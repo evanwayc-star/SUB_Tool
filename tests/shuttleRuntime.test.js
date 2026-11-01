@@ -38,6 +38,7 @@ function makeHarness({ time = 10, fps = 25, native = false, presentation: suppli
   };
   const onPresented = vi.fn();
   const onReachedStart = vi.fn();
+  const onRestoreFailed = vi.fn();
   const session = createReverseShuttleSession({
     media,
     presentation,
@@ -51,9 +52,10 @@ function makeHarness({ time = 10, fps = 25, native = false, presentation: suppli
     clearIntervalFn: handle => { if (handle) handle.active = false; },
     onPresented,
     onReachedStart,
+    onRestoreFailed,
   });
   return {
-    media, presentation, session, onPresented, onReachedStart, scheduled,
+    media, presentation, session, onPresented, onReachedStart, onRestoreFailed, scheduled,
     setNow(value) { nowMs = value; },
     setPresentedTime(value) { presentedTime = value; },
     run(handle) { if (handle?.active) handle.callback(); },
@@ -161,6 +163,40 @@ describe('reverse shuttle session', () => {
     restored.resolve(true);
     await flushPromises();
     expect(h.scheduled).toHaveLength(2);
+  });
+
+  it.each(['false', 'reject'])('原生停鐘後正向還原 %s，不得繼續以未就緒來源逐格 fallback', async failure => {
+    const h = makeHarness({ native: true });
+    h.media.setPlaybackDirection.mockResolvedValueOnce(true);
+    if (failure === 'false') h.media.setPlaybackDirection.mockResolvedValueOnce(false);
+    else h.media.setPlaybackDirection.mockRejectedValueOnce(new Error('forward command failed'));
+    await h.session.start(-1);
+    h.setNow(1200); h.run(h.scheduled[0]);
+    await flushPromises();
+    h.setNow(2000);
+    for (const handle of h.scheduled) h.run(handle);
+    expect(h.presentation.request).not.toHaveBeenCalled();
+    expect(h.session.isActive()).toBe(false);
+    expect(h.media.play).toHaveBeenCalledTimes(1);
+    expect(h.media.setReverseShuttleMuted).toHaveBeenLastCalledWith(false);
+    expect(h.onRestoreFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])('fallback 等待的還原結果 %s 晚於停止／重新倒帶，不能干擾新 session', async restored => {
+    const pending = deferred();
+    const h = makeHarness({ native: true });
+    h.media.setPlaybackDirection.mockResolvedValueOnce(true).mockImplementationOnce(() => pending.promise);
+    await h.session.start(-1);
+    h.setNow(1200); h.run(h.scheduled[0]);
+    h.session.stop();
+    const restarting = h.session.start(-2);
+    pending.resolve(restored);
+    await restarting; await flushPromises();
+    expect(h.session.isActive()).toBe(true);
+    expect(h.media.play).toHaveBeenCalledTimes(2);
+    expect(h.presentation.request).not.toHaveBeenCalled();
+    expect(h.onRestoreFailed).not.toHaveBeenCalled();
+    h.session.stop();
   });
 
   it('停止會封鎖晚到的 backward 啟動結果', async () => {

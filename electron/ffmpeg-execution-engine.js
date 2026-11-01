@@ -416,6 +416,9 @@ class FFmpegErrorAnalyzer {
       }
     }
 
+    if (watchdogResult?.cleanup?.retainedLease && watchdogResult.cleanup.releaseError) {
+      summary += `\n輸出鎖已保留：${watchdogResult.cleanup.releaseError.message}`;
+    }
     const errorCode = watchdogFailure?.code || (watchdogResult?.cleanup?.retainedLease ? 'PARTIAL_CLEANUP_FAILED' : 'FFMPEG_EXIT');
     return { summary, errorCode };
   }
@@ -639,6 +642,7 @@ function createFFmpegExecution(options = {}) {
     outputFormat,
     discAudioPlan,
     discVideoFps,
+    outputAuthority,
     isCancelled,
   } = {}) {
     return new Promise((resolve, reject) => {
@@ -782,6 +786,7 @@ function createFFmpegExecution(options = {}) {
           outPath,
           jobId,
           queueDir,
+          ...(outputAuthority ? { outputAuthority } : {}),
           ...(outputFormat ? { outputFormat } : {}),
           ...(discAudioPlan ? { discAudioPlan } : {}),
           ...(discVideoFps ? { discVideoFps } : {}),

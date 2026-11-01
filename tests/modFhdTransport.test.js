@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import { createRequire } from 'node:module';
 import { finalizeModFhdTransport } from '../electron/mod-fhd-transport.js';
+import { createExportArtifact } from '../electron/export-artifact.js';
+import { captureOutputAuthority, captureOutputDirectory, assertOutputAuthority } from '../electron/export-lease.js';
 
 let directory;
 let output;
@@ -63,6 +68,128 @@ function changes(before, after) {
 }
 
 describe('MOD-FHD MPEG-2 AAC transport finalization', () => {
+  it.each(['artifact', 'finalizer'])('%s 在父目錄換成 junction 後不修改外來同名有效 TS', async entry => {
+    const picked = path.join(directory, 'picked'), outside = path.join(directory, 'outside');
+    fs.mkdirSync(picked); fs.mkdirSync(outside);
+    const stagePath = path.join(picked, '.delivery.stage.mpg');
+    const source = Buffer.concat(pes([adts()]));
+    fs.writeFileSync(stagePath, source);
+    const authority = captureOutputAuthority(stagePath, captureOutputDirectory(picked));
+    const assertOutput = () => assertOutputAuthority(authority, stagePath);
+    const artifact = createExportArtifact({ outputFormat: 'mod-fhd', outPath: path.join(picked, 'delivery.mpg'),
+      stagePath, args: ['-y', path.join(picked, 'delivery.mpg')] }, { assertOutput });
+    await artifact.prepare({ tempDir: directory });
+    fs.renameSync(picked, path.join(directory, 'original'));
+    fs.symlinkSync(outside, picked, process.platform === 'win32' ? 'junction' : 'dir');
+    const foreign = path.join(outside, path.basename(stagePath));
+    fs.writeFileSync(foreign, source);
+    const result = entry === 'artifact' ? (await artifact.settle({ encoded: true })).error
+      : await finalizeModFhdTransport(stagePath, { assertOutput }).catch(error => error);
+    expect.soft(fs.readFileSync(foreign)).toEqual(source);
+    expect.soft(result).toMatchObject({ code: 'UNSAFE_DELIVERY_OUTPUT' });
+    expect(fs.readFileSync(path.join(directory, 'original', path.basename(stagePath)))).toEqual(source);
+  });
+
+  it('開檔等待中 stage 被替換時拒絕封裝，保留兩份內容並釋放 handle', async () => {
+    const source = Buffer.concat(pes([adts()]));
+    const foreign = Buffer.from(source); foreign[foreign.length - 1] ^= 1;
+    fs.writeFileSync(output, source);
+    const original = fs.statSync(output, { bigint: true });
+    const failure = Object.assign(new Error('stage 已換檔'), { code: 'UNSAFE_DELIVERY_STAGE' });
+    const assertOutput = () => {
+      if (fs.lstatSync(output, { bigint: true }).ino !== original.ino) throw failure;
+    };
+    const moved = path.join(directory, 'original.ts');
+    const filename = new URL('../electron/mod-fhd-transport.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), helper = { exports: {} }, module = { exports: {} };
+    let handle;
+    const open = async (file, flags, ...args) => {
+      expect(file).toBe(output); expect(flags).toBe('r+');
+      fs.renameSync(output, moved); fs.writeFileSync(output, foreign);
+      handle = await promises.open(file, flags, ...args);
+      return handle;
+    };
+    vm.runInNewContext(fs.readFileSync(new URL('../electron/owned-output-handle.js', import.meta.url), 'utf8'), {
+      module: helper, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, require: name => name === './owned-output-handle' ? helper.exports : require(name),
+    });
+    await expect(module.exports.finalizeModFhdTransport(output, { assertOutput })).rejects.toBe(failure);
+    expect(handle?.fd).toBe(-1);
+    expect(fs.readFileSync(output)).toEqual(foreign);
+    expect(fs.readFileSync(moved)).toEqual(source);
+    fs.unlinkSync(output); fs.unlinkSync(moved);
+  });
+
+  it('MOD patch 完成後 fd 實際關閉失敗必須回報可保留 stage 的錯誤', async () => {
+    fs.writeFileSync(output, Buffer.concat(pes([adts()])));
+    const filename = new URL('../electron/mod-fhd-transport.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), helper = { exports: {} }, module = { exports: {} };
+    let handle, close;
+    const open = async (...args) => {
+      handle = await promises.open(...args); close = handle.close.bind(handle);
+      handle.close = async () => { throw Object.assign(new Error('MOD handle remains open'), { code: 'EBUSY' }); };
+      return handle;
+    };
+    vm.runInNewContext(fs.readFileSync(new URL('../electron/owned-output-handle.js', import.meta.url), 'utf8'), {
+      module: helper, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, require: name => name === './owned-output-handle' ? helper.exports : require(name),
+    });
+    try {
+      const error = await module.exports.finalizeModFhdTransport(output).catch(value => value);
+      expect(error).toMatchObject({ code: 'OUTPUT_HANDLE_CLOSE_FAILED' });
+      expect(error.message).toContain('MOD handle remains open');
+      expect(handle.fd).toBeGreaterThanOrEqual(0);
+    } finally { await close?.(); }
+  });
+
+  it('開啟外來檔後原 stage 回復，仍拒絕修改外來 handle', async () => {
+    const source = Buffer.concat(pes([adts()]));
+    const foreign = path.join(directory, 'foreign.ts'), saved = path.join(directory, 'saved.ts');
+    fs.writeFileSync(output, source); fs.writeFileSync(foreign, source);
+    const identity = fs.lstatSync(output, { bigint: true });
+    const assertOutput = () => {
+      const now = fs.lstatSync(output, { bigint: true });
+      if (now.dev !== identity.dev || now.ino !== identity.ino) throw new Error('stage 已換檔');
+    };
+    const filename = new URL('../electron/mod-fhd-transport.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), module = { exports: {} };
+    let replaced = false;
+    const open = async (file, flags, ...args) => {
+      if (file !== output || flags !== 'r+' || replaced) return promises.open(file, flags, ...args);
+      replaced = true;
+      fs.renameSync(output, saved); fs.renameSync(foreign, output);
+      const handle = await promises.open(file, flags, ...args);
+      fs.renameSync(output, foreign); fs.renameSync(saved, output);
+      return handle;
+    };
+    const helper = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(new URL('../electron/owned-output-handle.js', import.meta.url), 'utf8'), {
+      module: helper, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, require: name => name === './owned-output-handle' ? helper.exports : require(name),
+    });
+    await expect(module.exports.finalizeModFhdTransport(output, { assertOutput })).rejects.toMatchObject({ code: 'UNSAFE_DELIVERY_STAGE' });
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(output)).toEqual(source);
+    expect(fs.readFileSync(foreign)).toEqual(source);
+    fs.unlinkSync(output); fs.unlinkSync(foreign);
+  });
+
+  it('有 owner 的成功封裝仍修改 ADTS 內容並保持原 stage inode', async () => {
+    const source = Buffer.concat(pes([adts()]));
+    fs.writeFileSync(output, source);
+    const original = fs.statSync(output, { bigint: true });
+    const assertOutput = () => expect(fs.lstatSync(output, { bigint: true }).ino).toBe(original.ino);
+    expect(await finalizeModFhdTransport(output, { assertOutput })).toMatchObject({ audioFrames: 1, patchedFrames: 1 });
+    expect(changes(source, fs.readFileSync(output))).toHaveLength(1);
+    assertOutput();
+  });
+
   it('只修改 framed ADTS MPEG ID，保留 AAC payload、PID、PTS、PCR 與無關串流位元組', async () => {
     const source = Buffer.concat([nullPacket(), ...pes([adts(), adts()]),
       packet(Buffer.alloc(100, 0xf1), { pid: 4131, start: true }), nullPacket()]);

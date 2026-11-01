@@ -29,7 +29,7 @@ vi.mock('../src/timeline-renderer.js', () => ({
   refreshTrackGutterActive: vi.fn(),
 }));
 vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
-vi.mock('../src/history.js', () => ({ History: {stack:[],hi:-1}, recordHistory: vi.fn(), renderHistory: vi.fn() }));
+vi.mock('../src/history.js', () => ({ History: {stack:[],hi:-1,cancelPreviewsForTargets:vi.fn()}, recordHistory: vi.fn(), renderHistory: vi.fn() }));
 vi.mock('../src/project.js', () => ({ Project: {captureWorkspaceOwnership:()=>()=>true}, ensureProjectSaved: vi.fn().mockResolvedValue() }));
 vi.mock('../src/substyle.js', async orig => ({ ...(await orig()) }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));

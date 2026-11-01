@@ -113,6 +113,14 @@ const History = {
     audioPreview=token;
     return ()=>{ if(audioPreview===token) audioPreview=null; };
   },
+  // 在移除預覽目標前先讓整個交易撤回；否則多選手勢少一個成員後，
+  // 其餘成員的暫時值可能被接下來的 History 或存檔當成已提交內容。
+  cancelPreviewsForTargets(targets){
+    const removed=new Set(targets||[]);
+    for(const preview of [...editPreviews]){
+      if(preview.entries.some(entry=>removed.has(entry.resolveTarget ? entry.resolveTarget() : entry.target))) preview.cancel?.();
+    }
+  },
   // clipGeo：影片幾何；externalAudioState：外部音訊的可編輯純資料。
   // AudioElement、波形與快取檔都不入 undo，Media 會依這份純資料重用或重建 runtime asset。
   // Project 可補入尚未重新連結的持久資料；預覽排除規則仍只有這一個 owner。

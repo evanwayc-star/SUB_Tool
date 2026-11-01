@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { DISC_FORMATS, discFormat, discAudioStreams, discEncoding } = require('./disc-encoding');
@@ -9,23 +10,64 @@ const WORK_PREFIX = 'subtool-disc-';
 
 function fail(code, message) { return Object.assign(new Error(message), { code }); }
 function abortIfNeeded(signal) { if (signal?.aborted) throw fail('ABORT_ERR', '光碟合成已取消'); }
+function directoryIdentity(directory) {
+  const stat = fsSync.lstatSync(directory, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw fail('INVALID_DISC_TEMP', '光碟暫存目錄不可為連結');
+  return { dev: String(stat.dev), ino: String(stat.ino), realpath: fsSync.realpathSync.native(directory) };
+}
+function assertDirectoryIdentity(directory, expected) {
+  if (!expected || typeof expected.dev !== 'string' || typeof expected.ino !== 'string' || typeof expected.realpath !== 'string') {
+    throw fail('INVALID_DISC_TEMP', '光碟暫存目錄缺少原始身分');
+  }
+  const actual = directoryIdentity(directory);
+  const key = value => process.platform === 'win32' ? value.toLowerCase() : value;
+  if (actual.dev !== expected.dev || actual.ino !== expected.ino || key(actual.realpath) !== key(expected.realpath)) {
+    throw fail('INVALID_DISC_TEMP', '光碟暫存目錄身分已變更，已保留檔案');
+  }
+}
 async function prepareDiscOutput(format, { tempDir } = {}) {
   const spec = discFormat(format);
   if (typeof tempDir !== 'string' || !path.isAbsolute(tempDir)) throw fail('INVALID_DISC_TEMP', '光碟暫存目錄必須為絕對路徑');
-  const workDir = await fs.mkdtemp(path.join(tempDir, WORK_PREFIX));
-  return { workDir, encodedPath: path.join(workDir, `internal${spec.extension}`) };
+  const parentIdentity = directoryIdentity(tempDir);
+  const created = await fs.mkdtemp(path.toNamespacedPath(path.join(tempDir, WORK_PREFIX)));
+  const workDir = path.join(tempDir, path.basename(created));
+  assertDirectoryIdentity(tempDir, parentIdentity);
+  const workIdentity = directoryIdentity(workDir);
+  return { workDir, encodedPath: path.join(workDir, `internal${spec.extension}`), parentIdentity, workIdentity };
 }
 
-async function cleanupDiscOutput({ workDir } = {}, { tempDir } = {}) {
+function assertDiscWorkspace({ workDir, parentIdentity, workIdentity, outputLink } = {}, { tempDir, allowMissing = false } = {}) {
   if (typeof workDir !== 'string' || typeof tempDir !== 'string') throw fail('INVALID_DISC_TEMP', '光碟暫存路徑無效');
   const absolute = path.resolve(workDir), parent = path.resolve(tempDir);
   if (path.dirname(absolute) !== parent || !path.basename(absolute).startsWith(WORK_PREFIX)) {
     throw fail('INVALID_DISC_TEMP', '拒絕清除非本工作的光碟暫存目錄');
   }
-  const stat = await fs.lstat(absolute).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
-  if (!stat) return;
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw fail('INVALID_DISC_TEMP', '光碟暫存目錄不可為連結');
-  await fs.rm(absolute, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  assertDirectoryIdentity(parent, parentIdentity);
+  try { assertDirectoryIdentity(absolute, workIdentity); }
+  catch (error) { if (allowMissing && error.code === 'ENOENT' && workIdentity) return false; throw error; }
+  const link = path.join(absolute, 'out');
+  let stat;
+  try { stat = fsSync.lstatSync(link, { bigint: true }); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (stat) {
+    if (!outputLink || !stat.isSymbolicLink() || String(stat.dev) !== outputLink.dev || String(stat.ino) !== outputLink.ino
+      || typeof outputLink.target?.path !== 'string') {
+      throw fail('INVALID_DISC_TEMP', '光碟輸出短路徑缺少原始身分，已保留檔案');
+    }
+    assertDirectoryIdentity(outputLink.target.path, outputLink.target.identity);
+    const key = value => process.platform === 'win32' ? value.toLowerCase() : value;
+    if (key(fsSync.realpathSync.native(link)) !== key(outputLink.target.path)) {
+      throw fail('INVALID_DISC_TEMP', '光碟輸出短路徑目標已變更，已保留檔案');
+    }
+  }
+  return true;
+}
+
+async function cleanupDiscOutput(stage, { tempDir } = {}) {
+  if (!assertDiscWorkspace(stage, { tempDir, allowMissing: true })) return;
+  // Keep the checks and removal synchronous to avoid an event-loop gap. The OS
+  // calls themselves are still separate; this does not eliminate external races.
+  fsSync.rmSync(path.resolve(stage.workDir), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
 function nativeDiscPaths(directory = path.join(__dirname, 'disc')) {
@@ -44,13 +86,14 @@ async function stopNative(child) {
   if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
 }
 
-async function runNative(executable, args, { cwd, signal, onProgress, onProcess, onOutputStart } = {}) {
+async function runNative(executable, args, { cwd, signal, onProgress, onProcess, onOutputStart, assertOutput } = {}) {
   abortIfNeeded(signal);
   if (typeof executable !== 'string' || !executable) throw fail('DISC_NATIVE_MISSING', '缺少光碟合成工具');
   await fs.access(executable).catch(() => { throw fail('DISC_NATIVE_MISSING', `找不到光碟合成工具：${path.basename(executable)}`); });
   abortIfNeeded(signal);
   await onOutputStart?.();
   abortIfNeeded(signal);
+  assertOutput?.();
   const child = spawn(executable, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let detail = '';
   let nativeError = null, stopping = null, resolveClosed, rejectSpawn;
@@ -79,11 +122,19 @@ async function runNative(executable, args, { cwd, signal, onProgress, onProcess,
     if (match && onProgress) onProgress(Math.min(100, Number(match[1])));
   };
   child.stdout.on('data', receive); child.stderr.on('data', receive);
+  const pipeError = error => {
+    nativeError ||= error;
+    // A broken pipe does not prove that the writer has stopped. Terminate it
+    // and keep the workspace until the child's close event confirms it exited.
+    void stop().catch(() => {});
+  };
+  child.stdout.on('error', pipeError); child.stderr.on('error', pipeError);
   const abort = () => { void stop().catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   try {
     if (signal?.aborted) abort();
     await spawned;
+    if (nativeError) throw nativeError;
     await onProcess?.(child);
     const result = await closed;
     if (nativeError) throw nativeError;
@@ -188,7 +239,7 @@ async function verifyDiscIso(format, outPath) {
   } finally { await file.close(); }
 }
 
-async function finalizeDiscOutput(format, encodedPath, outPath, { signal, nativePaths = nativeDiscPaths(), audioPlan, fps, onProgress, onProcess, onOutputStart } = {}) {
+async function finalizeDiscOutput(format, encodedPath, outPath, { signal, nativePaths = nativeDiscPaths(), audioPlan, fps, onProgress, onProcess, onOutputStart, onOutputLink, assertOutput, nativeWorkRoot } = {}) {
   const spec = discFormat(format);
   discAudioStreams(format, audioPlan);
   abortIfNeeded(signal);
@@ -198,23 +249,71 @@ async function finalizeDiscOutput(format, encodedPath, outPath, { signal, native
   }
   const cwd = path.dirname(encodedPath);
   if (!path.basename(cwd).startsWith(WORK_PREFIX)) throw fail('INVALID_DISC_TEMP', '光碟來源不是本工作暫存檔');
-  const options = { cwd, signal, onProgress, onProcess };
+  const options = { cwd: nativeWorkRoot ? path.join(nativeWorkRoot, path.basename(cwd)) : cwd,
+    signal, onProgress, onProcess, assertOutput };
   if (format === 'dvd-iso') {
-    await fs.writeFile(path.join(cwd, 'disc.xml'), dvdAuthorXml(audioPlan), 'utf8');
+    assertOutput?.();
+    fsSync.writeFileSync(path.join(cwd, 'disc.xml'), dvdAuthorXml(audioPlan), { encoding: 'utf8', flag: 'wx' });
     await runNative(nativePaths.dvdauthor, ['-x', 'disc.xml'], options);
     abortIfNeeded(signal);
     for (const filename of ['VIDEO_TS.IFO', 'VIDEO_TS.BUP', 'VTS_01_0.IFO', 'VTS_01_0.BUP', 'VTS_01_1.VOB']) {
+      assertOutput?.();
       const stat = await fs.stat(path.join(cwd, 'dvd', 'VIDEO_TS', filename));
       if (!stat.size) throw fail('INVALID_DISC_STRUCTURE', `DVD 缺少內容：${filename}`);
     }
     // mkisofs' Cygwin build accepts Windows forward-slash paths, including spaces.
     await runNative(nativePaths.mkisofs, ['-dvd-video', '-udf', '-V', 'DVD', '-o', outPath.replace(/\\/g, '/'), 'dvd'], { ...options, onOutputStart });
   } else {
-    await fs.writeFile(path.join(cwd, 'disc.meta'), blurayMeta(audioPlan, fps), 'utf8');
-    await runNative(nativePaths.tsmuxer, ['disc.meta', outPath], { ...options, onOutputStart });
+    assertOutput?.();
+    fsSync.writeFileSync(path.join(cwd, 'disc.meta'), blurayMeta(audioPlan, fps), { encoding: 'utf8', flag: 'wx' });
+    let outputArg = outPath;
+    let startOutput = onOutputStart;
+    let assertNativeOutput = assertOutput;
+    if (process.platform === 'win32' && nativeWorkRoot) {
+      // tsMuxeR cannot open a long absolute output path. This junction lives
+      // inside the owned work directory and points to the already-authorized
+      // output parent; the original stage remains the sole deliverable inode.
+      const outputLink = path.join(cwd, 'out');
+      outputArg = path.join(options.cwd, 'out', path.basename(outPath));
+      let linkIdentity, targetPath;
+      const key = value => path.resolve(value).toLowerCase();
+      const assertLink = () => {
+        assertOutput?.();
+        const stat = fsSync.lstatSync(outputLink, { bigint: true });
+        if (!linkIdentity || !stat.isSymbolicLink() || String(stat.dev) !== linkIdentity.dev
+          || String(stat.ino) !== linkIdentity.ino || key(fsSync.realpathSync.native(outputLink)) !== key(targetPath)) {
+          throw fail('INVALID_DISC_TEMP', '光碟輸出短路徑身分已變更，已保留檔案');
+        }
+        const expected = fsSync.lstatSync(outPath, { bigint: true });
+        const actual = fsSync.lstatSync(path.join(outputLink, path.basename(outPath)), { bigint: true });
+        if (!actual.isFile() || actual.isSymbolicLink() || String(actual.dev) !== String(expected.dev)
+          || String(actual.ino) !== String(expected.ino)) {
+          throw fail('INVALID_DISC_TEMP', '光碟輸出短路徑未指向原始成品暫存檔');
+        }
+      };
+      startOutput = async () => {
+        await onOutputStart?.();
+        abortIfNeeded(signal);
+        assertOutput?.();
+        targetPath = fsSync.realpathSync.native(path.dirname(outPath));
+        const targetIdentity = directoryIdentity(targetPath);
+        fsSync.symlinkSync(targetPath, outputLink, 'junction'); // EEXIST never grants ownership.
+        const stat = fsSync.lstatSync(outputLink, { bigint: true });
+        if (!stat.isSymbolicLink() || key(fsSync.realpathSync.native(outputLink)) !== key(targetPath)) {
+          throw fail('INVALID_DISC_TEMP', '光碟輸出短路徑目標已變更，已保留檔案');
+        }
+        linkIdentity = { dev: String(stat.dev), ino: String(stat.ino) };
+        await onOutputLink?.({ ...linkIdentity, target: { path: targetPath, identity: targetIdentity } });
+        abortIfNeeded(signal);
+        assertLink();
+      };
+      assertNativeOutput = assertLink;
+    }
+    await runNative(nativePaths.tsmuxer, ['disc.meta', outputArg],
+      { ...options, onOutputStart: startOutput, assertOutput: assertNativeOutput });
   }
   abortIfNeeded(signal);
   return verifyDiscIso(format, outPath);
 }
 
-module.exports = { DISC_FORMATS, discEncoding, prepareDiscOutput, cleanupDiscOutput, nativeDiscPaths, finalizeDiscOutput, dvdAuthorXml, blurayMeta, verifyDiscIso };
+module.exports = { DISC_FORMATS, discEncoding, prepareDiscOutput, assertDiscWorkspace, cleanupDiscOutput, nativeDiscPaths, finalizeDiscOutput, dvdAuthorXml, blurayMeta, verifyDiscIso };

@@ -66,6 +66,44 @@ function track(kind='buffer'){
   if(tr.el)tr.el.src='file:///source.mov';Media.tracks.push(tr);return tr;
 }
 describe('公開 sequence placement 到實際音訊節點',()=>{
+  it('自然播放離開反轉疊合後，晚到的舊音源準備不可再次重啟聲音',async()=>{
+    primary();
+    Seq.add({id:'reverse-overlay',name:'reverse.mov',path:'C:/reverse.mov',dur:2,in:0,out:2,
+      offset:0,vtrack:1,reverse:true,audioSrc:'clip:reverse-overlay',audioSourceId:'reverse-overlay'});
+    Seq.recomputeDuration();
+    track('buffer');
+    let resolveReverse;
+    const reverseReady=new Promise(resolve=>{resolveReverse=resolve;});
+    const prepare=vi.spyOn(Media,'prepareClipReverseAudio').mockReturnValue(reverseReady);
+    const startElements=vi.spyOn(Media._audioRouter,'startElementSources');
+    Media.playing=true;
+    video.currentTime=1;Media.seqTick();
+    expect(prepare).toHaveBeenCalledOnce();
+    video.currentTime=3;Media.seqTick();
+    const before={elements:startElements.mock.calls.length,buffers:buffers.length};
+    expect(before.elements).toBeGreaterThan(0);
+    resolveReverse(true);
+    await Promise.resolve();await Promise.resolve();
+    expect(startElements).toHaveBeenCalledTimes(before.elements);
+    expect(buffers).toHaveLength(before.buffers);
+  });
+
+  it('反轉疊合仍在作用時，音源準備完成後可起播一次',async()=>{
+    primary();
+    Seq.add({id:'reverse-overlay',name:'reverse.mov',path:'C:/reverse.mov',dur:2,in:0,out:2,
+      offset:0,vtrack:1,reverse:true,audioSrc:'clip:reverse-overlay',audioSourceId:'reverse-overlay'});
+    Seq.recomputeDuration();
+    let resolveReverse;
+    const reverseReady=new Promise(resolve=>{resolveReverse=resolve;});
+    vi.spyOn(Media,'prepareClipReverseAudio').mockReturnValue(reverseReady);
+    const startElements=vi.spyOn(Media._audioRouter,'startElementSources');
+    Media.playing=true;video.currentTime=1;Media.seqTick();
+    expect(startElements).not.toHaveBeenCalled();
+    resolveReverse(true);
+    await vi.waitFor(()=>expect(startElements).toHaveBeenCalledOnce());
+    expect(startElements.mock.calls[0][1]).toBeCloseTo(1);
+  });
+
   it.each(['mute','solo','disabled','zero'])('聲道尚未就緒時，carrier 的 %s 配線靜音在 seek 後仍生效',async action=>{
     const clip=primary(),bus=State.audioProject.buses[0];
     expect(Media.sourceChannels('video')).toHaveLength(0);

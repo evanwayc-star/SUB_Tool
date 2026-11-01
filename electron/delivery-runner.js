@@ -8,14 +8,17 @@ const path = require('path');
 const QueueStore = require('./queue-store');
 const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
 const { buildDeliveryArgv } = require('./export-plan');
+const { assertOutputAuthority } = require('./export-lease');
 
 function failureProgress({ stopped = false, shutdown = false, error = null } = {}) {
   const partialCleanup = error?.code === 'PARTIAL_CLEANUP_FAILED'
     || error?.watchdogResult?.cleanup?.retainedLease
     // 成品已 commit 時沒有 cleanup；lease 釋放失敗仍必須保留可見的失敗原因。
     || error?.watchdogResult?.release?.retainedLease;
+  // Shutdown normally requeues an interrupted job, but retained ownership is
+  // already a terminal failure. Requeue would hide it and may rerun a commit.
+  if (partialCleanup) return { error: true, errorMsg: error?.message || String(error) };
   if (stopped) {
-    if (partialCleanup) return { error: true, errorMsg: error?.message || String(error) };
     return { stopped: true };
   }
   if (shutdown) return null;
@@ -69,6 +72,7 @@ function createDeliveryRunner(options = {}) {
     const outputFiles = [path.normalize(outPath)];
 
     queue.assertJobCapabilities(job);
+    assertOutputAuthority(job.outputAuthority, outPath);
 
     let assText = null;
     if (job.assRef) {
@@ -179,10 +183,12 @@ function createDeliveryRunner(options = {}) {
       });
       const { args, label, duration: plannedDuration, kbps, audioBitrates } = plan;
       const startedAt = now();
+      assertOutputAuthority(job.outputAuthority, outPath);
 
       if (isWav) {
         await runFfmpeg(args, {
           executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, outPath,
+          outputAuthority: job.outputAuthority,
           onProgress: sendProgress,
           onProcess: ownController,
         });
@@ -199,6 +205,7 @@ function createDeliveryRunner(options = {}) {
       let usedEncoder = plan.plannedEncoder;
       const result = await runFfmpeg(args, {
         executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
+        outputAuthority: job.outputAuthority,
         outputFormat: format,
         ...(isDisc ? { discAudioPlan: plan.discAudioPlan, discVideoFps: plan.discVideoFps } : {}),
         onProgress: sendProgress,

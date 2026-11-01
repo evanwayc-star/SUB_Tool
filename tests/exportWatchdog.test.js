@@ -20,7 +20,14 @@ const {
   listLeases,
   normalizeOutputPath,
   stageOutputPath,
+  captureOutputDirectory,
+  captureOutputAuthority,
 } = require('../electron/export-lease');
+const authorityFor = outPath => captureOutputAuthority(outPath, captureOutputDirectory(path.dirname(outPath)));
+const stageIdentityFor = file => {
+  const stat = fs.lstatSync(file, { bigint: true });
+  return { dev: String(stat.dev), ino: String(stat.ino) };
+};
 
 const WAIT_TIMEOUT_MS = 6000;
 
@@ -143,6 +150,7 @@ if (mode === 'success') {
       args: [fakeFfmpeg, mode, markerPath, outPath],
       cwd: tempDir,
       outPath,
+      outputAuthority: authorityFor(outPath),
       jobId,
       queueDir,
       ...extra,
@@ -218,8 +226,8 @@ if (mode === 'success') {
       : path.join(tempDir, 'recovery-transport.sock');
     fs.writeFileSync(outPath, 'previous completed delivery');
     fs.writeFileSync(stagePath, 'partial');
-    const lease = acquireLease({ queueDir, outPath, token, stagePath, pipeName, jobId: 'recover-transport' });
-    fs.writeFileSync(path.join(lease.lockPath, 'owner.json'), JSON.stringify({ ...lease.owner, ...pids }));
+    const lease = acquireLease({ queueDir, outPath, token, stagePath, pipeName, jobId: 'recover-transport', outputAuthority: authorityFor(outPath) });
+    fs.writeFileSync(path.join(lease.lockPath, 'owner.json'), JSON.stringify({ ...lease.owner, stageIdentity: stageIdentityFor(stagePath), ...pids }));
     return { outPath, token, stagePath, pipeName };
   }
 
@@ -282,7 +290,7 @@ if (mode === 'success') {
     nativeRuntimes.push(runtime);
     events.emit('message', {
       type: 'start', ffmpegPath: 'fake-native-ffmpeg', args: [outPath],
-      outPath, jobId: 'held-native', queueDir,
+      outPath, jobId: 'held-native', queueDir, outputAuthority: authorityFor(outPath),
     });
     await waitFor(() => messages.some(message => message.type === (spawnFailure ? 'exit' : 'ready')),
       'standalone native adapter did not start or fail');
@@ -371,6 +379,7 @@ if (mode === 'success') {
     fs.writeFileSync(outPath, 'previous delivery');
     const controller = spawnExportWatchdog({
       ffmpegPath: 'held-native', args: [outPath], outPath,
+      outputAuthority: authorityFor(outPath),
       jobId: 'held-startup', queueDir,
     }, { scriptPath: adapterScript });
     controllers.push(controller);
@@ -557,6 +566,35 @@ if (mode === 'success') {
     expect(listLeases(queueDir)).toEqual([]);
   });
 
+  it.each(['commit', 'cancel'])('輸出父目錄被同名新目錄替換時 %s 不發布或清除外來檔，保留原 lease', async action => {
+    const parent = path.join(tempDir, 'output'), moved = path.join(tempDir, 'previous-output');
+    fs.mkdirSync(parent);
+    const outPath = path.join(parent, 'delivery.mp4');
+    fs.writeFileSync(outPath, 'previous completed delivery');
+    const gate = path.join(tempDir, 'finish-writer');
+    fs.writeFileSync(fakeFfmpeg, `
+      const fs=require('fs');
+      fs.writeFileSync(process.argv.at(-1),'owned encoded bytes');
+      const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)})){clearInterval(timer);}},10);
+    `);
+    const { controller } = launch('wait', outPath, 'parent-replaced');
+    await controller.ready;
+    const lease = listLeases(queueDir)[0], stage = lease.owner.stagePath;
+    await waitFor(() => fs.existsSync(stage) && fs.readFileSync(stage, 'utf8') === 'owned encoded bytes', '本工作 stage 尚未寫入實際內容');
+    fs.renameSync(parent, moved); fs.mkdirSync(parent);
+    fs.writeFileSync(outPath, 'foreign completed delivery');
+    fs.writeFileSync(stage, 'foreign staging bytes');
+    if (action === 'commit') fs.writeFileSync(gate, 'finish');
+    else controller.stop('user-stop');
+    const result = await controller.completion;
+    expect(result.ok).toBe(false);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('foreign completed delivery');
+    expect(fs.readFileSync(stage, 'utf8')).toBe('foreign staging bytes');
+    expect(fs.readFileSync(path.join(moved, path.basename(stage)), 'utf8')).toBe('owned encoded bytes');
+    expect(fs.readFileSync(path.join(moved, 'delivery.mp4'), 'utf8')).toBe('previous completed delivery');
+    expect(fs.existsSync(path.join(lease.lockPath, 'owner.json'))).toBe(true);
+  });
+
   it('既有成品在 FFmpeg 無法啟動時仍保持原內容', async () => {
     const outPath = path.join(tempDir, 'existing-spawn.mp4');
     fs.writeFileSync(outPath, 'original');
@@ -567,6 +605,69 @@ if (mode === 'success') {
     await controller.completion.catch(() => {});
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
     expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it.each(['commit', 'cancel'])('同父目錄的 stage 被換檔時 %s 不搬移或刪除外來內容', async action => {
+    const gate = path.join(tempDir, 'stage-gate');
+    fs.writeFileSync(fakeFfmpeg, `const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'owned encoded bytes');
+      const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t);},10);`);
+    const { controller, outPath } = launch('wait');
+    fs.writeFileSync(outPath, 'previous final');
+    await controller.ready;
+    const stage = activeStage();
+    await waitFor(() => fs.readFileSync(stage, 'utf8') === 'owned encoded bytes', 'writer 尚未完成 stage');
+    fs.renameSync(stage, stage + '.owned'); fs.writeFileSync(stage, 'foreign stage');
+    if (action === 'commit') fs.writeFileSync(gate, 'finish'); else controller.stop('user-stop');
+    expect(await controller.completion).toMatchObject({ ok: false, cleanup: { retainedLease: true } });
+    expect(fs.readFileSync(stage, 'utf8')).toBe('foreign stage');
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('previous final');
+    expect(fs.readFileSync(stage + '.owned', 'utf8')).toBe('owned encoded bytes');
+    expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('已選取 junction 根的正式 watchdog 使用原實體目錄成品並正確釋放固定 lease', async () => {
+    const target = path.join(tempDir, 'target'), alias = path.join(tempDir, 'selected'); fs.mkdirSync(target);
+    fs.symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const outPath = path.join(alias, 'delivery.mp4');
+    const { controller } = launch('success', outPath);
+    await controller.ready;
+    expect(await controller.completion).toMatchObject({ ok: true });
+    expect(fs.readFileSync(path.join(target, 'delivery.mp4'), 'utf8')).toBe('complete');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('缺少選取證據的 standalone 不自行對當前路徑授權', async () => {
+    const { controller, outPath } = launch('success', undefined, 'no-authority', { outputAuthority: undefined });
+    await expect(controller.ready).rejects.toMatchObject({ code: 'UNSAFE_DELIVERY_OUTPUT' });
+    await controller.completion.catch(() => {});
+    expect(fs.existsSync(markerPath)).toBe(false);
+    expect(fs.existsSync(outPath)).toBe(false);
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('編碼中所選 junction 改向不重算 lease key；保留原 stage 且不碰新目錄，恢復原選擇後可清理', async () => {
+    const target = path.join(tempDir, 'target'), outside = path.join(tempDir, 'outside'), alias = path.join(tempDir, 'selected');
+    fs.mkdirSync(target); fs.mkdirSync(outside);
+    const link = destination => fs.symlinkSync(destination, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    link(target);
+    const outPath = path.join(alias, 'delivery.mp4'), foreignOutput = path.join(outside, 'delivery.mp4');
+    fs.writeFileSync(foreignOutput, 'foreign final');
+    const gate = path.join(tempDir, 'alias-gate');
+    fs.writeFileSync(fakeFfmpeg, `const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'owned bytes');
+      const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t);},10);`);
+    const { controller } = launch('wait', outPath);
+    await controller.ready;
+    const lease = listLeases(queueDir)[0], stage = lease.owner.stagePath;
+    await waitFor(() => fs.readFileSync(stage, 'utf8') === 'owned bytes', '尚無實際stage');
+    fs.unlinkSync(alias); link(outside); fs.writeFileSync(gate, 'finish');
+    expect(await controller.completion).toMatchObject({ ok: false, cleanup: { retainedLease: true } });
+    expect(listLeases(queueDir)).toEqual([expect.objectContaining({ valid: true, key: lease.key })]);
+    expect(fs.readFileSync(stage, 'utf8')).toBe('owned bytes');
+    expect(fs.readFileSync(foreignOutput, 'utf8')).toBe('foreign final');
+    await waitForExit(controller.child);
+    fs.unlinkSync(alias); link(target);
+    expect((await recoverExportLeases(queueDir)).warnings).toEqual([]);
+    expect(listLeases(queueDir)).toEqual([]); expect(fs.existsSync(stage)).toBe(false);
   });
 
   it('拒絕最後參數不是輸出路徑的工作，不能錯替其他參數而覆蓋正式檔', () => {
@@ -768,6 +869,7 @@ if (mode === 'success') {
       queueDir,
       outPath,
       jobId: 'stale',
+      outputAuthority: authorityFor(outPath),
       token: 'stale-token',
       watchdogPid: null,
       pipeName: process.platform === 'win32'
@@ -862,7 +964,8 @@ if (mode === 'success') {
     const stagePath = stageOutputPath(outPath, token);
     fs.writeFileSync(outPath, 'original');
     fs.writeFileSync(stagePath, 'partial');
-    acquireLease({ queueDir, outPath, jobId: 'recover-stage', token, stagePath, outputStarted: true });
+    const lease = acquireLease({ queueDir, outPath, jobId: 'recover-stage', token, stagePath, outputStarted: true, outputAuthority: authorityFor(outPath) });
+    fs.writeFileSync(path.join(lease.lockPath, 'owner.json'), JSON.stringify({ ...lease.owner, stageIdentity: stageIdentityFor(stagePath) }));
     const recovery = await recoverExportLeases(queueDir);
     expect(recovery.warnings).toEqual([]);
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
@@ -876,7 +979,8 @@ if (mode === 'success') {
     const stagePath = stageOutputPath(outPath, token);
     fs.writeFileSync(outPath, 'original');
     fs.writeFileSync(stagePath, 'verified');
-    acquireLease({ queueDir, outPath, jobId: 'committed-stage', token, stagePath, outputStarted: true });
+    const lease = acquireLease({ queueDir, outPath, jobId: 'committed-stage', token, stagePath, outputStarted: true, outputAuthority: authorityFor(outPath) });
+    fs.writeFileSync(path.join(lease.lockPath, 'owner.json'), JSON.stringify({ ...lease.owner, stageIdentity: stageIdentityFor(stagePath) }));
     fs.renameSync(stagePath, outPath);
     const recovery = await recoverExportLeases(queueDir);
     expect(recovery.warnings).toEqual([]);
@@ -918,6 +1022,7 @@ if (mode === 'success') {
       queueDir,
       outPath,
       jobId: 'delete-failure',
+      outputAuthority: authorityFor(outPath),
       token: 'delete-failure-token',
       pipeName: null,
     });
@@ -936,5 +1041,48 @@ if (mode === 'success') {
     ]);
     expect(fs.existsSync(outPath)).toBe(true);
     expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it.each(['directory', 'junction', 'stage'])('重啟 recovery 遇 %s 身分替換保留 foreign bytes 與可辨識 lease，原 owner 回來後才清理', async kind => {
+    const parent = path.join(tempDir, 'output'), moved = path.join(tempDir, 'moved'), foreign = path.join(tempDir, 'foreign');
+    fs.mkdirSync(parent); fs.mkdirSync(foreign);
+    const outPath = path.join(parent, 'delivery.mp4'), token = 'identity-recovery';
+    const stagePath = stageOutputPath(outPath, token);
+    fs.writeFileSync(stagePath, 'owned partial');
+    const lease = acquireLease({ queueDir, outPath, token, stagePath, jobId: 'identity-recovery', outputStarted: true,
+      outputAuthority: authorityFor(outPath) });
+    fs.writeFileSync(path.join(lease.lockPath, 'owner.json'), JSON.stringify({ ...lease.owner, stageIdentity: stageIdentityFor(stagePath) }));
+    if (kind === 'stage') fs.renameSync(stagePath, stagePath + '.owned');
+    else {
+      fs.renameSync(parent, moved);
+      if (kind === 'directory') fs.mkdirSync(parent);
+      else fs.symlinkSync(foreign, parent, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    fs.writeFileSync(stagePath, 'foreign partial');
+    const result = await recoverExportLeases(queueDir, { deleteAttempts: 1 });
+    expect(result.recovered).toEqual([]); expect(result.warnings[0].code).toBe('PARTIAL_CLEANUP_FAILED');
+    expect(fs.readFileSync(stagePath, 'utf8')).toBe('foreign partial');
+    expect(listLeases(queueDir)).toEqual([expect.objectContaining({ valid: true, key: lease.key })]);
+    if (kind === 'stage') { fs.unlinkSync(stagePath); fs.renameSync(stagePath + '.owned', stagePath); }
+    else { if (kind === 'junction') fs.unlinkSync(parent); else fs.renameSync(parent, path.join(tempDir, 'foreign-retained')); fs.renameSync(moved, parent); }
+    expect((await recoverExportLeases(queueDir)).warnings).toEqual([]);
+    expect(fs.existsSync(stagePath)).toBe(false); expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it.each(['started', 'stage', 'reservation'])('舊 lease %s 不把現有檔案當成歷史授權', async kind => {
+    const outPath = path.join(tempDir, 'legacy.mp4'), token = 'legacy';
+    const stagePath = stageOutputPath(outPath, token);
+    fs.writeFileSync(outPath, 'existing final');
+    if (kind === 'stage') fs.writeFileSync(stagePath, 'unproven stage');
+    acquireLease({ queueDir, outPath, token, jobId: 'legacy',
+      ...(kind === 'stage' ? { stagePath } : {}), outputStarted: kind !== 'reservation' });
+    const result = await recoverExportLeases(queueDir);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('existing final');
+    if (kind === 'reservation') { expect(result.warnings).toEqual([]); expect(listLeases(queueDir)).toEqual([]); }
+    else {
+      expect(result.warnings).toEqual([expect.objectContaining({ code: 'OUTPUT_AUTHORITY_MISSING' })]);
+      expect(listLeases(queueDir)).toHaveLength(1);
+      if (kind === 'stage') expect(fs.readFileSync(stagePath, 'utf8')).toBe('unproven stage');
+    }
   });
 });

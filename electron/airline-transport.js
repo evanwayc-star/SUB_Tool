@@ -1,6 +1,8 @@
 'use strict';
 
-const { open, rename, rm } = require('node:fs/promises');
+const { open, rename } = require('node:fs/promises');
+const fs = require('node:fs');
+const { openOwnedOutput } = require('./owned-output-handle');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { airlineTransportProfile } = require('./airline-encoding');
@@ -138,9 +140,10 @@ function mediaPacket(frame, pid, randomPcrTicks = null) {
   return { bytes, elementary };
 }
 
-async function writeAll(file, bytes) {
+async function writeAll(file, bytes, assertOutput) {
   let offset = 0;
   while (offset < bytes.length) {
+    assertOutput?.();
     const { bytesWritten } = await file.write(bytes, offset, bytes.length - offset);
     if (!bytesWritten) throw invalid('無法寫入傳輸串流');
     offset += bytesWritten;
@@ -149,35 +152,86 @@ async function writeAll(file, bytes) {
 
 // A lease directory can live on another volume. Copy in bounded chunks while
 // the caller retains the output lease; cancellation leaves cleanup to that owner.
-async function publishFromLease(temporary, output, signal) {
+async function publishFromLease(temporary, output, signal, assertOutput, assertTemporary) {
   signal?.throwIfAborted();
-  const input = await open(temporary, 'r');
-  let destination;
+  const input = await openOwnedOutput(temporary, 'r', assertTemporary);
+  let destination, operationError;
   try {
-    destination = await open(output, 'w');
+    assertOutput?.();
+    // Opening must not truncate a replacement before the post-open owner check.
+    // Keep the already reserved stage inode through transport publication.
+    destination = await openOwnedOutput(output, 'r+', assertOutput);
+    assertOutput?.();
+    await destination.truncate(0);
     const chunk = Buffer.allocUnsafe(CHUNK);
     for (;;) {
       signal?.throwIfAborted();
       const { bytesRead } = await input.read(chunk);
       if (!bytesRead) break;
-      await writeAll(destination, chunk.subarray(0, bytesRead));
+      await writeAll(destination, chunk.subarray(0, bytesRead), assertOutput);
     }
     signal?.throwIfAborted();
+    assertOutput?.();
     await destination.sync();
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
-    await input.close();
-    await destination?.close();
+    let closeError;
+    try { await input.close(); } catch (error) { closeError = error; }
+    try { await destination?.close(); } catch (error) { closeError ||= error; }
+    if (closeError) throw tempCleanupError(closeError, operationError, true);
   }
 }
 
+const sameIdentity = (a, b) => a.dev === b.dev && a.ino === b.ino;
+function tempCleanupError(error, previous = null, handleOpen = false) {
+  const prior = previous && previous !== error ? `原始錯誤：${previous.message}；` : '';
+  return Object.assign(new Error(`${prior}航空重封裝暫存清理失敗，輸出鎖已保留：${error.message}`, { cause: previous || error }),
+    { code: handleOpen ? 'AIRLINE_TEMP_HANDLE_CLOSE_FAILED' : 'AIRLINE_TEMP_CLEANUP_FAILED' });
+}
+function captureTempParent(file) {
+  const directory = path.dirname(file), stat = fs.lstatSync(directory, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('暫存父目錄不是一般目錄');
+  return { directory, stat, realpath: fs.realpathSync.native(directory) };
+}
+function assertTempParent(owner) {
+  const current = fs.lstatSync(owner.directory, { bigint: true });
+  const canonical = value => process.platform === 'win32' ? value.toLowerCase() : value;
+  if (!current.isDirectory() || current.isSymbolicLink() || !sameIdentity(owner.stat, current)
+    || canonical(fs.realpathSync.native(owner.directory)) !== canonical(owner.realpath)) {
+    throw new Error('暫存父目錄身分已變更');
+  }
+}
+function assertTempFile(file, parent, identity) {
+  assertTempParent(parent);
+  const current = fs.lstatSync(file, { bigint: true });
+  if (!identity || !current.isFile() || current.isSymbolicLink() || !sameIdentity(current, identity)) {
+    throw new Error('暫存檔身分已變更');
+  }
+}
+function cleanupTemporary(file, parent, identity) {
+  assertTempParent(parent);
+  let current;
+  try { current = fs.lstatSync(file, { bigint: true }); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  if (!identity || !current.isFile() || current.isSymbolicLink() || !sameIdentity(current, identity)) {
+    throw new Error('暫存檔身分已變更');
+  }
+  fs.unlinkSync(file);
+}
+
 /** T-STD packet scheduling; exW omits idle null packets for VBR transport. */
-async function reshapeAirlineTransport(format, output, { signal, tempDir } = {}) {
+async function reshapeAirlineTransport(format, output, { signal, tempDir, assertOutput } = {}) {
   signal?.throwIfAborted();
   const profile = airlineTransportProfile(format);
   const temporary = tempDir ? path.join(tempDir, `airline-${randomUUID()}.mux.tmp`)
     : `${output}.${randomUUID()}.mux.tmp`;
-  const source = await open(output, 'r');
-  let destination;
+  assertOutput?.();
+  const source = await openOwnedOutput(output, 'r', assertOutput);
+  let destination, sourceClosed = false;
+  let temporaryCreated = false, temporaryParent, temporaryIdentity;
+  let operationError;
   try {
     const videoReader = elementaryPackets(source, 48, signal, format === 'airline-exw');
     const audioReader = elementaryPackets(source, 49, signal);
@@ -212,7 +266,11 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
     }
     const origin = Math.min(video.dts - profile.initialLead, audio.dts - 0.12);
     if (origin < 0) throw invalid('解碼時間沒有足夠的初始預載區間');
+    temporaryParent = captureTempParent(temporary);
     destination = await open(temporary, 'wx');
+    temporaryCreated = true;
+    temporaryIdentity = await destination.stat({ bigint: true });
+    assertTempFile(temporary, temporaryParent, temporaryIdentity);
     const chunk = Buffer.allocUnsafe(CHUNK), counters = new Map();
     const queues = { 48: [], 49: [] }, retained = { 48: 0, 49: 0 };
     const stats = { transportPackets: 0, maximumVideoTb: 0, maximumVideoBuffer: 0,
@@ -275,15 +333,30 @@ async function reshapeAirlineTransport(format, output, { signal, tempDir } = {})
     signal?.throwIfAborted();
     if (buffered) await writeAll(destination, chunk.subarray(0, buffered));
     await destination.sync(); await destination.close(); destination = null;
-    await source.close();
+    await source.close(); sourceClosed = true;
     signal?.throwIfAborted();
-    if (tempDir) await publishFromLease(temporary, output, signal);
-    else await rename(temporary, output);
+    if (tempDir) await publishFromLease(temporary, output, signal, assertOutput,
+      () => assertTempFile(temporary, temporaryParent, temporaryIdentity));
+    else {
+      assertOutput?.();
+      assertTempFile(temporary, temporaryParent, temporaryIdentity);
+      await rename(temporary, output);
+    }
     return { ...stats, bytes: stats.transportPackets * PACKET };
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
-    await source.close().catch(() => {});
-    await destination?.close();
-    await rm(temporary, { force: true });
+    let closeError;
+    if (!sourceClosed) try { await source.close(); } catch (error) { closeError = error; }
+    try { await destination?.close(); } catch (error) { closeError ||= error; }
+    // 無法證明仍開啟的 writer 已釋放；保留暫存與 stage 給 watchdog 復原。
+    if (closeError) throw tempCleanupError(closeError, operationError, true);
+    if (['OUTPUT_HANDLE_CLOSE_FAILED', 'AIRLINE_TEMP_HANDLE_CLOSE_FAILED'].includes(operationError?.code)) throw operationError;
+    if (temporaryCreated) {
+      try { cleanupTemporary(temporary, temporaryParent, temporaryIdentity); }
+      catch (error) { throw tempCleanupError(error, operationError); }
+    }
   }
 }
 

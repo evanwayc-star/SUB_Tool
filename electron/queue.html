@@ -299,6 +299,8 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .job-retry-feedback { margin: 0; color: var(--text-dim); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+    .job-retry-feedback:not(:empty) { margin-top: 6px; }
     .job-status {
       display: inline-flex;
       flex: 0 0 auto;
@@ -686,6 +688,40 @@
     let _jobs = [];
     let _deliveryFormatPresets = [];
     let _isDragging = false;
+    const _retryActions = new Map();
+
+    const sameRetryTarget = (job, action) => job.id === action.job.id
+      && (job.attempt || 0) === (action.job.attempt || 0)
+      && job.status === action.job.status && job.payload?.outPath === action.job.payload?.outPath;
+
+    async function retryFromCard(job, chooseDirectory, refresh) {
+      if (_retryActions.get(job.id)?.pending) return;
+      const action = { job, pending: true, message: chooseDirectory ? '請選擇這份工作的原輸出資料夾…' : '正在重試…', refresh };
+      _retryActions.set(job.id, action);
+      refresh();
+      const owns = () => _retryActions.get(job.id) === action && _jobs.some(current => sameRetryTarget(current, action));
+      try {
+        const result = chooseDirectory
+          ? await window.queueAPI.retryWithOutputDirectory(job.id)
+          : await window.queueAPI.retryJob(job.id);
+        if (!owns()) return;
+        if (chooseDirectory ? result?.status === 'retried' : result === true) {
+          action.message = '已重新加入佇列';
+          await loadData();
+        } else {
+          action.message = (chooseDirectory && result?.message) || (result?.status === 'cancelled'
+            ? '已取消選擇，原工作與輸出位置已保留。'
+            : '無法重試。請確認來源檔仍存在；若輸出位置未經授權或已變更，請按「重新選擇原輸出資料夾並重試」。');
+        }
+      } catch (error) {
+        if (owns()) action.message = '無法重試：' + (error?.message || String(error));
+      } finally {
+        if (owns()) {
+          action.pending = false;
+          action.refresh();
+        }
+      }
+    }
 
     // Format seconds
     const fmt = s => {
@@ -893,6 +929,7 @@
         }
         if (job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
           actionHtml += '<button type="button" class="primary" data-action="retry">重試</button>';
+          actionHtml += `<button type="button" data-action="retry-directory" title="原輸出位置：${escapeHTML(outPath)}">重新選擇原輸出資料夾並重試</button>`;
         }
         if (job.status === 'done' || job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
           actionHtml += '<button type="button" data-action="clear">清除紀錄</button>';
@@ -923,6 +960,7 @@
               ${enqueuedAt ? `<span class="job-enqueued" title="加入佇列時間">${escapeHTML(enqueuedAt)}</span>` : ''}
             </p>
             ${(job.status === 'queued' || !metaText) ? '' : `<p class="job-meta">${escapeHTML(metaText)}</p>`}
+            <p class="job-retry-feedback" role="status" aria-live="polite"></p>
           </div>
           ${isRunning ? `
             <div class="job-progress">
@@ -941,7 +979,16 @@
           window.queueAPI.clearJob(job.id);
         });
         el.querySelector('[data-action="stop"]')?.addEventListener('click', () => window.queueAPI.stopJob(job.id));
-        el.querySelector('[data-action="retry"]')?.addEventListener('click', () => window.queueAPI.retryJob(job.id));
+        const refreshRetry = () => {
+          const action = _retryActions.get(job.id);
+          const current = action && sameRetryTarget(job, action) ? action : null;
+          el.querySelector('.job-retry-feedback').textContent = current?.message || '';
+          el.querySelectorAll('.job-actions button').forEach(button => { button.disabled = !!current?.pending; });
+          if (current) current.refresh = refreshRetry;
+        };
+        refreshRetry();
+        el.querySelector('[data-action="retry"]')?.addEventListener('click', () => retryFromCard(job, false, refreshRetry));
+        el.querySelector('[data-action="retry-directory"]')?.addEventListener('click', () => retryFromCard(job, true, refreshRetry));
         el.querySelector('[data-action="clear"]')?.addEventListener('click', () => window.queueAPI.clearJob(job.id));
         el.querySelector('[data-action="show-output"]')?.addEventListener('click', () => window.queueAPI.showItemInFolder(outPath));
         el.querySelector('[data-action="open-log"]')?.addEventListener('click', () => window.queueAPI.openPath(logPath));
@@ -1079,6 +1126,9 @@
     }
 
     function renderJobs() {
+      for (const [id, action] of _retryActions) {
+        if (!_jobs.some(job => sameRetryTarget(job, action))) _retryActions.delete(id);
+      }
       if (_isDragging) return;
       if (UI.board.querySelector('.job-editor')) return;
       const completed = _jobs.filter(job => job.status === 'done');

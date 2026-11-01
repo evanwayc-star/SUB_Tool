@@ -14,17 +14,219 @@ function fixture(options = {}) {
   roots.push(directory);
   const authority = new FileAuthority();
   authority.grantScreenshotDirectory(directory);
-  return { directory, output: createScreenshotOutput({ fileAuthority: authority, ...options }) };
+  return { directory, output: createScreenshotOutput({ fileAuthority: authority, tempDir: directory, ...options }) };
 }
 
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe('截圖輸出 reservation', () => {
+  it('原生截圖使用本工作獨立暫存並回傳內容，不覆寫使用者同名檔', async () => {
+    const { directory, output } = fixture();
+    const existing = path.join(directory, '.subtool_temp_shot.jpg');
+    fs.writeFileSync(existing, 'user-owned bytes');
+    let nativePath;
+    const result = await output.captureNative({ async screenshot(file) {
+      nativePath = file;
+      fs.writeFileSync(file, 'native-frame-bytes');
+      return { ok: true };
+    } });
+    expect(result).toEqual({ ok: true, b64: Buffer.from('native-frame-bytes').toString('base64') });
+    expect(nativePath).not.toBe(existing);
+    expect(fs.readFileSync(existing, 'utf8')).toBe('user-owned bytes');
+    expect(fs.existsSync(path.dirname(nativePath))).toBe(false);
+  });
+
+  it('原生截圖失敗仍清除本工作暫存並保留使用者同名檔', async () => {
+    const { directory, output } = fixture();
+    const existing = path.join(directory, '.subtool_temp_shot.jpg');
+    fs.writeFileSync(existing, 'user-owned bytes');
+    let nativePath;
+    await expect(output.captureNative({ async screenshot(file) {
+      nativePath = file; fs.writeFileSync(file, 'partial'); throw new Error('mpv failure');
+    } })).rejects.toThrow('mpv failure');
+    expect(fs.readFileSync(existing, 'utf8')).toBe('user-owned bytes');
+    expect(fs.existsSync(path.dirname(nativePath))).toBe(false);
+  });
+
+  it('關閉會等待原生截圖的 private 寫入與清理，之後不再准入', async () => {
+    const { output } = fixture();
+    let started, finish;
+    const ready = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { finish = resolve; });
+    let nativePath, closed = false;
+    const capture = output.captureNative({ async screenshot(file) {
+      nativePath = file; started(); await gate; fs.writeFileSync(file, 'native'); return { ok: true };
+    } });
+    await ready;
+    const closing = output.close().then(() => { closed = true; });
+    await new Promise(resolve => setTimeout(resolve, 15));
+    expect(closed).toBe(false);
+    expect(await output.captureNative({ screenshot() {} })).toBeNull();
+    finish();
+    expect(await capture).toEqual({ ok: true, b64: Buffer.from('native').toString('base64') });
+    await closing;
+    expect(closed).toBe(true);
+    expect(fs.existsSync(path.dirname(nativePath))).toBe(false);
+  });
+
+  it('原生截圖等待期間私有根改向時保留原檔，不能讀取或清理替代目錄', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-native-shot-owner-')); roots.push(root);
+    const temp = path.join(root, 'temp'), outside = path.join(root, 'outside');
+    fs.mkdirSync(temp); fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, 'foreign.txt'), 'foreign');
+    const output = createScreenshotOutput({ fileAuthority: new FileAuthority(), tempDir: temp });
+    let nativePath;
+    await expect(output.captureNative({ async screenshot(file) {
+      nativePath = file; fs.writeFileSync(file, 'native');
+      fs.renameSync(temp, path.join(root, 'original'));
+      fs.symlinkSync(outside, temp, process.platform === 'win32' ? 'junction' : 'dir');
+      return { ok: true };
+    } })).rejects.toThrow();
+    await expect(output.close()).rejects.toThrow();
+    expect(fs.readFileSync(path.join(outside, 'foreign.txt'), 'utf8')).toBe('foreign');
+    expect(fs.readFileSync(path.join(root, 'original', path.basename(path.dirname(nativePath)), 'frame.jpg'), 'utf8')).toBe('native');
+  });
+
+  it('原生截圖私有根在啟動前被改向時，不授權替代目錄', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-native-shot-owner-')); roots.push(root);
+    const temp = path.join(root, 'temp'), outside = path.join(root, 'outside');
+    fs.mkdirSync(temp); fs.mkdirSync(outside);
+    const output = createScreenshotOutput({ fileAuthority: new FileAuthority(), tempDir: temp });
+    fs.renameSync(temp, path.join(root, 'original'));
+    fs.symlinkSync(outside, temp, process.platform === 'win32' ? 'junction' : 'dir');
+    const host = { screenshot: vi.fn(async file => { fs.writeFileSync(file, 'native'); return { ok: true }; }) };
+    await expect(output.captureNative(host)).rejects.toThrow();
+    expect(host.screenshot).not.toHaveBeenCalled();
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it('私有目錄建立後身分檢查暫時失敗，使用已記錄證據清除空目錄', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-native-shot-stat-')); roots.push(root);
+    let failed = false;
+    const io = { ...fs, lstatSync(file, ...args) {
+      if (!failed && path.basename(file).startsWith('native-shot-')) {
+        failed = true; throw Object.assign(new Error('temporary metadata failure'), { code: 'EIO' });
+      }
+      return fs.lstatSync(file, ...args);
+    } };
+    const output = createScreenshotOutput({ fileAuthority: new FileAuthority(), tempDir: root, fsModule: io });
+    await expect(output.captureNative({ screenshot: vi.fn() })).rejects.toThrow('temporary metadata failure');
+    await expect(output.close()).resolves.toBeUndefined();
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
+  it('私有目錄身分檢查失敗且目錄已被替換，不刪除外物並讓 close 回報失敗', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-native-shot-stat-')); roots.push(root);
+    let replaced, failed = false;
+    const io = { ...fs, lstatSync(file, ...args) {
+      if (!failed && path.basename(file).startsWith('native-shot-')) {
+        failed = true; replaced = file;
+        fs.renameSync(file, path.join(root, 'original'));
+        fs.mkdirSync(file); fs.writeFileSync(path.join(file, 'foreign.txt'), 'foreign');
+        throw Object.assign(new Error('temporary metadata failure'), { code: 'EIO' });
+      }
+      return fs.lstatSync(file, ...args);
+    } };
+    const output = createScreenshotOutput({ fileAuthority: new FileAuthority(), tempDir: root, fsModule: io });
+    await expect(output.captureNative({ screenshot: vi.fn() })).rejects.toThrow('temporary metadata failure');
+    await expect(output.close()).rejects.toThrow();
+    expect(fs.readFileSync(path.join(replaced, 'foreign.txt'), 'utf8')).toBe('foreign');
+  });
+
+  it('授權目錄被 junction 改向後不能在外部目錄保留或寫入截圖', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-shot-junction-test-')); roots.push(root);
+    const selected = path.join(root, 'selected'), outside = path.join(root, 'outside');
+    fs.mkdirSync(selected); fs.mkdirSync(outside);
+    const authority = new FileAuthority(); authority.grantScreenshotDirectory(selected);
+    const output = createScreenshotOutput({ fileAuthority: authority, tempDir: root });
+    fs.renameSync(selected, path.join(root, 'original'));
+    fs.symlinkSync(outside, selected, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(await output.reserve(selected)).toBeNull();
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it('等待目錄列舉時授權目錄改向，不能在新目錄建立 reservation', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-shot-junction-test-')); roots.push(root);
+    const selected = path.join(root, 'selected'), outside = path.join(root, 'outside');
+    fs.mkdirSync(selected); fs.mkdirSync(outside);
+    const authority = new FileAuthority(); authority.grantScreenshotDirectory(selected);
+    const readdir = async directory => {
+      const entries = await fs.promises.readdir(directory);
+      fs.renameSync(selected, path.join(root, 'original'));
+      fs.symlinkSync(outside, selected, process.platform === 'win32' ? 'junction' : 'dir');
+      return entries;
+    };
+    const output = createScreenshotOutput({ fileAuthority: authority, tempDir: root,
+      fsModule: { promises: { ...fs.promises, readdir } } });
+    await expect(output.reserve(selected)).rejects.toThrow();
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it('reservation 後授權目錄改向，不能覆寫或刪除新目錄檔案', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-shot-junction-test-')); roots.push(root);
+    const selected = path.join(root, 'selected'), outside = path.join(root, 'outside');
+    fs.mkdirSync(selected); fs.mkdirSync(outside);
+    const authority = new FileAuthority(); authority.grantScreenshotDirectory(selected);
+    const output = createScreenshotOutput({ fileAuthority: authority, tempDir: root });
+    const reservation = await output.reserve(selected);
+    fs.renameSync(selected, path.join(root, 'original'));
+    fs.symlinkSync(outside, selected, process.platform === 'win32' ? 'junction' : 'dir');
+    const foreign = path.join(outside, reservation.name); fs.writeFileSync(foreign, 'foreign bytes');
+    expect(await output.write(reservation.path, Buffer.from('image').toString('base64'))).toBeNull();
+    await expect(output.release(reservation.path)).rejects.toThrow();
+    expect(fs.readFileSync(foreign, 'utf8')).toBe('foreign bytes');
+  });
+
+  it('寫入暫存期間資料夾改向，不發布或清除新目錄的檔案', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-shot-junction-test-')); roots.push(root);
+    const selected = path.join(root, 'selected'), source = path.join(root, 'source'), outside = path.join(root, 'outside');
+    fs.mkdirSync(source); fs.mkdirSync(outside);
+    fs.symlinkSync(source, selected, process.platform === 'win32' ? 'junction' : 'dir');
+    const authority = new FileAuthority(); authority.grantScreenshotDirectory(selected);
+    let started, resume;
+    const ready = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { resume = resolve; });
+    const open = async (file, mode) => {
+      const handle = await fs.promises.open(file, mode);
+      if (file.includes('.screenshot-')) {
+        const write = handle.writeFile.bind(handle);
+        handle.writeFile = async bytes => { started(); await gate; return write(bytes); };
+      }
+      return handle;
+    };
+    const output = createScreenshotOutput({ fileAuthority: authority, tempDir: root,
+      fsModule: { promises: { ...fs.promises, open } } });
+    const reservation = await output.reserve(selected);
+    const write = output.write(reservation.path, Buffer.from('image').toString('base64'));
+    await ready;
+    fs.unlinkSync(selected);
+    fs.symlinkSync(outside, selected, process.platform === 'win32' ? 'junction' : 'dir');
+    const foreign = path.join(outside, reservation.name); fs.writeFileSync(foreign, 'foreign bytes');
+    resume();
+    await expect(write).rejects.toThrow();
+    expect(fs.readFileSync(foreign, 'utf8')).toBe('foreign bytes');
+    expect(fs.readdirSync(outside)).toEqual([reservation.name]);
+  });
+
+  it('使用者明確選取的 junction 本身可作為截圖根，但改向後失效', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-shot-junction-test-')); roots.push(root);
+    const selected = path.join(root, 'selected'), target = path.join(root, 'target'), other = path.join(root, 'other');
+    fs.mkdirSync(target); fs.mkdirSync(other);
+    fs.symlinkSync(target, selected, process.platform === 'win32' ? 'junction' : 'dir');
+    const authority = new FileAuthority(); expect(authority.grantScreenshotDirectory(selected)).toBe(true);
+    const output = createScreenshotOutput({ fileAuthority: authority, tempDir: root });
+    const reservation = await output.reserve(selected);
+    expect(await output.write(reservation.path, Buffer.from('image').toString('base64'))).toBe(reservation.path);
+    expect(fs.readFileSync(path.join(target, reservation.name), 'utf8')).toBe('image');
+    fs.unlinkSync(selected);
+    fs.symlinkSync(other, selected, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(await output.reserve(selected)).toBeNull();
+    expect(fs.readdirSync(other)).toEqual([]);
+  });
   it.each(['release', 'write'].flatMap(operation => ['filled', 'replaced'].map(change => ({ operation, change }))))
   ('$operation 的非同步空檔核對回覆過期時，不刪除或覆蓋外部新圖片 ($change)', async ({ operation, change }) => {
     let reserved, changed = false;
-    const lstat = async file => {
-      const snapshot = await fs.promises.lstat(file);
+    const lstat = async (file, options) => {
+      const snapshot = await fs.promises.lstat(file, options);
       if (file === reserved?.path && !changed) {
         changed = true;
         if (change === 'replaced') fs.renameSync(file, file + '.original-reservation');
@@ -362,7 +564,7 @@ describe('截圖輸出 reservation', () => {
       const handle = await fs.promises.open(file, mode);
       const stat = handle.stat.bind(handle);
       const selected = phase === 'reserve' ? !reserved : phase === 'stage' ? reserved && file !== reserved.path : reserved && file === reserved.path && mode === 'wx';
-      handle.stat = async () => { if (selected && !failed) { failed = true; throw new Error('stat temporarily failed'); } return stat(); };
+      handle.stat = async (...args) => { if (selected && !failed) { failed = true; throw new Error('stat temporarily failed'); } return stat(...args); };
       return handle;
     };
     const linkSync = () => { throw Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }); };
@@ -383,14 +585,14 @@ describe('截圖輸出 reservation', () => {
       const handle = await fs.promises.open(file, mode);
       if (reserved && file === reserved.path && mode === 'wx') {
         const stat = handle.stat.bind(handle);
-        handle.stat = async () => {
+        handle.stat = async (...args) => {
           if (!failed) {
             failed = true;
             if (owner === 'replaced') fs.unlinkSync(file);
             fs.writeFileSync(file, foreignBytes);
             throw new Error('copy stat temporarily failed');
           }
-          return stat();
+          return stat(...args);
         };
       }
       return handle;

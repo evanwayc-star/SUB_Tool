@@ -12,7 +12,9 @@ const {
   updateLease,
   releaseLease,
   listLeases,
-  stageOutputPath,
+  stagePathForCanonical,
+  assertOutputAuthority,
+  prepareNativeWorkspace,
 } = require('./export-lease');
 
 const CONTROL_PROTOCOL_VERSION = 1;
@@ -33,6 +35,18 @@ function errorWithCode(code, message, cause) {
   error.code = code;
   if (cause) error.cause = cause;
   return error;
+}
+
+function fileIdentity(stat) {
+  if (!stat.isFile() || stat.isSymbolicLink()) throw errorWithCode('UNSAFE_DELIVERY_STAGE', '匯出暫存成品身分已變更，檔案與輸出鎖已保留');
+  return { dev: String(stat.dev), ino: String(stat.ino) };
+}
+
+function assertStageIdentity(file, expected) {
+  const current = fileIdentity(fs.lstatSync(file, { bigint: true }));
+  if (current.dev !== expected.dev || current.ino !== expected.ino) {
+    throw errorWithCode('UNSAFE_DELIVERY_STAGE', '匯出暫存成品已被替換，檔案與輸出鎖已保留');
+  }
 }
 
 function serializeError(error) {
@@ -274,7 +288,10 @@ async function deletePartialFile(outPath, options = {}) {
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      await fs.promises.unlink(outPath);
+      if (options.assertOutput) {
+        options.assertOutput();
+        fs.unlinkSync(outPath);
+      } else await fs.promises.unlink(outPath);
       return { removed: true, missing: false, attempts: attempt };
     } catch (error) {
       if (error.code === 'ENOENT') {
@@ -295,12 +312,26 @@ async function deletePartialFile(outPath, options = {}) {
 
 async function startWatchdogRuntime(config, options = {}) {
   validateConfig(config);
+  const outputAuthority = config.outputAuthority;
+  assertOutputAuthority(outputAuthority, config.outPath);
+  // The acquired destination stays canonical for the entire writer lifetime.
+  // Re-resolving a selected alias after it changes would also change its lease key.
+  config = { ...config, outPath: outputAuthority.outPath };
+  const assertDirectory = () => assertOutputAuthority(outputAuthority, config.outPath);
 
   const token = crypto.randomBytes(32).toString('hex');
   const pipeName = makePipeName();
-  const stagePath = stageOutputPath(config.outPath, token);
+  const stagePath = stagePathForCanonical(config.outPath, token);
+  let stageIdentity = null;
+  let nativeWorkspace = null;
+  const assertOutput = () => {
+    assertDirectory();
+    nativeWorkspace?.assertCurrent();
+    if (stageIdentity) assertStageIdentity(stagePath, stageIdentity);
+  };
   let artifactTempDir = null;
   let leasesAcquired = false;
+  let leaseKey = null;
   let starting = true;
   let child = null;
   let childClosed = false;
@@ -312,11 +343,20 @@ async function startWatchdogRuntime(config, options = {}) {
   const finalizerAbort = new AbortController();
   const artifact = createExportArtifact({ ...config, stagePath }, {
     signal: finalizerAbort.signal,
+    assertOutput,
+    onWorkspacePrepared: stage => updateLease({ queueDir: config.queueDir, outPath: config.outPath,
+      token, leaseKey, discWorkspace: stage, discWorkspacePending: false }),
     onOutputStart: () => {
-      if (leasesAcquired) updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, outputStarted: true });
+      assertOutput();
+      if (!stageIdentity) {
+        const fd = fs.openSync(stagePath, 'wx');
+        try { stageIdentity = fileIdentity(fs.fstatSync(fd, { bigint: true })); }
+        finally { fs.closeSync(fd); }
+      }
+      if (leasesAcquired) updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey, outputStarted: true, stageIdentity });
     },
     onProcess: childProcess => updateLease({
-      queueDir: config.queueDir, outPath: config.outPath, token, ffmpegPid: childProcess.pid,
+      queueDir: config.queueDir, outPath: config.outPath, token, leaseKey, ffmpegPid: childProcess.pid,
     }),
     onProgress: progress => sendIpc({ type: 'progress', progress }),
   }, options.artifactAdapters);
@@ -328,7 +368,7 @@ async function startWatchdogRuntime(config, options = {}) {
   const releaseOutputs = async () => {
     if (!leasesAcquired) return undefined;
     try {
-      return await Promise.resolve(releaseLease({ queueDir: config.queueDir, outPath: config.outPath, token }));
+      return await Promise.resolve(releaseLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey }));
     } catch (error) {
       return { error: serializeError(error), retainedLease: true };
     }
@@ -346,14 +386,15 @@ async function startWatchdogRuntime(config, options = {}) {
       let outputCommitted = false;
       if (!cleanupReason && !childError && code === 0 && !finalizerAbort.signal.aborted) {
         try {
-          const stageInfo = await fs.promises.lstat(stagePath);
+          assertOutput();
+          const stageInfo = fs.lstatSync(stagePath);
           if (!stageInfo.isFile() || stageInfo.size <= 0) {
             throw errorWithCode('INVALID_DELIVERY_STAGE', '匯出暫存成品缺少有效檔案內容');
           }
           finalizerAbort.signal.throwIfAborted();
           // Both paths are in the same output directory. After FFmpeg and any
           // format-specific checks succeed, this rename is the commit point.
-          await fs.promises.rename(stagePath, config.outPath);
+          fs.renameSync(stagePath, config.outPath);
           outputCommitted = true;
         } catch (error) {
           childError = error;
@@ -365,8 +406,14 @@ async function startWatchdogRuntime(config, options = {}) {
       let release = null;
 
       if (needsCleanup) {
-        const deletion = leasesAcquired
-          ? { outPath: config.outPath, stagePath, ...await deletePartialFile(stagePath, options) }
+        // A failed mux handle close can leave a writer alive. Preserve the
+        // stage as well as the lease until recovery can safely inspect it.
+        const deletion = ['AIRLINE_TEMP_HANDLE_CLOSE_FAILED', 'OUTPUT_HANDLE_CLOSE_FAILED'].includes(stageCleanupError?.code)
+          ? { removed: false, missing: false, untouched: true }
+          : leasesAcquired
+          ? stageIdentity
+            ? { outPath: config.outPath, stagePath, ...await deletePartialFile(stagePath, { ...options, assertOutput }) }
+            : { removed: false, missing: false, untouched: true }
           : { removed: false, missing: false, untouched: true };
         const failed = (!deletion.removed && !deletion.missing && !deletion.untouched ? deletion : null) || stageCleanupError;
         cleanup = {
@@ -496,23 +543,36 @@ async function startWatchdogRuntime(config, options = {}) {
     const lease = await Promise.resolve(acquireLease({
       queueDir: config.queueDir, outPath: config.outPath, jobId: config.jobId,
       token, watchdogPid: process.pid, pipeName,
-      outputStarted: false, stagePath,
+      outputStarted: false, stagePath, outputAuthority,
     }));
     leasesAcquired = true;
+    leaseKey = lease.key;
     artifactTempDir = lease.lockPath;
+    if (isDiscOutput(config.outputFormat)) {
+      updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey, discWorkspacePending: true });
+    }
+    if (process.platform === 'win32' && isDiscOutput(config.outputFormat)) {
+      nativeWorkspace = prepareNativeWorkspace({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey });
+    }
   } catch (error) {
     // No FFmpeg has started: only release reservations, never delete an
     // existing deliverable when a sibling is owned by another job.
     const release = await releaseOutputs();
     // A recovery request can already be waiting on done. Let that socket
     // finish before closing the control server after a failed reservation.
-    resolveDone({ release, cleanup: {
+    const result = { type: 'exit', jobId: config.jobId, ok: false, code: null, signal: null, release, cleanup: {
       reason: cleanupReason || 'lease-acquire-failed',
       removed: false, missing: false, untouched: true,
       released: !release?.error, retainedLease: !!release?.error,
-    } });
+      ...(release?.error ? { releaseError: release.error } : {}),
+    } };
+    resolveDone(result);
     await close();
-    throw error;
+    // The standalone IPC owner needs both the original startup cause and the
+    // reservation outcome; throwing only the original loses a retained lease.
+    const startupError = error instanceof Error ? error : new Error(String(error));
+    startupError.watchdogResult = result;
+    throw startupError;
   }
 
   if (cleanupReason) {
@@ -522,7 +582,8 @@ async function startWatchdogRuntime(config, options = {}) {
   }
 
   try {
-    const args = await artifact.prepare({ tempDir: artifactTempDir });
+    const args = await artifact.prepare({ tempDir: artifactTempDir, nativeWorkRoot: nativeWorkspace?.path });
+    assertOutput();
     starting = false;
     if (cleanupReason) {
       void finalize(null, null);
@@ -582,6 +643,7 @@ async function startWatchdogRuntime(config, options = {}) {
   try {
     await Promise.resolve(updateLease({
       queueDir: config.queueDir, outPath: config.outPath, token,
+      leaseKey,
       watchdogPid: process.pid, ffmpegPid: child.pid, pipeName,
     }));
   } catch (error) {
@@ -785,13 +847,30 @@ async function recoverExportLeases(queueDir, options = {}) {
         message: '匯出程序仍可能執行中，暫存檔與輸出鎖已保留' });
       continue;
     }
-    // New leases only own their token-derived sibling stage. Older leases
-    // predate this field and retain their original partial-file semantics.
-    const deletion = owner.stagePath
-      ? await deletePartialFile(owner.stagePath, options)
+    // Without historical identities, recovery cannot grant the current same-name
+    // directory or file. A proven reservation that never wrote owns no file.
+    let unusedReservation = owner.outputStarted === false && !owner.stagePath;
+    if (owner.outputStarted === false && owner.stagePath && owner.outputAuthority && !owner.stageIdentity) {
+      try {
+        assertOutputAuthority(owner.outputAuthority, owner.outPath);
+        try { fs.lstatSync(owner.stagePath); } catch (error) { if (error.code === 'ENOENT') unusedReservation = true; }
+      } catch {}
+    }
+    if (!unusedReservation && (!owner.outputAuthority || (owner.stagePath && !owner.stageIdentity))) {
+      warnings.push({ code: 'OUTPUT_AUTHORITY_MISSING', key: entry.key, outPath: owner.outPath,
+        message: '舊交付鎖缺少原目錄身分；已保留半成品與鎖，請檢查後改用新的交付檔名' });
+      continue;
+    }
+    const guardedOptions = owner.outputAuthority
+      ? { ...options, assertOutput: () => {
+        assertOutputAuthority(owner.outputAuthority, owner.outPath);
+        if (owner.stageIdentity) assertStageIdentity(owner.stagePath, owner.stageIdentity);
+      } } : options;
+    const deletion = unusedReservation ? { removed: false, missing: false, untouched: true } : owner.stagePath
+      ? await deletePartialFile(owner.stagePath, guardedOptions)
       : owner.outputStarted === false
         ? { removed: false, missing: false, untouched: true }
-        : await deletePartialFile(owner.outPath, options);
+        : await deletePartialFile(owner.outPath, guardedOptions);
     if (!deletion.removed && !deletion.missing && !deletion.untouched) {
       warnings.push({
         code: 'PARTIAL_CLEANUP_FAILED',
@@ -807,6 +886,7 @@ async function recoverExportLeases(queueDir, options = {}) {
         queueDir,
         outPath: owner.outPath,
         token: owner.token,
+        leaseKey: entry.key,
       }));
       recovered.push({
         key: entry.key,
@@ -984,6 +1064,7 @@ async function runStandalone(options = {}) {
           await runtime.done;
         } catch (error) {
           sendIpc({ type: 'error', ...serializeError(error), jobId: message?.jobId });
+          if (error?.watchdogResult) sendIpc(error.watchdogResult);
         } finally {
           await closeAndDisconnect();
         }

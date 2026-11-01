@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createServer } from 'vite';
+import { createLogger, createServer, resolveConfig } from 'vite';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -23,6 +23,17 @@ let server, cacheDir, origin;
 beforeAll(async () => {
   cacheDir = mkdtempSync(join(realpathSync(tmpdir()), 'subtool-vite-shared-'));
   server = await createServer({ root, configFile: join(root, 'vite.config.mjs'), cacheDir,
+    plugins: [{
+      name: 'test-shared-named-import',
+      resolveId(id) { if(id==='/src/__shared_named_test.js') return '\0shared-named-test'; },
+      load(id) {
+        if(id==='\0shared-named-test') return `
+          import {clipLength} from '../shared/clip-fade.cjs';
+          import {exactDeliveryFrameRate} from '../../shared/delivery-frame-rate.cjs';
+          export const result={length:clipLength({in:1,out:5,speed:2}),rate:exactDeliveryFrameRate(29.97)};
+        `;
+      },
+    }],
     server: { host: '127.0.0.1', port: 0, strictPort: false, preTransformRequests: false }, logLevel: 'silent' });
   await server.listen();
   origin = `http://127.0.0.1:${server.httpServer.address().port}`;
@@ -39,6 +50,37 @@ afterAll(async () => {
 });
 
 describe('真實 Vite 開發伺服器的共用 CJS 規則', () => {
+  it('正式設定不使用 Vite 已棄用的 alias resolver', async () => {
+    const warnings=[];
+    const logger=createLogger('info');
+    logger.warn=message=>warnings.push(message);
+    await resolveConfig({root,configFile:join(root,'vite.config.mjs'),customLogger:logger},'serve');
+    expect(warnings.filter(message=>message.includes('customResolver'))).toEqual([]);
+  });
+
+  it('執行 Vite 轉換後的 named imports，取得共用規則實際結果', async () => {
+    const response=await fetch(`${origin}/src/__shared_named_test.js`);
+    expect(response.ok).toBe(true);
+    const transformed=await response.text();
+    const optimizedUrls=[];
+    const executable=transformed.replace(/(from\s*["'])(\/@fs\/[^"']+)(["'])/gu,(_match,prefix,url,suffix)=>{
+      const parsed=new URL(url,origin);
+      const file=decodeURIComponent(parsed.pathname.slice('/@fs/'.length));
+      optimizedUrls.push(url);
+      return `${prefix}${pathToFileURL(file).href}${parsed.search}${suffix}`;
+    });
+    expect(optimizedUrls).toHaveLength(2);
+    // optimizer 初次建立仍在背景進行；必須透過 Vite 等待輸出就緒後才交給 Node。
+    for(const url of optimizedUrls){
+      const optimized=await fetch(origin+url);
+      expect(optimized.ok).toBe(true);
+      await optimized.text();
+    }
+    const script=`const m=await import(${JSON.stringify(`data:text/javascript;base64,${Buffer.from(executable).toString('base64')}`)});console.log(JSON.stringify(m.result));`;
+    const actual=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',windowsHide:true,timeout:10000}));
+    expect(actual).toEqual({length:2,rate:require(join(root,'shared/delivery-frame-rate.cjs')).exactDeliveryFrameRate(29.97)});
+  });
+
   it.each([...callers])('%s 的 renderer caller 取得與 main 相同的規則', async (shared, imports) => {
     let optimizedUrl;
     for (const caller of imports) {

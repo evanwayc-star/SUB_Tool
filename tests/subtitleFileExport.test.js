@@ -10,6 +10,7 @@ import { buildXLSX } from '../src/xlsx-export.js';
 import { bytesToB64, baseName, encodeUTF16LE } from '../src/util.js';
 import { SubFormats } from '../src/formats.js';
 import { allocateExportFileNames } from '../src/export-job-engine.js';
+import { snapshotProvisionalCueEnds } from '../src/subtitle-model.js';
 
 const { writeDirectoryFiles } = createRequire(import.meta.url)('../electron/directory-output.js');
 
@@ -39,7 +40,7 @@ class RejectedWriter {
 
 function publicExports(desk, desktop = true) {
   const setStatus = vi.fn(), showToast = vi.fn(), downloadBytes = vi.fn();
-  const context = vm.createContext({ State, IS_DESKTOP: desktop, DESK: desk, buildXLSX, SubFormats, encodeUTF16LE, allocateExportFileNames,
+  const context = vm.createContext({ State, IS_DESKTOP: desktop, DESK: desk, buildXLSX, SubFormats, encodeUTF16LE, allocateExportFileNames, snapshotProvisionalCueEnds,
     bytesToB64, baseName, b64ToBytes: value => new Uint8Array(Buffer.from(value, 'base64')),
     downloadBytes, setStatus, showToast });
   vm.runInContext(`${functions}\n globalThis.exports = {${names.join(',')}};`, context);

@@ -9,12 +9,12 @@ const fixture=vi.hoisted(()=>{
   const ctx={fillRect:vi.fn(),drawImage:vi.fn(),save:vi.fn(),restore:vi.fn(),beginPath:vi.fn(),rect:vi.fn(),clip:vi.fn()};
   const publish={drawImage:vi.fn(),fillRect:vi.fn()};
   const canvas={style:{display:'none'},width:640,height:360,parentElement:{clientWidth:640,clientHeight:360},getContext:()=>publish};
-  return {clips,defaults:clips.map(clip=>({...clip})),ctx,publish,canvas,time:103,takeover:false,availableB:25,longHold:false,sourceFps:25,sourceOffsetUs:0,indexFailure:false,keyFrames:[0],realReader:false,decode:vi.fn(),readerDispose:vi.fn(),session:null,snapshot:null,composition:vi.fn(),report:vi.fn()};
+  return {clips,defaults:clips.map(clip=>({...clip})),ctx,publish,canvas,time:103,sequenceOn:true,takeover:false,availableB:25,longHold:false,sourceFps:25,sourceOffsetUs:0,indexFailure:false,keyFrames:[0],realReader:false,decode:vi.fn(),readerDispose:vi.fn(),session:null,snapshot:null,composition:vi.fn(),report:vi.fn()};
 });
 vi.mock('../src/dom.js',()=>({$:id=>id==='previewCanvas'?fixture.canvas:null,video:{src:'',currentSrc:''}}));
 vi.mock('../src/state.js',()=>({State:{clips:fixture.clips,videoTracks:[{visible:true},{visible:true}],videoWidth:1920,videoHeight:1080,fps:25},ensureVideoTrackCount:vi.fn(),videoTrackVisible:()=>true}));
 vi.mock('../src/media.js',()=>({Media:{
-  mpvMode:false,seqOn:()=>true,tlTime:()=>fixture.time,inGap:()=>false,
+  mpvMode:false,seqOn:()=>fixture.sequenceOn,tlTime:()=>fixture.time,inGap:()=>false,
   webCodecsTakeover:()=>fixture.takeover,setWebCodecsTakeover:value=>{fixture.takeover=value;fixture.session?.setWebCodecsTakeover(value);},
   setWebCodecsComposited:fixture.composition,reportWebCodecsPresentation:fixture.report,
 }}));
@@ -52,7 +52,7 @@ async function loadFirstFrame(){
 }
 
 beforeEach(()=>{
-  fixture.time=103;fixture.takeover=false;fixture.availableB=25;fixture.longHold=false;fixture.sourceFps=25;fixture.sourceOffsetUs=0;fixture.indexFailure=false;fixture.keyFrames=[0];fixture.realReader=false;fixture.session=null;fixture.snapshot=null;
+  fixture.time=103;fixture.sequenceOn=true;fixture.takeover=false;fixture.availableB=25;fixture.longHold=false;fixture.sourceFps=25;fixture.sourceOffsetUs=0;fixture.indexFailure=false;fixture.keyFrames=[0];fixture.realReader=false;fixture.session=null;fixture.snapshot=null;
   fixture.clips.splice(0,fixture.clips.length,...fixture.defaults.map(clip=>({...clip})));
   State.videoTracks=[{visible:true},{visible:true}];
   vi.clearAllMocks();
@@ -70,6 +70,38 @@ beforeEach(()=>{
 afterEach(()=>{WCPreview.disposeAll();vi.unstubAllGlobals();vi.restoreAllMocks();});
 
 describe('WebCodecs public preview frame admission',()=>{
+  it('先移除影片再卸載序列時，釋放圖片與已繪製的私有畫布',async()=>{
+    const images=[];
+    vi.stubGlobal('Image',class {
+      constructor(){this.naturalWidth=640;this.naturalHeight=360;images.push(this);}
+      set src(value){this.value=value;if(value)queueMicrotask(()=>this.onload?.());}
+      get src(){return this.value;}
+    });
+    fixture.clips.splice(0,fixture.clips.length,
+      {id:'image',type:'image',web:{url:'blob:still'},in:0,out:20,offset:100,vtrack:0},
+      {id:'video',web:{url:'a.mp4'},in:0,out:20,offset:100,vtrack:1});
+    await loadFirstFrame();
+    expect(fixture.publish.drawImage).toHaveBeenCalled();
+    const render=WCPreview._renderCanvas;
+    expect(render.width).toBeGreaterThan(0);
+    expect(images[0].src).toBe('blob:still');
+
+    fixture.clips.pop();
+    vi.spyOn(performance,'now').mockReturnValue(performance.now()+3000);
+    WCPreview.tick();
+    expect(WCPreview.sources.size).toBe(0);
+    expect(WCPreview._images.size).toBe(1);
+    fixture.sequenceOn=false;
+    WCPreview.tick();
+    expect(WCPreview._images.size).toBe(0);
+    expect(images[0].src).toBe('');
+    expect(images[0].onload).toBeNull();
+    expect(images[0].onerror).toBeNull();
+    expect(WCPreview._renderCanvas).toBeNull();
+    expect(render.width).toBe(0);
+    expect(render.height).toBe(0);
+  });
+
   it('整檔 payload 仍由同 URL 健康層共用，所有層終止失敗後不再持有舊 cache',async()=>{
     const decoders=[],HealthyDecoder=globalThis.VideoDecoder;
     class Decoder extends HealthyDecoder{

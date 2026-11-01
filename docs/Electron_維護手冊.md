@@ -48,6 +48,7 @@ flowchart LR
 | `delivery-runner.js`、`export-plan.js` | 交付准入／probe 與純交付計畫 |
 | `export-watchdog.js`、`export-lease.js` | 原生 owner、停止、跨程序輸出 lease 及最終裁定 |
 | `export-artifact.js` | 成品準備、封裝、驗證、發布及私有素材清理 |
+| `owned-output-handle.js` | 開檔前後的路徑與實際 handle 身分核對，供封裝後處理共用 |
 | `airline-*`、`mod-fhd-transport.js`、`disc-*` | 各交付格式的規格、封裝或結構驗證 |
 
 ## 2. 安全與檔案能力
@@ -62,11 +63,15 @@ Preload 以 `webUtils.getPathForFile()` 從真正的 File 取得路徑。一般�
 
 ### 專案
 
-可信 bytes 先由 main 讀取，再衍生專案宣告媒體的能力。原生選檔、最近清單、啟動參數與 OS 開檔共用 `projectWorkspace.open()` 的較新請求優先規則；過期讀取不得再授權、寫最近清單或交給 renderer。
+可信 bytes 先由 main 讀取，再衍生專案宣告媒體的能力。原生選檔、最近清單、啟動參數與 OS 開檔共用 `projectWorkspace.open()` 的較新請求優先規則；過期讀取不得再授權、寫最近清單或交給 renderer。讀取前捕獲所選父目錄身分，再以同一個 file handle 取得 bytes；讀取前後核對 dev／ino、長度與時間，關閉後及提交前核對路徑仍指向該檔與原目錄。舊 bytes 不能在讀取等待期間被替換的目錄取得新的重連或寫入能力。
 
 Save As 的媒體路徑必須已有讀權。`createAtomicProjectWriter()` 同時持有目錄準備、私有暫存及發布；main 不先以遞迴 mkdir 準備 renderer 傳入的路徑。所選根目錄可以是掛載／連結位置，`.subtool_AutoSave` 及其子目錄則逐層核對實體目錄與 dev／ino，不沿連結寫到其他位置。暫存放在所選實體根，完成 write／sync／close 後重核目錄、目標與暫存身分，才 rename；失敗只清本次仍持有的暫存，保留原檔及替換進來的資料。
 
+原專案儲存與自動備份沿用可信開檔／另存當時的父目錄身分，不能在下一次寫入時把同名替代目錄重新認成原根。備份根重疊時先選最具體的資格再核對，子根失效不能退回祖先資格。原生另存取得新的明確選擇後才建立新資格；writer 在準備、等待後與發布前都重核該資格，不能只依路徑字串或 `canWriteProject()` 的一次布林結果。
+
 路徑准入依呼叫順序非同步定位，再以實體父目錄與檔名排同目標 FIFO；別名與原路徑不能讓較舊內容晚到覆蓋。不同已准入目標仍可並行寫入。最後少量 metadata 核對、rename 及清理沒有 JavaScript await 缺口，內容寫入仍非同步；這是多次檔案系統呼叫的身分核對，不是 OS 級目錄 handle 的原子沙箱。成功才更新目前專案、重連與近期清單。最近項目以穩定 token 開啟，清單重排不改變原點選目標；清除後 token 失效。重連只接受同名一般檔案，不把目錄當媒體。
+
+自動重連只能使用目前已成功開啟的專案及其可信 bytes 宣告的來源。可信讀取時記錄專案搜尋根的實體身分，遞迴列舉每層目錄前保存快照，等待後及授權找到的檔案前重新核對；junction、同名換目錄或專案宣告世代變更都不授權晚到結果。另一專案成功開啟會撤銷舊搜尋資格；開啟失敗或使用者取消選檔不撤銷目前專案。這些仍是多個 filesystem syscall，不提供 OS 級原子圍堵。
 
 Windows 的同步與非同步實體路徑核對都使用 native realpath，將 8.3 短檔名展開為相同表示，再比較目錄與檔案身分。短名與長名指向同一目錄時不能誤拒保存；也不能只為名稱相同就省略 dev／ino 或連結檢查。
 
@@ -99,7 +104,7 @@ API 前綴皆為 `window.subtool`。`isDesktop` 是值；`getFilePath(file)` 只
 | `openDroppedProject(file)` | `project:openDroppedFile` | 真實專案 File 的可信開啟 |
 | `fileURL(path)` | `fs:fileURL` | 取得受控資源 URL |
 | `stat(path)` | `fs:stat` | 已授權路徑資訊 |
-| `listDir(path)` | `fs:listDir` | 受控目錄列舉 |
+| `listDir(path)` | `fs:listDir` | 受控目錄列舉；失權或讀取失敗會拒絕，只有成功的空目錄才回空陣列 |
 | `findRelinkTarget(projectPath, oldMediaPath)` | `fs:findRelinkTarget` | 原專案的重連搜尋 |
 | `showSourceInFolder(path)` | `app:showSourceInFolder` | 定位已授權來源 |
 | `fontsList()` | `fonts:list` | 字型清單與內容 |
@@ -182,7 +187,7 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `present(time, options)` | `mpv:present` | exact、waitForFrame、tolerance、frameTarget／frameStart／frameDuration |
 | `cancelPresent()` | `mpv:cancelPresent` | 撤銷待完成呈現 |
 | `loadfile(path)` | `mpv:loadfile` | 已授權來源切換；以命令回覆的 playlist entry ID 配對載入事件及路徑，舊來源事件不能完成新切換；回覆不代表首幀已呈現 |
-| `screenshot(path)` | `mpv:screenshot` | main 再驗輸出路徑，等待實際擷取 |
+| `screenshot(path)` | `mpv:screenshot` | main 驗證請求的截圖目錄，在私有暫存擷取並回傳 base64 畫格 |
 | `play()` | `mpv:play` | 等待播放命令成功 ACK；命令錯誤、逾時或斷線會拒絕，ACK 不代表畫格已呈現 |
 | `pause()` | `mpv:pause` | 暫停 |
 | `direction(value)` | `mpv:direction` | 播放方向 |
@@ -212,6 +217,7 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `setConcurrency(value)` | `queue:setConcurrency` | 並行度 |
 | `stopJob(id)` | `queue:stopJob` | 停止 |
 | `retryJob(id)` | `queue:retryJob` | 重試 |
+| `retryWithOutputDirectory(id)` | `queue:retryWithOutputDirectory` | 系統選取原輸出資料夾、重新授權並重試；回 `retried`／`cancelled`／`failed` 與訊息 |
 | `clearJob(id)` | `queue:clearJob` | 移除可清工作 |
 | `clearCompleted()` | `queue:clearCompleted` | 清完成紀錄 |
 | `reorderJob(id, newIndex)` | `queue:reorderJob` | 排隊順序 |
@@ -334,7 +340,19 @@ PCM 取樣前按影片來源原點對齊，resampler 與指定聲道的 pan 在�
 
 從 probe 開始就登記同一 active owner，停止也會取消準備中探測。成品提交及 lease 釋放後，補充 audio bitrate 探測失敗只回 `audioActualBitrates:null`，不能倒改已完成交付；編碼、封裝與收尾失敗仍屬失敗。
 
-Watchdog 取得輸出 lease，artifact 在同目錄的本工作私有路徑準備／編碼／封裝／驗證，全部成功才 rename 正式成品。取消、失敗及崩潰只刪本 owner 登記的私有檔，不刪既有同名成品；舊 lease 按原規則復原。ISO 開始寫入前持久化 owner，每個新原生程序更新 PID；清理失敗保留 lease。
+輸出授權綁定使用者在系統選擇器確認的實體目錄。`FileAuthority` 經 `export-lease.js` 保存所選根的原路徑、`realpathSync.native()` 解析的 canonical 路徑，以及 `dev`／`ino` 字串；根本身可為使用者明確選取的 junction，根以下到輸出父目錄則逐層拒絕連結並記錄目錄身分。改向或同名換目錄後，舊授權失效。main 不接受 renderer 偽造的 `outputAuthority`；可信捕捉結果存在 job 頂層，隨工作快照及 failed／stopped journal 持久化，重啟只恢復仍有效的證據。
+
+Runner 在 probe 前及交給 execution 前重核該工作證據；watchdog 再驗證並固定本次 canonical outPath。lease 位於該 queueDir 的 `output-leases/<輸出路徑雜湊>.lock/owner.json`，記錄 jobId、token、PID、pipe 與輸出證據。後續更新及釋放沿取得時的 lease key 核對 outPath／token，不因所選別名改向而重新計算另一把鎖。stage 名稱由 canonical outPath 與 token 派生，不接受 caller 指定刪除路徑。
+
+| 成品階段 | 實際所有權檢查 |
+|---|---|
+| 開始寫入 | 以 `wx` 保留 stage，從已取得的 handle 讀取 `dev`／`ino` 並寫入 lease；未取得檔案不能清除同名內容。ISO 也在真正 writer 起動前完成此步驟，每個新原生程序更新 PID |
+| 封裝 | artifact 傳遞同步 `assertOutput`；MOD／航空以開檔前、handle、開檔後的 bigint `dev`／`ino` 比對 stage，每次有限大小的修正或發布寫入前重核目錄與 stage。航空發布使用 `r+`、truncate 前再核對；私有 mux 以 `wx` 建立，記錄檔案與父目錄身分，讀取及清理前重核 |
+| Commit | 等編碼、封裝與驗證成功，再核目錄、stage 身分、非空一般檔案及取消狀態，以同目錄 rename 發布正式成品 |
+| Cleanup | 等 writer close 後，在每次刪除前重核目錄與 stage 身分；失權或清理失敗保留相關資料／lease，不沿被替換的路徑刪檔。handle 關閉失敗時保留 stage；lease 中只有已記錄並通過身分核對的光碟工作目錄可清理，其他未登記項目使釋放失敗。移除私有內容及 owner 記錄前核 token；最後鎖目錄刪除失敗時嘗試恢復 owner 記錄 |
+| Recovery | 先核 lock key、owner outPath、由 token 派生的 stage 路徑，再交原 pipe／token 收尾。無存活 owner 時，須確認登記的兩個 PID 均已消失，且原目錄／stage 身分有效，才可清理 |
+
+這些檢查覆蓋 app 的准入、等待、交接與重啟恢復，不是作業系統的原子檔案能力。Node 的 `lstat`／`realpath` 檢查與後續 open、write、rename、unlink 仍是不同 syscall；同步檢查縮短事件迴圈間隙，也不能封鎖另一個程序在其間替換目錄或檔案，原生 encoder 本身也仍以路徑開檔。沒有取得可跨這些操作持續約束目錄身分的 OS handle，因此不能宣稱消除了任意外部程序競爭下的所有 TOCTOU 窗口。
 
 Windows 的 `spawnExportWatchdog()` 使用 `detached`，讓 watchdog 在主程序遭強制終止後仍可接收 IPC disconnect，停止 FFmpeg 並完成 stage／lease 清理。保留隱藏視窗、stderr pipe、IPC 與 ChildProcess 追蹤，正常退出仍等待 completion；依據見 [Node.js 的 detached 說明](https://nodejs.org/api/child_process.html#optionsdetached)。回歸測試真正終止父程序，確認未呼叫 recover 也會自行完成清理，避免把下次啟動的補救當成本次 owner 已完成。
 
@@ -344,7 +362,7 @@ Windows 的 `spawnExportWatchdog()` 使用 `detached`，讓 watchdog 在主程�
 
 停止先持久化完整 stopped journal，記憶體維持 stopping 到 runner 結束。寫停止意圖失敗要回 running，不能先停 native。測試 adapter 只由可信 Node 注入，不得由 renderer 或持久化工作指定可載入模組。
 
-停止不掩蓋未完成的檔案收尾：stage 清理或成品提交後 lease 釋放失敗，佇列都保留 failed 與原錯誤。即使正式成品已存在，也不能將仍持鎖的工作報成正常 stopped；只有提交及釋鎖均完成後，才依成功結果裁定 done。
+停止或關機不掩蓋未完成的檔案收尾：stage 清理或成品提交後 lease 釋放失敗，佇列都持久化 failed 與錯誤，不能把仍持鎖的工作報成 stopped 或關機後重新排入 queued。即使正式成品已存在，也只有提交及釋鎖均完成後才依成功結果裁定 done。啟動時取得 lease 後、writer 尚未啟動前若出錯，watchdog 先嘗試釋鎖，再經 IPC 傳遞原始啟動錯誤及收尾結果；釋鎖失敗時保留 lease，並在失敗訊息保留原始原因與釋鎖原因。沒有保留 lease 的正常停止與關機仍依既有停止／排程規則處理。
 
 真正退出依序封閉准入，等 direct FFmpeg、probe、intake、PCM、辨識壓縮、cache owner 及 queue 屏障，再清暫存。若屏障失敗，恢復可恢復 owner；queue 等原交易收尾後 `cancelShutdown()`，不安全中止過的工作維持暫停。截圖清理須先於不可逆的 intake close，避免退出失敗後已有 HTTP Proxy、截圖或轉檔入口永久失效。
 
@@ -398,6 +416,12 @@ Artifact 先驗 TS，再以單 PES 與固定 buffer 重排到 lease 暫存 TS、
 
 BD 選不低於來源且最高 29.97 的可用格率；字幕先依顯示比例燒錄再縮儲存尺寸。兩種均無選單、首播 title 1。驗 UDF anchor／logical volume、tag checksum、descriptor CRC、標籤及容量後才完成；影音解碼與聲道仍須內容驗收。取消先等 native close，開始寫入前的失敗保留原 ISO。
 
+光碟的編碼資料仍留在 lease 專屬工作目錄；Windows 的原生工具以每工作獨立 junction 取得較短的工作路徑。建立前依序檢查系統暫存目錄（`os.tmpdir()`）、`LOCALAPPDATA/Temp`、`USERPROFILE/AppData/Local/Temp`，計入 DVD 內部檔案及 BD stage 完整檔名後選擇足夠短的既有目錄，並以實際建立動作確認寫入權；同名碰撞不取得所有權。沒有可寫且足夠短的個人暫存目錄時明確報錯，應調整環境後重試，不假報完成。極長 queue 的 lease 及光碟工作目錄以 Windows namespace 路徑建立，持久化資料仍使用原路徑表示。
+
+BD 的 tsMuxeR 另經工作目錄內的短 junction 存取原輸出父目錄。它寫入的仍是使用者授權目錄中已預留的同一 stage inode，並非另存後複製；建立與啟動前重核輸出授權、stage、junction 及其目標身分，設定檔則用 `wx` 建立。工作目錄父層、工作目錄、短入口及 BD 輸出 junction 的身分隨 lease 保存，清理與重啟復原依證據驗證。仍存活的 owner 可用已取得的記憶體身分清理；重啟復原缺少已持久化身分，或身分已被替換時則保留工作／連結。復原時若 `TEMP` 等環境改變，無法確認原入口就保留 lease，恢復原環境後才可重新驗證。清理工作目錄只移除受驗證的 junction，不沿 junction 遞迴刪除輸出目錄。這些仍受前述 Node／OS syscall 非原子限制。
+
+光碟原生程序的 stdout／stderr 發生讀取錯誤時，保留最先發生的錯誤並停止 writer，等待 child `close` 後才清理工作與 lease；管線報錯本身不是程序已退出的證據。
+
 工具與 DLL／授權文字由 `disc-tools.json` 固定來源及 SHA-256，正式包只收 manifest 所列檔案。`discAuthoring.test.js` 核對真工具 ISO／多音軌，`discWatchdog.test.js` 核對取消、復原及既有 ISO。
 
 ## 5. mpv 嵌入整合（Windows）
@@ -414,11 +438,13 @@ Launch／loadfile 透過 probe 取得容器相對來源原點，seek、回報與
 
 ### 截圖輸出
 
-Renderer 凍結時間、FPS 及圖片計畫，透過既有 `withPresentedFrame()` 暫停並確認同格，持有至 screenshot-to-file 回覆及像素讀入，再依最新意圖恢復。新 seek／reset／換來源使舊請求失效，但已送 native 讀取仍須等待結束，才能共用暫存圖。錯誤、逾時、斷線與寫入失敗都拒絕，不以固定 delay 判定。擷取、讀圖、疊 TC 與保存整段序列化。
+Renderer 凍結時間、FPS 及圖片計畫，透過既有 `withPresentedFrame()` 暫停並確認同格，持有至原生擷取回覆及像素讀入，再依最新意圖恢復。新 seek／reset／換來源使舊請求失效，已送 native 的擷取仍須等待結束。錯誤、逾時、斷線與寫入失敗都拒絕，不以固定 delay 判定。擷取、讀圖、疊 TC 與保存整段序列化。
+
+mpv 的 `screenshot-to-file` 會覆寫既有同名檔；main 不把 renderer 提供的固定路徑交給 mpv。每次擷取在主程序獨占 TMP 下建立新的私有目錄，以 `wx` 預留影像檔，等待 mpv 回覆後核對檔案與目錄身分，再透過同一 IPC 回傳畫格 bytes 並清理。若目錄／檔案身分改變或證據不足，保留資料並回報失敗；退出等待已准入擷取及清理。實體截圖目錄在可信授權時綁定身分，reservation、寫入與清理跨等待重新核對，避免目錄改向後寫入或刪除替代位置。
 
 `screenshot-output.js` 以 wx 保留下一個 Shot 編號，含超過 999；write 須同時具能力及 reservation。JPEG 先寫私有暫存檔並 sync／close，再核對原空檔身分，以 exclusive hardlink 發布；不支援 hardlink 才以 wx 複製，不能覆寫晚到外部檔。失敗只清本次仍持有的 reservation／私有檔及身分、前綴相符的部分複製。退出封閉准入，等 reserve／write 後清理；失敗可重試 close。未保存的 renderer 必須 release reservation。
 
-刪除前重查當前檔案身分、長度與修改時間，staging 發布及複製完成也核對寫入 handle 的完成快照，拒絕把等待期間被替換的內容視為成功截圖。最後的 metadata 與 link／unlink 同步執行，避免已重現的 JavaScript await 交錯；這仍不是作業系統層級的原子 compare-and-delete，不能推論可防禦任意跨程序同時改檔。
+刪除前以 bigint 檢查檔案身分、長度與奈秒時間，staging 發布及複製完成也核對寫入 handle 的完成快照，拒絕把等待期間被替換的內容視為成功截圖；Windows inode 不可先轉成可能失去精度的 Number。最後的 metadata 與 link／unlink 同步執行，避免已重現的 JavaScript await 交錯；這仍不是作業系統層級的原子 compare-and-delete，不能推論可防禦任意跨程序同時改檔。
 
 ### Guide 與互動
 
@@ -433,6 +459,10 @@ Renderer 凍結時間、FPS 及圖片計畫，透過既有 `withPresentedFrame()
 狀態真相在 `export-queue.js` 的 JOB_STATUS／TRANSITIONS。常見路徑為 queued→running→done／failed，停止先到 stopping，再依實際結果裁定 stopped／done／failed；missing-source 需重連才可回 queued。`paused` 是排程旗標，不是個別工作狀態。
 
 每份交付使用凍結快照、自己的 FFmpeg 程序；同輸出路徑只有一個 live job，跨程序由 `output-leases/*.lock/owner.json` 保護。決策與代價見 [ADR-0001](adr/0001-每份交付各自一個-ffmpeg-程序.md)。重啟先確認舊程序停止、復原 journal／lease、清本工作私有半成品，再恢復佇列。
+
+沒有 `outputAuthority` 的舊工作仍保留凍結 payload／ASS，但不憑原路徑自動授予目前同名目錄的寫入權。`retryWithOutputDirectory` 只收 job id，由 main 取得原父目錄；選擇後核同一 job 物件、attempt、status、payload／outPath 與退出狀態，再比較所選目錄和原父目錄的 canonical 路徑及 `dev`／`ino`。因此 8.3 短名／junction 與同一實體長路徑可相容，但不能藉此搬移工作。成功重試才將新證據隨新 attempt 持久化；取消保留原工作。queue renderer 跨重繪保留 pending 互斥，失權的晚到結果不覆寫新 attempt，普通 retry false 也須顯示失敗。
+
+舊工作重新授權不等於舊 lease 取得清檔資格。缺少原 `outputAuthority`，或已開始寫 stage 卻缺少 `stageIdentity` 的 stale lease，保留半成品與鎖；只有可證明尚未寫檔的 reservation 才能不刪檔釋放。目錄／stage 身分失效、PID／pipe 狀態不明，或 lease 內存在未登記項目（例如殘留 mux 或 owner 暫存檔）時也維持保留，不以現在路徑重新捕捉證據來猜測舊檔所有權。使用者可改檔名建立新交付，操作見[使用說明：匯出序列](使用說明.md#匯出序列)；原路徑清理須先保留並查證 owner／log。
 
 `queue-store.js` 分別持有 live state 與 history.json；不能把 history 當待跑工作。完成歷史只恢復精確成品定位能力，不授予讀寫或整目錄能力。只有 ENOENT 是未建立；讀取失敗不能當空歷史覆寫。毀損 JSON／schema 更新前先保存完整 `.corrupt-<uuid>` bytes，備份失敗保留原檔及 outcome journal，待可提交再結清。
 
@@ -469,7 +499,7 @@ Renderer 凍結時間、FPS 及圖片計畫，透過既有 `withPresentedFrame()
 | 字幕三路不同 | effStyle、PlayResY 高度縮放、ASS alignment／family／跳脫 |
 | 圖框可見不能拖 | guide 是否錯接滑鼠、renderer imageLayer 與讓位 |
 | 音訊或尾音不符 | 母素材、來源時鐘、source→bus→stream、成品 PCM |
-| 成品路徑無法重試 | live job、stopping journal、native PID、output lease |
+| 成品路徑無法重試 | 原輸出資料夾授權與 dev／ino、live job、stopping journal、native PID、output lease；舊 lease 缺身分時保留並依使用說明改檔名重送 |
 | 關閉後有半成品 | watchdog／artifact log、owner.json、close 及復原狀態 |
 | 本機資源被阻擋 | capability／token／Range，不關 webSecurity |
 | 按鈕無反應 | 原生對話框與 renderer handler，是否誤用 window.prompt |

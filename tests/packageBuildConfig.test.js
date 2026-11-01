@@ -39,6 +39,7 @@ describe('Windows 安裝檔設定', () => {
     visit('electron/export-watchdog.js');
   });
   it('航空輸出 watchdog 可從 unpacked 位置載入全部收尾相依', () => {
+    expect(packageJson.build.asarUnpack).toContain('electron/owned-output-handle.js');
     expect(packageJson.build.asarUnpack).toContain('electron/airline-output.js');
     expect(packageJson.build.asarUnpack).toContain('electron/airline-transport.js');
     expect(packageJson.build.asarUnpack).toContain('electron/airline-encoding.js');

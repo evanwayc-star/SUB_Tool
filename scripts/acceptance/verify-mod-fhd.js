@@ -10,7 +10,7 @@ const assert = require('assert/strict');
 const { execFileSync, spawnSync } = require('child_process');
 const { buildDeliveryArgv, _normaliseExportTimecodeWatermark } = require('../../electron/export-plan');
 const { spawnExportWatchdog } = require('../../electron/export-watchdog');
-const { listLeases } = require('../../electron/export-lease');
+const { listLeases, captureOutputAuthority, captureOutputDirectory } = require('../../electron/export-lease');
 
 const root = path.resolve(__dirname, '../..');
 const ffmpeg = path.join(root, 'electron/ffmpeg/ffmpeg.exe');
@@ -92,6 +92,7 @@ async function verify(source, name, overlay) {
   }, { timecodeFontFile: font && path.join(root, 'font', font), hasAudioStream: () => true });
   let log = '';
   const controller = spawnExportWatchdog({ ffmpegPath: ffmpeg, args: plan.args, cwd: dir,
+    outputAuthority: captureOutputAuthority(outPath, captureOutputDirectory(dir)),
     outPath, outputFormat: 'mod-fhd', jobId: `export-mod-${name}`, queueDir: path.join(dir, 'queue'),
   }, { onStderr: chunk => { log += chunk.toString(); } });
   await controller.ready;

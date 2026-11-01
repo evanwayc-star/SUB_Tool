@@ -56,6 +56,7 @@
       "electron/ffmpeg/**",
       "electron/export-watchdog.js",
       "electron/export-artifact.js",
+      "electron/owned-output-handle.js",
       "electron/mod-fhd-transport.js",
       "electron/airline-output.js",
       "electron/airline-transport.js",

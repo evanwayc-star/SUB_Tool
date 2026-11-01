@@ -27,7 +27,7 @@ vi.mock('../src/ui.js', () => ({
   setStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(),
   openModal: spies.openModal, closeModal: spies.closeModal,
 }));
-vi.mock('../src/formats.js', () => ({ SubFormats: {} }));
+vi.mock('../src/formats.js', async importOriginal => ({ ...await importOriginal(), SubFormats: {} }));
 vi.mock('../src/substyle.js', async (importOriginal) => {
   const actual = await importOriginal();
   return {
@@ -36,7 +36,11 @@ vi.mock('../src/substyle.js', async (importOriginal) => {
   };
 });
 vi.mock('../src/project-intake-engine.js', () => ({ buildSubtitleImportPlan: vi.fn() }));
-vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
+vi.mock('../src/history.js', () => ({ recordHistory: vi.fn(), History: {
+  committedSnapshot: () => ({ cues: structuredClone(State.cues), tracks: structuredClone(State.tracks),
+    clips: structuredClone(State.clips), videoTracks: structuredClone(State.videoTracks),
+    audioProject: structuredClone(State.audioProject) }),
+} }));
 vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));
 vi.mock('../src/project.js', () => ({ Project: { unrestoredClips: () => [], captureWorkspaceOwnership: () => {
@@ -114,6 +118,18 @@ describe('匯出交付清單', () => {
     });
     return spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn');
   }
+
+  it('進行中 I 點的交付 ASS 使用收尾快照且不更動 live 打點', async () => {
+    State.tracks=[{name:'字幕',visible:true}];
+    State.cues=[{id:'pending',text:'測試',start:1,end:9,track:0,_tempEnd:true}];
+    State.duration=10;State.exportIn=0;State.exportOut=10;
+    window.subtool.exportVideo.mockResolvedValue('job-A');
+    const submit=await prepareRows(['A.mp4']);
+    await submit.act();
+    const [job]=window.subtool.exportVideo.mock.calls[0];
+    expect(job.assText).toMatch(/Dialogue:.*0:00:01\.00,0:00:03\.00/);
+    expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true});
+  });
 
   it('第二份加入失敗後只保留失敗及未送出列，重試不重送第一份成功工作', async () => {
     const submit = await prepareRows();
@@ -260,6 +276,23 @@ describe('匯出交付清單', () => {
     expect(message.textContent).not.toContain('flight.aac');
     expect(message.textContent).not.toContain('flight.manzanita.cfg');
     expect(getComputedStyle(message).display).not.toBe('none');
+  });
+
+  it.each(['.ev-outdir', '.ev-name'])('輸入 %s 時立即撤銷舊目錄檢查的晚到錯誤', async selector => {
+    await showExportVideoDialog();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    let rejectOld;
+    window.subtool.listDir.mockImplementationOnce(() => new Promise((_, reject) => { rejectOld = reject; }));
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/舊目錄';
+    outDir.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(rejectOld).toBeTypeOf('function'));
+    const input = document.querySelector(selector);
+    input.value = selector === '.ev-outdir' ? 'D:/新目錄' : '新名稱.mp4';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    rejectOld(new Error('舊目錄無法讀取'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.getElementById('evConflictMsg').textContent).not.toContain('舊目錄');
   });
 
   it('舊匯出視窗的目錄選擇結果不能寫進重新開啟的視窗', async () => {

@@ -78,6 +78,13 @@ describe('watchdog 私有成品 lifecycle interface', () => {
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original');
   });
 
+  it('航空私有 mux 清理失敗向 watchdog 傳遞 cleanupError，不能解除 lease', async () => {
+    const error = Object.assign(new Error('mux 身分已變更'), { code: 'AIRLINE_TEMP_CLEANUP_FAILED' });
+    const artifact = create('airline-dmpes', {}, { finalizeAirline: async () => { throw error; } });
+    await artifact.prepare({ tempDir });
+    expect(await artifact.settle({ encoded: true })).toMatchObject({ error, cleanupError: error });
+  });
+
   it.each(['mod-fhd', 'airline-dmpes', 'airline-dmpes-4m', 'airline-exw'])('%s 等封裝驗證完成才 settle，失敗保留原錯誤', async format => {
     const checked = deferred();
     const gate = deferred();

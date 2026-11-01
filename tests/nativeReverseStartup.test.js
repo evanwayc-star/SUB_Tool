@@ -52,6 +52,24 @@ const carrier=()=>elements.find(el=>el.src==='file:///C:/reverse.wav');
 const progress=time=>Media.observeMpvEvent({event:'property-change',name:'time-pos',data:time});
 
 describe('已呈現 Proxy 的反向首播進展與一次復原',()=>{
+  it('倒帶 fallback 在真 Media.reset 後不得繼續移動新工作區的播放點',async()=>{
+    const {createReverseShuttleSession}=await import('../src/transport-controller.js');
+    vi.spyOn(Media,'supportsNativeReverse').mockReturnValue(false);
+    const session=createReverseShuttleSession({media:Media,getExactFps:()=>25,presentation:{
+      request:time=>Media.requestPresentation(time),cancel:reason=>Media.cancelPresentation(reason),
+      presentedTime:()=>Media.presentedTime(),
+    }});
+    try{
+      await session.start(-1);
+      Media.reset();video.removeAttribute('src');State.duration=10;
+      await Media.seek(2);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(Media.displayTime()).toBe(2);
+      expect(session.isActive()).toBe(false);
+    }finally{session.stop();}
+  });
+
+
   it('停鐘期間不重複回拉真反向音源，超過實際下一 PTS 期限後停止聲音並只重載同 Proxy 一次',async()=>{
     let loaded;bridge.loadfile.mockImplementation(()=>new Promise(resolve=>{loaded=resolve;}));
     Media.play();await flush();expect(carrier().paused).toBe(false);expect(carrier().currentTime).toBeCloseTo(1.04);

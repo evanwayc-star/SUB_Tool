@@ -16,6 +16,7 @@ const { createClipFrameCache } = require('../electron/clip-frame-cache.js');
 const { createClipAudioCache } = require('../electron/clip-audio-cache.js');
 const { createVocalWaveformRuntime } = require('../electron/vocal-waveform-runtime.js');
 const { createDeliveryRunner } = require('../electron/delivery-runner.js');
+const { captureOutputDirectory, captureOutputAuthority } = require('../electron/export-lease.js');
 const { FileAuthority } = require('../electron/file-authority.js');
 const P = require('../electron/export-plan.js');
 const { ffmpeg: FFMPEG, ffprobe: FFPROBE } = nativeTestTools();
@@ -89,7 +90,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材影
         const snapshot = buildExportSnapshot({ state: { fps: 24, videoTracks: [{}], clips: [{ path: source, type: 'video',
           in: start, out: 3, offset: 0, fps: 30, vtrack: 0, natW: 64, natH: 48,
           reverse: mode === 'reverse', ...(mode === 'fixed' ? { freezeTime: .2 } : {}) }] }, sequenceEnd: duration });
-        await runner.run({ id: mode, payload: { ...snapshot, format: 'h264', fps: 30, width: 64, height: 48, outPath: output,
+        await runner.run({ id: mode, outputAuthority: captureOutputAuthority(output, captureOutputDirectory(directory)), payload: { ...snapshot, format: 'h264', fps: 30, width: 64, height: 48, outPath: output,
           audioPlan: { buses: [{ id: 'a1', inputs: [{ file: source, sourceStream: 0, sourceChannel: 0, offset: 0,
             trimStart: .6, trimEnd: .8, volume: 1, reverse: mode === 'reverse' }] }],
           streams: [{ id: 's1', layout: 'mono', busIds: ['a1'] }] } } });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -48,36 +49,43 @@ describe('FileAuthority', () => {
   });
 
   it('專案檔只可寫回自身與 autosave 子目錄，不能成為同層交付覆寫權', () => {
-    const authority = makeAuthority();
-    const project = 'E:\\Projects\\cut.subtool';
-
-    authority.grantProjectFile(project);
-
-    expect(authority.canRead(project)).toBe(true);
-    expect(authority.canWriteProject(project)).toBe(true);
-    expect(authority.canWriteProject('E:\\Projects\\other.subtool')).toBe(false);
-    expect(authority.canWriteProject('E:\\Projects\\.subtool_AutoSave\\backup.subtool')).toBe(true);
-    expect(authority.canRead('E:\\Projects\\private.txt')).toBe(false);
-    expect(authority.canWriteDelivery(project)).toBe(false);
-    expect(authority.canWriteDelivery('E:\\Projects\\master.mov')).toBe(false);
+    const directory=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-project-grant-'));
+    try {
+      const authority = new FileAuthority();
+      const project = path.join(directory,'cut.subtool');
+      expect(authority.grantProjectFile(project)).toBe(true);
+      expect(authority.canRead(project)).toBe(true);
+      expect(authority.canWriteProject(project)).toBe(true);
+      expect(authority.canWriteProject(path.join(directory,'other.subtool'))).toBe(false);
+      expect(authority.canWriteProject(path.join(directory,'.subtool_AutoSave','backup.subtool'))).toBe(true);
+      expect(authority.canRead(path.join(directory,'private.txt'))).toBe(false);
+      expect(authority.canWriteDelivery(project)).toBe(false);
+      expect(authority.canWriteDelivery(path.join(directory,'master.mov'))).toBe(false);
+    } finally {
+      const actual=fs.realpathSync(directory);
+      if(path.dirname(actual)!==fs.realpathSync(os.tmpdir())||!path.basename(actual).startsWith('subtool-project-grant-')) throw new Error('拒絕清理不屬於測試的目錄');
+      fs.rmSync(actual,{recursive:true,force:true});
+    }
   });
 
   it('交付與截圖各自是受限能力，截圖暫存只加精確 read 不讀整個目錄', () => {
-    const authority = makeAuthority();
-    authority.grantDeliveryDirectory('F:\\Deliverables');
-    authority.grantScreenshotDirectory('E:\\Projects');
-
-    expect(authority.canWriteDelivery('F:\\Deliverables\\master.mov')).toBe(true);
-    expect(authority.canWriteDelivery('F:\\Elsewhere\\master.mov')).toBe(false);
-    expect(authority.canRevealDeliveryOutput('F:\\Deliverables\\master.mov')).toBe(false);
-    authority.grantDeliveryFile('F:\\Deliverables\\master.mov');
-    expect(authority.canRevealDeliveryOutput('F:\\Deliverables\\master.mov')).toBe(true);
-    expect(authority.canRevealDeliveryOutput('F:\\Deliverables\\unrelated.exe')).toBe(false);
-    expect(authority.canWriteScreenshot('E:\\Projects\\Shot-001.jpg')).toBe(true);
-    expect(authority.canRead('E:\\Projects\\Shot-001.jpg')).toBe(false);
-    expect(authority.grantTemporaryScreenshotRead('E:\\Projects\\.subtool_temp_shot.jpg')).toBe(true);
-    expect(authority.canRead('E:\\Projects\\.subtool_temp_shot.jpg')).toBe(true);
-    expect(authority.canRead('E:\\Projects\\private.jpg')).toBe(false);
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-delivery-grant-'));
+    try {
+      const authority = new FileAuthority(), delivery = new FileAuthority(), outPath = path.join(directory, 'master.mov');
+      expect(authority.grantScreenshotDirectory(directory)).toBe(true);
+      delivery.grantDeliveryDirectory(directory);
+      expect(delivery.canWriteDelivery(outPath)).toBe(true);
+      expect(delivery.canWriteDelivery(path.join(directory, '..', 'elsewhere.mov'))).toBe(false);
+      expect(delivery.canRevealDeliveryOutput(outPath)).toBe(false);
+      delivery.grantDeliveryFile(outPath);
+      expect(delivery.canRevealDeliveryOutput(outPath)).toBe(true);
+      expect(delivery.canRevealDeliveryOutput(path.join(directory, 'unrelated.exe'))).toBe(false);
+      expect(authority.canWriteScreenshot(path.join(directory, 'Shot-001.jpg'))).toBe(true);
+      expect(authority.canRead(path.join(directory, 'Shot-001.jpg'))).toBe(false);
+      expect(authority.grantTemporaryScreenshotRead(path.join(directory, '.subtool_temp_shot.jpg'))).toBe(true);
+      expect(authority.canRead(path.join(directory, '.subtool_temp_shot.jpg'))).toBe(true);
+      expect(authority.canRead(path.join(directory, 'private.jpg'))).toBe(false);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });
 
   it('系統開啟只接受受控佇列 log，不把 queue 的其他內部檔案交給 shell', () => {
@@ -184,7 +192,7 @@ describe('FileAuthority', () => {
     expect(main).toMatch(/ipcMain\.handle\('fs:fileURL',[\s\S]{0,180}localResourceServer\.urlFor/);
     expect(main).not.toMatch(/ipcMain\.handle\('fs:fileURL',[\s\S]{0,180}allowFileDir/);
     expect(localResource).toMatch(/urlFor\(file\)[\s\S]{0,180}fileAuthority\.canExposeFileURL/);
-    expect(main).toMatch(/createScreenshotOutput\(\{ fileAuthority \}\)/);
+    expect(main).toMatch(/createScreenshotOutput\(\{ fileAuthority, tempDir: TMP \}\)/);
     expect(main).toMatch(/ipcMain\.handle\('fs:writeScreenshot',[\s\S]{0,180}screenshotOutput\.write/);
     expect(screenshotOutput).toMatch(/function write\(file, b64\)[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);
     expect(main).toMatch(/ipcMain\.handle\('mpv:screenshot',[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);

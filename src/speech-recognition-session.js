@@ -536,7 +536,16 @@ function startAsrSession(initData = {}) {
 export function startAsrWork(initData = {}, adapters = {}) {
   const snapshot = startAsrSession(initData);
   const run = activeRun;
-  const promise = executeAsrWork(run, adapters);
+  let released=false;
+  const releaseResources=()=>{
+    if(released)return;
+    released=true;
+    run.controller.signal.removeEventListener('abort',releaseResources);
+    try{adapters.releaseResources?.();}catch(error){console.error('[ASR Session] 資源釋放失敗:',error);}
+  };
+  run.controller.signal.addEventListener('abort',releaseResources,{once:true});
+  if(run.controller.signal.aborted)releaseResources();
+  const promise = executeAsrWork(run, adapters).finally(releaseResources);
   return Object.freeze({
     id: snapshot.id,
     promise,

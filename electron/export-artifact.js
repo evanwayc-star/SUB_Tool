@@ -33,8 +33,9 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
   const disc = adapters.disc || nativeDisc;
   const airline = adapters.finalizeAirline || finalizeAirlineOutput;
   const modFhd = adapters.finalizeModFhd || finalizeModFhdTransport;
-  const { signal, onOutputStart, onProcess, onProgress } = owner;
+  const { signal, onOutputStart, onProcess, onProgress, assertOutput, onWorkspacePrepared } = owner;
   let tempDir;
+  let nativeWorkRoot;
   let stage = null;
   let preparing = null;
   let settling = null;
@@ -43,10 +44,12 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
     if (settling) return Promise.reject(new Error('匯出成品已結束，不能重新準備'));
     if (preparing) return preparing;
     tempDir = options.tempDir;
+    nativeWorkRoot = options.nativeWorkRoot;
     preparing = (async () => {
       signal?.throwIfAborted();
       if (isDisc) {
         stage = await disc.prepareDiscOutput(format, { tempDir });
+        await onWorkspacePrepared?.(stage);
         signal?.throwIfAborted();
         return [...args.slice(0, -1), stage.encodedPath];
       }
@@ -65,20 +68,31 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
       const outcome = { error: null, reason: null, cleanupError: null };
       if (encoded && preparing && !preparationFailed && !signal?.aborted) {
         try {
+          assertOutput?.();
           if (isDisc) {
             const label = format === 'dvd-iso' ? '製作 DVD ISO' : '製作 BD ISO';
             onProgress?.({ label, pct: artifactProgress(format, 'finalize', 0) });
+            const assertDiscOutput = () => {
+              assertOutput?.();
+              disc.assertDiscWorkspace(stage, { tempDir });
+            };
+            assertDiscOutput();
             await disc.finalizeDiscOutput(format, stage.encodedPath, writePath, {
-              signal, audioPlan: discAudioPlan, fps: discVideoFps, onOutputStart, onProcess,
+              signal, audioPlan: discAudioPlan, fps: discVideoFps, onOutputStart, onProcess, assertOutput: assertDiscOutput, nativeWorkRoot,
+              onOutputLink: async evidence => {
+                stage.outputLink = evidence;
+                await onWorkspacePrepared?.(stage);
+              },
               onProgress: percent => onProgress?.({ label, pct: artifactProgress(format, 'finalize', percent) }),
             });
           } else if (preset?.transport === 'airline') {
-            await airline(format, writePath, { signal, tempDir });
+            await airline(format, writePath, { signal, tempDir, ...(assertOutput ? { assertOutput } : {}) });
           } else if (format === 'mod-fhd') {
-            await modFhd(writePath, { signal });
+            await modFhd(writePath, { signal, ...(assertOutput ? { assertOutput } : {}) });
           }
         } catch (error) {
           outcome.error = error;
+          if (['AIRLINE_TEMP_CLEANUP_FAILED', 'AIRLINE_TEMP_HANDLE_CLOSE_FAILED', 'OUTPUT_HANDLE_CLOSE_FAILED'].includes(error?.code)) outcome.cleanupError = error;
           outcome.reason = isDisc ? 'disc-finalize-failed'
             : preset?.transport === 'airline' ? 'airline-finalize-failed' : 'mod-fhd-finalize-failed';
         }

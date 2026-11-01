@@ -138,6 +138,65 @@ it('a completed image dimension cache cannot cross a media epoch when a same URL
   vi.stubGlobal('Image',CaptureImage);
 });
 
+it('a transient image dimension failure retries while paused and restores the portrait interaction box',async()=>{
+  vi.useFakeTimers();
+  const pending=[];
+  class DeferredImage{naturalWidth=600;naturalHeight=1200;set src(value){this.source=value;pending.push(this);}}
+  vi.stubGlobal('Image',DeferredImage);
+  try{
+    const clip=image({path:'blob:transient-dimensions',natW:0,natH:0});
+    State.clips=[clip];renderImageOverlays();
+    expect(pending).toHaveLength(1);
+    expect(document.querySelector('#imageLayer .img-wrap').style.width).toBe('8px');
+    pending[0].onerror();
+    // Playback may be paused: no render tick arrives to repair this geometry.
+    await vi.advanceTimersByTimeAsync(999);
+    renderImageOverlays();
+    expect(pending).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pending).toHaveLength(2);
+    pending[1].onload();
+    expect([clip.natW,clip.natH]).toEqual([600,1200]);
+    expect(document.querySelector('#imageLayer .img-wrap').style.width).toBe('2px');
+  } finally { vi.useRealTimers();vi.stubGlobal('Image',CaptureImage); }
+});
+
+it('a failed image dimension retry cannot revive an old media owner',async()=>{
+  vi.useFakeTimers();
+  const pending=[];let owned=true;
+  class DeferredImage{set src(value){this.source=value;pending.push(this);}}
+  vi.stubGlobal('Image',DeferredImage);
+  adapters.Media.captureMediaOwnership.mockReturnValue(()=>owned);
+  try{
+    const clip=image({path:'blob:stale-dimensions-retry',natW:0,natH:0});
+    State.clips=[clip];renderImageOverlays();pending[0].onerror();
+    owned=false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pending).toHaveLength(1);
+    expect([clip.natW,clip.natH]).toEqual([0,0]);
+  } finally { vi.useRealTimers();vi.stubGlobal('Image',CaptureImage); }
+});
+
+it('repeated image dimension failures back off and stop probing removed clips',async()=>{
+  vi.useFakeTimers();
+  const pending=[];
+  class DeferredImage{set src(value){this.source=value;pending.push(this);}}
+  vi.stubGlobal('Image',DeferredImage);
+  try{
+    State.clips=[image({path:'blob:backoff-dimensions',natW:0,natH:0})];
+    renderImageOverlays();pending[0].onerror();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pending).toHaveLength(2);
+    pending[1].onerror();
+    await vi.advanceTimersByTimeAsync(1999);
+    renderImageOverlays();
+    expect(pending).toHaveLength(2);
+    State.clips=[];
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pending).toHaveLength(2);
+  } finally { vi.useRealTimers();vi.stubGlobal('Image',CaptureImage); }
+});
+
 describe('capturePreviewFrame uses the visible presenter and frozen timeline image plan',()=>{
   it.each(['image-only','audio-only','blank'].flatMap(kind=>['absent','empty'].map(source=>[kind,source])))('%s timeline with %s video src captures the synthetic background without waiting for a video frame',async(kind,source)=>{
     if(source==='absent') video.removeAttribute('src');
@@ -180,6 +239,16 @@ describe('capturePreviewFrame uses the visible presenter and frozen timeline ima
     expect(pixel(result,0,0)).toEqual([0,0,255]);
     expect(pixel(result,7,3)).toEqual([0,0,255]);
     expect(adapters.player.screenshot).not.toHaveBeenCalled();expect(readBase64).not.toHaveBeenCalled();
+  });
+
+  it('使用主程序回傳的原生畫格內容，不讀取使用者資料夾的固定檔名',async()=>{
+    adapters.Media.mpvPresenting.mockReturnValue(true);
+    adapters.player.screenshot.mockResolvedValue({ok:true,b64:'native-red'});
+    const readBase64=vi.fn();
+    const result=await capturePreviewFrame({nativePath:'temp.jpg',readBase64});
+    expect(result.presenter).toBe('mpv');
+    expect(readBase64).not.toHaveBeenCalled();
+    expect(pixel(result,4,2)).toEqual([255,0,0]);
   });
 
   it('composites separate image layers over WebCodecs video exactly once',async()=>{
@@ -323,7 +392,7 @@ describe('capturePreviewFrame uses the visible presenter and frozen timeline ima
     }finally{video.testColor=[255,0,0];}
   });
 
-  it('rejects native pixels after a newer seek or source owns the pending capture',async()=>{
+  it.each([false,true])('rejects native pixels after a newer seek or source owns the pending capture (inline=%s)',async(inline)=>{
     adapters.Media.mpvPresenting.mockReturnValue(true);
     const acknowledgement=deferred();
     adapters.player.screenshot.mockReturnValue(acknowledgement.promise);
@@ -331,7 +400,7 @@ describe('capturePreviewFrame uses the visible presenter and frozen timeline ima
     adapters.Media.withPresentedFrame.mockImplementation((time,capture)=>capture({adapter:adapters.player,isCurrent:()=>owned}));
     const readBase64=vi.fn().mockResolvedValue('native-red');
     const pending=capturePreviewFrame({nativePath:'temp.jpg',readBase64});
-    owned=false;acknowledgement.resolve({ok:true});
+    owned=false;acknowledgement.resolve(inline?{ok:true,b64:'native-red'}:{ok:true});
     await expect(pending).rejects.toMatchObject({name:'AbortError'});
     expect(readBase64).not.toHaveBeenCalled();
   });

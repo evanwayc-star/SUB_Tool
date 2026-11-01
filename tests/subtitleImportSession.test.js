@@ -6,7 +6,7 @@ vi.mock('../src/project.js',()=>({Project:{captureWorkspaceOwnership:()=>{const 
 vi.mock('../src/util.js',async original=>({...await original(),readFile:vi.fn(file=>new Promise(resolve=>workflow.reads.set(file.name,resolve)))}));
 vi.mock('../src/media.js',()=>({Media:{mpvMode:false,tracks:[],externalAudio:{list:()=>[]}},Wave:{}}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),layoutTimeline:vi.fn()}));
-vi.mock('../src/history.js',()=>({History:{stack:[],hi:-1},recordHistory:workflow.record}));
+vi.mock('../src/history.js',()=>({History:{stack:[],hi:-1,cancelPreviewsForTargets:vi.fn()},recordHistory:workflow.record}));
 vi.mock('../src/substyle.js',async original=>({...await original(),loadFonts:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../src/audio-routing.js',()=>({AudioRouting:{}}));
 vi.mock('../src/notes.js',()=>({getNotesGeneralFileData:vi.fn(),getNotesEdiusFileData:vi.fn()}));

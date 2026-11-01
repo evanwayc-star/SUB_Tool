@@ -15,6 +15,7 @@ const mediaMock = vi.hoisted(() => ({
   setPlaybackDirection: vi.fn().mockResolvedValue(true),
   setReverseShuttleMuted: vi.fn(),
   supportsNativeReverse: vi.fn(() => false),
+  capturePlaybackTargetOwnership: vi.fn(() => () => true),
   externalAudio: { list: vi.fn(() => []), get: vi.fn(() => null) },
   playing: false,
 }));
@@ -70,6 +71,7 @@ let jklReset;
 let getJklSpeed;
 let shuttleRewind;
 let shuttleForward;
+let togglePlayPause;
 let stepFrame;
 
 describe('JKL reverse shuttle time domain', () => {
@@ -86,7 +88,7 @@ describe('JKL reverse shuttle time domain', () => {
     `;
     ({ State } = await import('../src/state.js'));
     ({ jklReset } = await import('../src/keyboard.js'));
-    ({ getJklSpeed, shuttleRewind, shuttleForward, stepFrame } = await import('../src/transport-controller.js'));
+    ({ getJklSpeed, shuttleRewind, shuttleForward, togglePlayPause, stepFrame } = await import('../src/transport-controller.js'));
     State.keymap = { rewind: [{ key: 'j' }] };
     State.clips = [{
       id: 'offset-clip',
@@ -109,9 +111,10 @@ describe('JKL reverse shuttle time domain', () => {
     mediaMock.pause.mockReset();
     mediaMock.play.mockClear();
     mediaMock.setRate.mockClear();
-    mediaMock.setPlaybackDirection.mockClear();
+    mediaMock.setPlaybackDirection.mockReset().mockResolvedValue(true);
     mediaMock.setReverseShuttleMuted.mockClear();
     mediaMock.supportsNativeReverse.mockReset().mockReturnValue(false);
+    mediaMock.capturePlaybackTargetOwnership.mockReset().mockImplementation(() => () => true);
     mediaMock.playing = false;
   });
 
@@ -156,6 +159,156 @@ describe('JKL reverse shuttle time domain', () => {
     expect(mediaMock.setPlaybackDirection).toHaveBeenLastCalledWith('forward');
     expect(mediaMock.setRate).toHaveBeenLastCalledWith(1);
   });
+
+  it.each(['false', 'reject'])('J 轉 L 的正向還原 %s 時保持暫停並回報，不在錯誤方向起播', async failure => {
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    mediaMock.setPlaybackDirection.mockResolvedValueOnce(true);
+    if (failure === 'false') mediaMock.setPlaybackDirection.mockResolvedValueOnce(false);
+    else mediaMock.setPlaybackDirection.mockRejectedValueOnce(new Error('forward command failed'));
+    shuttleRewind();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(1);
+    shuttleForward();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(1);
+    expect(mediaMock.playing).toBe(false);
+    expect(getJklSpeed()).toBe(0);
+    const { setStatus } = await import('../src/ui.js');
+    expect(setStatus).toHaveBeenLastCalledWith(expect.stringContaining('還原'), 'err');
+  });
+
+  it.each([true, false])('J 轉 L 等待還原時再按 L，最新正播仍等同一份來源結果 %s', async restored => {
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    let finish;
+    mediaMock.setPlaybackDirection.mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    shuttleRewind(); await vi.advanceTimersByTimeAsync(0);
+    shuttleForward(); await vi.advanceTimersByTimeAsync(0);
+    shuttleForward(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(1);
+    finish(restored); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(restored ? 2 : 1);
+    expect(mediaMock.playing).toBe(restored);
+    expect(getJklSpeed()).toBe(restored ? 1.5 : 0);
+  });
+
+  it('J 轉 L 的還原失敗後，明確再按 L 會重試還原而非沿失敗來源直接播放', async () => {
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    mediaMock.setPlaybackDirection.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    shuttleRewind(); await vi.advanceTimersByTimeAsync(0);
+    shuttleForward(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(1);
+    shuttleForward(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.setPlaybackDirection.mock.calls.map(([value]) => value)).toEqual(['backward', 'forward', 'forward']);
+    expect(mediaMock.play).toHaveBeenCalledTimes(2);
+    expect(getJklSpeed()).toBe(1);
+  });
+
+  it.each(['success', 'false', 'reject'])('J→K 後播放鍵也等待正向還原 %s，失敗不能直接起播', async outcome => {
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    let finish;
+    mediaMock.setPlaybackDirection.mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => new Promise((resolve, reject) => {
+        finish = () => outcome === 'reject' ? reject(new Error('restore failed')) : resolve(outcome === 'success');
+      }));
+    shuttleRewind(); await vi.advanceTimersByTimeAsync(0);
+    jklReset(); togglePlayPause(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(1);
+    finish(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(outcome === 'success' ? 2 : 1);
+    expect(mediaMock.playing).toBe(outcome === 'success');
+  });
+
+  it.each([true, false])('J→K 還原中連按兩次播放鍵，晚到結果 %s 不反悔重新起播或報錯', async restored => {
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    let finish;
+    mediaMock.setPlaybackDirection.mockResolvedValueOnce(true)
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    shuttleRewind(); await vi.advanceTimersByTimeAsync(0);
+    jklReset(); togglePlayPause(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(1);
+    togglePlayPause(); const {setStatus}=await import('../src/ui.js'); setStatus.mockClear();
+    finish(restored); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(1); expect(mediaMock.playing).toBe(false);
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('無倒帶交接時播放鍵維持正常播放／暫停與狀態提示', async () => {
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    const {setStatus}=await import('../src/ui.js');
+    togglePlayPause(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.playing).toBe(true);expect(setStatus).toHaveBeenLastCalledWith('▶ 正播','ok');
+    togglePlayPause(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.playing).toBe(false);expect(setStatus).toHaveBeenLastCalledWith('⏸ 暫停','');
+    expect(mediaMock.setPlaybackDirection).not.toHaveBeenCalled();
+  });
+
+  it('還原失敗後再按播放鍵，須等明確重試成功才起播', async () => {
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    let finish;
+    mediaMock.setPlaybackDirection.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    shuttleRewind(); await vi.advanceTimersByTimeAsync(0);
+    shuttleForward(); await vi.advanceTimersByTimeAsync(0);
+    togglePlayPause(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(1);
+    finish(true); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.play).toHaveBeenCalledTimes(2); expect(mediaMock.playing).toBe(true);
+  });
+
+  it('工作區失權撤銷舊 JKL 狀態，新工作區第一次播放鍵即可正常播放', async () => {
+    let workspace = 1;
+    mediaMock.capturePlaybackTargetOwnership.mockImplementation(() => {
+      const captured = workspace; return () => captured === workspace;
+    });
+    mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    shuttleRewind(); await vi.advanceTimersByTimeAsync(50);
+    mediaMock.requestPresentation.mockClear(); mediaMock.pause.mockClear(); mediaMock.setRate.mockClear();
+    workspace += 1;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(mediaMock.requestPresentation).not.toHaveBeenCalled();
+    expect(mediaMock.pause).not.toHaveBeenCalled(); expect(mediaMock.setRate).not.toHaveBeenCalled();
+    expect(getJklSpeed()).toBe(0);
+    togglePlayPause(); await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.playing).toBe(true); expect(mediaMock.play).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['pause', 'rewind', 'source'].flatMap(action => [true, false].map(restored => [action, restored])))(
+    'J 轉 L 的舊還原晚到 %s／%s，不起播或回報舊操作錯誤', async (action, restored) => {
+      mediaMock.supportsNativeReverse.mockReturnValue(true);
+      mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
+      mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+      let finish, current = true;
+      mediaMock.capturePlaybackTargetOwnership.mockImplementation(() => () => current);
+      mediaMock.setPlaybackDirection.mockResolvedValueOnce(true)
+        .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      shuttleRewind(); await vi.advanceTimersByTimeAsync(0);
+      shuttleForward(); await vi.advanceTimersByTimeAsync(0);
+      if (action === 'pause') jklReset();
+      if (action === 'rewind') shuttleRewind();
+      if (action === 'source') current = false;
+      const { setStatus } = await import('../src/ui.js'); setStatus.mockClear();
+      finish(restored); await vi.advanceTimersByTimeAsync(0);
+      expect(mediaMock.play).toHaveBeenCalledTimes(action === 'rewind' ? 2 : 1);
+      expect(mediaMock.playing).toBe(action === 'rewind');
+      expect(setStatus).not.toHaveBeenCalled();
+      if (action === 'rewind') expect(getJklSpeed()).toBe(-1);
+    },
+  );
 
   it('原生倒播中按播放暫停鍵只停止，不會緊接著切成正播', async () => {
     State.keymap = {

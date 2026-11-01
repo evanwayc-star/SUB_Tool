@@ -28,7 +28,7 @@ import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { drawTimeline } from './timeline-renderer.js';
 import { History } from './history.js';
-import { snapAllCuesToFrames } from './subtitle-model.js';
+import { snapAllCuesToFrames, snapshotProvisionalCueEnds, snapshotTimelineDuration } from './subtitle-model.js';
 import { renderNotes } from './notes.js';
 import { emit } from './events.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
@@ -265,7 +265,10 @@ function _buildProjectData({snapshot=null,workspace=null}={}){
   // 輸入只含純 metadata；runtime Audio / File / waveform 不跨這個 interface。
   const savedClips=_savedClips().map(c=>Seq.persistentMetadata(c));
   const savedAudio=_savedExternalAudioSources();
-  const committed=snapshot||History.committedSnapshot({clips:savedClips,externalAudioState:savedAudio});
+  const original=snapshot||History.committedSnapshot({clips:savedClips,externalAudioState:savedAudio});
+  const committed={...original,cues:snapshotProvisionalCueEnds(original.cues,{
+    fps:original.fps,dropFrame:original.dropFrame,duration:snapshotTimelineDuration(original,workspace?.duration??State.duration),
+  })};
   const cueEnd=committed.cues.reduce((end,cue)=>cue.timed!==false?Math.max(end,Number(cue.end)||0):end,0);
   const clipEnd=committed.clips.reduce((end,c)=>Math.max(end,Math.max(0,Number(c.offset)||0)+Seq.len(c)),0);
   const hasAssets=snapshot ? committed.clips.length||committed.externalAudioState.length : savedClips.length||savedAudio.length;

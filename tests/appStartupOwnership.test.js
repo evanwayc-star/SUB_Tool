@@ -90,3 +90,34 @@ it('沒有啟動檔時不對等待期間新增的字幕顯示無效捨棄確認'
   expect(State.cues.map(cue => cue.text)).toEqual(['USER_EDIT']);
   expect(document.getElementById('modalBody').textContent).not.toContain('未儲存');
 });
+
+it.each([false,true])('拖曳字幕期間選擇 FPS（同值=%s），保留正確時間與 Undo／Redo',async same=>{
+  const {History}=await import('../src/history.js');
+  const {setSelection}=await import('../src/state.js');
+  const {ensureProjectSaved}=await import('../src/project.js');
+  const Timeline=await import('../src/timeline-renderer.js');
+  State.fps=25;State.dropFrame=false;State.clips=[];State.notes=[];State.duration=10;
+  State.tracks=[{name:'字幕',visible:true,locked:false}];State.trackCount=1;State.vtracksCollapsed=false;
+  State.cues=[{id:'fps-drag',start:3,end:4,text:'原稿',track:0}];
+  History.reset();
+  const guard=ensureProjectSaved();
+  [...document.querySelectorAll('#modalFoot button')].find(button=>button.textContent==='稍後再說').click();
+  await guard;
+  for(const element of [document.getElementById('tlLayer'),document.getElementById('tlScroll')]){
+    element.getBoundingClientRect=()=>({left:0,top:0,right:640,bottom:500,width:640,height:500});
+    Object.defineProperty(element,'clientWidth',{configurable:true,value:640});
+    Object.defineProperty(element,'clientHeight',{configurable:true,value:500});
+  }
+  State.pxPerSec=80;State.viewStart=0;Timeline.drawTimeline();
+  setSelection({kind:'sub',ids:['fps-drag'],primary:'fps-drag'});
+  const block=document.querySelector('.cue-block[data-id="fps-drag"]');expect(block).toBeTruthy();
+  block.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0,clientX:240,clientY:100}));
+  window.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:280,clientY:100}));
+  expect(State.cues[0].start).toBeGreaterThan(3);
+  const preview={start:State.cues[0].start,end:State.cues[0].end};
+  const selector=document.getElementById('fpsSel');selector.value=same?'25':'24';selector.dispatchEvent(new Event('change',{bubbles:true}));
+  window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:280,clientY:100}));
+  expect(State.fps).toBe(same?25:24);expect(State.cues[0]).toMatchObject(same?preview:{start:3,end:4});
+  History.undo();expect(State.fps).toBe(25);expect(State.cues[0]).toMatchObject({start:3,end:4});
+  History.redo();expect(State.fps).toBe(same?25:24);expect(State.cues[0]).toMatchObject(same?preview:{start:3,end:4});
+});

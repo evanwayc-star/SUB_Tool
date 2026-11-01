@@ -433,6 +433,191 @@ async function provisionalCue(){
   Model.toggleSubMode();vi.spyOn(Media,'displayTime').mockReturnValue(1);await Transport.setIn();
   expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true});
 }
+it('儲存正在打點的字幕只輸出收尾快照，仍可繼續設定 Out',async()=>{
+  await provisionalCue();const util=await import('../src/util.js');
+  const download=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{}),steps=History.stack.length;
+  try{
+    await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(download.mock.calls.at(-1)[0]).subarray(2).toString('utf16le'));
+    expect(saved.cues.find(c=>c.text==='original')).toMatchObject({start:1,end:3,timed:true});
+    expect(saved.cues.find(c=>c.text==='original')).not.toHaveProperty('_tempEnd');
+    expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true});expect(History.stack).toHaveLength(steps);
+    expect(ProjectModule.isProjectDirty()).toBe(false);
+    Media.displayTime.mockReturnValue(4);await (await import('../src/transport-controller.js')).setOut();
+    expect(State.cues.find(c=>c.id==='a')).toMatchObject({start:1,end:4});
+    expect(ProjectModule.isProjectDirty()).toBe(true);
+  }finally{download.mockRestore();}
+});
+it('字幕匯出對話框輸出暫定終點的收尾時間，保留尚在打點的原狀態',async()=>{
+  await provisionalCue();const SubIO=await import('../src/subio.js'),util=await import('../src/util.js');
+  const download=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{}),steps=History.stack.length;
+  try{
+    SubIO.showExportDialog();document.querySelector('[data-fmt="encore"]').checked=false;
+    document.querySelector('[data-fmt="srt"]').checked=true;click('匯出');
+    const text=Buffer.from(download.mock.calls[0][0]).subarray(2).toString('utf16le');
+    expect(text).toContain('00:00:01,000 --> 00:00:03,000');
+    expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true});expect(History.stack).toHaveLength(steps);
+  }finally{download.mockRestore();}
+});
+it('進行中的時間手勢存檔只輸出已提交內容，並保留原手勢',async()=>{
+  await provisionalCue();await timeline();const util=await import('../src/util.js');
+  const download=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{}),steps=History.stack.length;
+  try{
+    dragCueEdge(document.querySelector('.cue-block[data-id="a"] .edge.r'),'mousedown',720);
+    dragCueEdge(window,'mousemove',400);expect(State.cues[0].end).toBe(5);
+    await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(download.mock.calls.at(-1)[0]).subarray(2).toString('utf16le'));
+    expect(saved.cues.find(c=>c.text==='original')).toMatchObject({start:1,end:3});
+    expect(State.cues[0]).toMatchObject({end:5,_tempEnd:true});expect(History.stack).toHaveLength(steps);
+    dragCueEdge(window,'mouseup',400);expect(State.cues.find(c=>c.id==='a').end).toBe(5);
+    expect(ProjectModule.isProjectDirty()).toBe(true);
+  }finally{download.mockRestore();}
+});
+it('匯出期間的拖曳預覽不進入 SRT，且手勢仍可提交',async()=>{
+  await provisionalCue();await timeline();const SubIO=await import('../src/subio.js'),util=await import('../src/util.js');
+  const download=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{});
+  try{
+    dragCueEdge(document.querySelector('.cue-block[data-id="a"] .edge.r'),'mousedown',720);
+    dragCueEdge(window,'mousemove',400);expect(State.cues[0].end).toBe(5);
+    SubIO.showExportDialog();document.querySelector('[data-fmt="encore"]').checked=false;
+    document.querySelector('[data-fmt="srt"]').checked=true;click('匯出');
+    const text=Buffer.from(download.mock.calls[0][0]).subarray(2).toString('utf16le');
+    expect(text).toContain('00:00:01,000 --> 00:00:03,000');
+    expect(State.cues[0]).toMatchObject({end:5,_tempEnd:true});
+    dragCueEdge(window,'mouseup',400);expect(State.cues.find(c=>c.id==='a').end).toBe(5);
+  }finally{download.mockRestore();}
+});
+it('快照依格網及片長限制暫定終點，不改鎖軌或已確認的長時間',async()=>{
+  await provisionalCue();State.duration=2.019;State.tracks[0].locked=true;
+  State.cues.push({id:'confirmed',text:'confirmed',start:1,end:8,track:1});
+  const util=await import('../src/util.js'),download=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{});
+  try{
+    await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(download.mock.calls.at(-1)[0]).subarray(2).toString('utf16le'));
+    expect(saved.cues.find(c=>c.text==='original')).toMatchObject({start:1,end:2});
+    expect(saved.cues.find(c=>c.text==='confirmed')).toMatchObject({start:1,end:8});
+    expect(State.cues.find(c=>c.id==='a')).toMatchObject({end:9,_tempEnd:true});
+  }finally{download.mockRestore();}
+});
+it('I 在片長尾點以無界兩秒收尾，專案與 SRT 不保存一小時暫存值',async()=>{
+  const Transport=await import('../src/transport-controller.js'),SubIO=await import('../src/subio.js');
+  State.cues[1].track=1;State.duration=2;StateModule.setSelection({kind:'sub',ids:['a'],primary:'a'});
+  Model.toggleSubMode();vi.spyOn(Media,'displayTime').mockReturnValue(2);await Transport.setIn();
+  expect(State.cues[0]).toMatchObject({start:2,end:3602,_tempEnd:true});
+  const util=await import('../src/util.js'),download=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{});
+  try{
+    await Project.saveAs();
+    const saved=JSON.parse(Buffer.from(download.mock.calls.at(-1)[0]).subarray(2).toString('utf16le'));
+    expect(saved.cues.find(c=>c.text==='original')).toMatchObject({start:2,end:4});
+    const srt=SubIO.getFileData('srt',[State.cues[0]],'字幕');
+    expect(Buffer.from(srt.content,'base64').subarray(2).toString('utf16le')).toContain('00:00:02,000 --> 00:00:04,000');
+    expect(State.cues[0]).toMatchObject({start:2,end:3602,_tempEnd:true});
+    Subtitles.selectCue('b');expect(State.cues.find(c=>c.id==='a').end).toBe(4);
+  }finally{download.mockRestore();}
+});
+it('I 後方只有不足一格的片長時拒絕修改原時碼',async()=>{
+  const Transport=await import('../src/transport-controller.js');
+  State.cues[1].track=1;State.duration=2.019;StateModule.setSelection({kind:'sub',ids:['a'],primary:'a'});
+  Model.toggleSubMode();vi.spyOn(Media,'displayTime').mockReturnValue(2);const steps=History.stack.length;
+  await Transport.setIn();expect(State.cues[0]).toMatchObject({start:1,end:2});
+  expect(State.cues[0]._tempEnd).toBeUndefined();expect(History.stack).toHaveLength(steps);
+});
+it('public FPS conversion after In preserves the accepted span across selection and Undo',async()=>{
+  const SubIO=await import('../src/subio.js');await provisionalCue();
+  const steps=History.stack.length;
+  SubIO.showFpsConvertDialog();vi.advanceTimersByTime(30);
+  document.getElementById('fpsFrom').value='30';document.getElementById('fpsTo').value='25';click('轉換');
+  expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1.2,end:10.8});
+  Subtitles.selectCue('b');
+  expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1.2,end:10.8});
+  expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();expect(History.stack).toHaveLength(steps+1);
+  History.undo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1,end:9,_tempEnd:true});
+  History.redo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1.2,end:10.8});
+  expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();
+});
+it.each(['cancel','same-fps','same-frames','locked'])('public FPS conversion %s preserves provisional timing and History',async action=>{
+  const SubIO=await import('../src/subio.js');await provisionalCue();const steps=History.stack.length;
+  SubIO.showFpsConvertDialog();vi.advanceTimersByTime(30);
+  document.getElementById('fpsFrom').value=action==='same-frames'?'24':'30';
+  document.getElementById('fpsTo').value=action==='same-frames'?'23.976':action==='same-fps'?'30':'25';
+  if(action==='locked') State.tracks[0].locked=true;
+  click(action==='cancel'?'取消':'轉換');
+  expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1,end:9,_tempEnd:true});
+  expect(History.stack).toHaveLength(steps);
+});
+const cueMenuClick=label=>[...document.querySelectorAll('#ctxmenu .ci')].find(item=>item.textContent.includes(label)).click();
+async function splitProvisionalAt(time){
+  Media.displayTime.mockReturnValue(time);Subtitles.renderSubList();
+  const txt=document.querySelector('.sub-row[data-id="a"] .txt');
+  txt.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+  const range=document.createRange();range.setStart(txt.firstChild,6);range.collapse(true);
+  const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+  txt.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true,cancelable:true}));
+  vi.advanceTimersByTime(16);
+}
+it.each(['split','swap','merge'])('public provisional %s keeps accepted times after later selection and Undo',async action=>{
+  await provisionalCue();State.cues[0].text='alpha beta';
+  Object.assign(State.cues[1],{track:0,start:10,end:12});
+  State.cues.push({id:'other',track:1,start:16,end:17,text:'other'});History.reset();
+  if(action==='split') await splitProvisionalAt(5);
+  else{
+    Menus.showCueMenu(0,0,State.cues[0]);
+    cueMenuClick(action==='swap'?'與下一句相鄰換位':'與下句合併');
+    if(action==='merge') click('確認合併');
+  }
+  const expected=action==='split'?{start:1,end:5}:action==='swap'?{start:4,end:12}:{start:1,end:12};
+  expect(State.cues.find(cue=>cue.id==='a')).toMatchObject(expected);
+  const accepted=structuredClone(State.cues);
+  Subtitles.selectCue('other');expect(State.cues).toEqual(accepted);
+  expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1,end:9,_tempEnd:true,text:'alpha beta'});
+  History.redo();expect(State.cues).toEqual(accepted);
+});
+it.each(['split-invalid','swap-locked','merge-cancel','swap-unchanged'])('public provisional %s leaves the pending end and History intact',async action=>{
+  await provisionalCue();State.cues[0].text='alpha beta';
+  Object.assign(State.cues[1],{track:0,start:action==='swap-unchanged'?1:10,end:action==='swap-unchanged'?9:12});History.reset();
+  const before=structuredClone(State.cues);
+  if(action==='split-invalid') await splitProvisionalAt(1);
+  else{
+    Menus.showCueMenu(0,0,State.cues[0]);
+    if(action==='swap-locked') State.tracks[0].locked=true;
+    cueMenuClick(action==='merge-cancel'?'與下句合併':'與下一句相鄰換位');
+    if(action==='merge-cancel') click('取消');
+  }
+  expect(State.cues).toEqual(before);expect(History.stack).toHaveLength(1);
+});
+it('public clearing time after In leaves no hidden completion step when selecting another cue',async()=>{
+  await provisionalCue();History.reset();
+  Menus.showCueMenu(0,0,State.cues[0]);cueMenuClick('清除字幕時間點');
+  expect(State.cues[0]).toMatchObject({timed:false,start:1,end:9});
+  Subtitles.selectCue('b');
+  expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({timed:false,start:1,end:9});
+  expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({timed:true,start:1,end:9,_tempEnd:true});
+  History.redo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({timed:false,start:1,end:9});
+  expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();
+});
+it('public locked clearing time preserves the provisional span',async()=>{
+  await provisionalCue();History.reset();Menus.showCueMenu(0,0,State.cues[0]);State.tracks[0].locked=true;
+  cueMenuClick('清除字幕時間點');expect(State.cues[0]).toMatchObject({timed:true,start:1,end:9,_tempEnd:true});
+  expect(History.stack).toHaveLength(1);
+});
+it('public merge with unchanged span keeps the provisional end while committing its text',async()=>{
+  await provisionalCue();Object.assign(State.cues[1],{track:0,start:3,end:4});History.reset();
+  Menus.showCueMenu(0,0,State.cues[0]);cueMenuClick('與下句合併');click('確認合併');
+  expect(State.cues).toHaveLength(1);expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true,text:'original second'});
+  expect(History.stack).toHaveLength(2);History.undo();expect(State.cues).toHaveLength(2);
+  History.redo();expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true,text:'original second'});
+});
+it('public previous-cue swap clears the provisional end of the later cue too',async()=>{
+  await provisionalCue();Object.assign(State.cues[1],{track:0,start:0,end:.5});State.cues.reverse();History.reset();
+  Menus.showCueMenu(0,0,State.cues.find(cue=>cue.id==='a'));cueMenuClick('與上一句相鄰換位');
+  expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:0,end:8});
+  Subtitles.selectCue('b');expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:0,end:8});
+  expect(State.cues.find(cue=>cue.id==='a')._tempEnd).toBeUndefined();expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:1,end:9,_tempEnd:true});
+  History.redo();expect(State.cues.find(cue=>cue.id==='a')).toMatchObject({start:0,end:8});
+});
 const dragCueEdge=(target,type,x)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0,clientX:x,clientY:100}));
 it.each(['timecode','percentage','right-edge'])('public %s duration edit after In survives selection, Undo and Redo',async method=>{
   const SubIO=await import('../src/subio.js');await provisionalCue();

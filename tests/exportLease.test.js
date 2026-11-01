@@ -25,6 +25,7 @@ const {
   stageOutputPath,
   updateLease,
 } = require('../electron/export-lease.js');
+const { prepareDiscOutput } = require('../electron/disc-authoring.js');
 
 const tempDirs = new Set();
 
@@ -285,13 +286,14 @@ describe('更新與釋放匯出檔案鎖', () => {
     expect(releaseLease({ queueDir, outPath, token: 'token-1' })).toBe(false);
   });
 
-  test('刪除私有素材失敗後 owner 仍可讀取，解除占用即可重試釋放', () => {
+  test('刪除私有素材失敗後 owner 仍可讀取，解除占用即可重試釋放', async () => {
     const queueDir = makeTempDir();
     const outPath = path.join(queueDir, 'movie.iso');
     const lease = acquireLease({ queueDir, outPath, jobId: 'disc', token: 'disc-token', outputStarted: false });
-    const stage = path.join(lease.lockPath, 'subtool-disc-stage');
-    mkdirSync(stage);
-    writeFileSync(path.join(stage, 'internal.ts'), 'busy encoded file');
+    const work = await prepareDiscOutput('bd-iso', { tempDir: lease.lockPath });
+    const stage = work.workDir;
+    writeFileSync(work.encodedPath, 'busy encoded file');
+    const updated = updateLease({ queueDir, outPath, token: 'disc-token', discWorkspace: work });
     const originalRemove = nativeFs.rmSync;
     const mocked = vi.spyOn(nativeFs, 'rmSync').mockImplementation((file, options) => {
       if (file === stage) throw Object.assign(new Error('file busy'), { code: 'EBUSY' });
@@ -299,7 +301,7 @@ describe('更新與釋放匯出檔案鎖', () => {
     });
     expect(() => releaseLease({ queueDir, outPath, token: 'disc-token' }))
       .toThrow(expect.objectContaining({ code: 'EBUSY' }));
-    expect(listLeases(queueDir)).toEqual([{ valid: true, ...lease }]);
+    expect(listLeases(queueDir)).toEqual([{ valid: true, ...lease, owner: updated.owner }]);
     mocked.mockRestore();
     expect(releaseLease({ queueDir, outPath, token: 'disc-token' })).toBe(true);
     expect(existsSync(lease.lockPath)).toBe(false);

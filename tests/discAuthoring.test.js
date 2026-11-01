@@ -326,33 +326,42 @@ describe.skipIf(!nativeAvailable)('原生 DVD／BD 合成內容與生命週期',
     writeFileSync(outPath, 'existing output');
     const onProcess = vi.fn();
     const onOutputStart = vi.fn(async () => { throw Object.assign(new Error('lease rejected'), { code: 'LEASE_REJECTED' }); });
-    await expect(finalizeDiscOutput('bd-iso', generated.get('bd-iso').work.encodedPath, outPath,
-      { audioPlan: AUDIO, nativePaths: NATIVE, onProcess, onOutputStart })).rejects.toMatchObject({ code: 'LEASE_REJECTED' });
-    expect(onOutputStart).toHaveBeenCalledOnce();
-    expect(onProcess).not.toHaveBeenCalled();
-    expect(readFileSync(outPath, 'utf8')).toBe('existing output');
-    onOutputStart.mockClear();
-    await expect(finalizeDiscOutput('bd-iso', generated.get('bd-iso').work.encodedPath, outPath,
-      { audioPlan: AUDIO, nativePaths: { tsmuxer: path.join(directory, 'missing.exe') }, onOutputStart }))
-      .rejects.toMatchObject({ code: 'DISC_NATIVE_MISSING' });
-    expect(onOutputStart).not.toHaveBeenCalled();
+    for (const missing of [false, true]) {
+      const work = await prepareDiscOutput('bd-iso', { tempDir: directory });
+      try {
+        await fs.copyFile(generated.get('bd-iso').work.encodedPath, work.encodedPath);
+        const nativePaths = missing ? { tsmuxer: path.join(directory, 'missing.exe') } : NATIVE;
+        await expect(finalizeDiscOutput('bd-iso', work.encodedPath, outPath,
+          { audioPlan: AUDIO, nativePaths, onProcess, onOutputStart }))
+          .rejects.toMatchObject({ code: missing ? 'DISC_NATIVE_MISSING' : 'LEASE_REJECTED' });
+        if (missing) expect(onOutputStart).not.toHaveBeenCalled();
+        else expect(onOutputStart).toHaveBeenCalledOnce();
+        expect(onProcess).not.toHaveBeenCalled();
+        expect(readFileSync(outPath, 'utf8')).toBe('existing output');
+        onOutputStart.mockClear();
+      } finally { await cleanupDiscOutput(work, { tempDir: directory }); }
+    }
   });
 
   it('取消會等原生程序退出；lease callback 拒絕也不留下寫入者', async () => {
     for (const cancel of [true, false]) {
       const controller = new AbortController();
       let process;
-      const promise = finalizeDiscOutput('bd-iso', generated.get('bd-iso').work.encodedPath,
-        path.join(directory, `cancel-${cancel}.iso`), { audioPlan: AUDIO, nativePaths: NATIVE, signal: controller.signal,
-          onProcess: async child => {
-            process = child;
-            await new Promise(resolve => setTimeout(resolve, 1));
-            if (cancel) controller.abort();
-            else throw Object.assign(new Error('lease rejected'), { code: 'LEASE_REJECTED' });
-          },
-        });
-      await expect(promise).rejects.toMatchObject({ code: cancel ? 'ABORT_ERR' : 'LEASE_REJECTED' });
-      expect(process.exitCode !== null || process.signalCode !== null).toBe(true);
+      const work = await prepareDiscOutput('bd-iso', { tempDir: directory });
+      try {
+        await fs.copyFile(generated.get('bd-iso').work.encodedPath, work.encodedPath);
+        const promise = finalizeDiscOutput('bd-iso', work.encodedPath,
+          path.join(directory, `cancel-${cancel}.iso`), { audioPlan: AUDIO, nativePaths: NATIVE, signal: controller.signal,
+            onProcess: async child => {
+              process = child;
+              await new Promise(resolve => setTimeout(resolve, 1));
+              if (cancel) controller.abort();
+              else throw Object.assign(new Error('lease rejected'), { code: 'LEASE_REJECTED' });
+            },
+          });
+        await expect(promise).rejects.toMatchObject({ code: cancel ? 'ABORT_ERR' : 'LEASE_REJECTED' });
+        expect(process.exitCode !== null || process.signalCode !== null).toBe(true);
+      } finally { await cleanupDiscOutput(work, { tempDir: directory }); }
     }
   });
 

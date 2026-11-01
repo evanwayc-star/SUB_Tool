@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { validateAndPatchAirlineOutput } from '../electron/airline-output.js';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import { createRequire } from 'node:module';
+import { validateAndPatchAirlineOutput, finalizeAirlineOutput } from '../electron/airline-output.js';
+import { captureOutputAuthority, captureOutputDirectory, assertOutputAuthority } from '../electron/export-lease.js';
 
 const PAT = Buffer.from('00b00d0001c100000001e03fd69d4f8c', 'hex');
 const PMT_S3K = Buffer.from('02b0170001c10000e030f00002e030f00003e031f000947a0d66', 'hex');
@@ -47,12 +51,322 @@ function fixture() {
   return [...psi(0, PAT), ...psi(63, PMT_DMPES), ...media(),
     packet(17, Buffer.alloc(184, 0xaa), { start: true }), nullPacket()];
 }
+function muxFixture() {
+  // One video/audio PES at 1 second leaves a real positive decode lead for the scheduler.
+  const header = [0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5, 0x21, 0, 5, 0xbf, 0x21];
+  const audio = [...header]; audio[3] = 0xc0;
+  return Buffer.concat([...psi(0, PAT), ...psi(63, PMT_DMPES),
+    packet(48, Buffer.from([...header, 0, 0, 1, 9, 0xf0, 0, 0, 1, 0x65, 0x80]), { start: true, pcr: true }),
+    packet(49, Buffer.from([...audio, 0xff, 0xf1, 0x4c, 0x80, 1, 0x1f, 0xfc, 0]), { start: true })]);
+}
 async function convert(packets, format = 'airline-exw', options) {
   await writeFile(output, Buffer.concat(packets));
   return validateAndPatchAirlineOutput(format, output, options);
 }
 
 describe('航空內建 MPG 傳輸串流完成檢查', () => {
+  it('private mux 的 wx 建立失敗不刪除原有同名檔案', async () => {
+    const lease = path.join(directory, 'lease'); fs.mkdirSync(lease);
+    const occupied = path.join(lease, 'airline-collision.mux.tmp');
+    fs.writeFileSync(occupied, 'foreign private-work bytes');
+    const source = muxFixture(); fs.writeFileSync(output, source);
+    const filename = new URL('../electron/airline-transport.js', import.meta.url);
+    const require = createRequire(filename), module = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer,
+      require: name => name === 'node:crypto' ? { randomUUID: () => 'collision' } : require(name),
+    });
+    await expect(module.exports.reshapeAirlineTransport('airline-dmpes', output, { tempDir: lease }))
+      .rejects.toMatchObject({ code: 'EEXIST' });
+    expect(fs.existsSync(occupied)).toBe(true);
+    expect(fs.readFileSync(occupied, 'utf8')).toBe('foreign private-work bytes');
+    expect(fs.readFileSync(output)).toEqual(source);
+  });
+
+  it('父目錄換成 junction 時不修改外來同名有效 TS', async () => {
+    const picked = path.join(directory, 'picked'), outside = path.join(directory, 'outside');
+    fs.mkdirSync(picked); fs.mkdirSync(outside);
+    const stage = path.join(picked, '.delivery.stage.mpg');
+    const source = Buffer.concat(fixture());
+    fs.writeFileSync(stage, source);
+    const authority = captureOutputAuthority(stage, captureOutputDirectory(picked));
+    fs.renameSync(picked, path.join(directory, 'original'));
+    fs.symlinkSync(outside, picked, process.platform === 'win32' ? 'junction' : 'dir');
+    fs.writeFileSync(path.join(outside, path.basename(stage)), source);
+    await expect(finalizeAirlineOutput('airline-dmpes', stage, {
+      tempDir: directory, assertOutput: () => assertOutputAuthority(authority, stage),
+    })).rejects.toMatchObject({ code: 'UNSAFE_DELIVERY_OUTPUT' });
+    expect(fs.readFileSync(stage)).toEqual(source);
+    expect(fs.readFileSync(path.join(directory, 'original', path.basename(stage)))).toEqual(source);
+  });
+
+  it('開檔等待中 stage 被替換時不修改任一份，且釋放檔案 handle', async () => {
+    const source = Buffer.concat(fixture());
+    const foreign = Buffer.from(source); foreign[foreign.length - 1] ^= 1;
+    fs.writeFileSync(output, source);
+    const identity = fs.statSync(output, { bigint: true });
+    const failure = Object.assign(new Error('stage 已換檔'), { code: 'UNSAFE_DELIVERY_STAGE' });
+    const assertOutput = () => {
+      if (fs.lstatSync(output, { bigint: true }).ino !== identity.ino) throw failure;
+    };
+    const moved = path.join(directory, 'original.mpg');
+    const filename = new URL('../electron/airline-output.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), helper = { exports: {} }, module = { exports: {} };
+    let handle;
+    const open = async (file, flags, ...args) => {
+      expect(file).toBe(output); expect(flags).toBe('r+');
+      fs.renameSync(output, moved); fs.writeFileSync(output, foreign);
+      handle = await promises.open(file, flags, ...args);
+      return handle;
+    };
+    vm.runInNewContext(fs.readFileSync(new URL('../electron/owned-output-handle.js', import.meta.url), 'utf8'), {
+      module: helper, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, require: name => name === './owned-output-handle' ? helper.exports : require(name),
+    });
+    await expect(module.exports.validateAndPatchAirlineOutput('airline-dmpes', output, { assertOutput })).rejects.toBe(failure);
+    expect(handle?.fd).toBe(-1);
+    expect(fs.readFileSync(output)).toEqual(foreign);
+    expect(fs.readFileSync(moved)).toEqual(source);
+    fs.unlinkSync(output); fs.unlinkSync(moved);
+  });
+
+  it('航空 patch 完成後 fd 實際關閉失敗必須回報可保留 stage 的錯誤', async () => {
+    fs.writeFileSync(output, Buffer.concat(fixture()));
+    const filename = new URL('../electron/airline-output.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), helper = { exports: {} }, module = { exports: {} };
+    let handle, close;
+    const open = async (...args) => {
+      handle = await promises.open(...args); close = handle.close.bind(handle);
+      handle.close = async () => { throw Object.assign(new Error('patch handle remains open'), { code: 'EBUSY' }); };
+      return handle;
+    };
+    vm.runInNewContext(fs.readFileSync(new URL('../electron/owned-output-handle.js', import.meta.url), 'utf8'), {
+      module: helper, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, require: name => name === './owned-output-handle' ? helper.exports : require(name),
+    });
+    try {
+      const error = await module.exports.validateAndPatchAirlineOutput('airline-dmpes', output).catch(value => value);
+      expect(error).toMatchObject({ code: 'OUTPUT_HANDLE_CLOSE_FAILED' });
+      expect(error.message).toContain('patch handle remains open');
+      expect(handle.fd).toBeGreaterThanOrEqual(0);
+    } finally { await close?.(); }
+  });
+
+  it.each(['patch', 'publish', 'source'])('%s 開啟外來檔後原 stage 回復，仍拒絕使用外來 handle', async operation => {
+    const source = operation === 'patch' ? Buffer.concat(fixture()) : muxFixture();
+    const foreign = path.join(directory, 'foreign.mpg'), saved = path.join(directory, 'saved.mpg');
+    const lease = path.join(directory, 'lease'); fs.mkdirSync(lease);
+    fs.writeFileSync(output, source); fs.writeFileSync(foreign, source);
+    const identity = fs.lstatSync(output, { bigint: true });
+    const assertOutput = () => {
+      const now = fs.lstatSync(output, { bigint: true });
+      if (now.dev !== identity.dev || now.ino !== identity.ino) throw new Error('stage 已換檔');
+    };
+    const filename = new URL(operation === 'patch' ? '../electron/airline-output.js' : '../electron/airline-transport.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), module = { exports: {} };
+    let replaced = false;
+    const open = async (file, flags, ...args) => {
+      if (file !== output || flags !== (operation === 'source' ? 'r' : 'r+') || replaced) return promises.open(file, flags, ...args);
+      replaced = true;
+      fs.renameSync(output, saved); fs.renameSync(foreign, output);
+      const handle = await promises.open(file, flags, ...args);
+      fs.renameSync(output, foreign); fs.renameSync(saved, output);
+      return handle;
+    };
+    const helper = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(new URL('../electron/owned-output-handle.js', import.meta.url), 'utf8'), {
+      module: helper, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, process, require: name => name === './owned-output-handle' ? helper.exports : require(name),
+    });
+    const run = operation === 'patch' ? module.exports.validateAndPatchAirlineOutput
+      : module.exports.reshapeAirlineTransport;
+    await expect(run('airline-dmpes', output, { tempDir: lease, assertOutput })).rejects.toMatchObject({ code: 'UNSAFE_DELIVERY_STAGE' });
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(output)).toEqual(source);
+    expect(fs.readFileSync(foreign)).toEqual(source);
+    fs.unlinkSync(output); fs.unlinkSync(foreign); // 兩個 handle 必須已關閉
+  });
+
+  it('stage 在核對 handle 後、truncate 前換檔，不修改原 stage 與替代檔', async () => {
+    const temporary = path.join(directory, 'mux.tmp'), original = path.join(directory, 'saved-stage.mpg');
+    fs.writeFileSync(output, 'original stage'); fs.writeFileSync(temporary, 'new transport');
+    const identity = fs.lstatSync(output, { bigint: true });
+    const assertOutput = () => {
+      const now = fs.lstatSync(output, { bigint: true });
+      if (now.dev !== identity.dev || now.ino !== identity.ino) throw Object.assign(new Error('stage 已換檔'), { code: 'UNSAFE_DELIVERY_STAGE' });
+    };
+    const filename = new URL('../electron/airline-transport.js', import.meta.url);
+    const require = createRequire(filename), actual = require('./owned-output-handle'), module = { exports: {} };
+    let replaced = false;
+    const helper = { ...actual, async openOwnedOutput(file, flags, owner) {
+      const handle = await actual.openOwnedOutput(file, flags, owner);
+      if (file === output && flags === 'r+') queueMicrotask(() => {
+        fs.renameSync(output, original); fs.writeFileSync(output, 'foreign stage'); replaced = true;
+      });
+      return handle;
+    } };
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8') + '\nmodule.exports.testPublish=publishFromLease;', {
+      module, Buffer, process, require: name => name === './owned-output-handle' ? helper : require(name),
+    });
+    await expect(module.exports.testPublish(temporary, output, null, assertOutput)).rejects.toMatchObject({ code: 'UNSAFE_DELIVERY_STAGE' });
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(original, 'utf8')).toBe('original stage');
+    expect(fs.readFileSync(output, 'utf8')).toBe('foreign stage');
+    expect(fs.readFileSync(temporary, 'utf8')).toBe('new transport');
+  });
+
+  it('航空重封裝發布前父目錄改向時保留 foreign stage，仍清除私有 mux 暫存', async () => {
+    const picked = path.join(directory, 'picked'), outside = path.join(directory, 'outside'), lease = path.join(directory, 'lease');
+    fs.mkdirSync(picked); fs.mkdirSync(outside); fs.mkdirSync(lease);
+    const stage = path.join(picked, '.delivery.stage.mpg'), source = muxFixture();
+    fs.writeFileSync(stage, source);
+    const authority = captureOutputAuthority(stage, captureOutputDirectory(picked));
+    let replaced = false;
+    const signal = { throwIfAborted() {
+      if (replaced || !fs.readdirSync(lease).some(name => fs.statSync(path.join(lease, name)).size > 0)) return;
+      replaced = true;
+      fs.renameSync(picked, path.join(directory, 'original'));
+      fs.symlinkSync(outside, picked, process.platform === 'win32' ? 'junction' : 'dir');
+      fs.writeFileSync(path.join(outside, path.basename(stage)), source);
+    } };
+    await expect(finalizeAirlineOutput('airline-dmpes', stage, {
+      tempDir: lease, signal, assertOutput: () => assertOutputAuthority(authority, stage),
+    })).rejects.toMatchObject({ code: 'UNSAFE_DELIVERY_OUTPUT' });
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(stage)).toEqual(source);
+    expect(fs.readdirSync(lease)).toEqual([]);
+  });
+
+  it('私有 mux 關閉後被替換時保留替代檔與原 mux，拒絕發佈並回報清理錯誤', async () => {
+    const lease = path.join(directory, 'lease'); fs.mkdirSync(lease);
+    const source = muxFixture(); fs.writeFileSync(output, source);
+    const filename = new URL('../electron/airline-transport.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), module = { exports: {} };
+    let foreign, original;
+    const open = async (file, flags, ...args) => {
+      const handle = await promises.open(file, flags, ...args);
+      if (flags === 'wx' && path.dirname(file) === lease) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          await close();
+          foreign = file; original = file + '.original';
+          fs.renameSync(file, original); fs.writeFileSync(file, 'foreign replacement data');
+        };
+      }
+      return handle;
+    };
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, process, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    const result = await module.exports.reshapeAirlineTransport('airline-dmpes', output, { tempDir: lease }).catch(error => error);
+    expect(result).toMatchObject({ code: 'AIRLINE_TEMP_CLEANUP_FAILED' });
+    expect(fs.readFileSync(output)).toEqual(source);
+    expect(fs.readFileSync(foreign, 'utf8')).toBe('foreign replacement data');
+    expect(fs.statSync(original).size).toBeGreaterThan(0);
+  });
+
+  it('私有 mux 在已驗證父目錄中消失時視為已清理', async () => {
+    const lease = path.join(directory, 'lease'); fs.mkdirSync(lease);
+    fs.writeFileSync(output, muxFixture());
+    const filename = new URL('../electron/airline-transport.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), module = { exports: {} };
+    let removed;
+    const open = async (file, flags, ...args) => {
+      const handle = await promises.open(file, flags, ...args);
+      if (flags === 'r' && path.dirname(file) === lease) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => { await close(); removed = file; fs.unlinkSync(file); };
+      }
+      return handle;
+    };
+    const helper = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(new URL('../electron/owned-output-handle.js', import.meta.url), 'utf8'), {
+      module: helper, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, process, require: name => name === 'node:fs/promises' ? { ...promises, open }
+        : name === './owned-output-handle' ? helper.exports : require(name),
+    });
+    await expect(module.exports.reshapeAirlineTransport('airline-dmpes', output, { tempDir: lease })).resolves.toMatchObject({ bytes: expect.any(Number) });
+    expect(removed).toBeTruthy();
+    expect(fs.existsSync(removed)).toBe(false);
+    expect(fs.readdirSync(lease)).toEqual([]);
+  });
+
+  it('mux 父目錄換成同名新目錄後，即使新目錄中沒有 mux 也不得視為已清理', async () => {
+    const lease = path.join(directory, 'lease'), moved = path.join(directory, 'original-lease'); fs.mkdirSync(lease);
+    const source = muxFixture(); fs.writeFileSync(output, source);
+    const filename = new URL('../electron/airline-transport.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), module = { exports: {} };
+    let replaced = false;
+    const open = async (file, flags, ...args) => {
+      const handle = await promises.open(file, flags, ...args);
+      if (flags === 'wx' && path.dirname(file) === lease) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => { await close(); fs.renameSync(lease, moved); fs.mkdirSync(lease); replaced = true; };
+      }
+      return handle;
+    };
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, process, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    const error = await module.exports.reshapeAirlineTransport('airline-dmpes', output, { tempDir: lease }).catch(value => value);
+    expect(error).toMatchObject({ code: 'AIRLINE_TEMP_CLEANUP_FAILED' });
+    expect(replaced).toBe(true);
+    expect(fs.readdirSync(lease)).toEqual([]);
+    expect(fs.readdirSync(moved)).toHaveLength(1);
+    expect(fs.readFileSync(output)).toEqual(source);
+  });
+
+  it('私有 mux handle 實際未關閉時保留檔案並回報清理失敗', async () => {
+    const lease = path.join(directory, 'lease'); fs.mkdirSync(lease);
+    const source = muxFixture(); fs.writeFileSync(output, source);
+    const filename = new URL('../electron/airline-transport.js', import.meta.url);
+    const require = createRequire(filename), promises = require('node:fs/promises'), module = { exports: {} };
+    let handle, close, temporary;
+    const open = async (file, flags, ...args) => {
+      const result = await promises.open(file, flags, ...args);
+      if (flags === 'wx' && path.dirname(file) === lease) {
+        handle = result; temporary = file; close = result.close.bind(result);
+        result.close = async () => { throw Object.assign(new Error('injected close failure'), { code: 'EBUSY' }); };
+      }
+      return result;
+    };
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, Buffer, process, require: name => name === 'node:fs/promises' ? { ...promises, open } : require(name),
+    });
+    try {
+      const error = await module.exports.reshapeAirlineTransport('airline-dmpes', output, { tempDir: lease }).catch(value => value);
+      expect(error).toMatchObject({ code: 'AIRLINE_TEMP_HANDLE_CLOSE_FAILED' });
+      expect(error.message).toContain('injected close failure');
+      expect(handle.fd).toBeGreaterThanOrEqual(0);
+      expect(fs.statSync(temporary).size).toBeGreaterThan(0);
+      expect(fs.readFileSync(output)).toEqual(source);
+    } finally { await close?.(); }
+  });
+
+  it('有 owner 的航空重封裝成功保留 stage inode，內容確實重新排程且清掉 mux 暫存', async () => {
+    const lease = path.join(directory, 'lease'); fs.mkdirSync(lease);
+    const source = muxFixture(); fs.writeFileSync(output, source);
+    const identity = fs.statSync(output, { bigint: true });
+    const assertOutput = () => expect(fs.lstatSync(output, { bigint: true }).ino).toBe(identity.ino);
+    const result = await finalizeAirlineOutput('airline-dmpes', output, { tempDir: lease, assertOutput });
+    const bytes = fs.readFileSync(output);
+    expect(result.bytes).toBe(bytes.length);
+    expect(bytes.length % 188).toBe(0);
+    expect(bytes.equals(source)).toBe(false);
+    expect(result.minimumDecodeLead).toBeGreaterThan(0);
+    expect(result.maximumAudioBuffer).toBeGreaterThan(0);
+    expect(fs.readdirSync(lease)).toEqual([]);
+    assertOutput();
+  });
+
   it.each(['airline-exw', 'airline-dmpes'])('%s 保留影音、PCR、PTS 與 packet 位置，完成 priority／SDT 修正', async format => {
     const packets = fixture();
     const expected = packets.map(bytes => Buffer.from(bytes));

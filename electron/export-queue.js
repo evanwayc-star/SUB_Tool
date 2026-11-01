@@ -250,6 +250,7 @@ function createExportQueue(deps) {
     dir, store, history,
     admission, grantPersistedCapabilities, grantCompletedOutputReveal, canReadSource, canWriteDelivery,
     isFile, runJob, onChanged, onJobFailed, prepareDeliveryUpdate, shutdownRunnerTimeoutMs,
+    captureOutputAuthority,
   } = deps;
   const state = deps.state || new ExportQueueState();
   if (!(state instanceof ExportQueueState)) throw new TypeError('匯出佇列只接受正式 ExportQueueState');
@@ -617,7 +618,7 @@ function createExportQueue(deps) {
       if (!canWriteDelivery(job?.payload?.outPath)) {
         return {
           ok: false, sourcePaths, status: JOB_STATUS.FAILED,
-          errorMsg: `匯出輸出位置未經授權：${job?.payload?.outPath || ''}`,
+          errorMsg: `匯出輸出位置未經授權：${job?.payload?.outPath || ''}\n請按「重新選擇原輸出資料夾並重試」；舊輸出鎖無法安全清理時，請以新檔名建立交付工作。`,
         };
       }
       return { ok: true, sourcePaths, status: null, errorMsg: null };
@@ -682,9 +683,12 @@ function createExportQueue(deps) {
       const inspected = this.inspectSources(job);
       if (!inspected.ok) return false;
       try { admission.assertOutputAvailable(job); } catch (error) { return false; }
+      let outputAuthority;
+      try { outputAuthority = captureOutputAuthority?.(job.payload.outPath); } catch (error) { return false; }
       const committed = mutatePersistedJob(jobId, current => {
         current.sourcePaths = inspected.sourcePaths;
         current.attempt = nextAttempt;
+        if (outputAuthority) current.outputAuthority = outputAuthority;
         return state.retry(current.id);
       });
       if (!committed.ok) {
@@ -786,6 +790,7 @@ function createExportQueue(deps) {
       if (!prepared || !prepared.payload || !prepared.result) throw new Error('交付更新規則回傳無效結果');
       const committed = mutatePersistedJob(jobId, current => {
         current.payload = prepared.payload;
+        if (prepared.outputAuthority) current.outputAuthority = prepared.outputAuthority;
         return true;
       });
       if (!committed.ok) {
@@ -1099,6 +1104,8 @@ function createExportQueue(deps) {
       job.sourcePaths = store.collectSourcePaths(job.payload);
       admission.assertJobAdmissible(job);
       admission.assertOutputAvailable(job);
+      // Evidence comes from the trusted picker authority, never from renderer data.
+      if (captureOutputAuthority) job.outputAuthority = captureOutputAuthority(job.payload.outPath);
       state.add(job);
       try { store.persistJob(d, job, state.jobs().length - 1); } catch (error) {
         state.remove(job.id);

@@ -370,6 +370,130 @@ describe('editor mutation ownership through public commands',()=>{
     window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:120,clientY:100}));
     expect(State.cues.find(c=>c.id==='a').start).toBe(1);
   });
+  it.each([false,true])('多選拖曳期間刪除一句，保留另一句已提交背景變更=%s',async background=>{
+    const {setSelection}=await import(ROOT+'/src/state.js');
+    await timeline();
+    setSelection({kind:'sub',ids:['a','b'],primary:'a'});
+    const block=document.querySelector('.cue-block[data-id="a"]');
+    expect(block).toBeTruthy();
+    mouse(block,'mousedown',80,100);
+    mouse(window,'mousemove',120,100);
+    expect(State.cues[0].start).toBeGreaterThan(1);
+    expect(State.cues[1].start).toBeGreaterThan(3);
+    if(background){
+      Object.assign(State.cues[1],{start:6,end:7,text:'背景已提交'});
+      History.record('背景時間與文字');
+    }
+    Subtitles.selectCueSingle('a');
+    Subtitles.deleteSelectedWithPrompt();
+    click('確定刪除');
+    mouse(window,'mouseup',120,100);
+    const b=background?['b',6,7,'背景已提交']:['b',3,4,'second'];
+    expect(State.cues.map(c=>[c.id,c.start,c.end,c.text])).toEqual([b]);
+    History.undo();
+    expect(State.cues.map(c=>[c.id,c.start,c.end,c.text])).toEqual([['a',1,2,'original'],b]);
+    History.redo();
+    expect(State.cues.map(c=>[c.id,c.start,c.end,c.text])).toEqual([b]);
+  });
+  it('複製拖曳的草稿被選中刪除時，取消整個草稿且不刪原句',async()=>{
+    const {setSelection}=await import(ROOT+'/src/state.js');
+    await timeline();setSelection({kind:'sub',ids:['a','b'],primary:'a'});
+    mouse(document.querySelector('.cue-block[data-id="a"]'),'mousedown',80,100,{altKey:true});
+    mouse(window,'mousemove',160,100,{altKey:true});
+    const copied=State.cues.filter(c=>!['a','b'].includes(c.id));
+    expect(copied).toHaveLength(2);
+    Subtitles.selectCueSingle(copied[0].id);Subtitles.deleteSelectedWithPrompt();click('確定刪除');
+    mouse(window,'mouseup',160,100);
+    expect(State.cues.map(c=>[c.id,c.start,c.end])).toEqual([['a',1,2],['b',3,4]]);
+    expect(History.stack).toHaveLength(1);
+  });
+  it('多選拖曳期間合併字幕，以已提交時間合併並保留 Undo／Redo',async()=>{
+    const {setSelection}=await import(ROOT+'/src/state.js');
+    await timeline();setSelection({kind:'sub',ids:['a','b'],primary:'a'});
+    mouse(document.querySelector('.cue-block[data-id="a"]'),'mousedown',80,100);
+    mouse(window,'mousemove',120,100);
+    expect(State.cues[0].start).toBeGreaterThan(1);
+    Menus.showCueMenu(0,0,State.cues[0]);
+    [...document.querySelectorAll('#ctxmenu .ci')].find(item=>item.textContent.includes('與下句合併')).click();
+    click('確認合併');mouse(window,'mouseup',120,100);
+    expect(State.cues.map(c=>[c.id,c.start,c.end,c.text])).toEqual([['a',1,4,'original second']]);
+    History.undo();expect(State.cues.map(c=>[c.id,c.start,c.end])).toEqual([['a',1,2],['b',3,4]]);
+    History.redo();expect(State.cues.map(c=>[c.id,c.start,c.end])).toEqual([['a',1,4]]);
+  });
+  it('跨軌多選拖曳期間刪軌，不把另一軌草稿時間帶入 History',async()=>{
+    const {setSelection}=await import(ROOT+'/src/state.js');
+    State.cues[1].track=1;History.reset();
+    const Timeline=await timeline();setSelection({kind:'sub',ids:['a','b'],primary:'a'});
+    mouse(document.querySelector('.cue-block[data-id="a"]'),'mousedown',80,100);
+    mouse(window,'mousemove',120,100);
+    expect(State.cues[1].start).toBeGreaterThan(3);
+    Timeline.removeTrack(0);click('確定刪除');mouse(window,'mouseup',120,100);
+    expect(State.cues.map(c=>[c.id,c.start,c.end,c.track])).toEqual([['b',3,4,0]]);
+    History.undo();expect(State.cues.map(c=>[c.id,c.start,c.end,c.track])).toEqual([['a',1,2,0],['b',3,4,1]]);
+    History.redo();expect(State.cues.map(c=>[c.id,c.start,c.end,c.track])).toEqual([['b',3,4,0]]);
+  });
+  it('調整後方軌道高度期間刪除前方軌道，不留下未提交高度',async()=>{
+    State.tracks[1].height=40;State.cues[1].track=1;History.reset();
+    const Timeline=await timeline(), clock=vi.spyOn(performance,'now').mockReturnValue(123456);
+    try{
+      const handle=document.querySelector('#tlGutterTracks [data-track="1"] .tl-resize-handle');
+      expect(handle).toBeTruthy();mouse(handle,'mousedown',10,100);mouse(document,'mousemove',10,120);
+      expect(State.tracks[1].height).toBe(60);
+      Timeline.removeTrack(0);click('確定刪除');mouse(document,'mouseup',10,120);
+      expect(State.tracks[0]).toMatchObject({name:'second',height:40});
+      History.undo();expect(State.tracks[1]).toMatchObject({name:'second',height:40});
+      History.redo();expect(State.tracks[0]).toMatchObject({name:'second',height:40});
+    }finally{clock.mockRestore();}
+  });
+  it('跨軌多選拖曳期間覆蓋匯入，不把另一軌草稿時間帶入 History',async()=>{
+    const {setSelection}=await import(ROOT+'/src/state.js');
+    const SubIO=await import(ROOT+'/src/subio.js');
+    State.cues[1].track=1;History.reset();
+    await timeline();setSelection({kind:'sub',ids:['a','b'],primary:'a'});
+    mouse(document.querySelector('.cue-block[data-id="a"]'),'mousedown',80,100);
+    mouse(window,'mousemove',120,100);
+    expect(State.cues[1].start).toBeGreaterThan(3);
+    const parsed=SubIO._parseSubtitleText('1\n00:00:07,000 --> 00:00:08,000\n匯入字幕\n','srt');
+    SubIO._openImportModal('匯入字幕',parsed,'srt');
+    document.getElementById('importTkSel').value='0';click('匯入');click('確認覆蓋');
+    mouse(window,'mouseup',120,100);
+    expect(State.cues.find(c=>c.id==='b')).toMatchObject({start:3,end:4,track:1});
+    expect(State.cues.map(c=>c.text).sort()).toEqual(['second','匯入字幕'].sort());
+    History.undo();expect(State.cues.map(c=>[c.id,c.start,c.end,c.track])).toEqual([['a',1,2,0],['b',3,4,1]]);
+    History.redo();expect(State.cues.find(c=>c.id==='b')).toMatchObject({start:3,end:4,track:1});
+  });
+  it('拖曳期間匯入並更改 FPS，既有字幕只以已提交時間轉換格網',async()=>{
+    const {setSelection}=await import(ROOT+'/src/state.js');
+    const SubIO=await import(ROOT+'/src/subio.js');
+    State.mediaName=null;History.reset();await timeline();
+    setSelection({kind:'sub',ids:['b'],primary:'b'});
+    mouse(document.querySelector('.cue-block[data-id="b"]'),'mousedown',240,100);
+    mouse(window,'mousemove',280,100);expect(State.cues[1].start).toBeGreaterThan(3);
+    const prepared=SubIO._prepareSubtitleImport('1\n00:00:07,000 --> 00:00:08,000\n匯入字幕\n','srt');
+    document.getElementById('importFpsSel').value='24';click('確定');
+    const parsed=await prepared;SubIO._openImportModal('匯入字幕',parsed,'srt');click('匯入');
+    mouse(window,'mouseup',280,100);
+    expect(State.fps).toBe(24);
+    expect(State.cues.find(c=>c.id==='b')).toMatchObject({start:3,end:4});
+    History.undo();expect(State.fps).toBe(25);expect(State.cues.find(c=>c.id==='b')).toMatchObject({start:3,end:4});
+    History.redo();expect(State.fps).toBe(24);expect(State.cues.find(c=>c.id==='b')).toMatchObject({start:3,end:4});
+  });
+  it('拖曳期間匯入到新軌且 FPS 不變，不取消無關的拖曳',async()=>{
+    const {setSelection}=await import(ROOT+'/src/state.js');
+    const SubIO=await import(ROOT+'/src/subio.js');
+    State.mediaName=null;History.reset();await timeline();
+    setSelection({kind:'sub',ids:['b'],primary:'b'});
+    mouse(document.querySelector('.cue-block[data-id="b"]'),'mousedown',240,100);
+    mouse(window,'mousemove',280,100);const preview=State.cues[1].start;expect(preview).toBeGreaterThan(3);
+    const prepared=SubIO._prepareSubtitleImport('1\n00:00:07,000 --> 00:00:08,000\n匯入字幕\n','srt');
+    document.getElementById('importFpsSel').value='25';click('確定');
+    const parsed=await prepared;SubIO._openImportModal('匯入字幕',parsed,'srt');click('匯入');
+    expect(History.stack.at(-1).snap.cues.find(c=>c.id==='b').start).toBe(3);
+    mouse(window,'mouseup',280,100);
+    expect(State.cues.find(c=>c.id==='b').start).toBe(preview);
+    History.undo();expect(State.cues.find(c=>c.id==='b').start).toBe(3);
+    expect(State.cues.some(c=>c.text==='匯入字幕')).toBe(true);
+  });
   it('normal delete removes only owned cues and preserves an unrelated addition and its Undo',()=>{
     Subtitles.deleteSelectedWithPrompt();
     State.cues.push({id:'added',start:5,end:6,text:'background',track:0});History.record('background');

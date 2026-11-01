@@ -2,8 +2,8 @@ import { State, IS_DESKTOP, DESK, setFps, snapFps, getFpsRevision, newTrack, syn
 import { $ } from './dom.js';
 import { secToEncore, snapTimeToFrame, getExactFps, fmtClock } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
-import { recordHistory } from './history.js';
-import { sortCues, trackLocked, cuesTrackLocked, subtitleTimeOnFrame, shiftCueTimes, snapCueToFrames, snapAllCuesToFrames } from './subtitle-model.js';
+import { History, recordHistory } from './history.js';
+import { sortCues, trackLocked, cuesTrackLocked, subtitleTimeOnFrame, shiftCueTimes, snapCueToFrames, snapAllCuesToFrames, snapshotProvisionalCueEnds } from './subtitle-model.js';
 import { renderASS, SubFormats } from './formats.js';
 import { drawTimeline, layoutTimeline } from './timeline-renderer.js';
 import { emit } from './events.js';
@@ -58,9 +58,11 @@ function showFpsConvertDialog() {
         const fr = 1 / getExactFps(State.fps || 25);
         const cues = targets;
         for (const c of cues) {
-          c.start = snapTimeToFrame(Math.max(0, c.start * ratio), State.fps, State.dropFrame);
+          const start = snapTimeToFrame(Math.max(0, c.start * ratio), State.fps, State.dropFrame);
           let ne = snapTimeToFrame(c.end * ratio, State.fps, State.dropFrame);
-          if (ne < c.start + fr) ne = c.start + fr;
+          if (ne < start + fr) ne = start + fr;
+          if (start !== c.start || ne !== c.end) delete c._tempEnd;
+          c.start = start;
           c.end = ne;
         }
         const maxEnd = State.cues.reduce((m, c) => c.end > m ? c.end : m, 0);
@@ -177,10 +179,11 @@ function showExportDialog() {
       if (fmts.length && showTrackChoices && !tks.length) { showToast('請至少勾選一個軌道'); return; }
       if (fmts.length && tks.some(index => index < 0)) { showToast('所選字幕軌已變更，請重新開啟匯出視窗'); return; }
       session.close();
+      const committedCues=History.committedSnapshot().cues;
       const filesToExport = [];
       for (const fmt of fmts) {
         if (fmt === 'xlsx') {
-          const list = tks.map(i => ({ name: State.tracks[i]?.name || ('軌道' + (i + 1)), cues: State.cues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length);
+          const list = tks.map(i => ({ name: State.tracks[i]?.name || ('軌道' + (i + 1)), cues: committedCues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length);
           const f = getXLSXFileData(list); if (f) filesToExport.push(f);
         } else {
           const shouldMerge = document.getElementById(`merge_${fmt}`)?.checked;
@@ -188,7 +191,7 @@ function showExportDialog() {
             const mergedCues = [];
             const mergedNames = [];
             for (const i of tks) {
-              const cues = State.cues.filter(c => (c.track || 0) === i);
+              const cues = committedCues.filter(c => (c.track || 0) === i);
               if (cues.length) {
                 mergedCues.push(...cues);
                 mergedNames.push(State.tracks[i]?.name || ('軌道' + (i + 1)));
@@ -201,7 +204,7 @@ function showExportDialog() {
             }
           } else {
             for (const i of tks) {
-              const cues = State.cues.filter(c => (c.track || 0) === i);
+              const cues = committedCues.filter(c => (c.track || 0) === i);
               if (cues.length) { const f = getFileData(fmt, cues, showTrackChoices ? State.tracks[i]?.name : undefined); if (f) filesToExport.push(f); }
             }
           }
@@ -221,24 +224,27 @@ function showExportDialog() {
 function _captureExportDraft(){
   let liveExternalSources=[];
   try{ liveExternalSources = Media.externalAudio?.list?.() || []; }catch(e){}
+  const committed=History.committedSnapshot();
+  const cues=snapshotProvisionalCueEnds(committed.cues);
+  const sequenceEnd=committed.clips.reduce((end,clip)=>Math.max(end,Seq.clipEnd(clip)),0);
   const snapshot = buildExportSnapshot({
-    state: State,
+    state: { ...State, clips: committed.clips, videoTracks: committed.videoTracks, audioProject: committed.audioProject },
     mediaTracks: Media.tracks || [],
     liveExternalSources,
-    sequenceEnd: Seq.end(),
+    sequenceEnd,
     pendingClips: Project.unrestoredClips(),
   });
   return freezeExportSubmission(snapshot, {
-    cues: State.cues,
-    tracks: State.tracks,
-    backgroundLayouts: measureSubtitleBackgroundLayouts(State.cues, State.tracks),
+    cues,
+    tracks: committed.tracks,
+    backgroundLayouts: measureSubtitleBackgroundLayouts(cues, committed.tracks),
     fps: State.fps,
     dropFrame: State.dropFrame,
     mediaName: State.mediaName,
     canvasW: State.videoWidth || 1920,
     canvasH: State.videoHeight || 1080,
-    audioProject: State.audioProject,
-    defaultAudioLayout: State.audioProject?.exportLayout || {},
+    audioProject: committed.audioProject,
+    defaultAudioLayout: committed.audioProject?.exportLayout || {},
     hasCustomRange: State.exportIn != null || State.exportOut != null,
   });
 }
@@ -465,7 +471,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     // 文字欄位失焦時若重建整列，下一個被點擊的 input 會在 mouseup 前消失，
     // 看起來就像檔名完全無法輸入。輸入時同步草稿，失焦只更新驗證與欄位顯示。
     $$('.ev-name').forEach(el => {
-      el.oninput = e => list.setName(idxOf(e), e.target.value);
+      el.oninput = e => { list.setName(idxOf(e), e.target.value); submission.invalidatePreview(); };
       el.onchange = e => {
         list.setName(idxOf(e), e.target.value);
         const name = list.get(idxOf(e))?.customName || '';
@@ -475,7 +481,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       };
     });
     $$('.ev-outdir').forEach(el => {
-      el.oninput = e => list.setOutDir(idxOf(e), e.target.value);
+      el.oninput = e => { list.setOutDir(idxOf(e), e.target.value); submission.invalidatePreview(); };
       el.onchange = e => {
         list.setOutDir(idxOf(e), e.target.value);
         e.target.title = e.target.value;
@@ -700,6 +706,16 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
         const tkName=selVal==='new' ? ($('importNewTkName').value.trim() || importPlan?.trackPatch?.name || ('軌道 '+(State.tracks.length+1))) : null;
         const append=selVal==='new'||$('importAppend').checked;
         const commitImport=()=>{
+        const gridChanges=draft?.choice!=null && (grid.fps!==State.fps || grid.dropFrame!==State.dropFrame);
+        if(gridChanges || !append){
+          History.cancelPreviewsForTargets(gridChanges ? [...State.cues] : removed);
+          const current=State.cues.filter(cue=>(cue.track||0)===+selVal);
+          if(!owns() || (draft&&!draft.isCurrent())
+            || (selVal!=='new' && (State.tracks[+selVal]!==tracks[+selVal] || tracks[+selVal]?.locked))
+            || (!append && (current.length!==removed.length || !removed.every(cue=>current.includes(cue))))){
+            showToast('字幕或專案已變更，請重新執行並確認'); return false;
+          }
+        }
         let targetTk;
         if (selVal === 'new') {
           const trk = newTrack(tkName);
@@ -883,6 +899,7 @@ export function applyDurAdjPct() {
 
 export function getFileData(kind, cues, trackName) {
   if (!cues.length) return null;
+  cues=snapshotProvisionalCueEnds(cues);
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
   const tkName = trackName ? trackName.replace(/[\\/:*?"<>|]/g, '_') : '軌道';
   let text, ext, fname;
@@ -908,7 +925,7 @@ export function getFileData(kind, cues, trackName) {
 
 export function getXLSXFileData(trackDataList) {
   if (!trackDataList.length) return null;
-  const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);
+  const bytes = buildXLSX(trackDataList.map(track=>({...track,cues:snapshotProvisionalCueEnds(track.cues)})), State.fps, State.dropFrame);
   const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
   const fname = `ST_${projName}_SUB.xlsx`;
   return { name: fname, content: bytesToB64(bytes), ext: 'xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };

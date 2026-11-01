@@ -11,7 +11,9 @@ vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:
 vi.mock('../src/notes.js',()=>({renderNotes:vi.fn(),updateNoteActive:vi.fn()}));
 vi.mock('../src/menus.js',()=>({showCtx:vi.fn()}));
 vi.mock('../src/subtitles.js',()=>({selectCueSingle:vi.fn(),commitCueTimeEdit:vi.fn()}));
-vi.mock('../src/subtitle-model.js',()=>({addCue:vi.fn(),cueTrackLocked:vi.fn(),snapAllCuesToFrames:vi.fn()}));
+vi.mock('../src/subtitle-model.js',async(importOriginal)=>({
+ ...await importOriginal(),addCue:vi.fn(),cueTrackLocked:vi.fn(),snapAllCuesToFrames:vi.fn(),
+}));
 let Media,Wave,State,setFps,resetAudioProject,ensureAudioSourceMap,Project,resetProject,Seq,AudioEngine,pickMediaFiles,importDesktopMediaFiles,importBrowserMediaFiles,openMedia;
 const audioElements=[];
 beforeAll(async()=>{
@@ -150,7 +152,7 @@ it.each(['fade','remove'])('純圖片專案等待第二張 stat 時 %s 第一張
   Buffer.from([255,254]),Buffer.from(JSON.stringify(data),'utf16le'),
  ]).toString('base64')});
  try{
-  await started.promise;
+  await Promise.race([started.promise,loading.then(()=>{throw new Error('專案復原未到第二張圖片即已結束');})]);
   if(action==='fade') expect(setClipFade(State.clips[0],1,1)).toBe(true);
   else{expect(Media.removeClip(State.clips[0].id)).toBe(true);History.record('刪除已復原圖片');}
   pending.resolve();await loading;

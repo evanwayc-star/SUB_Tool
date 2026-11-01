@@ -19,6 +19,7 @@ const P = require(path.join(ROOT, 'electron/export-plan.js'));
 const { buildClipFrameArgs } = require('../electron/clip-frame-cache.js');
 const { privateSarasaFont } = require('./fixtures/private-font.cjs');
 const { createDeliveryRunner } = require('../electron/delivery-runner.js');
+const { captureOutputDirectory, captureOutputAuthority } = require('../electron/export-lease.js');
 const FFMPEG = process.env.FFMPEG_PATH || path.join(ROOT, 'electron/ffmpeg/ffmpeg.exe');
 
 describe.skipIf(!fs.existsSync(FFMPEG))('一般片段的來源影格交付', () => {
@@ -276,7 +277,7 @@ describe.skipIf(!fs.existsSync(FFMPEG))('合法字型路徑的真 FFmpeg 內容�
                 encoder:{proresArgs:()=>['-c:v','prores_ks','-c:a','pcm_s24le']},
                 runFfmpeg:async(args,options)=>{encoded=run(args,options.cwd);return{maps:[]};},
               });
-              await runner.run({id:'native-timecode',payload:{format:'prores',clips:[{path:source,in:0,out:0.4,offset:0,audio:[]}],videoTracks:[{vt:0}],width:320,height:180,fps:25,duration:0.4,outPath,timecodeWatermark:{start:'01:00:00:00'}}});
+              await runner.run({id:'native-timecode',outputAuthority:captureOutputAuthority(outPath,captureOutputDirectory(root)),payload:{format:'prores',clips:[{path:source,in:0,out:0.4,offset:0,audio:[]}],videoTracks:[{vt:0}],width:320,height:180,fps:25,duration:0.4,outPath,timecodeWatermark:{start:'01:00:00:00'}}});
               expect(progress.at(-1),JSON.stringify(progress)).toMatchObject({done:true});
               expect(fs.readdirSync(directory)).toEqual(['fixed.ttf']);
             }

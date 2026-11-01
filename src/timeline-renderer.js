@@ -1866,6 +1866,12 @@ export function removeTrack(i,expectedTrack=State.tracks[i]){
     if(i<0) return false;
     const current=State.cues.filter(c=>(c.track||0)===i);
     if(current.length!==targets.length || !targets.every(c=>current.includes(c))){showToast('軌道內容已變更，請重新確認刪除');return false;}
+    // 刪軌也會改後續軌道的編號；先結束相交預覽，再核對使用者確認的內容。
+    History.cancelPreviewsForTargets([...State.tracks.slice(i),...State.cues.filter(c=>(c.track||0)>=i)]);
+    i=State.tracks.indexOf(expectedTrack);
+    if(i<0 || expectedTrack.locked) return false;
+    const afterCancel=State.cues.filter(c=>(c.track||0)===i);
+    if(afterCancel.length!==targets.length || !targets.every(c=>afterCancel.includes(c))){showToast('軌道內容已變更，請重新確認刪除');return false;}
     State.cues=State.cues.filter(c=>(c.track||0)!==i);
     State.cues.forEach(c=>{ if((c.track||0)>i)c.track=(c.track||0)-1; });
     State.tracks.splice(i,1); syncTrackCount();

@@ -7,6 +7,8 @@ import { showToast, openModal, closeModal, setStatus } from './ui.js';
 import { planCueStyleAssignment } from './subtitle-style-engine.js';
 import { effStyle, trackStyleSnapshot, CUE_STYLE_KEYS } from './substyle.js';
 import { Project } from './project.js';
+import { Seq } from './sequence.js';
+import { assetRange } from './external-audio.js';
 
 // FPS-SYNC：定時字幕的兩個端點以數值一起落格，至少保留一個可顯示的影格。
 export function snapCueToFrames(cue, {fps=State.fps,dropFrame=State.dropFrame}={}) {
@@ -76,9 +78,11 @@ export function swapAdjacentCues(id, dir){
   const newStart1 = gap < 0 ? cue2.start : newEnd2 + gap;
   const newEnd1 = newStart1 + dur1;
   
+  if (newStart2 !== cue2.start || newEnd2 !== cue2.end) delete cue2._tempEnd;
   cue2.start = newStart2;
   cue2.end = newEnd2;
   
+  if (newStart1 !== cue1.start || newEnd1 !== cue1.end) delete cue1._tempEnd;
   cue1.start = newStart1;
   cue1.end = newEnd1;
   
@@ -100,6 +104,12 @@ export function mergeAdjacentCues(id, dir){
   if (targetIdx < 0 || targetIdx >= list.length) return;
   
   const targetCue = list[targetIdx];
+  // 合併會移除其中一個成員，也會採用兩句時間；先撤回相交手勢的草稿。
+  History.cancelPreviewsForTargets([cue,targetCue]);
+  const currentTrack=cue.track||0;
+  const currentList=State.cues.filter(item=>(item.track||0)===currentTrack);
+  const currentIndex=currentList.indexOf(cue);
+  if(currentIndex<0 || currentList[currentIndex+dir]!==targetCue || cueTrackLocked(cue,'合併字幕')) return;
   const cue1 = dir === -1 ? targetCue : cue;
   const cue2 = dir === -1 ? cue : targetCue;
   
@@ -110,8 +120,10 @@ export function mergeAdjacentCues(id, dir){
   cue1.text = newText;
   
   if (cue1.timed !== false && cue2.timed !== false) {
-    cue1.start = Math.min(cue1.start, cue2.start);
-    cue1.end = Math.max(cue1.end, cue2.end);
+    const start = Math.min(cue1.start, cue2.start), end = Math.max(cue1.end, cue2.end);
+    if (start !== cue1.start || end !== cue1.end) delete cue1._tempEnd;
+    cue1.start = start;
+    cue1.end = end;
   }
   
   const idx2 = State.cues.findIndex(c => c.id === cue2.id);
@@ -266,7 +278,11 @@ export function deleteSelectedCues(ids){
   if(!ids || !ids.length) return false;
   const cues=ids.map(id=>State.cues.find(c=>c.id===id)).filter(Boolean);
   if(cuesTrackLocked(cues, '刪除字幕')) return false;
-  _doDeleteCues(ids);
+  History.cancelPreviewsForTargets(cues);
+  // 取消 copy-drag 可能已移除預覽新增項目；只能刪仍是原物件的句子。
+  const current=cues.filter(cue=>State.cues.includes(cue));
+  if(!current.length) return false;
+  _doDeleteCues(current.map(cue=>cue.id));
   return true;
 }
 
@@ -318,6 +334,7 @@ export function clearSelectedCuesTime() {
   cues.forEach(c => {
     if (c && c.timed !== false) {
       c.timed = false;
+      delete c._tempEnd;
       changed = true;
     }
   });
@@ -401,14 +418,46 @@ export function subtitleTimeOnFrame(value, min=0, max=Infinity, {fps=State.fps,d
   return Math.min(upper,Math.max(lower,snapTimeToFrame(value,fps,dropFrame)));
 }
 
+// 用同一份已提交快照推導時間軸邊界，避免播放器等待中的速度預覽污染存檔。
+// 沒有素材時，保留純字幕工作區原本的虛擬片長；未復原素材由呼叫端一併提供。
+export function snapshotTimelineDuration(snapshot, fallback=State.duration) {
+  const endOf=({clips=[],externalAudioState: sources=[],cues=[]})=>{
+    const videoEnd=clips.reduce((end,clip)=>Math.max(end,Math.max(0,Number(clip.offset)||0)+Seq.len(clip)),0);
+    const audioEnd=sources.reduce((end,source)=>{const range=assetRange(source);return Math.max(end,range.offset+range.length);},0);
+    const cueEnd=cues.reduce((end,cue)=>cue?.timed===false?end:Math.max(end,Math.max(0,Number(cue?.end)||0)),0);
+    return Math.max(videoEnd,audioEnd,cueEnd);
+  };
+  if(!(snapshot.clips?.length||snapshot.externalAudioState?.length)) return fallback;
+  // 若 live duration 並非目前素材計算出的值，表示它可能是純工作區／載入期的
+  // 虛擬片長；既有值不能因為推導資料不完整而縮短。
+  const liveEnd=endOf(State);
+  if(!Number.isFinite(fallback)||Math.abs(liveEnd-fallback)>1e-9) return fallback;
+  return endOf(snapshot);
+}
+
+// I 尚未收到 O 時，畫面上的長終點只是打點用的暫存值。輸出純快照採用
+// 與離開字幕相同的收尾規則，不修改 live cue、手勢或 History 的暫存資格。
+export function snapshotProvisionalCueEnds(cues, {fps=State.fps,dropFrame=State.dropFrame,duration=State.duration}={}) {
+  const frame=1/getExactFps(fps || 25);
+  return cues.map(cue=>{
+    if(!cue._tempEnd) return cue;
+    const saved={...cue};
+    // I 允許在片尾建立尚未指定 O 的字幕；此時片長容不下一格，
+    // 與其保存一小時的預覽值，不如在時間軸延長時使用正常兩秒收尾。
+    const end=subtitleTimeOnFrame(cue.start+2,cue.start+frame,duration||Infinity,{fps,dropFrame})
+      ?? subtitleTimeOnFrame(cue.start+2,cue.start+frame,Infinity,{fps,dropFrame});
+    if(end!=null) saved.end=end;
+    delete saved._tempEnd;
+    return saved;
+  });
+}
+
 // FPS-SYNC：I、切換句子與退出上字幕模式共用暫存終點收尾；不要把合法格再限制回原秒數。
 export function finalizeProvisionalCueEnds(exceptId=null, {history=true}={}) {
-  const frame=1/getExactFps(State.fps || 25);
   let changed=false;
   for(const cue of State.cues){
     if(!cue._tempEnd || cue.id===exceptId || State.tracks[cue.track||0]?.locked) continue;
-    const end=subtitleTimeOnFrame(cue.start+2,cue.start+frame,State.duration||Infinity);
-    if(end!=null) cue.end=end;
+    cue.end=snapshotProvisionalCueEnds([cue])[0].end;
     delete cue._tempEnd;
     changed=true;
   }
@@ -659,7 +708,7 @@ export function splitCue({ cueId, textBefore, textAfter, timelineTime, beforeCom
   const originalEnd = cue.end;
   beforeCommit?.();
   cue.text = textBefore;
-  if (isTimed) cue.end = splitTime;
+  if (isTimed) { cue.end = splitTime; delete cue._tempEnd; }
 
   const newCue = {
     id: newId(),

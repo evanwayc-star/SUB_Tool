@@ -133,6 +133,7 @@ function terminalOutcomeEntry(job) {
     payload: job.payload,
     assRef: isSafeAssRef(job.assRef) ? job.assRef : null,
     sourcePaths: mergeSourcePaths(job.payload, job.sourcePaths),
+    ...(job.outputAuthority ? { outputAuthority: job.outputAuthority } : {}),
   };
 }
 
@@ -270,6 +271,7 @@ function persistedRecord(job, order) {
     payload: job.payload,
     assRef: job.assRef || null,
     sourcePaths,
+    ...(job.outputAuthority ? { outputAuthority: job.outputAuthority } : {}),
   };
 }
 
@@ -349,6 +351,7 @@ function loadJobs(queueDir, { protectedAssRefs = [] } = {}) {
         status,
         attempt: normaliseAttempt(record.attempt),
         payload: record.payload,
+        ...(record.outputAuthority ? { outputAuthority: record.outputAuthority } : {}),
         assRef: record.assRef || null,
         sourcePaths,
         senderId: null,

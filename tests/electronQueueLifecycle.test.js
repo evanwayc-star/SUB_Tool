@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const QueueStore = require(path.join(ROOT, 'electron', 'queue-store.js'));
+const { captureOutputAuthority, captureOutputDirectory } = require('../electron/export-lease.js');
 const { DELIVERY_FRAME_RATES, exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
 const { isMainWindowTarget, CdpClient, getJSON, waitFor, trackElectron, stopElectron, verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
@@ -148,6 +149,7 @@ function seedQueuedCapabilities(profileDir, entries) {
       id,
       createdAt: Date.now() + order,
       status: 'queued',
+      outputAuthority: captureOutputAuthority(entry.outPath, captureOutputDirectory(path.dirname(entry.outPath))),
       payload: {
         outPath: entry.outPath,
         format: entry.format || 'h264',
@@ -629,11 +631,12 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     `);
     fs.writeFileSync(parentScript, `
       const { spawnExportWatchdog } = require(${JSON.stringify(path.resolve('electron/export-watchdog.js'))});
-      const { listLeases } = require(${JSON.stringify(path.resolve('electron/export-lease.js'))});
+      const { listLeases, captureOutputAuthority, captureOutputDirectory } = require(${JSON.stringify(path.resolve('electron/export-lease.js'))});
       const controller = spawnExportWatchdog({
         ffmpegPath: process.execPath,
         args: ${JSON.stringify([fakeFfmpeg, markerPath, outPath])},
         outPath: ${JSON.stringify(outPath)}, queueDir: ${JSON.stringify(queueDir)}, jobId: 'parent-crash',
+        outputAuthority: captureOutputAuthority(${JSON.stringify(outPath)}, captureOutputDirectory(${JSON.stringify(path.dirname(outPath))})),
       }, {
         nodePath: ${JSON.stringify(ELECTRON)}, scriptPath: ${JSON.stringify(ownerScript)}, onStderr() {},
       });

@@ -54,6 +54,19 @@ function crossOriginIsolation() {
   };
 }
 
+function resolveSharedRules() {
+  return {
+    name: 'resolve-shared-rules',
+    enforce: 'pre',
+    resolveId(source, importer, options) {
+      const match = /^(?:\.\.\/)+shared\/([^/]+\.cjs)$/.exec(source);
+      if (!match) return null;
+      // 再交給 Vite 解析 bare ID，讓 dev 使用同名預打包結果。
+      return this.resolve(`@subtool-shared/${match[1]}`, importer, { ...options, skipSelf: true });
+    },
+  };
+}
+
 // 開發：vite（HMR）；打包：輸出單一可雙擊的 dist/index.html（含內嵌 JS/CSS）
 export default defineConfig({
   base: './',
@@ -62,13 +75,6 @@ export default defineConfig({
     conditions: ['onnxruntime-web-use-extern-wasm','module','browser','development|production'],
     alias: [
       { find: /^onnxruntime-web$/, replacement: 'onnxruntime-web/webgpu' },
-      {
-        find: /^(?:\.\.\/)+shared\/([^/]+\.cjs)$/,
-        replacement: '@subtool-shared/$1',
-        customResolver(source, importer, options) {
-          return this.resolve(source, importer, { ...options, skipSelf: false });
-        },
-      },
       { find: /^@subtool-shared\//, replacement: fileURLToPath(new URL('./shared/', import.meta.url)) },
     ],
   },
@@ -79,7 +85,7 @@ export default defineConfig({
       .filter(name => name.endsWith('.cjs'))
       .map(name => `@subtool-shared/${name}`),
   },
-  plugins: [injectCSP(), viteSingleFile(), crossOriginIsolation()],
+  plugins: [resolveSharedRules(), injectCSP(), viteSingleFile(), crossOriginIsolation()],
   server: { 
     port: 8777, 
     host: true,

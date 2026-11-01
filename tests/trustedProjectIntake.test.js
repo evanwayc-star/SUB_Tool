@@ -13,9 +13,11 @@ const { FileAuthority } = require('../electron/file-authority.js');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const directories = [];
 
-function relinkFixture() {
-  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-relink-test-'));
-  directories.push(directory);
+function relinkFixture({ readdir, nested = false } = {}) {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-relink-test-'));
+  directories.push(root);
+  const directory = nested ? path.join(root, 'selected') : root;
+  if (nested) fs.mkdirSync(directory);
   const projectPath = path.join(directory, 'edit.subtool');
   const oldMediaPath = path.join(directory, 'missing', 'master.mxf');
   const fileAuthority = new FileAuthority();
@@ -37,9 +39,10 @@ function relinkFixture() {
   expect(search).toBeDefined();
   expect(registration).toBeDefined();
   let handler;
-  const context = { fs, path, fileAuthority, projectWorkspace, ipcMain: { handle: (_, fn) => { handler = fn; } } };
+  const io = readdir ? { ...fs, promises: { ...fs.promises, readdir } } : fs;
+  const context = { fs: io, path, fileAuthority, projectWorkspace, ipcMain: { handle: (_, fn) => { handler = fn; } } };
   vm.runInNewContext(`${source.slice(search.start, search.end)}\n${source.slice(registration.start, registration.end)}`, context);
-  return { directory, projectPath, oldMediaPath, fileAuthority, handler };
+  return { root, directory, projectPath, oldMediaPath, fileAuthority, projectWorkspace, bytes, handler };
 }
 
 afterEach(() => {
@@ -181,6 +184,83 @@ describe('trusted project intake', () => {
     fs.writeFileSync(sibling, 'private sibling');
     await expect(handler({}, { projectPath, oldMediaPath: path.join(directory, 'missing', 'private.wav') })).resolves.toBeNull();
     expect(fileAuthority.canRead(sibling)).toBe(false);
+  });
+
+  it('搜尋等待中重新開啟同一宣告時，舊結果不授予讀取能力', async () => {
+    let started, resume;
+    const ready = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { resume = resolve; });
+    const f = relinkFixture({ readdir: async (...args) => { started(); await gate; return fs.promises.readdir(...args); } });
+    const found = path.join(f.directory, 'master.mxf'); fs.writeFileSync(found, 'media');
+    const pending = f.handler({}, { projectPath: f.projectPath, oldMediaPath: f.oldMediaPath });
+    await ready;
+    f.projectWorkspace.grantProjectOnly(f.projectPath);
+    f.projectWorkspace.grant(f.projectPath, f.bytes);
+    resume();
+    expect(await pending).toBeNull();
+    expect(f.fileAuthority.canRead(found)).toBe(false);
+  });
+
+  it.each(['before', 'during'])('專案授權根於搜尋 %s 被 junction 改向時，不讀取或授權外部同名素材', async timing => {
+    let started, resume;
+    const ready = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { resume = resolve; });
+    const f = relinkFixture({ nested: true, readdir: async (...args) => { started(); await gate; return fs.promises.readdir(...args); } });
+    const outside = path.join(f.root, 'outside'); fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'master.mxf'), 'outside content');
+    const redirect = () => {
+      fs.renameSync(f.directory, path.join(f.root, 'original'));
+      fs.symlinkSync(outside, f.directory, process.platform === 'win32' ? 'junction' : 'dir');
+    };
+    if (timing === 'before') redirect();
+    const pending = f.handler({}, { projectPath: f.projectPath, oldMediaPath: f.oldMediaPath });
+    if (timing === 'during') { await ready; redirect(); }
+    resume();
+    expect(await pending).toBeNull();
+    expect(f.fileAuthority.canRead(path.join(f.directory, 'master.mxf'))).toBe(false);
+    expect(fs.readFileSync(path.join(outside, 'master.mxf'), 'utf8')).toBe('outside content');
+  });
+
+  it('遞迴搜尋等待子資料夾時被 junction 改向，不授權外部同名素材', async () => {
+    let started, resume, child;
+    const ready = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { resume = resolve; });
+    const f = relinkFixture({ nested: true, readdir: async (...args) => {
+      if (args[0] === child) { started(); await gate; }
+      return fs.promises.readdir(...args);
+    } });
+    child = path.join(f.directory, 'media'); fs.mkdirSync(child);
+    const outside = path.join(f.root, 'outside'); fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'master.mxf'), 'outside content');
+    const pending = f.handler({}, { projectPath: f.projectPath, oldMediaPath: f.oldMediaPath });
+    await ready;
+    fs.renameSync(child, path.join(f.root, 'original-media'));
+    fs.symlinkSync(outside, child, process.platform === 'win32' ? 'junction' : 'dir');
+    resume();
+    expect(await pending).toBeNull();
+    expect(f.fileAuthority.canRead(path.join(child, 'master.mxf'))).toBe(false);
+    expect(fs.readFileSync(path.join(outside, 'master.mxf'), 'utf8')).toBe('outside content');
+  });
+
+  it('子資料夾列舉等待時同名普通目錄被替換，不授權替代素材', async () => {
+    let started, resume, child;
+    const ready = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { resume = resolve; });
+    const f = relinkFixture({ nested: true, readdir: async (...args) => {
+      const entries = await fs.promises.readdir(...args);
+      if (args[0] === child) { started(); await gate; }
+      return entries;
+    } });
+    child = path.join(f.directory, 'media'); fs.mkdirSync(child);
+    fs.writeFileSync(path.join(child, 'master.mxf'), 'original content');
+    const pending = f.handler({}, { projectPath: f.projectPath, oldMediaPath: f.oldMediaPath });
+    await ready;
+    fs.renameSync(child, path.join(f.root, 'original-media'));
+    fs.mkdirSync(child); fs.writeFileSync(path.join(child, 'master.mxf'), 'replacement content');
+    resume();
+    expect(await pending).toBeNull();
+    expect(f.fileAuthority.canRead(path.join(child, 'master.mxf'))).toBe(false);
+    expect(fs.readFileSync(path.join(child, 'master.mxf'), 'utf8')).toBe('replacement content');
   });
 
   it('does not expose a renderer-controlled project authorization channel', () => {

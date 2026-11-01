@@ -13,6 +13,7 @@
 'use strict';
 
 const path = require('path');
+const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 const { decodeText } = require('../shared/text-encoding.cjs');
 
 /** 專案檔副檔名正規表達式 */
@@ -106,10 +107,12 @@ class FileAuthority {
     this._internalDirectories = new Set();
     this._readFiles = new Set();
     this._writeFiles = new Set();
-    this._deliveryDirectories = new Set();
-    this._deliveryFiles = new Set();
+    this._projectRelinkRoots = new Map();
+    this._projectBackupRoots = new Map();
+    this._deliveryDirectories = new Map();
+    this._deliveryFiles = new Map();
     this._deliveryRevealFiles = new Set();
-    this._screenshotDirectories = new Set();
+    this._screenshotDirectories = new Map();
     this._queueLogDirectories = new Set();
     this._diagnosticLogFiles = new Set();
 
@@ -199,20 +202,63 @@ class FileAuthority {
    * 專案檔本身具備覆寫能力，並精確只允許其底下的 `.subtool_AutoSave` 子目錄寫入。
    * 專案父目錄同時授予截圖儲存能力。
    */
-  grantProjectFile(file) {
+  grantProjectFile(file, admittedRoot = null) {
+    const projectKey = this._resolve(file);
+    if (!projectKey) return false;
+    const parent = this._path.dirname(file);
+    let root;
+    try {
+      root = admittedRoot || captureOutputDirectory(parent);
+      if (this._resolve(parent) !== this._resolve(root.requestedPath)) return false;
+      captureOutputAuthority(this._path.join(parent, '.subtool-project-check'), root);
+    } catch (error) { return false; }
     if (!this.grantTrustedFile(file, { read: true, write: true })) return false;
+    this._projectRelinkRoots.set(projectKey, root);
     const autosaveDirectory = this._path.join(this._path.dirname(file), '.subtool_AutoSave');
     this._grantDirectory(autosaveDirectory, { read: false, write: true });
-    const parent = this._path.dirname(file);
-    this.grantScreenshotDirectory(parent);
+    this._projectBackupRoots.set(this._resolve(autosaveDirectory), root);
+    this.grantScreenshotDirectory(parent, root);
     return true;
+  }
+
+  captureProjectWriteRoot(file) {
+    const candidate = this._resolve(file);
+    if (!candidate || !PROJECT_FILE.test(file || '')) throw new Error('專案輸出位置未授權');
+    let root = this._projectRelinkRoots.get(candidate);
+    if (!root) {
+      let bestLength = -1;
+      for (const [backup, grant] of this._projectBackupRoots) {
+        if (backup.length > bestLength && this._isWithin(candidate, backup)) {
+          bestLength = backup.length;
+          root = grant;
+        }
+      }
+    }
+    if (!root) throw new Error('專案輸出位置未授權');
+    captureOutputAuthority(this._path.join(root.requestedPath, '.subtool-project-check'), root);
+    return structuredClone(root);
+  }
+
+  /** Bind relink searches to the directory present at trusted project intake. */
+  captureProjectRelinkOutput(projectFile, file) {
+    const root = this._projectRelinkRoots.get(this._resolve(projectFile));
+    if (!root) throw new Error('專案搜尋目錄缺少原始身分');
+    return captureOutputAuthority(file, root);
+  }
+
+  isProjectRelinkOutputCurrent(projectFile, evidence) {
+    try {
+      const current = this.captureProjectRelinkOutput(projectFile, evidence.requestedPath);
+      assertOutputAuthority(evidence, evidence.requestedPath);
+      return current.parents[0].dev === evidence.parents[0].dev && current.parents[0].ino === evidence.parents[0].ino;
+    } catch (error) { return false; }
   }
 
   /** 授予交付輸出目錄寫入能力。 */
   grantDeliveryDirectory(directory) {
     const resolved = this._resolve(directory);
     if (!resolved) return false;
-    this._deliveryDirectories.add(resolved);
+    this._deliveryDirectories.set(resolved, captureOutputDirectory(directory));
     return true;
   }
 
@@ -220,8 +266,33 @@ class FileAuthority {
   grantDeliveryFile(file) {
     const resolved = this._resolve(file);
     if (!resolved) return false;
-    this._deliveryFiles.add(resolved);
+    const authority = captureOutputAuthority(file, captureOutputDirectory(this._path.dirname(file)));
+    this._deliveryFiles.set(resolved, authority);
     return true;
+  }
+
+  /** Queue-owned evidence is restored without granting a replacement directory. */
+  restoreDeliveryFile(file, authority) {
+    const resolved = this._resolve(file);
+    if (!resolved || !authority) return false;
+    assertOutputAuthority(authority, file);
+    this._deliveryFiles.set(resolved, structuredClone(authority));
+    return true;
+  }
+
+  captureDeliveryOutput(file) {
+    const candidate = this._resolve(file);
+    const exact = this._deliveryFiles.get(candidate);
+    if (exact) {
+      try { return structuredClone(assertOutputAuthority(exact, file)); } catch (error) {}
+    }
+    for (const [root, grant] of this._deliveryDirectories) {
+      if (!candidate || !this._isWithin(candidate, root)) continue;
+      try { return captureOutputAuthority(file, grant); } catch (error) {}
+    }
+    const error = new Error('交付輸出位置未經授權或目錄已變更；請在佇列按「重新選擇原輸出資料夾並重試」');
+    error.code = 'UNAUTHORIZED_OUTPUT_PATH';
+    throw error;
   }
 
   /** 完成歷史只可定位精確成品，不會恢復寫入或同目錄能力。 */
@@ -233,11 +304,27 @@ class FileAuthority {
   }
 
   /** 授予截圖儲存目錄寫入能力。 */
-  grantScreenshotDirectory(directory) {
+  grantScreenshotDirectory(directory, admittedRoot = null) {
     const resolved = this._resolve(directory);
     if (!resolved) return false;
-    this._screenshotDirectories.add(resolved);
-    return true;
+    try {
+      const root = admittedRoot || captureOutputDirectory(directory);
+      if (resolved !== this._resolve(root.requestedPath)) return false;
+      captureOutputAuthority(this._path.join(directory, '.subtool-screenshot-query'), root);
+      this._screenshotDirectories.set(resolved, root);
+      return true;
+    } catch (error) { return false; }
+  }
+
+  captureScreenshotOutput(file) {
+    const candidate = this._resolve(file);
+    for (const [root, grant] of this._screenshotDirectories) {
+      if (!candidate || !this._isWithin(candidate, root)) continue;
+      try { return captureOutputAuthority(file, grant); } catch (error) {}
+    }
+    const error = new Error('截圖資料夾未經授權或目錄已變更');
+    error.code = 'UNAUTHORIZED_SCREENSHOT_PATH';
+    throw error;
   }
 
   /** 授予佇列失敗記錄 (.log) 開啟能力。 */
@@ -277,8 +364,7 @@ class FileAuthority {
 
   /** 檢查檔案是否具備交付輸出寫入權限。 */
   canWriteDelivery(file) {
-    const candidate = this._resolve(file);
-    return !!candidate && (this._deliveryFiles.has(candidate) || this._matchesDirectoryCapability(candidate, this._deliveryDirectories));
+    try { this.captureDeliveryOutput(file); return true; } catch (error) { return false; }
   }
 
   /** 檢查檔案是否允許在檔案總管/Finder 定位顯示。 */
@@ -297,7 +383,10 @@ class FileAuthority {
   /** 檢查目錄是否為授權之截圖目錄。 */
   canUseScreenshotDirectory(directory) {
     const candidate = this._resolve(directory);
-    return !!candidate && this._screenshotDirectories.has(candidate);
+    const grant = this._screenshotDirectories.get(candidate);
+    if (!grant) return false;
+    try { captureOutputAuthority(this._path.join(directory, '.subtool-screenshot-query'), grant); return true; }
+    catch (error) { return false; }
   }
 
   /** 檢查檔案是否位於受管內部快取或工作目錄內。 */
@@ -319,20 +408,34 @@ class FileAuthority {
   /** 檢查目錄是否允許列出檔案內容。 */
   canListDirectory(directory) {
     const candidate = this._resolve(directory);
-    return !!candidate && this._matchesDirectoryCapability(candidate, this._deliveryDirectories);
+    for (const [root, grant] of this._deliveryDirectories) {
+      if (!candidate || !this._isWithin(candidate, root)) continue;
+      try {
+        captureOutputAuthority(this._path.join(directory, '.subtool-directory-query'), grant);
+        return true;
+      } catch (error) {}
+    }
+    return false;
   }
 
   /** 檢查檔案是否允許寫入為專案檔 (.subtool / .json)。 */
   canWriteProject(file) {
-    return PROJECT_FILE.test(file || '') && this.canWrite(file);
+    if (!PROJECT_FILE.test(file || '')) return false;
+    const candidate = this._resolve(file);
+    if (!candidate) return false;
+    if (this._projectRelinkRoots.has(candidate)
+      || [...this._projectBackupRoots.keys()].some(root => this._isWithin(candidate, root))) {
+      try { this.captureProjectWriteRoot(file); return true; } catch (error) { return false; }
+    }
+    return this.canWrite(file);
   }
 
   /** 檢查檔案是否允許寫入為截圖圖片。 */
   canWriteScreenshot(file) {
     const candidate = this._resolve(file);
-    return !!candidate && SCREENSHOT_FILE.test(file || '') && (
-      this.canWrite(file) || this._matchesDirectoryCapability(candidate, this._screenshotDirectories)
-    );
+    if (!candidate || !SCREENSHOT_FILE.test(file || '')) return false;
+    if (this.canWrite(file)) return true;
+    try { this.captureScreenshotOutput(file); return true; } catch (error) { return false; }
   }
 }
 

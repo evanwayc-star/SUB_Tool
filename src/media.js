@@ -530,6 +530,7 @@ const Media = {
   // can overwrite a current transcode's in.media or logger mid-run.
   _webFfmpegTail:Promise.resolve(),
   objectURLs:[],
+  _objectURLLeases:new Map(),
   get mpvMode(){ return getPlayerAdapter().mode === 'mpv'; },
   _mpvTime:0, _mpvDuration:0, _mpvExactSeek:false, _mpvSeekOffset:0, _bgVersion:0,
   _nativeReverse:false,
@@ -583,7 +584,28 @@ const Media = {
   _releaseObjectURL(url){
     if(!url) return;
     this.objectURLs=this.objectURLs.filter(item=>item!==url);
+    const lease=this._objectURLLeases.get(url);
+    if(lease){ lease.pending=true; return; }
     try{ URL.revokeObjectURL(url); }catch(error){}
+  },
+  retainObjectURLs(urls){
+    // 只持有本模組建立的 URL；外部 URL 的壽命不由本模組決定。
+    const held=[...new Set(urls||[])].filter(url=>this.objectURLs.includes(url));
+    for(const url of held){
+      const lease=this._objectURLLeases.get(url)||{count:0,pending:false};
+      lease.count++;this._objectURLLeases.set(url,lease);
+    }
+    let released=false;
+    return ()=>{
+      if(released)return;
+      released=true;
+      for(const url of held){
+        const lease=this._objectURLLeases.get(url);
+        if(!lease||--lease.count>0)continue;
+        this._objectURLLeases.delete(url);
+        if(lease.pending)try{ URL.revokeObjectURL(url); }catch(error){}
+      }
+    };
   },
   _disposeMediaElement(element){
     getPlayerAdapter().cancelElementSeek?.(element);
@@ -3706,10 +3728,11 @@ const Media = {
   },
   _startElementSourcesReady(localT, tlT){
     const timeline=tlT??(this.seqOn()?this.tlTime():localT);
+    // 每次起播意圖都取代先前仍在準備的反轉音訊，即使新的位置沒有反轉片段。
+    const version=this._reverseAudioStartVersion=(this._reverseAudioStartVersion||0)+1;
     const reversed=[...Seq.clipsAt(timeline).filter(clip=>clip.reverse&&!clip.audioDetached&&!Seq.isStill(clip)),
       ...this.externalAudioSources.filter(asset=>asset.reverse&&this.externalAudio.sourceTime(asset.audioSrc,timeline)!=null)];
     if(!reversed.length){ this._audioRouter.startElementSources(localT,tlT); return; }
-    const version=this._reverseAudioStartVersion=(this._reverseAudioStartVersion||0)+1;
     Promise.all(reversed.map(clip=>this.prepareClipReverseAudio(clip))).then(ready=>{
       if(version!==this._reverseAudioStartVersion||!this.playing||this._reverseShuttleMuted||ready.some(value=>!value)) return;
       const current=this.tlTime();
@@ -4379,8 +4402,7 @@ const Media = {
     this._clipRuntimePromises?.clear();
     emit('media:clearMeters'); // Fix #10：清除 mixer 的舊音軌參照，避免 rafLoop 讀取廢棄 analyser
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
-    this.objectURLs.forEach(u=>{ if(!keepObjectURLs.has(u)) try{URL.revokeObjectURL(u);}catch(e){} });
-    this.objectURLs=this.objectURLs.filter(u=>keepObjectURLs.has(u));
+    for(const url of [...this.objectURLs]) if(!keepObjectURLs.has(url)) this._releaseObjectURL(url);
     this.playing=false; this._transport.reset();
     this._manualRate=1; video.playbackRate=1;
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）

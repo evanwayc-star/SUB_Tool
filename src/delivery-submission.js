@@ -123,16 +123,20 @@ export function createDeliverySubmission({
     // Freeze paths before the first directory read, even for a live preview.
     const paths = candidate.outPaths();
     const names = [];
-    try {
-      for (const { dir, name } of paths) {
-        if (!dir) continue;
+    for (const { dir, name } of paths) {
+      if (!dir) continue;
+      try {
         const files = await desktop.listDir(dir);
         if (!owns()) return null;
         const existing = files.map(file => (typeof file === 'string' ? file : file.name).toLowerCase());
         if (existing.includes(name.toLowerCase())) names.push(name);
+      } catch {
+        if (!owns()) return null;
+        return {
+          kind: 'blocking',
+          message: `無法檢查輸出資料夾「${dir}」是否有同名檔案，請確認資料夾可讀取後重試。`,
+        };
       }
-    } catch (error) {
-      // Directory preview is advisory. Native admission remains authoritative.
     }
     return names.length ? {
       kind: 'overwrite', names,
@@ -152,6 +156,11 @@ export function createDeliverySubmission({
     const next = await conflicts(list, owns);
     if (owns()) setWarning(next, generation);
     return state();
+  }
+
+  function invalidatePreview() {
+    const generation = ++conflictGeneration;
+    setWarning(null, generation);
   }
 
   async function submit() {
@@ -206,5 +215,5 @@ export function createDeliverySubmission({
     }
   }
 
-  return Object.freeze({ state, previewConflicts, submit });
+  return Object.freeze({ state, previewConflicts, invalidatePreview, submit });
 }

@@ -185,6 +185,33 @@ describe('delivery submission lifecycle through its production interface', () =>
     expect(s.list.count()).toBe(1);
   });
 
+  it('無法檢查輸出目錄時阻擋提交並保留列，恢復後可重試', async () => {
+    const s = setup(['A.mp4', 'B.mp4']);
+    s.list.setOutDir(1, 'D:/其他交付');
+    s.desktop.listDir.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error('讀取目錄失敗'));
+    const result = await s.submission.submit();
+    expect(result).toMatchObject({ status: 'invalid', accepted: 0 });
+    expect(result.reason).toContain('無法檢查');
+    expect(s.submission.state().warning.message).toContain('D:/其他交付');
+    expect(s.desktop.exportVideo).not.toHaveBeenCalled();
+    expect(s.list.count()).toBe(2);
+    s.desktop.listDir.mockResolvedValue([]);
+    await expect(s.submission.submit()).resolves.toMatchObject({ status: 'submitted', accepted: 2, complete: true });
+  });
+
+  it('失效的舊目錄檢查錯誤不得覆寫新預覽', async () => {
+    const s = setup(['A.mp4']);
+    let reject;
+    const old = new Promise((_, fail) => { reject = fail; });
+    s.desktop.listDir.mockImplementationOnce(() => old).mockResolvedValueOnce([]);
+    const previous = s.submission.previewConflicts();
+    s.list.setOutDir(0, 'D:/新目錄');
+    await s.submission.previewConflicts();
+    reject(new Error('舊目錄失敗'));
+    await previous;
+    expect(s.submission.state().warning).toBeNull();
+  });
+
   it('非同步覆寫確認後再次檢查 ownership', async () => {
     const s = setup(['A.mp4']);
     const gate = deferred();

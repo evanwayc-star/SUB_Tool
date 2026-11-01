@@ -1,6 +1,6 @@
 'use strict';
 
-const { open } = require('node:fs/promises');
+const { withOwnedOutput } = require('./owned-output-handle');
 const path = require('path');
 const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
 const { reshapeAirlineTransport } = require('./airline-transport');
@@ -190,9 +190,10 @@ async function readExact(file, buffer, length, position) {
   }
 }
 
-async function writeExact(file, bytes, position) {
+async function writeExact(file, bytes, position, assertOutput) {
   let offset = 0;
   while (offset < bytes.length) {
+    assertOutput?.();
     const { bytesWritten } = await file.write(bytes, offset, bytes.length - offset, position + offset);
     if (!bytesWritten) throw invalid('無法寫入封裝修正');
     offset += bytesWritten;
@@ -200,11 +201,11 @@ async function writeExact(file, bytes, position) {
 }
 
 /** Validate before writing; caller retains the output lease and owns cleanup. */
-async function validateAndPatchAirlineOutput(format, outPath, { signal } = {}) {
+async function validateAndPatchAirlineOutput(format, outPath, { signal, assertOutput } = {}) {
   if (!isAirlineOutput(format)) return null;
   signal?.throwIfAborted();
-  const file = await open(outPath, 'r+');
-  try {
+  assertOutput?.();
+  return withOwnedOutput(outPath, 'r+', assertOutput, async file => {
     const original = await file.stat();
     if (!original.isFile() || !original.size || original.size % TS_SIZE) throw invalid('檔案必須由完整的 188-byte TS 封包組成');
     const buffer = Buffer.allocUnsafe(READ_SIZE);
@@ -226,8 +227,8 @@ async function validateAndPatchAirlineOutput(format, outPath, { signal } = {}) {
         for (let offset = 0; offset < length; offset += TS_SIZE) parser.packet(buffer.subarray(offset, offset + TS_SIZE), chunkStart + offset);
         signal?.throwIfAborted();
         if (pass === 1) {
-          for (const change of earlier) await writeExact(file, change.bytes, change.offset);
-          if (modified) await writeExact(file, buffer.subarray(0, length), chunkStart);
+          for (const change of earlier) await writeExact(file, change.bytes, change.offset, assertOutput);
+          if (modified) await writeExact(file, buffer.subarray(0, length), chunkStart, assertOutput);
         }
       }
       result = parser.finish();
@@ -238,11 +239,10 @@ async function validateAndPatchAirlineOutput(format, outPath, { signal } = {}) {
       }
     }
     signal?.throwIfAborted();
+    assertOutput?.();
     await file.sync();
     return { ...result, bytes: original.size, outPath, requiresManzanita: false };
-  } finally {
-    await file.close();
-  }
+  });
 }
 
 async function finalizeAirlineOutput(format, outPath, options = {}) {

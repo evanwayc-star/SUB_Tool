@@ -361,10 +361,12 @@ export const WCPreview = {
     const mpv = Media.mpvMode;
     // mpv 模式下，即使沒有全域的 proxy URL，也必須放行，
     // 以便後續能夠透過片段的 c.proxyUrl 進行解碼與接管
-    const on = this.enabled && Media.seqOn();
+    const sequenceOn=Media.seqOn();
+    const on = this.enabled && sequenceOn;
     if(!on){
       this._hideCanvas();
-      if(this.sources.size && !Media.seqOn()) this.disposeAll(); // 媒體已卸載 → 釋放 demux/解碼資源
+      // 影片來源可能先被淘汰，但圖片和私有畫布仍保留；卸載序列時一併釋放。
+      if(!sequenceOn && (this.sources.size || this._images.size || this._renderCanvas)) this.disposeAll();
       this._setTakeover(false);
       Media.setWebCodecsComposited(false); this.mode = 'off'; return;
     }

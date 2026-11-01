@@ -6,7 +6,9 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { spawnExportWatchdog, recoverExportLeases } = require('../electron/export-watchdog');
-const { acquireLease, listLeases } = require('../electron/export-lease');
+const { captureOutputAuthority, captureOutputDirectory } = require('../electron/export-lease');
+const { acquireLease, listLeases, updateLease } = require('../electron/export-lease');
+const { prepareDiscOutput } = require('../electron/disc-authoring');
 const helperPath = require.resolve('../electron/disc-authoring');
 const watchdogPath = require.resolve('../electron/export-watchdog');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -106,6 +108,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     const messages = [];
     const controller = spawnExportWatchdog({
       ffmpegPath: process.execPath, args: [encoderPath, outPath], outPath,
+      outputAuthority: captureOutputAuthority(outPath, captureOutputDirectory(path.dirname(outPath))),
       queueDir, jobId: mode, outputFormat: format,
     }, {
       scriptPath: bootstrapPath,
@@ -144,7 +147,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     await controller.ready;
     const result = await controller.completion;
     expect(result.ok).toBe(false);
-    expect(result.cleanup).toMatchObject({ missing: true, released: true });
+    expect(result.cleanup).toMatchObject({ untouched: true, released: true });
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
     expect(listLeases(queueDir)).toEqual([]);
   });
@@ -153,9 +156,11 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     const { controller } = launch('encoding-wait');
     await controller.ready;
     await waitFor(() => fs.existsSync(path.join(tempDir, 'encoded.log')));
-    expect(listLeases(queueDir)[0].owner.outputStarted).toBe(false);
+    const [lease] = listLeases(queueDir);
+    expect(lease.owner).toMatchObject({ outputStarted: false, discWorkspacePending: false,
+      discWorkspace: JSON.parse(fs.readFileSync(path.join(tempDir, 'prepared.json'))) });
     controller.stop('user-stop');
-    expect((await controller.completion).cleanup).toMatchObject({ missing: true, released: true });
+    expect((await controller.completion).cleanup).toMatchObject({ untouched: true, released: true });
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
     expect(listLeases(queueDir)).toEqual([]);
   });
@@ -168,7 +173,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     expect(listLeases(queueDir)).toHaveLength(1);
     fs.writeFileSync(path.join(tempDir, 'gate'), 'release');
     const result = await controller.completion;
-    expect(result.cleanup).toMatchObject({ reason: 'user-stop', missing: true, released: true });
+    expect(result.cleanup).toMatchObject({ reason: 'user-stop', untouched: true, released: true });
     expect(fs.existsSync(path.join(tempDir, 'encoded.log'))).toBe(false);
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
     expect(listLeases(queueDir)).toEqual([]);
@@ -225,8 +230,9 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
 
   it('崩潰在編碼階段時復原只刪私有素材，保留原 ISO', async () => {
     const lease = acquireLease({ queueDir, outPath, jobId: 'stale-disc', outputStarted: false });
-    fs.mkdirSync(path.join(lease.lockPath, 'subtool-disc-stale'));
-    fs.writeFileSync(path.join(lease.lockPath, 'subtool-disc-stale', 'internal.ts'), 'partial encode');
+    const work = await prepareDiscOutput('bd-iso', { tempDir: lease.lockPath });
+    fs.writeFileSync(work.encodedPath, 'partial encode');
+    updateLease({ queueDir, outPath, token: lease.owner.token, leaseKey: lease.key, discWorkspace: work });
     const result = await recoverExportLeases(queueDir);
     expect(result.warnings).toEqual([]);
     expect(result.recovered[0].cleanup.untouched).toBe(true);

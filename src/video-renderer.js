@@ -473,21 +473,36 @@ let _mpvImageGuideSig = '';
 const _imgNatCache = new Map();
 function _imageNat(c, src){
   if(c.natW > 0 && c.natH > 0) return { w:c.natW, h:c.natH };
+  if(!src) return { w:0, h:0 };
   const hit = _imgNatCache.get(src);
   if(hit&&hit.ownsMedia()){
     if(hit.w > 0){ c.natW = hit.w; c.natH = hit.h; }
-    return hit;
+    if(!hit.retryReady) return hit;
   }
   const ownsMedia=Media.captureMediaOwnership();
-  const entry={w:0,h:0,ownsMedia};
+  const entry={w:0,h:0,ownsMedia,attempt:hit?.ownsMedia() ? hit.attempt+1 : 0, retryReady:false};
   _imgNatCache.set(src,entry); // 佔位：避免每一格都重新發一次請求
   const probe = new Image();
+  const retry=()=>{
+    if(!ownsMedia() || _imgNatCache.get(src)!==entry) return;
+    // 暫時無法讀取時不永久快取失敗，也不能在播放每幀重試；暫停時仍可復原。
+    const delay=Math.min(30000,1000*2**Math.min(entry.attempt,5));
+    setTimeout(()=>{
+      if(!ownsMedia() || _imgNatCache.get(src)!==entry){
+        if(_imgNatCache.get(src)===entry) _imgNatCache.delete(src);
+        return;
+      }
+      entry.retryReady=true;
+      if(State.clips.some(clip=>imageSourceUrl(clip)===src)) renderImageOverlays();
+    },delay);
+  };
   probe.onload = () => {
-    if(!ownsMedia()){
+    if(!ownsMedia() || _imgNatCache.get(src)!==entry){
       if(_imgNatCache.get(src)===entry) _imgNatCache.delete(src);
       return;
     }
     const w = probe.naturalWidth || 0, h = probe.naturalHeight || 0;
+    if(!(w > 0 && h > 0)){ retry(); return; }
     entry.w=w;entry.h=h;
     if(w > 0){
       const live=Seq.byId(c.id);
@@ -497,7 +512,7 @@ function _imageNat(c, src){
     }
     renderImageOverlays();
   };
-  probe.onerror = () => {};
+  probe.onerror = retry;
   setMediaElementSource(probe,src);
   return { w:0, h:0 };
 }
@@ -716,7 +731,7 @@ export async function capturePreviewFrame({nativePath,readBase64}={}){
       const result=await adapter.screenshot(nativePath);
       check();
       if(!result||result.ok===false) throw new Error('原生播放器截圖失敗');
-      const b64=await readBase64(nativePath);
+      const b64=typeof result.b64==='string'?result.b64:await readBase64(nativePath);
       check();
       if(!b64) throw new Error('無法讀取原生播放器截圖');
       const image=await loadCaptureImage('data:image/jpeg;base64,'+b64);

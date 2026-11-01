@@ -1,6 +1,6 @@
 'use strict';
 
-const { open } = require('node:fs/promises');
+const { withOwnedOutput } = require('./owned-output-handle');
 
 const TS_PACKET_SIZE = 188;
 const READ_SIZE = TS_PACKET_SIZE * 1024;
@@ -127,9 +127,10 @@ async function readExact(file, buffer, length, position) {
   }
 }
 
-async function writeExact(file, buffer, position) {
+async function writeExact(file, buffer, position, assertOutput) {
   let offset = 0;
   while (offset < buffer.length) {
+    assertOutput?.();
     const { bytesWritten } = await file.write(buffer, offset, buffer.length - offset, position + offset);
     if (!bytesWritten) throw new Error('無法寫入 MOD-FHD 封裝');
     offset += bytesWritten;
@@ -141,11 +142,11 @@ async function writeExact(file, buffer, position) {
  * Validate the whole file before writing, then patch with bounded memory. The
  * caller owns failed/cancelled-output cleanup and must retain its output lease.
  */
-async function finalizeModFhdTransport(outPath, { audioPid = 4130, signal } = {}) {
+async function finalizeModFhdTransport(outPath, { audioPid = 4130, signal, assertOutput } = {}) {
   if (!Number.isInteger(audioPid) || audioPid < 32 || audioPid >= 8191) throw new TypeError('MOD-FHD 音訊 PID 無效');
   checkCancelled(signal);
-  const file = await open(outPath, 'r+');
-  try {
+  assertOutput?.();
+  return withOwnedOutput(outPath, 'r+', assertOutput, async file => {
     const original = await file.stat();
     if (!original.isFile() || !original.size || original.size % TS_PACKET_SIZE) throw invalid('檔案必須由完整的 188-byte TS 封包組成');
     const buffer = Buffer.allocUnsafe(READ_SIZE);
@@ -169,8 +170,8 @@ async function finalizeModFhdTransport(outPath, { audioPid = 4130, signal } = {}
         }
         checkCancelled(signal);
         if (pass === 1) {
-          for (const patch of earlier) await writeExact(file, Buffer.from([patch.byte]), patch.offset);
-          if (modified) await writeExact(file, buffer.subarray(0, length), chunkStart);
+          for (const patch of earlier) await writeExact(file, Buffer.from([patch.byte]), patch.offset, assertOutput);
+          if (modified) await writeExact(file, buffer.subarray(0, length), chunkStart, assertOutput);
         }
       }
       result = parser.finish();
@@ -181,11 +182,10 @@ async function finalizeModFhdTransport(outPath, { audioPid = 4130, signal } = {}
       }
     }
     checkCancelled(signal);
+    assertOutput?.();
     await file.sync();
     return { ...result, bytes: original.size };
-  } finally {
-    await file.close();
-  }
+  });
 }
 
 module.exports = { finalizeModFhdTransport };

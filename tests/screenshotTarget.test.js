@@ -55,10 +55,14 @@ describe('存放目錄', () => {
     const dir = screenshotDir({ projectDir });
     expect(dir).toBe(expected);
     const pathModule = projectDir === '/' ? path.posix : path.win32;
-    const authority = new FileAuthority({ pathModule, caseInsensitive: pathModule === path.win32 });
-    authority.grantScreenshotDirectory(projectDir);
-    expect(authority.canUseScreenshotDirectory(dir)).toBe(true);
     expect(pathModule.isAbsolute(dir)).toBe(true);
+  });
+
+  it('目前系統的實體根目錄仍可建立截圖目錄授權', () => {
+    const root = path.parse(process.cwd()).root;
+    const authority = new FileAuthority();
+    expect(authority.grantScreenshotDirectory(root)).toBe(true);
+    expect(authority.canUseScreenshotDirectory(screenshotDir({ projectDir: root }))).toBe(true);
   });
 
   it.each([

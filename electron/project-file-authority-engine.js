@@ -15,6 +15,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const crypto = require('crypto');
 const { PROJECT_FILE, collectProjectMediaPaths, parseProjectBuffer } = require('./file-authority');
+const { captureOutputAuthority } = require('./export-lease');
 const { encodeUTF16LE } = require('../shared/text-encoding.cjs');
 
 const RECENT_MAX_ENTRIES = 10;
@@ -135,15 +136,15 @@ function createTrustedProjectIntake({
     }
   };
 
-  function grantProjectOnly(projectFile) {
+  function grantProjectOnly(projectFile, root = null) {
     if (typeof projectFile !== 'string' || !projectFile) return null;
-    grantProject(projectFile);
+    if (grantProject(projectFile, root) === false) return null;
     const projectKey = key(projectFile);
     if (projectKey) declaredMediaByProject.delete(projectKey);
     return projectFile;
   }
 
-  function grant(projectFile, contents = null) {
+  function grant(projectFile, contents = null, root = null) {
     if (typeof projectFile !== 'string' || !projectFile) return null;
     let projectBuffer = Buffer.isBuffer(contents) ? contents : null;
     if (!projectBuffer) {
@@ -158,7 +159,7 @@ function createTrustedProjectIntake({
     const project = parseProjectBuffer(projectBuffer);
     if (!project) return null;
     const mediaPaths = collectProjectMediaPaths(project);
-    grantProjectOnly(projectFile);
+    if (!grantProjectOnly(projectFile, root)) return null;
 
     for (const mediaPath of mediaPaths) {
       grantMedia(mediaPath);
@@ -176,7 +177,18 @@ function createTrustedProjectIntake({
     return !!projectKey && !!mediaKey && declaredMediaByProject.get(projectKey)?.has(mediaKey) === true;
   }
 
-  return Object.freeze({ grant, grantProjectOnly, canRelink });
+  function captureRelinkTicket(projectFile, oldMediaPath) {
+    const projectKey = key(projectFile), mediaKey = key(oldMediaPath);
+    const declaration = declaredMediaByProject.get(projectKey);
+    return declaration?.has(mediaKey) ? declaration : null;
+  }
+
+  function isRelinkTicketCurrent(projectFile, oldMediaPath, ticket) {
+    const projectKey = key(projectFile), mediaKey = key(oldMediaPath);
+    return !!ticket && declaredMediaByProject.get(projectKey) === ticket && ticket.has(mediaKey);
+  }
+
+  return Object.freeze({ grant, grantProjectOnly, canRelink, captureRelinkTicket, isRelinkTicketCurrent });
 }
 
 /**
@@ -208,9 +220,40 @@ function inspectProjectWrite(buffer, { canRead } = {}) {
 function finalizeProjectWrite(projectFile, { clearTrustedDeclarations } = {}) {
   if (typeof projectFile !== 'string' || !projectFile) return null;
   if (typeof clearTrustedDeclarations === 'function') {
-    clearTrustedDeclarations(projectFile);
+    const granted = clearTrustedDeclarations(projectFile);
+    if (granted === false || granted === null) return null;
   }
   return projectFile;
+}
+
+function assertProjectRoot(root) {
+  if (!root?.requestedPath) throw new Error('專案目錄缺少授權身分');
+  captureOutputAuthority(path.join(root.requestedPath, '.subtool-project-check'), root);
+  return root;
+}
+
+// 已選專案的 bytes 必須來自同一個開啟的檔案，且 commit 時路徑仍指向它。
+function createBoundProjectReader({ fsModule = { ...fs, ...fsp } } = {}) {
+  const sameSnapshot = (left, right) => !!left && !!right && left.isFile() && right.isFile()
+    && ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].every(field => left[field] === right[field]);
+  return async (file, { projectRoot } = {}) => {
+    assertProjectRoot(projectRoot);
+    let handle;
+    try {
+      handle = await fsModule.open(file, 'r');
+      const before = await handle.stat({ bigint: true });
+      if (!before.isFile()) throw new Error('專案路徑不是檔案');
+      const buffer = await handle.readFile();
+      const after = await handle.stat({ bigint: true });
+      if (!sameSnapshot(before, after) || BigInt(buffer.length) !== after.size) throw new Error('專案讀取期間內容已變更');
+      const isCurrent = () => {
+        try { assertProjectRoot(projectRoot); return sameSnapshot(after, fsModule.statSync(file, { bigint: true })); }
+        catch (error) { return false; }
+      };
+      if (!isCurrent()) throw new Error('專案讀取期間路徑已變更');
+      return { buffer, isCurrent };
+    } finally { if (handle) await handle.close(); }
+  };
 }
 
 // 保存只在所選實體根的私有檔案完整關閉後才發布，失敗不截斷上一份專案。
@@ -229,14 +272,18 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
     try { return fsModule.lstatSync(file, { bigint: true }); }
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   };
-  async function prepareParents(target, ensureParent) {
+  async function prepareParents(target, ensureParent, projectRoot) {
     // The selected project directory may itself be a mounted/linked location.
     // Its private backup descendants must remain real directories inside it.
-    let anchor = path.dirname(target);
-    for (let current = anchor; path.dirname(current) !== current; current = path.dirname(current)) {
+    let anchor = projectRoot?.requestedPath || path.dirname(target);
+    if (!projectRoot) for (let current = anchor; path.dirname(current) !== current; current = path.dirname(current)) {
       const name = path.basename(current);
       if (name === '.subtool_AutoSave'
         || (process.platform === 'win32' && name.toLowerCase() === '.subtool_autosave')) anchor = path.dirname(current);
+    }
+    if (projectRoot) {
+      assertProjectRoot(projectRoot);
+      if (canonical(path.resolve(anchor)) !== canonical(path.resolve(projectRoot.requestedPath))) throw unsafe();
     }
     const root = await fsModule.realpath(anchor);
     const owner = await fsModule.lstat(root, { bigint: true });
@@ -247,6 +294,7 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
       if (!current?.isDirectory() || current.isSymbolicLink() || !sameFile(current, owner)) throw unsafe();
     };
     const check = async () => {
+      if (projectRoot) assertProjectRoot(projectRoot);
       if (canonical(await fsModule.realpath(anchor)) !== canonical(root)) throw unsafe();
       for (const parent of parents) {
         const current = await statIfPresent(parent.file);
@@ -254,6 +302,7 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
       }
     };
     const checkSync = () => {
+      if (projectRoot) assertProjectRoot(projectRoot);
       // promises.realpath 使用 native 解析；同步核對也須展開 Windows 8.3 短名，
       // 不能把同一實體目錄的短／長拼法誤判成替換。下方身分與連結檢查仍保留。
       const resolve = fsModule.realpathSync.native || fsModule.realpathSync;
@@ -291,11 +340,11 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
     const existing = statIfPresentSync(target);
     if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw unsafe();
   };
-  return function writeProject(projectFile, contents, { ensureParent = false } = {}) {
+  return function writeProject(projectFile, contents, { ensureParent = false, projectRoot = null } = {}) {
     const target = path.resolve(projectFile);
     // Resolve aliases in call order without blocking main on synchronous path
     // discovery. Different admitted files can still write concurrently.
-    const preparedResult = admission.then(() => prepareParents(target, ensureParent));
+    const preparedResult = admission.then(() => prepareParents(target, ensureParent, projectRoot));
     admission = preparedResult.catch(() => {});
     return preparedResult.then(prepared => {
       const key = canonical(prepared.target);
@@ -347,11 +396,13 @@ async function commitAdmittedProjectWrite(projectFile, buffer, {
   ensureParent = false,
   writeFile,
   clearTrustedDeclarations,
+  projectRoot = null,
 } = {}) {
   if (typeof projectFile !== 'string' || !projectFile || !Buffer.isBuffer(buffer) || typeof writeFile !== 'function') {
     return null;
   }
-  await writeFile(projectFile, buffer, { ensureParent });
+  await writeFile(projectFile, buffer, { ensureParent, ...(projectRoot ? { projectRoot } : {}) });
+  if (projectRoot) assertProjectRoot(projectRoot);
   return finalizeProjectWrite(projectFile, { clearTrustedDeclarations });
 }
 
@@ -361,6 +412,7 @@ async function commitAdmittedProjectWrite(projectFile, buffer, {
 function createProjectWorkspace({
   readFile,
   writeFile,
+  captureProjectRoot,
   saveMetadata,
   grantProjectFile,
   grantMediaFile,
@@ -379,6 +431,8 @@ function createProjectWorkspace({
   let pendingStartupPath = null;
   let startupClaimed = false;
   let latestOpenGeneration = 0;
+  let committedOpenGeneration = 0;
+  let currentProjectKey = null;
 
   const recentList = () => {
     try {
@@ -405,27 +459,39 @@ function createProjectWorkspace({
   // 身分只用來在目前受信清單內定位，不能以 renderer 的路徑擴張授權。
   const recentToken = item => crypto.createHash('sha256').update(recentPathKey(item.path)).digest('hex');
 
-  async function readProject(projectFile) {
+  async function readProject(projectFile, root) {
     if (!isProjectPath(projectFile) || typeof readFile !== 'function') return null;
     try {
-      const buffer = await readFile(projectFile);
-      return Buffer.isBuffer(buffer) ? buffer : null;
+      const result = await readFile(projectFile, { projectRoot: root });
+      if (Buffer.isBuffer(result)) return { buffer: result, isCurrent: null };
+      return Buffer.isBuffer(result?.buffer) && typeof result.isCurrent === 'function' ? result : null;
     } catch (error) {
       return null;
     }
   }
 
-  function commitOpen(projectFile, buffer, { rememberRecent = true } = {}) {
-    if (!buffer || !intake.grant(projectFile, buffer)) return null;
+  function commitOpen(projectFile, buffer, { rememberRecent = true } = {}, root = null) {
+    if (root) {
+      try { assertProjectRoot(root); } catch (error) { return null; }
+    }
+    if (!buffer || !intake.grant(projectFile, buffer, root)) return null;
+    currentProjectKey = recentPathKey(projectFile);
+    committedOpenGeneration += 1;
     if (rememberRecent) remember(projectFile);
     return { path: projectFile, b64: buffer.toString('base64') };
   }
 
   async function open(projectFile, options) {
     const generation = ++latestOpenGeneration;
-    const buffer = await readProject(projectFile);
+    let root = null;
+    if (typeof captureProjectRoot === 'function') {
+      try { root = captureProjectRoot(projectFile); assertProjectRoot(root); }
+      catch (error) { return null; }
+    }
+    const result = await readProject(projectFile, root);
     if (generation !== latestOpenGeneration) return null;
-    return commitOpen(projectFile, buffer, options);
+    if (!result || (result.isCurrent && !result.isCurrent())) return null;
+    return commitOpen(projectFile, result.buffer, options, root);
   }
 
   function stageStartup(projectFile) {
@@ -455,6 +521,7 @@ function createProjectWorkspace({
   async function writeRendererProject(projectFile, b64, {
     ensureParent = false,
     remember: shouldRemember = false,
+    projectRoot = null,
   } = {}) {
     if (!isProjectPath(projectFile) || typeof b64 !== 'string') return null;
     let buffer;
@@ -486,7 +553,12 @@ function createProjectWorkspace({
     const saved = await commitAdmittedProjectWrite(projectFile, buffer, {
       ensureParent,
       writeFile,
-      clearTrustedDeclarations: file => intake.grantProjectOnly(file),
+      projectRoot,
+      clearTrustedDeclarations: file => {
+        // 備份已由原專案根授權；不把備份子目錄提升成新的專案或截圖根。
+        if (projectRoot && recentPathKey(path.dirname(file)) !== recentPathKey(projectRoot.requestedPath)) return file;
+        return intake.grantProjectOnly(file, projectRoot);
+      },
     });
 
     if (saved && shouldRemember) remember(saved);
@@ -535,7 +607,16 @@ function createProjectWorkspace({
 
   return Object.freeze({
     acceptsRendererProject,
-    canRelink: (projectFile, mediaPath) => intake.canRelink(projectFile, mediaPath),
+    canRelink: (projectFile, mediaPath) => typeof projectFile === 'string' && recentPathKey(projectFile) === currentProjectKey
+      && intake.canRelink(projectFile, mediaPath),
+    captureRelinkTicket: (projectFile, mediaPath) => {
+      if (typeof projectFile !== 'string' || recentPathKey(projectFile) !== currentProjectKey) return null;
+      const declaration = intake.captureRelinkTicket(projectFile, mediaPath);
+      return declaration ? { declaration, generation: committedOpenGeneration } : null;
+    },
+    isRelinkTicketCurrent: (projectFile, mediaPath, ticket) => typeof projectFile === 'string'
+      && recentPathKey(projectFile) === currentProjectKey && ticket?.generation === committedOpenGeneration
+      && intake.isRelinkTicketCurrent(projectFile, mediaPath, ticket.declaration),
     clearRecent,
     listRecent,
     open,
@@ -550,6 +631,7 @@ module.exports = {
   authorizeDroppedMediaPath,
   commitAdmittedProjectWrite,
   createAtomicProjectWriter,
+  createBoundProjectReader,
   createProjectWorkspace,
   createTrustedProjectIntake,
   finalizeProjectWrite,

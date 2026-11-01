@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
+import vm from 'node:vm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import deliveryFormats from '../shared/delivery-formats.cjs';
 import frameRates from '../shared/delivery-frame-rate.cjs';
@@ -15,7 +16,8 @@ async function openQueueWindow(jobs) {
     setPause: vi.fn().mockResolvedValue(),
     setConcurrency: vi.fn().mockResolvedValue(),
     stopJob: vi.fn().mockResolvedValue(),
-    retryJob: vi.fn().mockResolvedValue(),
+    retryJob: vi.fn().mockResolvedValue(true),
+    retryWithOutputDirectory: vi.fn().mockResolvedValue({ status: 'retried' }),
     clearJob: vi.fn().mockResolvedValue(),
     clearCompleted: vi.fn().mockResolvedValue(),
     reorderJob: vi.fn().mockResolvedValue(),
@@ -44,6 +46,141 @@ async function openQueueWindow(jobs) {
 
 afterEach(() => {
   while (openWindows.length) openWindows.pop().close();
+});
+
+describe('佇列原輸出目錄重新授權', () => {
+  const legacy = { id: 'legacy', attempt: 1, status: 'failed', errorMsg: '輸出位置未經授權',
+    payload: { outPath: 'C:/out/原交付.mp4' } };
+  const feedback = document => document.querySelector('[data-job-id="legacy"] .job-retry-feedback')?.textContent || '';
+  const update = async (queueAPI, jobs) => {
+    const calls = queueAPI.getAll.mock.calls.length;
+    queueAPI.getAll.mockResolvedValue({ jobs, concurrency: 1, isPaused: false });
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await vi.waitFor(() => expect(queueAPI.getAll).toHaveBeenCalledTimes(calls + 1));
+    await Promise.resolve();
+  };
+
+  it('sandbox bridge 只傳工作身分，不接受 renderer 指定替代輸出路徑', async () => {
+    let api;
+    const invoke = vi.fn().mockResolvedValue({ status: 'cancelled', message: '已取消' });
+    vm.runInNewContext(readFileSync(new URL('../electron/queue-preload.js', import.meta.url), 'utf8'), {
+      require: name => {
+        expect(name).toBe('electron');
+        return { contextBridge: { exposeInMainWorld: (key, value) => { if (key === 'queueAPI') api = value; } },
+          ipcRenderer: { invoke } };
+      },
+    });
+    expect(typeof api.retryWithOutputDirectory).toBe('function');
+    expect(await api.retryWithOutputDirectory('legacy', 'C:/untrusted/other.mp4')).toEqual({ status: 'cancelled', message: '已取消' });
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('queue:retryWithOutputDirectory', 'legacy');
+  });
+
+  it.each(['failed', 'missing-source', 'stopped'])('主工作區沒有素材時仍可從 %s 工作選取原資料夾並重試', async status => {
+    const { document, queueAPI } = await openQueueWindow([{ ...legacy, status }]);
+    const button = document.querySelector('[data-action="retry-directory"]');
+    expect(button).not.toBeNull();
+    expect(button.textContent).toContain('原輸出資料夾');
+    queueAPI.getAll.mockResolvedValue({ jobs: [{ ...legacy, attempt: 2, status: 'queued' }], concurrency: 1 });
+    button.click();
+    await vi.waitFor(() => expect(document.querySelector('[data-job-id="legacy"]').dataset.status).toBe('queued'));
+    expect(queueAPI.retryWithOutputDirectory).toHaveBeenCalledExactlyOnceWith('legacy');
+    expect(queueAPI.retryJob).not.toHaveBeenCalled();
+    expect(queueAPI.showMainWindow).not.toHaveBeenCalled();
+    expect(queueAPI.clearJob).not.toHaveBeenCalled();
+  });
+
+  it('普通重試被拒絕時顯示恢復方法，保留原始錯誤和工作', async () => {
+    const { document, queueAPI } = await openQueueWindow([legacy]);
+    queueAPI.retryJob.mockResolvedValue(false);
+    document.querySelector('[data-action="retry"]').click();
+    await vi.waitFor(() => expect(feedback(document)).toContain('原輸出資料夾'));
+    expect(document.querySelector('.error-detail').textContent).toBe(legacy.errorMsg);
+    expect(queueAPI.clearJob).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-action="retry-directory"]').disabled).toBe(false);
+  });
+
+  it('選擇期間其他工作更新仍保持互斥，取消後原工作可再操作', async () => {
+    const other = { id: 'other', status: 'running', payload: { outPath: 'C:/out/other.mp4' } };
+    const { document, queueAPI } = await openQueueWindow([legacy, other]);
+    let finish;
+    queueAPI.retryWithOutputDirectory.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    document.querySelector('[data-action="retry-directory"]').click();
+    expect(feedback(document)).toContain('請選擇');
+    await update(queueAPI, [legacy, { ...other, pct: 50 }]);
+    const row = document.querySelector('[data-job-id="legacy"]');
+    for (const action of ['retry', 'retry-directory', 'clear']) {
+      const button = row.querySelector(`[data-action="${action}"]`);
+      expect(button.disabled).toBe(true);
+      button.click();
+    }
+    expect(document.querySelector('[data-job-id="other"] [data-action="stop"]').disabled).toBe(false);
+    expect(queueAPI.retryWithOutputDirectory).toHaveBeenCalledTimes(1);
+    expect(queueAPI.retryJob).not.toHaveBeenCalled();
+    expect(queueAPI.clearJob).not.toHaveBeenCalled();
+    finish({ status: 'cancelled' });
+    await vi.waitFor(() => expect(feedback(document)).toContain('已取消選擇'));
+    expect(document.querySelector('[data-job-id="legacy"] .job-title').title).toBe('原交付.mp4');
+    expect(document.querySelector('.error-detail').textContent).toBe(legacy.errorMsg);
+    expect(row.querySelector('[data-action="retry-directory"]').disabled).toBe(false);
+    queueAPI.retryWithOutputDirectory.mockResolvedValue({ status: 'cancelled', message: '再次取消' });
+    row.querySelector('[data-action="retry-directory"]').click();
+    await vi.waitFor(() => expect(feedback(document)).toBe('再次取消'));
+    expect(queueAPI.retryWithOutputDirectory).toHaveBeenCalledTimes(2);
+  });
+
+  it('重新選到其他目錄的失敗內容以純文字顯示並保留重試機會', async () => {
+    const { document, queueAPI } = await openQueueWindow([legacy]);
+    const message = '請選擇原資料夾 C:/out，無法改為 <img id="injected-retry">';
+    queueAPI.retryWithOutputDirectory.mockResolvedValue({ status: 'failed', message });
+    document.querySelector('[data-action="retry-directory"]').click();
+    await vi.waitFor(() => expect(feedback(document)).toBe(message));
+    expect(document.getElementById('injected-retry')).toBeNull();
+    expect(document.querySelector('[data-action="retry-directory"]').disabled).toBe(false);
+    expect(queueAPI.retryJob).not.toHaveBeenCalled();
+  });
+
+  it.each(['retry', 'retry-directory'])('%s bridge 拒絕有明確回饋且解除等待', async action => {
+    const { document, queueAPI } = await openQueueWindow([legacy]);
+    const invoke = action === 'retry' ? queueAPI.retryJob : queueAPI.retryWithOutputDirectory;
+    invoke.mockRejectedValue(new Error('無法開啟資料夾選擇器'));
+    document.querySelector(`[data-action="${action}"]`).click();
+    await vi.waitFor(() => expect(feedback(document)).toContain('無法開啟資料夾選擇器'));
+    expect(document.querySelector(`[data-action="${action}"]`).disabled).toBe(false);
+    expect(document.querySelector('.error-detail').textContent).toBe(legacy.errorMsg);
+  });
+
+  it.each(['failed', 'cancelled', 'reject'])('較新 attempt 不接收舊選擇的 %s 結果', async result => {
+    const { document, queueAPI } = await openQueueWindow([legacy]);
+    let finish, fail;
+    queueAPI.retryWithOutputDirectory.mockImplementation(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+    document.querySelector('[data-action="retry-directory"]').click();
+    await update(queueAPI, [{ ...legacy, attempt: 2, errorMsg: '較新的失敗原因' }]);
+    if (result === 'reject') fail(new Error('舊選擇失敗'));
+    else finish({ status: result, message: '舊選擇結果' });
+    await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+    expect(feedback(document)).toBe('');
+    expect(document.querySelector('.error-detail').textContent).toBe('較新的失敗原因');
+    expect(document.querySelector('[data-action="retry-directory"]').disabled).toBe(false);
+    expect(queueAPI.retryJob).not.toHaveBeenCalled();
+  });
+
+  it('其他工作正在更改格式時，授權結果仍可見且不打斷該草稿', async () => {
+    const other = { id: 'other', status: 'queued', payload: { format: 'h264', outPath: 'C:/out/other.mp4' } };
+    const { document, queueAPI } = await openQueueWindow([legacy, other]);
+    document.querySelector('[data-job-id="other"] [data-action="edit"]').click();
+    const input = document.querySelector('.job-editor [data-f="kbps"]');
+    input.value = '12345';
+    queueAPI.retryWithOutputDirectory.mockResolvedValue({ status: 'cancelled' });
+    document.querySelector('[data-action="retry-directory"]').click();
+    await vi.waitFor(() => expect(feedback(document)).toContain('已取消選擇'));
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe('12345');
+  });
+
+  it('等待、執行中與已完成項目不提供重新授權重試', async () => {
+    const { document } = await openQueueWindow(['queued', 'running', 'done'].map(status => ({ ...legacy, id: status, status })));
+    expect(document.querySelector('[data-action="retry-directory"]')).toBeNull();
+  });
 });
 
 describe('匯出佇列監控緊湊工作區', () => {

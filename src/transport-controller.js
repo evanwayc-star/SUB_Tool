@@ -31,6 +31,8 @@ function createReverseShuttleSession({
   getExactFps,
   onPresented,
   onReachedStart,
+  onRestoreFailed,
+  onAbandoned,
   now = () => performance.now(),
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
@@ -50,8 +52,10 @@ function createReverseShuttleSession({
   let lastNativeProgressAt = 0;
   let nativeProgressSeen = false;
   let lastStopPromise = null;
+  let lastStopFailed = false;
   let pendingDirectionRestore = null;
   let startingDirectionPromise = null;
+  let ownsPlayback = () => true;
 
   function exactFps() {
     return Math.max(1, Number(getExactFps?.()) || 30);
@@ -68,6 +72,22 @@ function createReverseShuttleSession({
     healthTimer = null;
   }
 
+  function abandonStalePlayback(notify = false) {
+    if (ownsPlayback()) return false;
+    // reset／新定位已接管播放器；只清自己的工作，不能暫停或定位新工作區。
+    active = false; mode = 'idle'; generation += 1;
+    clearTimers();
+    lastStopPromise = null; lastStopFailed = false;
+    pendingDirectionRestore = null; startingDirectionPromise = null;
+    ownsPlayback = () => true;
+    if (notify) onAbandoned?.();
+    return true;
+  }
+
+  function current(token) {
+    return active && token === generation && !abandonStalePlayback(true);
+  }
+
   function latestPresentedTime({ allowDisplayFallback = true } = {}) {
     const rawObserved = presentation?.presentedTime?.();
     const observed = Number(rawObserved);
@@ -80,22 +100,31 @@ function createReverseShuttleSession({
     return Promise.resolve(media?.setPlaybackDirection?.('forward')).catch(() => false);
   }
 
+  function rememberStop(promise) {
+    lastStopFailed = false;
+    const stopping = Promise.resolve(promise).catch(() => false);
+    lastStopPromise = stopping;
+    stopping.then(restored => {
+      if (lastStopPromise === stopping) lastStopFailed = restored === false;
+    });
+  }
+
   function finishAtStart(token, presentedTime) {
-    if (!active || token !== generation) return;
+    if (!current(token)) return;
     onPresented?.(presentedTime);
     stop();
     onReachedStart?.();
   }
 
   function requestFallbackFrame(token) {
-    if (!active || token !== generation || mode !== 'fallback') return;
+    if (!current(token) || mode !== 'fallback') return;
     const fps = exactFps();
     const elapsedSeconds = Math.max(0, (now() - anchorWallTime) / 1000);
     const rawTarget = Math.max(0, anchorTime - elapsedSeconds * rate);
     // FPS-SYNC (I3): 依格網吸附，若提供 snapFrame 則使用其精確 frame metadata
     const targetTime = Math.max(0, typeof snapFrame === 'function' ? snapFrame(rawTarget) : (Math.round(rawTarget * fps) / fps));
     Promise.resolve(presentation.request(targetTime)).then(result => {
-      if (!active || token !== generation || mode !== 'fallback') return;
+      if (!current(token) || mode !== 'fallback') return;
       if (result?.status !== 'presented') return;
       const presentedTime = Number(result.presentedTime);
       if (!Number.isFinite(presentedTime)) return;
@@ -108,7 +137,7 @@ function createReverseShuttleSession({
   }
 
   function beginFallback(token, { restoreDirection = false } = {}) {
-    if (!active || token !== generation) return;
+    if (!current(token)) return;
     if (healthTimer != null) clearIntervalFn(healthTimer);
     healthTimer = null;
     if (restoreDirection) {
@@ -124,8 +153,13 @@ function createReverseShuttleSession({
     anchorTime = latestPresentedTime();
     anchorWallTime = now();
     const frameInterval = 1000 / Math.min(60, exactFps());
-    const startFallback = () => {
-      if (!active || token !== generation || mode !== 'fallback') return;
+    const startFallback = restored => {
+      if (!current(token) || mode !== 'fallback') return;
+      if (restored === false) {
+        stop();
+        onRestoreFailed?.();
+        return;
+      }
       // 原生倒播必須先完全恢復正向，否則 fallback 的 seek 仍可能從後往前解讀。
       anchorTime = latestPresentedTime();
       anchorWallTime = now();
@@ -142,7 +176,7 @@ function createReverseShuttleSession({
   }
 
   function monitorNative(token) {
-    if (!active || token !== generation || mode !== 'native') return;
+    if (!current(token) || mode !== 'native') return;
     const observed = latestPresentedTime({ allowDisplayFallback: false });
     const currentWallTime = now();
     const minimumProgress = 0.25 / exactFps();
@@ -160,7 +194,9 @@ function createReverseShuttleSession({
   }
 
   async function start(nextRate = -1) {
+    abandonStalePlayback();
     if (active) return update(nextRate);
+    ownsPlayback = media?.capturePlaybackTargetOwnership?.() || (() => true);
     active = true;
     rate = normalizedRate(nextRate);
     const token = ++generation;
@@ -170,7 +206,7 @@ function createReverseShuttleSession({
     // 前一輪 J/K 已停止時，先等來源與方向切回母素材，再開始新倒播。
     // 否則兩個非同步 loadfile 會交錯，舊來源的 file-loaded 會被新請求接走。
     if (lastStopPromise) await lastStopPromise;
-    if (!active || token !== generation) return false;
+    if (!current(token)) return false;
     media?.setReverseShuttleMuted?.(true);
     media?.pause?.();
 
@@ -181,12 +217,12 @@ function createReverseShuttleSession({
 
     mode = 'starting-native';
     const directionPromise = Promise.resolve()
-      .then(() => active && token === generation ? media.setPlaybackDirection('backward') : false)
+      .then(() => current(token) ? media.setPlaybackDirection('backward') : false)
       .catch(() => false);
     startingDirectionPromise = directionPromise;
     const enabled = await directionPromise;
     if (startingDirectionPromise === directionPromise) startingDirectionPromise = null;
-    if (!active || token !== generation) {
+    if (!current(token)) {
       // stop() 已接手等待這輪 backward 完成後恢復正向。
       return false;
     }
@@ -206,6 +242,7 @@ function createReverseShuttleSession({
   }
 
   function update(nextRate) {
+    abandonStalePlayback();
     if (!active) return start(nextRate);
     rate = normalizedRate(nextRate);
     if (mode === 'native') {
@@ -219,7 +256,12 @@ function createReverseShuttleSession({
   }
 
   function stop() {
-    if (!active && mode === 'idle') return false;
+    if (abandonStalePlayback()) return false;
+    if (!active && mode === 'idle') {
+      // 已失敗的還原不能當成可播放來源；下一次明確操作才重試。
+      if (lastStopFailed) rememberStop(restoreForwardDirection());
+      return false;
+    }
     const stoppingMode = mode;
     const previousStop = lastStopPromise;
     active = false;
@@ -228,11 +270,11 @@ function createReverseShuttleSession({
     presentation?.cancel?.('reverse-stopped');
     media?.pause?.();
     if (stoppingMode === 'starting-native' && startingDirectionPromise) {
-      lastStopPromise = startingDirectionPromise.then(enabled => enabled === false ? false : restoreForwardDirection());
+      rememberStop(startingDirectionPromise.then(enabled => enabled === false ? false : restoreForwardDirection()));
     } else if (stoppingMode === 'native') {
-      lastStopPromise = Promise.resolve(restoreForwardDirection()).catch(() => false);
+      rememberStop(restoreForwardDirection());
     } else {
-      lastStopPromise = pendingDirectionRestore || previousStop || Promise.resolve(true);
+      rememberStop(pendingDirectionRestore || previousStop || true);
     }
     media?.setRate?.(1);
     media?.setReverseShuttleMuted?.(false);
@@ -241,10 +283,12 @@ function createReverseShuttleSession({
   }
 
   function isActive() {
+    abandonStalePlayback();
     return active || mode !== 'idle';
   }
 
   function stopPromise() {
+    abandonStalePlayback();
     return lastStopPromise || Promise.resolve(true);
   }
 
@@ -253,6 +297,34 @@ function createReverseShuttleSession({
 
 /* ===== JKL 穿梭輪狀態與定時器 ============================================== */
 let _jklSpeed = 0;
+let _jklIntentVersion = 0;
+let _pendingForwardPlay = null;
+
+function reportShuttleRestoreFailure() {
+  _jklIntentVersion += 1;
+  _jklSpeed = 0;
+  Media.setRate(1);
+  setStatus('無法還原正向播放，已暫停；請重新嘗試', 'err');
+  updateSpeedIndicator();
+}
+
+function playAfterShuttleStop() {
+  const intent = _jklIntentVersion;
+  const ownsTarget = Media.capturePlaybackTargetOwnership?.() || (() => true);
+  const request = { intent, ownsTarget };
+  _pendingForwardPlay = request;
+  // L 與播放鍵共用同一份來源還原結果；連按也不能跳過它。
+  Promise.resolve(_reverseSession.stopPromise()).then(restored => {
+    if (_pendingForwardPlay !== request || intent !== _jklIntentVersion || Media.playing || !ownsTarget()) return;
+    if (restored === false) reportShuttleRestoreFailure();
+    else {
+      Media.play();
+      if (_jklSpeed === 0) setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : '');
+    }
+  }).finally(() => {
+    if (_pendingForwardPlay === request) _pendingForwardPlay = null;
+  });
+}
 
 const _reverseSession = createReverseShuttleSession({
   media: Media,
@@ -276,6 +348,12 @@ const _reverseSession = createReverseShuttleSession({
   onReachedStart() {
     _jklSpeed = 0;
     setStatus('已到開頭', '');
+    updateSpeedIndicator();
+  },
+  onRestoreFailed: reportShuttleRestoreFailure,
+  onAbandoned() {
+    _jklIntentVersion += 1;
+    _jklSpeed = 0;
     updateSpeedIndicator();
   },
 });
@@ -305,10 +383,12 @@ function getJklSpeed() {
 }
 
 function setJklSpeed(speed) {
+  _jklIntentVersion += 1;
   _jklSpeed = speed;
 }
 
 function resetPlaybackSpeed() {
+  _jklIntentVersion += 1;
   jklClear();
   _jklSpeed = 0;
   Media.setRate(1);
@@ -342,6 +422,7 @@ on('transport:pointerSeekPause', pauseForPointerSeek);
 
 
 function setManualPlaybackSpeed(rate) {
+  _jklIntentVersion += 1;
   jklClear();
   _jklSpeed = 0;
   Media.setRate(rate);
@@ -349,23 +430,15 @@ function setManualPlaybackSpeed(rate) {
 }
 
 function jklApply() {
+  _jklIntentVersion += 1;
   if (_jklSpeed === 0) {
     if (!jklClear()) Media.pause();
     Media.setRate(1);
   } else if (_jklSpeed > 0) {
-    const wasReversing = _reverseSession.isActive?.() ?? false;
     jklClear();
     Media.setRate(_jklSpeed);
     if (!Media.playing) {
-      if (wasReversing) {
-        Promise.resolve(_reverseSession.stopPromise?.()).then(() => {
-          if (_jklSpeed > 0 && !Media.playing) Media.play();
-        }).catch(() => {
-          if (_jklSpeed > 0 && !Media.playing) Media.play();
-        });
-      } else {
-        Media.play();
-      }
+      playAfterShuttleStop();
     }
   } else {
     _reverseSession.start(_jklSpeed).catch(() => {});
@@ -397,14 +470,15 @@ function shuttleForward() {
 
 function togglePlayPause() {
   const wasPlaying = Media.playing;
-  const wasShuttling = _jklSpeed !== 0;
+  const wasShuttling = _jklSpeed > 0 || (_jklSpeed < 0 && _reverseSession.isActive());
+  const wasStarting = _pendingForwardPlay?.intent === _jklIntentVersion && _pendingForwardPlay.ownsTarget();
   resetPlaybackSpeed();
   // 原生倒播的 reset 會先暫停並恢復 forward；此時不能再 toggle 一次，否則
   // 空白鍵會從「倒播」意外變成「立刻正播」。
-  if (wasPlaying || wasShuttling) {
+  if (wasPlaying || wasShuttling || wasStarting) {
     if (Media.playing) Media.pause();
   } else {
-    Media.play();
+    playAfterShuttleStop();
   }
   setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : '');
 }

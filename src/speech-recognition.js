@@ -190,7 +190,9 @@ function captureRecognitionSource(source) {
     ? track.audioSourceId===source.audioSourceId
     : runtimeSource&&(track.source||'video')===runtimeSource);
   const tracks=live.length?live:(Array.isArray(source.recognitionTracks)?source.recognitionTracks:[]);
-  return {...source,recognitionTracks:tracks.map(track=>({
+  return {...source,
+    ...(source.audioElement?{audioElement:{src:source.audioElement.currentSrc||source.audioElement.src||''}}:{}),
+    recognitionTracks:tracks.map(track=>({
     sourceStream:track.sourceStream,sourceChannel:track.sourceChannel,
     buffer:track.buffer,file:track.file,_audioEffect:track._audioEffect,
     // Playback may dispose or replace an element while another source in this
@@ -198,6 +200,17 @@ function captureRecognitionSource(source) {
     ...(track.el?{el:{src:track.el.currentSrc||track.el.src||''}}:{}),
     ...(track.audioElement?{audioElement:{src:track.audioElement.currentSrc||track.audioElement.src||''}}:{}),
   }))};
+}
+
+function retainRecognitionSources(clips){
+  const urls=[];
+  for(const clip of clips){
+    urls.push(clip.web?.url,clip.audioElement?.src,clip.src,typeof clip.file==='string'?clip.file:null);
+    for(const track of clip.recognitionTracks||[]){
+      urls.push(track.el?.src,track.audioElement?.src,typeof track.file==='string'?track.file:null);
+    }
+  }
+  return Media.retainObjectURLs?.(urls.filter(Boolean))||(()=>{});
 }
 
 function recognitionTrackEntries(clip) {
@@ -1385,12 +1398,15 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           if (statusEl) statusEl.textContent = session.statusText || progress.message || '';
         };
 
-        const work = startAsrWork({
+        const acceptedClips=clips.map(captureRecognitionSource);
+        const releaseSources=retainRecognitionSources(acceptedClips);
+        let work;
+        try{ work = startAsrWork({
           taskMode,
           provider,
           builtinModel,
           language,
-          clips:clips.map(captureRecognitionSource),
+          clips:acceptedClips,
           transcript,
           transcriptLines,
           recognitionSelection,
@@ -1406,6 +1422,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           timelineDropFrame: State.dropFrame || false,
           dialogOpen: true
         }, {
+          releaseResources:releaseSources,
           extractAudio: (clip, { signal, recognitionSelection: selectedAudio }) => (
             getClipAudioBuffer(clip, { signal, recognitionSelection: selectedAudio })
           ),
@@ -1458,7 +1475,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
             });
             return { count, timelineRejectedLineNumbers };
           }
-        });
+        }); }catch(error){releaseSources();throw error;}
         workId=work.id;
         const unsubscribe = onAsrSessionChange(session => {
           if (session?.id === work.id) renderWorkSnapshot(session);

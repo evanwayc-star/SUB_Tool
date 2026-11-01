@@ -26,14 +26,14 @@ const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
 const { FileAuthority } = require('./file-authority');
 const { createLocalResourceServer, registerLocalResourceScheme } = require('./local-resource');
-const { createProjectWorkspace, createAtomicProjectWriter, authorizeDroppedMediaPath } = require('./project-file-authority-engine');
+const { createProjectWorkspace, createAtomicProjectWriter, createBoundProjectReader, authorizeDroppedMediaPath } = require('./project-file-authority-engine');
 const { createSettingsFile } = require('./settings-file');
 const { collectStyleDirectoryFiles } = require('./style-directory-import');
 const { writeDirectoryFiles } = require('./directory-output');
 const { createScreenshotOutput } = require('./screenshot-output');
 
 const { createIpcGuards, expectedExportExtension, mergeRendererConfig } = require('./ipc-guards');
-const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput } = require('./export-queue');
+const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput, isRetryable } = require('./export-queue');
 const { createMpvHost } = require('./mpv-host');
 const { createMediaIntakeRuntime, createMediaIngestCoordinator, sourceAudioClockFilter } = require('./media-intake-runtime');
 const { createCompareWindow } = require('./compare-window');
@@ -91,7 +91,7 @@ const mediaIngestCoordinator = createMediaIngestCoordinator();
    renderer 路徑不會因 fs:fileURL／stat 等查詢被靜默升格；只接受原生對話框、OS 開檔、
    preload 驗證過的拖放 File 與內部快取。專案內已宣告的媒體則只給「那一個檔案」的唯讀能力。 */
 const fileAuthority = new FileAuthority({ internalDirectories: [TMP] });
-const screenshotOutput = createScreenshotOutput({ fileAuthority });
+const screenshotOutput = createScreenshotOutput({ fileAuthority, tempDir: TMP });
 const localResourceServer = createLocalResourceServer({
   fileAuthority,
   protocolModule: protocol,
@@ -99,9 +99,10 @@ const localResourceServer = createLocalResourceServer({
 });
 const projectWorkspace = createProjectWorkspace({
   saveMetadata: () => ({ appVersion: app.getVersion(), computerName: os.hostname() }),
-  readFile: projectFile => fs.promises.readFile(projectFile),
+  captureProjectRoot: projectFile => ExportLease.captureOutputDirectory(path.dirname(projectFile)),
+  readFile: createBoundProjectReader(),
   writeFile: createAtomicProjectWriter(),
-  grantProjectFile: projectFile => fileAuthority.grantProjectFile(projectFile),
+  grantProjectFile: (projectFile, root) => fileAuthority.grantProjectFile(projectFile, root),
   grantMediaFile: mediaPath => fileAuthority.grantTrustedFile(mediaPath, { read: true, write: false }),
   canReadMedia: mediaPath => fileAuthority.canRead(mediaPath),
   readRecent: () => loadRecentProjects(),
@@ -310,8 +311,10 @@ if (!gotTheLock) {
     fileAuthority.grantQueueLogDirectory(EXPORT_QUEUE_DIR);
     try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
     try { mediaIntakeRuntime.cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
+    let recoveryWarnings = [];
     try {
       const recovery = await ExportWatchdog.recoverExportLeases(EXPORT_QUEUE_DIR);
+      recoveryWarnings = recovery.warnings || [];
       for (const warning of recovery.warnings || []) {
         console.error(`[Export watchdog] ${warning.message || JSON.stringify(warning)}`);
       }
@@ -321,6 +324,7 @@ if (!gotTheLock) {
     }
     try { QueueManager.restoreJobs(); } catch (e) { console.error('[Queue] 無法恢復匯出佇列：', e); }
     createWindow();
+    showExportRecoveryWarnings(recoveryWarnings);
     app.on('activate', () => { showMainWindow(); });
   });
 }
@@ -443,22 +447,37 @@ ipcMain.handle('fs:stat', (e, p) => {
   try { const s = fs.statSync(p); return { exists: true, size: s.size }; } catch (err) { return { exists: false }; }
 });
 ipcMain.handle('fs:listDir', (e, p) => {
-  if (!fileAuthority.canListDirectory(p)) { console.warn('[sec] listDir blocked:', p); return []; }
-  try { return fs.readdirSync(p); } catch (err) { return []; }
+  if (!fileAuthority.canListDirectory(p)) {
+    console.warn('[sec] listDir blocked:', p);
+    throw new Error('無法檢查交付資料夾：目錄未授權或已變更，請重新選擇。');
+  }
+  let files;
+  try { files = fs.readdirSync(p); }
+  catch (error) { throw new Error('無法檢查交付資料夾：請確認目錄存在且可讀取。', { cause: error }); }
+  if (!fileAuthority.canListDirectory(p)) throw new Error('無法檢查交付資料夾：目錄已變更，請重新選擇。');
+  return files;
 });
 
-async function findFileRecursively(dir, targetName, maxDepth = 3) {
+async function findFileRecursively(dir, targetName, maxDepth, captureDirectory, isCurrent, ancestors = []) {
   if (maxDepth < 0) return null;
+  const directory = captureDirectory(dir);
+  if (!directory) return null;
+  const snapshots = [...ancestors, directory];
+  const stillCurrent = () => snapshots.every(isCurrent);
+  if (!stillCurrent()) return null;
   try {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    if (!stillCurrent()) return null;
     for (const entry of entries) {
+      if (!stillCurrent()) return null;
       if (entry.isFile() && entry.name === targetName) {
-        return path.join(dir, entry.name);
+        return { path: path.join(dir, entry.name), snapshots };
       }
     }
     for (const entry of entries) {
+      if (!stillCurrent()) return null;
       if (entry.isDirectory()) {
-        const found = await findFileRecursively(path.join(dir, entry.name), targetName, maxDepth - 1);
+        const found = await findFileRecursively(path.join(dir, entry.name), targetName, maxDepth - 1, captureDirectory, isCurrent, snapshots);
         if (found) return found;
       }
     }
@@ -473,12 +492,28 @@ ipcMain.handle('fs:findRelinkTarget', async (e, { projectPath, oldMediaPath }) =
      renderer-supplied arbitrary name is never authority to search/grant a
      sibling file. */
   if (!projectWorkspace.canRelink(projectPath, oldMediaPath)) return null;
+  const ticket = projectWorkspace.captureRelinkTicket(projectPath, oldMediaPath);
+  if (!ticket) return null;
   
   const targetName = path.basename(oldMediaPath);
   const startDir = path.dirname(projectPath);
   
-  const newPath = await findFileRecursively(startDir, targetName, 3);
-  if (newPath) {
+  const captureDirectory = directory => {
+    if (!projectWorkspace.isRelinkTicketCurrent(projectPath, oldMediaPath, ticket)) return null;
+    try { return fileAuthority.captureProjectRelinkOutput(projectPath, path.join(directory, '.subtool-relink-check')); }
+    catch (error) { return null; }
+  };
+  const isCurrent = evidence => projectWorkspace.isRelinkTicketCurrent(projectPath, oldMediaPath, ticket)
+    && fileAuthority.isProjectRelinkOutputCurrent(projectPath, evidence);
+  const found = await findFileRecursively(startDir, targetName, 3, captureDirectory, isCurrent);
+  if (found) {
+    if (!found.snapshots.every(isCurrent)) return null;
+    const newPath = found.path;
+    try {
+      fileAuthority.captureProjectRelinkOutput(projectPath, newPath);
+      const stat = fs.lstatSync(newPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    } catch (error) { return null; }
     fileAuthority.grantTrustedFile(newPath, { read: true, write: false });
     return newPath;
   }
@@ -614,7 +649,10 @@ ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
   /* 儲存時的 JSON 來自 renderer；只授權使用者剛在原生對話框選定的專案檔，
      不可據此替其中任意宣告的 media path 升權。重新從原生開啟該專案時，才會走
      projectWorkspace 解析已取得的檔案內容。 */
-  try { return await projectWorkspace.writeRendererProject(r.filePath, b64, { remember: true }); }
+  try {
+    const projectRoot = ExportLease.captureOutputDirectory(path.dirname(r.filePath));
+    return await projectWorkspace.writeRendererProject(r.filePath, b64, { remember: true, projectRoot });
+  }
   catch (error) { return null; }
 });
 
@@ -679,6 +717,22 @@ function _findExportTimecodeFont() {
 /* ===== 背景匯出佇列與 QueueManager ===== */
 let EXPORT_QUEUE_DIR = null;
 let queueWin = null;
+let exportRecoveryWarningsShown = false;
+function showExportRecoveryWarnings(warnings) {
+  if (exportRecoveryWarningsShown || !warnings?.length || _isAppQuitting || !mainWin || mainWin.isDestroyed()) return;
+  exportRecoveryWarningsShown = true;
+  const details = warnings.slice(0, 5).map(warning =>
+    `${String(warning.outPath || '').slice(0, 256)}\n${String(warning.message || '無法確認舊交付身分').slice(0, 256)}`);
+  if (warnings.length > 5) details.push(`另有 ${warnings.length - 5} 筆；詳細內容請查看應用程式記錄。`);
+  // This notification never owns initialization, queue persistence or quit.
+  try {
+    void dialog.showMessageBox(mainWin, { type: 'warning', title: '未完成交付檔案已保留',
+      message: '部分交付暫存檔與輸出鎖無法安全清理，已保留原檔案。',
+      detail: `${details.join('\n\n')}\n\n請檢查保留檔案；在佇列重新選擇原輸出資料夾後重試。若舊鎖仍無法清理，請以新檔名建立交付工作。`,
+      buttons: ['知道了'], noLink: true,
+    }).catch(error => console.error('[Export watchdog] 無法顯示復原提示：', error));
+  } catch (error) { console.error('[Export watchdog] 無法顯示復原提示：', error); }
+}
 let QueueManager = null;
 /* 分類的唯一來源在 export-queue.js */
 const OUTPUT_RESERVED_STATUSES = { has: reservesOutput };
@@ -860,7 +914,7 @@ function grantPersistedQueueJobCapabilities(job) {
   }
   try {
     assertQueueOutputFormat(job);
-    fileAuthority.grantDeliveryFile(job.payload.outPath);
+    if (job.outputAuthority) fileAuthority.restoreDeliveryFile(job.payload.outPath, job.outputAuthority);
   } catch (error) {}
 }
 
@@ -962,6 +1016,7 @@ QueueManager = createExportQueue({
   grantCompletedOutputReveal: file => fileAuthority.grantDeliveryReveal(file),
   canReadSource: file => fileAuthority.canRead(file),
   canWriteDelivery: file => fileAuthority.canWriteDelivery(file),
+  captureOutputAuthority: file => fileAuthority.captureDeliveryOutput(file),
   isFile: p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } },
   runJob: job => deliveryRunner.run(job),
   prepareDeliveryUpdate: prepareQueueDeliveryUpdate,
@@ -1021,6 +1076,34 @@ ipcMain.handle('queue:stopJob', (e, jobId) => {
 
 ipcMain.handle('queue:retryJob', (e, jobId) => {
   return QueueManager.retryJob(jobId);
+});
+
+ipcMain.handle('queue:retryWithOutputDirectory', async (e, jobId) => {
+  const job = QueueManager.jobs().find(current => current.id === jobId);
+  const fail = message => ({ status: 'failed', message });
+  if (!job || !isRetryable(job.status) || QueueManager.shuttingDown) return fail('這份工作目前不能重試');
+  const { status, attempt, payload } = job;
+  const outPath = payload?.outPath;
+  if (typeof outPath !== 'string' || !outPath) return fail('工作缺少輸出路徑');
+  const directory = path.dirname(outPath);
+  const owns = () => !QueueManager.shuttingDown && QueueManager.jobs().find(current => current.id === jobId) === job
+    && job.status === status && job.attempt === attempt && job.payload === payload && job.payload.outPath === outPath;
+  try {
+    const result = await dialog.showOpenDialog(queueWin || mainWin, {
+      title: '重新選擇原輸出資料夾並重試', defaultPath: directory, properties: ['openDirectory'],
+    });
+    if (result.canceled || !result.filePaths?.length) return { status: 'cancelled', message: '已取消重新選擇，原工作與字幕快照仍保留' };
+    if (!owns()) return fail('工作已變更，本次選擇未套用');
+    const selected = ExportLease.captureOutputDirectory(result.filePaths[0]);
+    const original = ExportLease.captureOutputDirectory(directory);
+    const key = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+    if (key(selected.path) !== key(original.path) || selected.dev !== original.dev || selected.ino !== original.ino) {
+      return fail(`請選擇原輸出資料夾：${directory}；如需其他位置，請建立新的交付工作`);
+    }
+    fileAuthority.grantDeliveryDirectory(directory);
+    if (!QueueManager.retryJob(jobId)) return fail('無法重試：請檢查來源與保留的輸出鎖；舊鎖無法安全清理時，請以新檔名建立交付工作');
+    return { status: 'retried', message: '已重新授權原輸出資料夾並重試' };
+  } catch (error) { return fail(error?.message || '無法重新選擇輸出資料夾'); }
 });
 
 ipcMain.handle('queue:clearJob', (e, jobId) => {
@@ -1088,16 +1171,18 @@ function prepareQueueDeliveryUpdate(job, patch) {
   /* 先用候選物件跑一次准入檢查，通過才真的改到 job 上——
      失敗時 job 必須維持原狀，不可以留下改到一半的狀態。 */
   const nextPayload = { ...p, format, outPath: newPath, ...spec, audioPlan, canvasW, canvasH };
+  const outputAuthority = ExportLease.retargetOutputAuthority(job.outputAuthority, newPath);
   const candidate = { ...job, payload: nextPayload };
   _admission.assertOutputFormat(candidate);
   _admission.assertOutputAvailable(candidate, job.id); // 排除自己；擋同路徑撞車
   return {
     payload: nextPayload,
+    outputAuthority,
     result: { format, outPath: newPath, width: spec.width, height: spec.height, targetH: spec.targetH,
       videoKbps: spec.videoKbps, fps: spec.fps, burnTimecode: !!spec.timecodeWatermark },
     /* 同資料夾、同主檔名，只換副檔名。能力只在 job 快照成功落盤後才擴張，
        失敗時不留下 renderer 看不到的半份授權。 */
-    onCommitted: newPath !== oldPath ? () => fileAuthority.grantDeliveryFile(newPath) : undefined,
+    onCommitted: newPath !== oldPath ? () => fileAuthority.restoreDeliveryFile(newPath, outputAuthority) : undefined,
   };
 }
 
@@ -1108,6 +1193,7 @@ ipcMain.handle('queue:openMonitor', () => {
 ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
   payload = prepareDeliveryPayload({ ...payload, format: String(payload?.format || '').trim().toLowerCase() });
+  delete payload.outputAuthority;
   const preset = getDeliveryFormatPreset(payload?.format);
   if (preset) payload = { ...payload, targetH: preset.height };
   const { assText, format, defaultName, outPath: presetOut } = payload;
@@ -1133,7 +1219,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   await deliveryCapabilities.assertReady(authorizationPayload);
   // 交付目錄能力只代表「可建立候選檔」；工作通過格式、來源與路徑驗證後，
   // 才給這一個成品 shell reveal 的精確能力。
-  fileAuthority.grantDeliveryFile(outPath);
+  fileAuthority.grantDeliveryReveal(outPath);
 
   const jobId = newJobId('export-');
   // 分離 assText 存為獨立檔案
@@ -1586,7 +1672,10 @@ ipcMain.handle('fs:readB64', async (e, p) => {
 ipcMain.handle('fs:writeProject', async (e, { path: p, b64 }) => {
   // autosave 落在使用者已選取的專案／媒體資料夾旁；不可讓 renderer 自行擴張寫入根。
   if (!fileAuthority.canWriteProject(p)) { console.warn('[sec] writeProject blocked:', p); return null; }
-  try { return await projectWorkspace.writeRendererProject(p, b64, { ensureParent: true }); }
+  try {
+    const projectRoot = fileAuthority.captureProjectWriteRoot(p);
+    return await projectWorkspace.writeRendererProject(p, b64, { ensureParent: true, projectRoot });
+  }
   catch (err) { return null; }
 });
 ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
@@ -1766,8 +1855,7 @@ ipcMain.handle('mpv:present', (event, time, options) => mpvHost.present(time, {
 ipcMain.handle('mpv:cancelPresent', () => mpvHost.cancelPresent());
 ipcMain.handle('mpv:screenshot', (event, filePath) => {
   if (!fileAuthority.canWriteScreenshot(filePath)) throw new Error('未授權的截圖輸出路徑');
-  fileAuthority.grantTemporaryScreenshotRead(filePath);
-  return mpvHost.screenshot(filePath);
+  return screenshotOutput.captureNative(mpvHost);
 });
 ipcMain.handle('mpv:play', () => mpvHost.play());
 ipcMain.handle('mpv:pause', () => mpvHost.pause());

@@ -9,7 +9,8 @@ const { createDeliveryRunner } = require('../electron/delivery-runner.js');
 const { createExportQueue } = require('../electron/export-queue.js');
 const QueueStore = require('../electron/queue-store.js');
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
-const { acquireLease, releaseLease, listLeases, stageOutputPath } = require('../electron/export-lease.js');
+const { spawnExportWatchdog } = require('../electron/export-watchdog.js');
+const { acquireLease, releaseLease, listLeases, stageOutputPath, captureOutputAuthority, captureOutputDirectory } = require('../electron/export-lease.js');
 const nativeFs = require('node:fs');
 
 const tempRoots = [];
@@ -65,7 +66,12 @@ function make(overrides = {}) {
     },
     now: overrides.now || (() => 1000),
   });
-  return { runner, queue, queueDir, tempDir, sent, active, runFfmpeg };
+  const publicRunner = { run(job) {
+    job.payload.outPath = path.join(root, path.posix.basename(job.payload.outPath));
+    job.outputAuthority = captureOutputAuthority(job.payload.outPath, captureOutputDirectory(root));
+    return runner.run(job);
+  } };
+  return { runner: publicRunner, queue, queueDir, tempDir, sent, active, runFfmpeg };
 }
 
 function videoJob(overrides = {}) {
@@ -100,6 +106,7 @@ describe('delivery runner public interface', () => {
         assertJobAdmissible() {}, assertMasterMedia() {}, assertOutputAvailable() {}, assertOutputFormat() {} },
       grantPersistedCapabilities() {}, canReadSource: () => true, canWriteDelivery: () => true,
       isFile: () => true, runJob: job => runner.run(job), onChanged() {},
+      captureOutputAuthority: file => captureOutputAuthority(file, captureOutputDirectory(root)),
     });
     runner = createDeliveryRunner({ queue, queueDir: () => queueDir, tempDir,
       nativeCapabilities: { assertReady }, mediaProbe: () => ({ hasAudio, audioBitrates: async () => [] }),
@@ -289,18 +296,20 @@ describe('delivery runner public interface', () => {
     expect(setup.active.size).toBe(0);
   });
 
-  it.each([false, true])('成品提交後停止仍依 lease 收尾結果保存終態（releaseFailure=%s）', async releaseFailure => {
+  it.each(['user-stop', 'shutdown'].flatMap(reason => [false, true].map(releaseFailure => ({ reason, releaseFailure }))))
+  ('成品提交後 $reason 仍依 lease 收尾結果保存終態（releaseFailure=$releaseFailure）', async ({ reason, releaseFailure }) => {
     const root = mkdtempSync(path.join(tmpdir(), 'subtool-delivery-release-')); tempRoots.push(root);
     const queueDir = path.join(root, 'queue'), outPath = path.join(root, 'delivery.mp4');
     const token = 'completed-delivery-token', stagePath = stageOutputPath(outPath, token);
     const completedBytes = Buffer.from('completed delivery bytes preserved after commit');
     const sent = [], stop = vi.fn(), releaseError = Object.assign(new Error('輸出鎖暫時無法移除'), { code: 'EPERM' });
-    let runner, lease, failedReleaseAttempts = 0;
+    let runner, lease, shutdown, failedReleaseAttempts = 0;
     const queue = createExportQueue({ dir: () => queueDir, store: QueueStore, history: QueueStore.QueueHistory,
       admission: { sourcePathsOf: job => QueueStore.collectSourcePaths(job.payload),
         assertJobAdmissible() {}, assertMasterMedia() {}, assertOutputAvailable() {}, assertOutputFormat() {} },
       grantPersistedCapabilities() {}, canReadSource: () => true, canWriteDelivery: () => true,
       isFile: () => true, runJob: job => runner.run(job), onChanged() {},
+      captureOutputAuthority: file => captureOutputAuthority(file, captureOutputDirectory(root)),
     });
     const rmdir = nativeFs.rmdirSync;
     const removeLock = vi.spyOn(nativeFs, 'rmdirSync').mockImplementation((file, ...args) => {
@@ -314,7 +323,8 @@ describe('delivery runner public interface', () => {
           lease = acquireLease({ queueDir, outPath, token, stagePath, jobId: config.jobId });
           writeFileSync(stagePath, completedBytes);
           nativeFs.renameSync(stagePath, outPath);
-          expect(queue.stopJob(config.jobId)).toBe(true);
+          if (reason === 'shutdown') shutdown = queue.prepareForShutdown();
+          else expect(queue.stopJob(config.jobId)).toBe(true);
           let release;
           try { release = releaseLease({ queueDir, outPath, token }); }
           catch (error) {
@@ -343,7 +353,8 @@ describe('delivery runner public interface', () => {
         expect(runFfmpeg).toHaveBeenCalledOnce();
         expect(queue.activeJob(job.id)).toBeNull();
       });
-      expect(stop).toHaveBeenCalledWith('user-stop');
+      if (shutdown) await shutdown;
+      expect(stop).toHaveBeenCalledWith(reason);
       expect(readFileSync(outPath)).toEqual(completedBytes);
       expect(existsSync(stagePath)).toBe(false);
       expect(failedReleaseAttempts).toBe(releaseFailure ? 1 : 0);
@@ -363,6 +374,114 @@ describe('delivery runner public interface', () => {
         expect(audioBitrates).toHaveBeenCalledOnce();
       }
     } finally { removeLock.mockRestore(); }
+  });
+
+  it.each(['partial-cleanup', 'committed-release'])('關機時 %s 保留 lease 必須持久化 failed 而非重新排隊', async mode => {
+    const root = mkdtempSync(path.join(tmpdir(), 'subtool-delivery-shutdown-retained-')); tempRoots.push(root);
+    const queueDir = path.join(root, 'queue'), outPath = path.join(root, 'delivery.mp4');
+    const token = 'shutdown-retained-token', stagePath = stageOutputPath(outPath, token);
+    const oldBytes = Buffer.from('old deliverable'), newBytes = Buffer.from('complete new deliverable');
+    writeFileSync(outPath, oldBytes);
+    let runner, started;
+    const ready = new Promise(resolve => { started = resolve; });
+    const queue = createExportQueue({ dir: () => queueDir, store: QueueStore, history: QueueStore.QueueHistory,
+      admission: { sourcePathsOf: job => QueueStore.collectSourcePaths(job.payload),
+        assertJobAdmissible() {}, assertMasterMedia() {}, assertOutputAvailable() {}, assertOutputFormat() {} },
+      grantPersistedCapabilities() {}, canReadSource: () => true, canWriteDelivery: () => true,
+      isFile: () => true, runJob: job => runner.run(job), onChanged() {},
+      captureOutputAuthority: file => captureOutputAuthority(file, captureOutputDirectory(root)),
+    });
+    const runFfmpeg = vi.fn(async (args, options) => {
+      acquireLease({ queueDir, outPath, token, stagePath, jobId: options.jobId, outputStarted: true,
+        outputAuthority: options.outputAuthority });
+      writeFileSync(stagePath, mode === 'partial-cleanup' ? 'partial output' : newBytes);
+      if (mode === 'committed-release') nativeFs.renameSync(stagePath, outPath);
+      return new Promise((resolve, reject) => {
+        options.onProcess({ process: { pid: 42 }, stop(reason) {
+          expect(reason).toBe('shutdown');
+          const error = Object.assign(new Error('輸出收尾失敗，鎖已保留'), {
+            code: mode === 'partial-cleanup' ? 'PARTIAL_CLEANUP_FAILED' : 'LEASE_RELEASE_FAILED',
+            watchdogResult: mode === 'partial-cleanup' ? { cleanup: { retainedLease: true } }
+              : { cleanup: null, release: { retainedLease: true } },
+          });
+          reject(error);
+        } });
+        started();
+      });
+    });
+    runner = createDeliveryRunner({ queue, queueDir: () => queueDir, tempDir: path.join(root, 'work'),
+      nativeCapabilities: { assertReady: async () => {} }, mediaProbe: () => ({ hasAudio: async () => false }),
+      encoder: { bitrateArgs: () => ['-c:v', 'libx264'] }, runFfmpeg,
+    });
+    const job = videoJob({ status: 'queued', createdAt: Date.now() }); job.payload.outPath = outPath;
+    queue.addJob(job); await ready;
+    await queue.prepareForShutdown();
+    expect(queue.get(job.id)).toMatchObject({ status: 'failed', errorMsg: expect.stringContaining('鎖已保留') });
+    expect(QueueStore.loadTerminalOutcomes(queueDir)).toMatchObject([{ id: job.id, status: 'failed' }]);
+    expect(listLeases(queueDir)).toMatchObject([{ valid: true, owner: { token } }]);
+    expect(readFileSync(outPath)).toEqual(mode === 'partial-cleanup' ? oldBytes : newBytes);
+    if (mode === 'partial-cleanup') expect(readFileSync(stagePath, 'utf8')).toBe('partial output');
+  });
+
+  it.each(['none', 'user-stop', 'shutdown'].flatMap(reason => [false, true].map(releaseFailure => ({ reason, releaseFailure }))))
+  ('光碟啟動失敗後 $reason 依釋鎖結果保留原始原因與終態（releaseFailure=$releaseFailure）', async ({ reason, releaseFailure }) => {
+    const root = mkdtempSync(path.join(tmpdir(), 'subtool-startup-release-')); tempRoots.push(root);
+    const queueDir = path.join(root, 'queue'), outPath = path.join(root, 'delivery.iso');
+    const adapter = path.join(root, 'watchdog-adapter.cjs');
+    writeFileSync(outPath, 'previous delivery');
+    writeFileSync(adapter, `
+      const lease = require(${JSON.stringify(path.resolve('electron/export-lease.js'))});
+      lease.updateLease = () => {
+        process.send({ type: 'test-startup' });
+        throw Object.assign(new Error('owner update failed'), { code: 'EIO' });
+      };
+      ${releaseFailure ? "lease.releaseLease = () => { throw Object.assign(new Error('lease release failed'), { code: 'EPERM' }); };" : ''}
+      require(${JSON.stringify(path.resolve('electron/export-watchdog.js'))}).runStandalone();
+    `);
+    let runner, shutdown;
+    const messages = [];
+    const queue = createExportQueue({ dir: () => queueDir, store: QueueStore, history: QueueStore.QueueHistory,
+      admission: { sourcePathsOf: job => QueueStore.collectSourcePaths(job.payload),
+        assertJobAdmissible() {}, assertMasterMedia() {}, assertOutputAvailable() {}, assertOutputFormat() {} },
+      grantPersistedCapabilities() {}, canReadSource: () => true, canWriteDelivery: () => true,
+      isFile: () => true, runJob: job => runner.run(job), onChanged() {},
+      captureOutputAuthority: file => captureOutputAuthority(file, captureOutputDirectory(root)),
+    });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => process.execPath, getQueueDir: () => queueDir,
+      spawnWatchdog(config, handlers) {
+        return spawnExportWatchdog(config, { ...handlers, scriptPath: adapter, onMessage(message) {
+          messages.push(message);
+          if (message.type === 'test-startup') {
+            if (reason === 'shutdown') shutdown = queue.prepareForShutdown();
+            else if (reason === 'user-stop') expect(queue.stopJob(config.jobId)).toBe(true);
+          }
+          handlers.onMessage(message);
+        } });
+      },
+    });
+    const runFfmpeg = vi.fn((args, options) => execution.execute(args, options));
+    runner = createDeliveryRunner({ queue, queueDir: () => queueDir, tempDir: path.join(root, 'work'),
+      nativeCapabilities: { assertReady: async () => {} }, mediaProbe: () => ({ hasAudio: async () => false }),
+      encoder: { bitrateArgs: () => ['-c:v', 'libx264'] }, runFfmpeg,
+    });
+    const job = videoJob({ status: 'queued', createdAt: Date.now() });
+    Object.assign(job.payload, { format: 'dvd-iso', outPath, width: 720, height: 576 });
+    queue.addJob(job);
+    await vi.waitFor(() => { expect(runFfmpeg).toHaveBeenCalledOnce(); expect(queue.activeJob(job.id)).toBeNull(); });
+    if (shutdown) await shutdown;
+    expect(messages).toContainEqual(expect.objectContaining({ type: 'error', code: 'EIO', message: 'owner update failed' }));
+    expect(readFileSync(outPath, 'utf8')).toBe('previous delivery');
+    if (releaseFailure) {
+      expect(messages).toContainEqual(expect.objectContaining({ type: 'exit', ok: false,
+        cleanup: expect.objectContaining({ retainedLease: true, releaseError: { code: 'EPERM', message: 'lease release failed' } }) }));
+      expect(listLeases(queueDir)).toMatchObject([{ valid: true, owner: { outputStarted: false } }]);
+      expect(queue.get(job.id)).toMatchObject({ status: 'failed', errorMsg: expect.stringContaining('owner update failed') });
+      expect(queue.get(job.id).errorMsg).toContain('lease release failed');
+      expect(QueueStore.loadTerminalOutcomes(queueDir)).toMatchObject([{ id: job.id, status: 'failed' }]);
+    } else {
+      expect(listLeases(queueDir)).toEqual([]);
+      expect(queue.get(job.id).status).toBe(reason === 'none' ? 'failed' : reason === 'user-stop' ? 'stopped' : 'queued');
+    }
   });
 
   it('航空來源的音訊前導時間送入正式轉檔計畫', async () => {
@@ -388,7 +507,7 @@ describe('delivery runner public interface', () => {
       expect.objectContaining({ outputFormat: format, discAudioPlan: null,
         discVideoFps: format === 'bd-iso' ? 25 : 29.97 }));
     expect(setup.sent.at(-1)?.payload).toMatchObject({ done: true,
-      result: { container: 'iso', outputFiles: [path.join('D:/out', 'disc.iso')], audioActualBitrates: null } });
+      result: { container: 'iso', outputFiles: [path.normalize(job.payload.outPath)], audioActualBitrates: null } });
   });
   it('光碟容量估算包含超出影像範圍的音訊尾端', async () => {
     const setup = make();
@@ -417,11 +536,12 @@ describe('delivery runner public interface', () => {
     let clock = 1000;
     const setup = make({ now: () => (clock += 250) });
 
-    await setup.runner.run(videoJob());
+    const job = videoJob();
+    await setup.runner.run(job);
 
     expect(setup.queue.assertJobCapabilities).toHaveBeenCalledOnce();
     expect(setup.runFfmpeg).toHaveBeenCalledWith(
-      expect.arrayContaining(['-c:v', 'libx264', 'D:/out/delivery.mp4']),
+      expect.arrayContaining(['-c:v', 'libx264', job.payload.outPath]),
       expect.objectContaining({ jobId: 'delivery-1', cwd: setup.tempDir }),
     );
     expect(setup.queue.registerActiveJob).toHaveBeenCalledOnce();

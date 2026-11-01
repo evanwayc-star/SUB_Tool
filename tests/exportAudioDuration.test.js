@@ -14,6 +14,7 @@ const { ffmpeg: FFMPEG, ffprobe: FFPROBE } = nativeTestTools();
 const nativeIt = existsSync(FFMPEG) ? it : it.skip;
 const require = createRequire(import.meta.url);
 const { createDeliveryRunner } = require('../electron/delivery-runner.js');
+const { captureOutputDirectory, captureOutputAuthority } = require('../electron/export-lease.js');
 const { createMediaProbe } = require('../electron/media-probe.js');
 const SAMPLE_RATE = 48000;
 const roots = [];
@@ -82,7 +83,7 @@ describe('交付音訊完整時間範圍', () => {
       encoder: { proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] },
       runFfmpeg: async args => { runFfmpeg(args); return { maps: [] }; } });
     try {
-      await runner.run({ id: 'delayed-forward', payload: { format: mode === 'wav' ? 'wav' : 'prores',
+      await runner.run({ id: 'delayed-forward', outputAuthority: captureOutputAuthority(outPath, captureOutputDirectory(directory)), payload: { format: mode === 'wav' ? 'wav' : 'prores',
         duration: 3.2 - inPoint, outPath, clips: mode === 'wav' ? [] : [clip], videoTracks: [{ vt: 0 }], width: 64, height: 48, fps: 25,
         audioPlan: mode === 'wav' || mode.startsWith('routed') ? audioPlan : null } });
       expect(progress.find(record => record.error), JSON.stringify(progress)).toBeUndefined();

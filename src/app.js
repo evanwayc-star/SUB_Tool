@@ -317,7 +317,14 @@ $('seekBar').addEventListener('input',e=>{ renderSeekBar(e.target); const t=(+e.
 // rateSel removed from UI — speed controlled via JKL keys
 $('fpsSel').addEventListener('change',e=>{
   const prev=State.fps,prevDf=State.dropFrame;
-  setFps(e.target.value);
+  const requested=e.target.value;
+  const nextFps=snapFps(parseFloat(requested)||24),nextDf=requested.endsWith('df');
+  if(nextFps!==prev || nextDf!==prevDf){
+    const owns=Project.captureWorkspaceOwnership();
+    History.cancelPreviewsForTargets([...State.cues]);
+    if(!owns() || State.fps!==prev || State.dropFrame!==prevDf) return;
+  }
+  setFps(requested);
   snapAllCuesToFrames();
   State.notes.forEach(n => {
     n.time = snapTimeToFrame(n.time, State.fps, State.dropFrame);
