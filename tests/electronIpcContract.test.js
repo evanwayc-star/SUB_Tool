@@ -15,12 +15,12 @@ const { FileAuthority } = require('../electron/file-authority.js');
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('../electron/media-intake-runtime.js');
 
-function intakeBridge(runtime, coordinator, sender) {
+function intakeBridge(runtime, coordinator, sender, waveformCoordinator = createMediaIngestCoordinator()) {
   const source = fs.readFileSync(path.join(ROOT, 'electron/main.js'), 'utf8');
   const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
-  const channels = ['ffmpeg:ingest', 'ffmpeg:streamIngest', 'ffmpeg:cancelIntake', 'ffmpeg:releaseStream'];
+  const channels = ['ffmpeg:ingest', 'ffmpeg:streamIngest', 'ffmpeg:prepareSourceWaveform', 'ffmpeg:cancelIntake', 'ffmpeg:releaseStream'];
   const handlers = new Map();
-  const context = { mediaIntakeRuntime: runtime, mediaIngestCoordinator: coordinator,
+  const context = { mediaIntakeRuntime: runtime, mediaIngestCoordinator: coordinator, mediaWaveformCoordinator: waveformCoordinator,
     requireReadablePath() {}, TypeError,
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } };
   const selected = ast.body.filter(node => (node.type === 'FunctionDeclaration'
@@ -160,6 +160,56 @@ describe('sandbox 佇列精確 FPS bridge', () => {
 });
 
 describe('Electron invoke interface', () => {
+  it('來源波形經真 preload/main/runtime 不排在 Proxy 後；取消只停止自己並等待 writer close 清理', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-wave-ipc-'));
+    const source = path.join(root, 'mother.mov'); fs.writeFileSync(source, 'mother');
+    const children = [], outputs = [];
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg-test', getUserDataDir: () => root,
+      spawnDirect(_executable, args) {
+        const child = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = vi.fn();
+        outputs.push(args.at(-1)); fs.writeFileSync(args.at(-1), 'wave partial'); children.push(child);
+        return child;
+      } });
+    const runtime = createMediaIntakeRuntime({ tempRoot: root, cacheRoot: path.join(root, 'cache'), allowSidecarCache: false,
+      fileAuthority: new FileAuthority({ internalDirectories: [root] }), ffmpegExecution: execution });
+    const coordinator = createMediaIngestCoordinator(), waveCoordinator = createMediaIngestCoordinator();
+    const sender = new EventEmitter(), foreignSender = {};
+    const api = intakeBridge(runtime, coordinator, sender, waveCoordinator);
+    const foreign = intakeBridge(runtime, coordinator, foreignSender, waveCoordinator);
+    let finishProxy;
+    const proxyOwner = { sender, sessionId: 'proxy', requestId: 'long' };
+    const proxyClosed = new Promise(resolve => { finishProxy = resolve; });
+    await coordinator.enqueue(() => ({ response: true, completion: proxyClosed }), proxyOwner);
+    let pending;
+    try {
+      expect(typeof api.prepareSourceWaveform).toBe('function');
+      pending = api.prepareSourceWaveform({ path: source, duration: 120, audio: [{ channels: 2 }],
+        start: 60, length: 60, sessionId: 'wave', requestId: 'segment' });
+      pending.catch(() => {});
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      await expect(foreign.cancelMediaIntake({ sessionId: 'wave' })).resolves.toBe(0);
+      expect(children[0].kill).not.toHaveBeenCalled();
+      let stopped = false;
+      const stop = api.cancelMediaIntake({ sessionId: 'wave' }).then(() => { stopped = true; });
+      await vi.waitFor(() => expect(children[0].kill).toHaveBeenCalledOnce());
+      expect(stopped).toBe(false); expect(fs.existsSync(outputs[0])).toBe(true);
+      children[0].emit('close', 1);
+      await stop;
+      await expect(pending).rejects.toMatchObject({ code: 'INGEST_SUPERSEDED' });
+      expect(fs.existsSync(outputs[0])).toBe(false);
+      await expect(api.prepareSourceWaveform({ path: source, duration: 120, audio: [{ channels: 2 }],
+        start: 0, length: 60, sessionId: 'wave', requestId: 'late' })).rejects.toMatchObject({ code: 'INGEST_SUPERSEDED' });
+      expect(children).toHaveLength(1); expect(sender.listenerCount('destroyed')).toBe(0);
+    } finally {
+      for (const child of children) child.emit('close', 1);
+      finishProxy(); await pending?.catch(() => {});
+      await Promise.all([coordinator.cancelAllAndWait(), waveCoordinator.cancelAllAndWait()]); await runtime.close();
+      const resolved = fs.realpathSync(root);
+      if (path.dirname(resolved) !== fs.realpathSync(os.tmpdir()) || !path.basename(resolved).startsWith('subtool-wave-ipc-')) throw new Error('unsafe wave fixture cleanup');
+      fs.rmSync(resolved, { recursive: true, force: true });
+    }
+  });
+
   it('Proxy 取消經真 preload/main/runtime，只停止同 sender 的原 session，native close 後才准入新工作', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-intake-ipc-'));
     const source = path.join(root, 'mother.mov');

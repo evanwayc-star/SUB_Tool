@@ -200,6 +200,13 @@ export const Wave = {
     if(!this.peaks||runtime===Media.activeSource||(!Media.activeSource&&runtime==='video')) this.peaks=peaks;
     return peaks||null;
   },
+  clearSourceMixPeaks(source,expected){
+    const state=this._sourceState(source,false);
+    if(!state||state.mix.peaks!==expected) return false;
+    state.mix={path:null,peaks:null,loading:null};
+    if(this.peaks===expected) this.peaks=null;
+    return true;
+  },
   setSourceBuffer(source,ab,{channels}={}){
     if(!ab) return null;
     const buffers=Array.isArray(ab)?ab:[ab];

@@ -18,11 +18,26 @@ export function renderProjectIdentity({name}={}) {
 // X6：狀態點除顏色外提供文字等價（aria-label），供報讀器與非顏色辨識
 const _DOT_LABEL = { ok: '就緒', err: '錯誤', busy: '處理中', '': '閒置' };
 let _statusLocked = false;
+let _status = null;
+let _mediaIntakeStatus = null;
 function setStatus(msg, kind, force = false) {
   if (_statusLocked && !force) return;
   if (force === 'lock') _statusLocked = true;
   else if (force === 'unlock') _statusLocked = false;
-  
+  _status = {msg,kind};
+  // 背景準備期間仍讓錯誤可見；後續進度恢復時 toast 保留閱讀時間。
+  if (_mediaIntakeStatus && kind === 'err') showToast(msg);
+  renderStatus(_statusLocked || kind === 'err' || force === true ? _status : _mediaIntakeStatus || _status);
+}
+
+// 進度的生命週期由 MediaIntakeJobs 持有；UI 只負責顯示優先序，不鎖住匯出。
+export function setMediaIntakeStatus(msg, kind = 'busy') {
+  if (!_status) _status = {msg:$('stMsg')?.textContent || '',kind:''};
+  _mediaIntakeStatus = msg == null ? null : {msg,kind};
+  renderStatus(_statusLocked ? _status : _mediaIntakeStatus || _status);
+}
+
+function renderStatus({msg,kind}) {
   const msgEl = $('stMsg');
   if (msgEl) msgEl.textContent = msg;
   const d = $('stDot');

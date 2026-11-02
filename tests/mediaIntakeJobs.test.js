@@ -7,6 +7,8 @@ function setup(){
   const bridge={
     ingest:vi.fn(()=>{const job=deferred();pending.push(job);return job.promise;}),
     streamIngest:vi.fn(()=>{const job=deferred();pending.push(job);return job.promise;}),
+    prepareSourceWaveform:vi.fn(()=>{const job=deferred();pending.push(job);return job.promise;}),
+    cleanupAudio:vi.fn(async()=>{}),
     cancelMediaIntake:vi.fn(async()=>1),
   };
   return {bridge,pending,changed,jobs:createMediaIntakeJobs({bridge,changed,id:()=>`id-${++serial}`})};
@@ -81,5 +83,65 @@ describe('renderer media intake ownership',()=>{
     const previous=jobs.capture();await jobs.reset();
     await expect(previous.ingest({path:'old'})).rejects.toMatchObject({name:'AbortError'});
     expect(bridge.ingest).not.toHaveBeenCalled();
+  });
+
+  it('本機波形進度沿用session，取消後拒絕晚到結果且不發原生取消',async()=>{
+    const {jobs,bridge,changed}=setup(),done=deferred();let control;
+    const wave=jobs.prepareWaveform(value=>{control=value;return done.promise;});
+    expect(control.owns()).toBe(true);
+    expect(control.report({label:'讀取波形',pct:40})).toBe(true);
+    expect(jobs.snapshot()).toMatchObject({count:1,hasProxy:false,jobs:[{local:true,progress:{stage:'waveform',label:'讀取波形',pct:40}}]});
+    const rejected=expect(wave).rejects.toMatchObject({name:'AbortError'});
+    await jobs.reset();await rejected;
+    expect(bridge.cancelMediaIntake).not.toHaveBeenCalled();
+    expect(control.owns()).toBe(false);
+    const calls=changed.mock.calls.length;
+    expect(control.report({label:'過期',pct:100})).toBe(false);
+    done.resolve({old:true});await Promise.resolve();
+    expect(changed).toHaveBeenCalledTimes(calls);
+    expect(jobs.snapshot().count).toBe(0);
+  });
+
+  it('波形讀取失敗會釋放工作，保留失敗結果給caller',async()=>{
+    const {jobs}=setup();
+    await expect(jobs.prepareWaveform(()=>Promise.reject(new Error('波形讀取失敗')))).rejects.toThrow('波形讀取失敗');
+    expect(jobs.snapshot().count).toBe(0);
+  });
+
+  it('原生優先波形使用相同session取消，開始前標記排隊並在成功後釋放',async()=>{
+    const {jobs,bridge,pending}=setup();
+    const wave=jobs.prepareSourceWaveform({path:'mother.mxf',duration:10,audio:[{index:1}],needsProxy:true});
+    const options=bridge.prepareSourceWaveform.mock.calls[0][0];
+    expect(options).toMatchObject({path:'mother.mxf',sessionId:jobs.snapshot().sessionId});
+    expect(jobs.snapshot()).toMatchObject({count:1,hasProxy:false,jobs:[{local:false,progress:{stage:'source-waveform',queued:true}}]});
+    expect(jobs.progress({...options,stage:'source-waveform',label:'優先產生波形',queued:false,pct:35})).toBe(true);
+    expect(jobs.snapshot().jobs[0].progress).toMatchObject({queued:false,pct:35});
+    pending[0].resolve({wave:'wave.wav',temporary:true});
+    await expect(wave).resolves.toEqual({wave:'wave.wav',temporary:true});
+    expect(jobs.snapshot().count).toBe(0);
+    expect(bridge.cleanupAudio).not.toHaveBeenCalled();
+  });
+
+  it.each([true,false])('取消後晚到原生波形temporary=%s僅清理本次暫存，不刪快取',async temporary=>{
+    const {jobs,bridge,pending}=setup();
+    const wave=jobs.prepareSourceWaveform({path:'old.mxf'});
+    const options=bridge.prepareSourceWaveform.mock.calls[0][0];
+    const rejected=expect(wave).rejects.toMatchObject({name:'AbortError'});
+    await jobs.reset();await rejected;
+    expect(bridge.cancelMediaIntake).toHaveBeenCalledWith({sessionId:options.sessionId});
+    pending[0].resolve({wave:'old.wav',temporary});
+    await Promise.resolve();await Promise.resolve();await Promise.resolve();
+    expect(bridge.cleanupAudio.mock.calls).toEqual(temporary?[['old.wav']]:[]);
+    expect(jobs.progress({...options,pct:100})).toBe(false);
+    expect(jobs.snapshot().count).toBe(0);
+  });
+
+  it('原生波形resolve與caller交接之間取消，仍只清理一次暫存',async()=>{
+    const {jobs,bridge,pending}=setup();
+    const wave=jobs.prepareSourceWaveform({path:'old.mxf'});
+    const rejected=expect(wave).rejects.toMatchObject({name:'AbortError'});
+    pending[0].resolve({wave:'handoff.wav',temporary:true});
+    await Promise.resolve();await jobs.reset();await rejected;
+    expect(bridge.cleanupAudio).toHaveBeenCalledExactlyOnceWith('handoff.wav');
   });
 });

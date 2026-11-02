@@ -243,14 +243,14 @@ describe('JKL reverse shuttle time domain', () => {
     expect(setStatus).not.toHaveBeenCalled();
   });
 
-  it('無倒帶交接時播放鍵維持正常播放／暫停與狀態提示', async () => {
+  it('無倒帶交接時播放鍵維持正常播放／暫停且保留工作狀態', async () => {
     mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });
     mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
     const {setStatus}=await import('../src/ui.js');
     togglePlayPause(); await vi.advanceTimersByTimeAsync(0);
-    expect(mediaMock.playing).toBe(true);expect(setStatus).toHaveBeenLastCalledWith('▶ 正播','ok');
+    expect(mediaMock.playing).toBe(true);expect(setStatus).not.toHaveBeenCalled();
     togglePlayPause(); await vi.advanceTimersByTimeAsync(0);
-    expect(mediaMock.playing).toBe(false);expect(setStatus).toHaveBeenLastCalledWith('⏸ 暫停','');
+    expect(mediaMock.playing).toBe(false);expect(setStatus).not.toHaveBeenCalled();
     expect(mediaMock.setPlaybackDirection).not.toHaveBeenCalled();
   });
 

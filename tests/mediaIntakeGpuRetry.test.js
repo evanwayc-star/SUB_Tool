@@ -216,12 +216,14 @@ it('進度回報各次實際 GPU 策略與最後 CPU 退路，純音訊不帶策
   },{sendProgress:(_target,payload)=>events.push(payload)});
   try {
     await f.runtime.ingest({src:f.src,duration:1,needsProxy:true,audio:[]});
-    const labels=events.filter(event=>!event.done).map(event=>event.label);
+    const labels=events.filter(event=>event.stage==='transcoding'&&!event.done).map(event=>event.label);
     expect(labels).toEqual(expect.arrayContaining([expect.stringContaining('GPU 解碼／縮放／編碼'),
       expect.stringContaining('GPU 縮放／編碼'),expect.stringContaining('GPU 編碼'),expect.stringContaining('CPU 轉檔')]));
     expect(events.filter(event=>event.done)).toHaveLength(1);
     events.length=0;
     await f.runtime.ingest({src:f.src,duration:1,needsProxy:false,audio:[{channels:1}]});
-    expect(events.find(event=>!event.done).label).toBe('正在分析音訊');
+    expect(events.filter(event=>event.stage==='transcoding'&&!event.done)).toEqual([
+      expect.objectContaining({label:'正在分析音訊',pct:20}),
+    ]);
   } finally {await f.runtime.close();}
 });

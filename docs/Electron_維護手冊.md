@@ -257,15 +257,19 @@ Callback 包裝不把 Electron event 交給頁面。部分 API 替換舊 listene
 
 Runtime 接受 probe 結果，建立 720p 預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。
 
+`ffmpeg:prepareSourceWaveform` 優先供應來源波形，使用獨立 coordinator 與相同 session／request 取消契約，退出時也等待程序 close。嚴格本機來源 key 命中的有效波形可直接沿用，無須等其他快取元件；跨機未驗證的波形不猜用，改由已授權的母素材產生私有暫存 PCM。Renderer 每次請求最多 60 秒，native 依共用來源時鐘與音訊混合規則輸出 4000 Hz Mono PCM，前後核對來源及暫存檔身分。這條路徑不掃描整檔 SHA-256，也不寫入跨機識別或快取完成紀錄。
+
+Renderer 在主素材註冊後立即啟動波形，不受較重 intake 的首次延後啟動影響；同一來源的切片共用準備工作。每段讀完即發布已完成來源範圍的峰值並回收私有檔，未讀尾端不填成靜音。外層工作顯示累積百分比，單段結束不表示整份素材完成；段與段的來源 key 必須相同，換檔或失敗只撤回仍屬本輪的部分結果。波形準備結束後才啟動同來源 Proxy intake，正式快取仍沿用下述完整內容驗證規則。
+
 舊式 `ffmpeg:proxy`、`ffmpeg:extractAudio`、`ffmpeg:waveAudio` 的未交接輸出由 `produceTemporaryFile()` 持有：在私有暫存根以 `wx` 保留檔案，記錄 dev／ino，等待 writer 結束。整項工作失敗時只清除仍屬本次的檔案；extract 的 copy→AAC 退路屬同一交易，不在中間失敗時清檔。成功才交出路徑，沿用 renderer 清理；清理失敗保留原錯誤及既有退出保底，已確認同名外來檔則不延續本交易的逐檔清理登記。這不改變應用程式退出時回收自身私有暫存根的既有生命週期。
 
 來源證據包含完整路徑、size／mtime／ctime／dev／ino 及前／中／尾段取樣。讀取前後核對檔案身分，來源途中替換或截斷即拒絕。這不是整檔 checksum，也不授權路徑。各 owner 仍持有自己的 namespace、規格與 capability／realpath 檢查；`source-v3` 隔離未依影片時鐘對齊的舊 intake。
 
-跨電腦重用保留上述本機 key 與原快取目錄，完成紀錄保存可攜來源證據 `sourceContent`（`source-v3-sha256`、size、完整內容 SHA-256）及已驗證的 `sourceKeys`。`portableSourceFingerprint()` 以固定 1 MiB buffer 非同步讀完整母素材，讀前後核對 handle 與路徑身分，逐段檢查取消；不能把原本的取樣 key 改成只看檔名或部分內容。
+跨電腦重用保留上述本機 key 與原快取目錄，完成紀錄保存可攜來源證據 `sourceContent`（`source-v3-sha256`、size、完整內容 SHA-256）及已驗證的 `sourceKeys`。`portableSourceFingerprint()` 以固定 1 MiB buffer 非同步讀完整母素材，讀前後核對 handle 與路徑身分，逐段檢查取消，並回報實際已讀 bytes／總 bytes；完成身分核對後才回報驗證 100%。不能把原本的取樣 key 改成只看檔名或部分內容。
 
 每個 writer 在自己的 `generation-<隨機識別>/cache-meta.json` 原子發布完成紀錄，這才是真正提交點；根目錄 `meta.json` 只供相容索引使用，寫入失敗不撤銷已完成產物。補記跨機身分另寫 `source-<本機 key>.json` receipt，不回寫整份產物索引。讀取由同一 owner 合併相同母素材及相容聲道配置的完成元件，避免較晚的 writer 或身分補記抹掉另一行程剛補齊的音訊；不以遠端 PID 或逾時搶鎖判定跨電腦所有權。只有既有 `meta.json` 的舊快取仍可讀取。
 
-Runtime 只在既有 sidecar／中央快取根目錄內搜尋可攜 metadata；相符內容才沿用原 generation，磁碟代號、檔案時間或裝置差異不影響內容相等。已確認的本機 key 可免重讀全文；唯讀快取無法補記 key 時仍可讀，下次再驗證。舊 metadata 只在原本機 key 仍命中時補上內容證據；無證據的外來舊快取不能猜認。處理期間仍核對凍結的本機 key，且沿用原本的色彩版本、聲道完整性與路徑圍堵檢查。
+Runtime 只在既有 sidecar／中央快取根目錄內搜尋可攜 metadata；相符內容才沿用原 generation，磁碟代號、檔案時間或裝置差異不影響內容相等。已確認的本機 key 可免重讀全文；已綁定本機來源但缺少元件時也沿用既有內容證據，只補缺件。唯讀快取無法補記 key 時仍可讀，下次再驗證。完整的舊 metadata 在原本機 key 仍命中時直接交付，不為升級跨機識別阻塞讀取；無證據的外來舊快取不能猜認。處理期間仍核對凍結的本機 key，且沿用原本的色彩版本、聲道完整性與路徑圍堵檢查。
 
 可攜映射同時保存目錄及已驗證的 `sourceContent`；候選路徑本身不是沿用資格。實際讀取、補建及清理都須重核目前內容，不能在檢查後換入另一母素材時仍回報 cached。新格式的本機 key 目錄若未綁定目前來源，也須先完成內容驗證；舊無內容證據的本機快取仍保留相容規則。失配會撤銷舊映射，暫時 I/O 失敗則只拒絕本次准入，不當成可以刪除的無效資料。
 
@@ -321,6 +325,8 @@ Direct 與交付佇列的每次執行都以獨立隨機名稱及 `wx` 建立記�
 記錄檔若未成功開啟，例如 `wx` 遇到同名外來檔，執行器不得讀取、刪除、授權或以 `LOG_PATH` 發布該路徑；診斷僅使用本次 stderr 與開檔錯誤。記錄失敗不改變原生工作的成功／失敗判定。
 
 `done:true` 只表示結束，成功須有 `outcome:'success'`，失敗為 `failed`。有標記的 intake 由 runtime 統一附上 sessionId／requestId，包括 native 中間進度、cache hit、提交與 stream 終態；renderer 只接目前仍持有的工作。stream 的 ready Promise 不可提前清掉仍在執行的工作狀態。其他直接作業如 extractAudio 的 `a0` 進度有自己的 caller，不能被 intake 的 session 篩選誤吞。
+
+Intake 進度以 `stage` 區分快取檢查、母素材內容驗證與轉檔；未知分母使用 `pct:null`，不補造百分比，切換階段時重設剩餘時間估算。Renderer 的 `MediaIntakeJobs` 也持有本機波形準備工作，其取消與晚到結果同樣受 session／request 歸屬限制；波形讀取及整理與聲道 metadata 載入並行。狀態列保留仍持有的背景進度，一般訊息及播放操作不能覆蓋；錯誤仍可提示，匯出的進度鎖優先，解鎖後恢復目前背景工作。
 
 Execution 的編碼完成不等於交付完成；封裝、內容驗證、成品發布及 lease 清理仍由 artifact／watchdog 裁定。取消不發布假成功。
 

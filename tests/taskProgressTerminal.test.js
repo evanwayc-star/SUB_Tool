@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { parse } from 'acorn';
-const ui=vi.hoisted(()=>({setStatus:vi.fn(),showToast:vi.fn()}));
+const ui=vi.hoisted(()=>({setStatus:vi.fn(),setMediaIntakeStatus:vi.fn(),showToast:vi.fn()}));
 vi.mock('../src/ui.js',()=>ui);
 vi.mock('../src/media.js',()=>({Media:{mpvMode:false}}));
 
@@ -42,7 +42,7 @@ beforeEach(async () => {
   vi.resetModules();
   if (listener) window.removeEventListener('desk:ingest-done', listener);
   document.body.innerHTML = '<span id="stMedia">master.mxf</span>';
-  setStatus=ui.setStatus;setStatus.mockClear();completed = [];
+  setStatus=ui.setStatus;setStatus.mockClear();ui.setMediaIntakeStatus.mockClear();completed = [];
   window.subtool={isDesktop:true,streamIngest:options=>{request=options;return Promise.resolve({cached:false});}};
   ({MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js'));
   const {handleMediaIntakeProgress,bindMediaIntakeView}=await import('../src/media-intake-view.js');
@@ -61,8 +61,10 @@ describe('registered native task-progress terminal consumer', () => {
     const owner=streamOwner();
     consume({ ...owner,jobId: 'stream-1', label: '轉檔', pct: 10 });
     expect(document.getElementById('stMedia').style.display).toBe('none');
+    expect(ui.setMediaIntakeStatus).toHaveBeenLastCalledWith('轉檔… 10%');
     consume({ ...owner,jobId: 'stream-1', label: '轉檔', done: true, outcome: 'failed', errorMsg: 'codec unsupported' });
     expect(setStatus).toHaveBeenLastCalledWith('轉檔失敗', 'err');
+    expect(ui.setMediaIntakeStatus).toHaveBeenLastCalledWith(null);
     expect(document.getElementById('stMedia').style.display).toBe('');
     expect(completed).toEqual([]);
   });

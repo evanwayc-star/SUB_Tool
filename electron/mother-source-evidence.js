@@ -50,7 +50,7 @@ function finishEvidence(before, after, digestLength) {
 // 跨電腦只有完整內容可識別同一份母素材；本機路徑／檔案身分僅用於
 // 讀取期間的變更檢查，不參與可攜式 digest。固定 buffer 避免大檔整份載入。
 async function portableSourceFingerprint(source, {
-  shouldContinue = () => true, fileSystem = fsp,
+  shouldContinue = () => true, fileSystem = fsp, onProgress = null,
 } = {}) {
   const current = () => {
     if (!shouldContinue()) {
@@ -62,13 +62,18 @@ async function portableSourceFingerprint(source, {
   current();
   const resolved = path.resolve(source);
   const file = await fileSystem.open(resolved, 'r');
-  let digest;
+  let digest, totalBytes = 0;
+  const progress = (processedBytes, completed = false) => {
+    try { onProgress?.({ processedBytes, totalBytes, completed }); } catch (_) { /* 觀察者不影響內容驗證。 */ }
+  };
   try {
     current();
     const stat = await file.stat();
     current();
     if (!stat.isFile()) throw new TypeError('母素材來源不是檔案');
     if (!Number.isSafeInteger(stat.size) || stat.size < 0) throw new Error('母素材檔案大小無效');
+    totalBytes = stat.size;
+    progress(0);
     const before = fileEvidence(stat), hash = crypto.createHash('sha256');
     const bytes = Buffer.alloc(1024 * 1024);
     let position = 0;
@@ -82,6 +87,7 @@ async function portableSourceFingerprint(source, {
       }
       hash.update(bytes.subarray(0, bytesRead));
       position += bytesRead;
+      if (position < stat.size) progress(position);
     }
     const handleStat = await file.stat();
     current();
@@ -94,6 +100,7 @@ async function portableSourceFingerprint(source, {
     digest = hash.digest('hex');
   } finally { await file.close(); }
   current();
+  progress(totalBytes, true);
   return digest;
 }
 

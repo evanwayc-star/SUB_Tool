@@ -51,6 +51,41 @@ afterEach(() => {
 });
 
 describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來源時間的音訊快取', () => {
+  it.each([0,5])('優先波形分段保留容器起點 %s 的來源時間及所有音訊 stream',async origin=>{
+    const directory=fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()),'subtool-intake-source-clock-'));roots.push(directory);
+    const source=path.join(directory,'wave-segments.mkv'),cache=path.join(directory,'cache');
+    run(['-y','-itsoffset',String(origin+.5),'-f','lavfi','-i','color=red:s=64x48:r=24:d=3',
+      '-itsoffset',String(origin),'-f','lavfi','-i','sine=frequency=440:sample_rate=48000:duration=3.5',
+      '-itsoffset',String(origin+1.5),'-f','lavfi','-i','sine=frequency=880:sample_rate=48000:duration=2',
+      '-map','0:v:0','-map','1:a:0','-map','2:a:0','-c:v','libx264','-c:a','pcm_s16le',source]);
+    const probe=createMediaProbe({executable:FFPROBE});
+    const execution=createFFmpegExecution({getFFmpegPath:()=>FFMPEG,getUserDataDir:()=>directory});
+    const runtime=createMediaIntakeRuntime({fileAuthority:new FileAuthority({internalDirectories:[directory]}),
+      ffmpegExecution:execution,tempRoot:directory,cacheRoot:cache,allowSidecarCache:false,
+      describeAudio:async file=>(await probe.describe(file)).audio});
+    try{
+      const info=await probe.describe(source),request={src:source,duration:info.duration,audio:info.audio};
+      const beginning=await runtime.waveform({...request,start:0,length:1.5});
+      const later=await runtime.waveform({...request,start:1.5,length:1.5});
+      expect(beginning).toMatchObject({cached:false,temporary:true,start:0,duration:1.5,complete:false});
+      expect(later).toMatchObject({cached:false,temporary:true,start:1.5,duration:1.5,complete:false,sourceKey:beginning.sourceKey});
+      const complete=await runtime.ingest({...request,needsProxy:false});
+      const firstPcm=pcm(beginning.wave),laterPcm=pcm(later.wave),fullPcm=pcm(complete.wave);
+      expect(firstPcm.length/4).toBe(6000);expect(laterPcm.length/4).toBe(6000);
+      expect(energy(firstPcm,.2,.8,440)).toBeGreaterThan(.08);
+      expect(energy(firstPcm,.2,.8,880)).toBeLessThan(.002);
+      expect(energy(firstPcm,1.1,1.4,880)).toBeGreaterThan(.08);
+      for(const frequency of [440,880]){
+        expect(energy(laterPcm,.2,1.2,frequency)).toBeGreaterThan(.08);
+        expect(energy(laterPcm,.2,1.2,frequency)).toBeCloseTo(energy(fullPcm,1.7,2.7,frequency),3);
+      }
+      // Compare every interior PCM sample as well as spectral energy, not file existence.
+      let squareError=0;
+      for(let frame=400;frame<5600;frame++)squareError+=(laterPcm.readFloatLE(frame*4)-fullPcm.readFloatLE((frame+6000)*4))**2;
+      expect(Math.sqrt(squareError/5200)).toBeLessThan(.002);
+    }finally{await runtime.close();await execution.cancelAllAndWait();await probe.cancelAllAndWait();}
+  },30000);
+
   it.each([
     { name: 'SD 無色彩標籤', size: '320x180', matrix: null, expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0] },
     { name: 'HD 無色彩標籤', size: '1920x1080', matrix: null, expectedMatrix: 'bt709', expectedRgb: [255, 23, 0] },

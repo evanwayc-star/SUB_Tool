@@ -334,7 +334,9 @@ async function captureAndSaveScreenshot(withTimecode){
       try{const anchor=document.createElement('a');anchor.href=url;anchor.download=name;anchor.click();}
       finally{URL.revokeObjectURL(url);}
     }
-    setStatus(`截圖已儲存：${name}`,'ok');
+    const message=`截圖已儲存：${name}`;
+    setStatus(message,'ok');
+    showToast(message);
   }catch(error){
     console.error('[screenshot]',error);showToast('截圖失敗：'+(error.message||String(error)));
   }finally{

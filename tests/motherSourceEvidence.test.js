@@ -48,6 +48,28 @@ afterEach(() => {
 });
 
 describe('跨電腦可攜式母素材證據', () => {
+  it('依實際短讀 bytes 回報進度，通過來源重核及關檔後才回報完成', async () => {
+    const files = memoryFiles(Buffer.from('abcdef'), { maxRead: 2 }), progress = [];
+    let closedAtCompletion = false;
+    await portableSourceFingerprint('source.bin', { fileSystem: files.fileSystem,
+      onProgress: event => { progress.push(event); if (event.completed) closedAtCompletion = files.close.mock.calls.length === 1; } });
+    expect(progress).toEqual([
+      { processedBytes: 0, totalBytes: 6, completed: false },
+      { processedBytes: 2, totalBytes: 6, completed: false },
+      { processedBytes: 4, totalBytes: 6, completed: false },
+      { processedBytes: 6, totalBytes: 6, completed: true },
+    ]);
+    expect(closedAtCompletion).toBe(true);
+  });
+
+  it('資料已讀完但身分重核失敗，不能送出完成進度', async () => {
+    const files = memoryFiles(Buffer.from('abcdef'), { afterStat: { ino: 99 } }), progress = [];
+    await expect(portableSourceFingerprint('source.bin', { fileSystem: files.fileSystem,
+      onProgress: event => progress.push(event) })).rejects.toThrow(/變更/);
+    expect(progress.some(event => event.completed)).toBe(false);
+    expect(files.close).toHaveBeenCalledOnce();
+  });
+
   it('完整 bytes 的 SHA-256 不受路徑、作業系統檔案身分或時間影響，短讀仍累積完成', async () => {
     const bytes = Buffer.from('portable mother source');
     const first = memoryFiles(bytes, { maxRead: 2 });

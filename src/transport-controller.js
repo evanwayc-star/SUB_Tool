@@ -319,7 +319,6 @@ function playAfterShuttleStop() {
     if (restored === false) reportShuttleRestoreFailure();
     else {
       Media.play();
-      if (_jklSpeed === 0) setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : '');
     }
   }).finally(() => {
     if (_pendingForwardPlay === request) _pendingForwardPlay = null;
@@ -444,9 +443,7 @@ function jklApply() {
     _reverseSession.start(_jklSpeed).catch(() => {});
   }
   const spd = Math.abs(_jklSpeed);
-  const label = _jklSpeed === 0 ? '暫停' : (_jklSpeed > 0 ? `▶ ${spd}x 正播` : `◀ ${spd}x 倒帶`);
   const osd = _jklSpeed === 0 ? '⏸' : (_jklSpeed > 0 ? `▶ ${spd}×` : `◀ ${spd}×`);
-  setStatus(label, _jklSpeed !== 0 ? 'ok' : '');
   showOsd(osd);
   updateSpeedIndicator();
 }
@@ -480,7 +477,6 @@ function togglePlayPause() {
   } else {
     playAfterShuttleStop();
   }
-  setStatus(Media.playing ? '▶ 正播' : '⏸ 暫停', Media.playing ? 'ok' : '');
 }
 
 let _lastRepeatDir = 0;
@@ -491,7 +487,6 @@ function stepFrame(dir, repeat = false) {
     jklClear();
     _jklSpeed = 0;
     if (Media.playing) Media.pause({ seekOnPause: false });
-    setStatus('⏸ 暫停', '');
   }
 
   // 方向鍵長按 (repeat=true) 維持純粹的連續逐格步進，節流在 50ms（約 20fps），
@@ -530,7 +525,6 @@ function nudge(d) {
     jklClear();
     _jklSpeed = 0;
     if (Media.playing) Media.pause({ seekOnPause: false });
-    setStatus('⏸ 暫停', '');
   }
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點為基準，並精確吸附至影格格網
   const exactFps = getExactFps(State.fps || 30);

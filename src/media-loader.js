@@ -149,28 +149,33 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       // 原生播放繼續直讀；聲道 cache 在背景準備，供專案路由匯出使用。
       ctx.cacheNativeRoutingAudio(primary,p,State.duration||dur,audio);
       if(audio.length>0){
-        setStatus('正在分析音訊與產生波形…','busy');
-        let wavPath=null;
-        try{
-          wavPath=await DESK.waveAudio(p,dur);
-          if(!ownsPrimary()) return;
-          const wavUrl=await DESK.fileURL(wavPath);
-          if(!ownsPrimary()) return;
-          const res=await fetch(wavUrl);
-          const buf=await res.arrayBuffer();
-          if(!ownsPrimary()) return;
-          const ab=await AudioEngine.decodeAudioData(buf); 
-          if(!ownsPrimary()) return;
-          // The waveform spans the mother source, not its trimmed placements.
-          // Sequence, external audio and cues remain the timeline duration owner.
-          ctx.recomputeTimelineDuration();
-          ctx._commitOriginalWave(primary,ab); emit('media:timeline');
-        }
-        catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); } }
-        finally{
-          // waveAudio 是本次請求的暫存檔；讀取/解碼失敗及失權也必須釋放。
-          // 不適用於其他分支由 ingest 持有、後續波形仍會讀取的 res.wave。
-          if(wavPath) try{ await DESK.cleanupAudio(wavPath); }catch(e){}
+        if(DESK.prepareSourceWaveform){
+          // 與原生聲道路由工作共用優先波形；專案可先開啟，波形繼續分段顯示。
+          // 重驗證仍由 routing caller 等整部波形備妥後才開始。
+          void ctx._prepareSourceWaveform(primary,p,audio,State.duration||dur,ownsPrimary);
+        }else{
+          setStatus('正在分析音訊與產生波形…','busy');
+          let wavPath=null;
+          try{
+            wavPath=await DESK.waveAudio(p,dur);
+            if(!ownsPrimary()) return;
+            const wavUrl=await DESK.fileURL(wavPath);
+            if(!ownsPrimary()) return;
+            const res=await fetch(wavUrl);
+            const buf=await res.arrayBuffer();
+            if(!ownsPrimary()) return;
+            const ab=await AudioEngine.decodeAudioData(buf);
+            if(!ownsPrimary()) return;
+            // The waveform spans the mother source, not its trimmed placements.
+            // Sequence, external audio and cues remain the timeline duration owner.
+            ctx.recomputeTimelineDuration();
+            ctx._commitOriginalWave(primary,ab); emit('media:timeline');
+          }
+          catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); } }
+          finally{
+            // 舊 bridge 的 waveAudio 暫存仍由同一 caller 釋放。
+            if(wavPath) try{ await DESK.cleanupAudio(wavPath); }catch(e){}
+          }
         }
       }
       if(!ownsPrimary()) return;
@@ -495,6 +500,9 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     emit('media:audioTracks');
     emit('duration:known');
     Wave.initLive();
+    // 先讀本機有效波形或直接抽母素材音訊，不隨較重的 Proxy／快取驗證延後十秒。
+    // _bgAudioIngest 會沿用同一來源 promise，待波形已可顯示後才開始重工作。
+    void ctx._prepareSourceWaveform(primary,p,audio,dur);
 
     // 背景抽取音軌（不阻塞播放；完成後 element tracks 接管音訊，mpv 靜音）
     if(audio.length>0||needsProxy){

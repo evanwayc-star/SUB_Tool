@@ -86,6 +86,8 @@ let tmpSeq = 0;
 /* proxy、聲道與波形都共用 per-source cache；streamIngest 回傳「可播放」後仍持有
    writer lease，直到 ffmpeg 完整結束才讓下一個 queued ingest 寫入。 */
 const mediaIngestCoordinator = createMediaIngestCoordinator();
+// 波形直接讀母素材並寫私有暫存，不與 Proxy 共寫快取，因此有獨立的取消／close 屏障。
+const mediaWaveformCoordinator = createMediaIngestCoordinator();
 
 /* S1：唯一的 IPC 檔案能力權威。
    renderer 路徑不會因 fs:fileURL／stat 等查詢被靜默升格；只接受原生對話框、OS 開檔、
@@ -345,6 +347,7 @@ app.on('before-quit', (event) => {
         speechCompressionRuntime.cancelAllAndWait(),
         vocalWaveformRuntime.cancelAllAndWait(),
         mediaIngestCoordinator.cancelAllAndWait(),
+        mediaWaveformCoordinator.cancelAllAndWait(),
         QueueManager.prepareForShutdown(),
       ]);
       // execution 確認程序 close 後，快取 owner 還須完成來源核對與 staging 清理。
@@ -367,6 +370,7 @@ app.on('before-quit', (event) => {
       deliveryCapabilities.resume();
       speechCompressionRuntime.resume();
       mediaIngestCoordinator.resume();
+      mediaWaveformCoordinator.resume();
       vocalWaveformRuntime.resume();
       await QueueManager.cancelShutdown();
       _quitSequenceStarted = false;
@@ -829,6 +833,8 @@ const mediaIntakeRuntime = createMediaIntakeRuntime({
   ffmpegExecution,
   getEncoder: () => VENC,
   describeVideo: async src => (await mediaProbe.describe(src)).video,
+  describeAudio: async src => (await mediaProbe.describe(src)).audio,
+  createTempPath: tmpPath,
   sendProgress: (target, payload) => safeSend(target, 'task-progress', payload),
   forgetTemporaryFile: file => tempFiles.delete(file),
   log: (message, ...args) => {
@@ -1659,9 +1665,30 @@ ipcMain.handle('ffmpeg:ingest', async (e, request) => {
 
 ipcMain.handle('ffmpeg:cancelIntake', async (e, request) => {
   const owner = mediaIntakeOwner(e, request, { cancel: true });
-  const completion = mediaIngestCoordinator.cancel(owner);
+  const completion = Promise.all([mediaIngestCoordinator.cancel(owner), mediaWaveformCoordinator.cancel(owner)]);
   mediaIntakeRuntime.cancel(owner);
-  return completion;
+  return (await completion).reduce((count, value) => count + value, 0);
+});
+
+ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
+  const owner = mediaIntakeOwner(e, request);
+  if (owner.sessionId === undefined) throw new TypeError('波形工作缺少 sessionId/requestId');
+  const { path: src, duration, audio, start, length } = request;
+  requireReadablePath('ffmpeg:prepareSourceWaveform', src);
+  let prepared;
+  const cancel = () => { void mediaWaveformCoordinator.cancel(owner); };
+  e.sender.once?.('destroyed', cancel);
+  if (e.sender.isDestroyed?.()) cancel();
+  try {
+    return await mediaWaveformCoordinator.enqueue(async lease => {
+      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length }, mediaIntakeSession(e, lease, owner));
+      return prepared;
+    }, owner);
+  } catch (error) {
+    // native 已交回但 coordinator 尚未發布時若失權，renderer 不會取得路徑，仍由 main 回收。
+    if (prepared?.temporary) mediaIntakeRuntime.cleanupGeneratedFile(prepared.wave);
+    throw error;
+  } finally { e.sender.removeListener?.('destroyed', cancel); }
 });
 
 /* 讀取快取檔案內容（base64）給 renderer（例如波形 wav） */

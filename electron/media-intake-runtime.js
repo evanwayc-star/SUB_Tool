@@ -9,7 +9,7 @@ const { pipeline } = require('stream/promises');
 const { motherSourceFingerprintSync, portableSourceFingerprint } = require('./mother-source-evidence');
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
 const { buildIngestArgs, previewPipelineCandidates, previewFallbackAllowed } = require('./ffmpeg-execution-engine');
-const { sourceAudioClockFilter } = require('./media-source-clock');
+const { sourceAudioClockFilter, sourceClockSeek, timestampOffset } = require('./media-source-clock');
 const SOURCE_CACHE_VERSION = 'source-v3';
 const PORTABLE_SOURCE_FORMAT = SOURCE_CACHE_VERSION + '-sha256';
 
@@ -27,7 +27,7 @@ function ownsMediaIntake(owner, scope) {
 /**
  * ffprobe audio[] → 單次 ffmpeg ingest 的跨平台音訊規劃。
  */
-function buildAudioIngestPlan(audio) {
+function buildAudioIngestPlan(audio, { waveOnly = false } = {}) {
   const filters = [];
   const channels = [];
   const channelMaps = [];
@@ -43,6 +43,7 @@ function buildAudioIngestPlan(audio) {
     filters.push(`[0:a:${streamIndex}]${sourceAudioClockFilter(stream)}[at${streamIndex}]`);
 
     if (count === 1) {
+      if (waveOnly) { waveContribs.push(`[at${streamIndex}]`); return; }
       filters.push(`[at${streamIndex}]asplit=2[co${channelIndex}][wv${streamIndex}]`);
       channels.push({
         label: base,
@@ -56,24 +57,26 @@ function buildAudioIngestPlan(audio) {
       return;
     }
 
-    const splitPads = Array.from({ length: count }, (_, sourceChannel) => `sp${streamIndex}_${sourceChannel}`);
-    filters.push(
-      `[at${streamIndex}]asplit=${count + 1}${splitPads.map(pad => `[${pad}]`).join('')}[wv${streamIndex}]`,
-    );
-    for (let sourceChannel = 0; sourceChannel < count; sourceChannel++) {
-      filters.push(`[${splitPads[sourceChannel]}]pan=mono|c0=c${sourceChannel}[co${channelIndex}]`);
-      channels.push({
-        label: `${base} · 聲道${sourceChannel + 1}`,
-        file: channelFileName(channelIndex),
-        sourceStream: streamIndex,
-        sourceChannel,
-      });
-      channelMaps.push(`[co${channelIndex}]`);
-      channelIndex++;
+    if (!waveOnly) {
+      const splitPads = Array.from({ length: count }, (_, sourceChannel) => `sp${streamIndex}_${sourceChannel}`);
+      filters.push(
+        `[at${streamIndex}]asplit=${count + 1}${splitPads.map(pad => `[${pad}]`).join('')}[wv${streamIndex}]`,
+      );
+      for (let sourceChannel = 0; sourceChannel < count; sourceChannel++) {
+        filters.push(`[${splitPads[sourceChannel]}]pan=mono|c0=c${sourceChannel}[co${channelIndex}]`);
+        channels.push({
+          label: `${base} · 聲道${sourceChannel + 1}`,
+          file: channelFileName(channelIndex),
+          sourceStream: streamIndex,
+          sourceChannel,
+        });
+        channelMaps.push(`[co${channelIndex}]`);
+        channelIndex++;
+      }
     }
     const average = (1 / count).toFixed(4);
     const sum = Array.from({ length: count }, (_, sourceChannel) => `${average}*c${sourceChannel}`).join('+');
-    filters.push(`[wv${streamIndex}]pan=mono|c0=${sum}[wm${streamIndex}]`);
+    filters.push(`[${waveOnly ? 'at' : 'wv'}${streamIndex}]pan=mono|c0=${sum}[wm${streamIndex}]`);
     waveContribs.push(`[wm${streamIndex}]`);
   });
 
@@ -519,7 +522,8 @@ function createMediaIntakeRuntime(options = {}) {
     return partial;
   }
 
-  async function preparePortableCache({ src, audio = [], needsProxy }, session) {
+  async function preparePortableCache({ src, audio = [], needsProxy }, session, requireContent = false) {
+    reportProgress(session, { jobId: 'ingest', stage: 'cache-check', label: '檢查 Proxy 與音訊快取', pct: null });
     const sourceKey = cacheKeyFor(src);
     const current = () => !closed && !cancelled(session);
     const ensureCurrent = () => { if (!current()) throw new IngestSupersededError(); };
@@ -531,7 +535,9 @@ function createMediaIntakeRuntime(options = {}) {
     const direct = readCache(src, audio, needsProxy);
     const knownContent = direct?.sourceContent?.size === fs.statSync(src).size ? direct.sourceContent : null;
     const directComplete = direct && coversAudioRequest(direct.meta, audio) && (!needsProxy || direct.meta.proxy);
-    if (directComplete && knownContent) return { sourceKey, sourceContent: knownContent };
+    // 嚴格本機 key 已證明來源未變；完整舊快取不必先讀完整母素材，
+    // 才能交付原本可用的音訊／波形。未具有內容證據者仍不得跨機猜用。
+    if (directComplete && (!requireContent || knownContent)) return { sourceKey, sourceContent: knownContent };
     const candidates = [];
     if (!directComplete) {
       const roots = [cacheRoot()];
@@ -570,19 +576,35 @@ function createMediaIntakeRuntime(options = {}) {
       }
       check();
       // 這台電腦已完整驗證過且來源 strict key 未變，免重讀整支大型素材。
+      let verifiedPartial = null;
       for (const candidate of candidates) {
         if (!Array.isArray(candidate.sourceKeys) || !candidate.sourceKeys.includes(sourceKey)) continue;
         const hit = inspectCacheDirectory(candidate.dir, audio);
         if (hit.error || !sameSourceContent(hit.sourceContent, candidate.sourceContent)
-          || !hit.sourceKeys.includes(sourceKey) || !coversAudioRequest(hit.meta, audio) || (needsProxy && !hit.meta.proxy)) continue;
+          || !hit.sourceKeys.includes(sourceKey)) continue;
+        if (!coversAudioRequest(hit.meta, audio) || (needsProxy && !hit.meta.proxy)) {
+          verifiedPartial ||= candidate;
+          continue;
+        }
         portableHits.set(sourceKey, { dir: candidate.dir, sourceContent: candidate.sourceContent });
         return { sourceKey, sourceContent: candidate.sourceContent };
+      }
+      // 缺少元件不撤銷先前對母素材的完整驗證；只補缺件，仍在 plan/commit 重核目錄與來源。
+      if (verifiedPartial) {
+        portableHits.set(sourceKey, { dir: verifiedPartial.dir, sourceContent: verifiedPartial.sourceContent });
+        return { sourceKey, sourceContent: verifiedPartial.sourceContent };
       }
     }
     let sha256 = knownContent?.sha256;
     if (!sha256) {
-      reportProgress(session, { jobId: 'ingest', label: '驗證共用 Proxy 的母素材', pct: 0 });
-      const hash = portableSourceFingerprint(src, { shouldContinue: current });
+      let lastPercent = -1, lastReport = -Infinity;
+      const hash = portableSourceFingerprint(src, { shouldContinue: current, onProgress: ({ processedBytes, totalBytes, completed }) => {
+        const pct = totalBytes ? processedBytes / totalBytes * 100 : completed ? 100 : null;
+        const timestamp = now(), integer = pct === null ? -1 : Math.floor(pct);
+        if (integer === lastPercent && timestamp - lastReport < 250) return;
+        lastPercent = integer; lastReport = timestamp;
+        reportProgress(session, { jobId: 'ingest', stage: 'source-verification', label: '驗證母素材內容', pct, processedBytes, totalBytes });
+      } });
       portableHashes.add(hash);
       try { sha256 = await hash; } finally { portableHashes.delete(hash); }
     }
@@ -847,7 +869,8 @@ function createMediaIntakeRuntime(options = {}) {
     try { resolved = path.resolve(file); } catch (error) { return false; }
     const basename = path.basename(resolved).toLowerCase();
     // channelFileName() 產生 ch_01.m4a；舊版無底線聲道與混音波形也只供預覽。
-    if (basename !== 'proxy.mp4' && basename !== 'wave.wav' && !/^ch_?\d+\.m4a$/i.test(basename)) return false;
+    if (basename !== 'proxy.mp4' && basename !== 'wave.wav' && !basename.endsWith('.source-wave.wav')
+      && !/^ch_?\d+\.m4a$/i.test(basename)) return false;
     const lower = resolved.toLowerCase();
     const inInternalRoot = [cacheRoot(), tempRoot].filter(Boolean).some(root => {
       try {
@@ -1073,6 +1096,9 @@ function createMediaIntakeRuntime(options = {}) {
       return { cached: true, dir: hit.dir, meta: hit.meta,
         streamGuard: () => captureStreamGuard(hit.dir, inspectedCacheOwners.get(hit), hit.meta.proxy) };
     }
+    // 舊快取命中免全文驗證，但若 admission 等待期間失去元件，
+    // 新 generation 仍必須具備完整母素材證據才能建立及發布。
+    if (!validSourceContent(portable?.sourceContent)) return { needsSourceVerification: true };
     const copyCompleted = hit && !isDirWritable(hit.dir);
     const hitOwner = hit && inspectedCacheOwners.get(hit);
     if (hit) checkPublicationDirectory(hit.dir, hitOwner, portable.sourceContent, !!hit.sourceContent);
@@ -1246,7 +1272,7 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   function reportCacheHit(session) {
-    reportCompletion(session, 'ingest', '使用既有快取');
+    reportProgress(session, { jobId: 'ingest', stage: 'cache-ready', label: '使用既有快取', done: true, outcome: 'success', pct: 100 });
   }
 
   function reportCompletion(session, jobId, label, error) {
@@ -1268,14 +1294,92 @@ function createMediaIntakeRuntime(options = {}) {
     } catch (ignored) {}
   }
 
+  // 這份波形只證明本次已授權母素材的內容；未知跨機快取仍由 ingest 完整驗證。
+  // 獨立暫存不寫 portable index/binding，也不參與 Proxy／逐聲道 publication。
+  async function waveform({ src, duration, audio = [], start = 0, length }, session = {}) {
+    if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(start) || start < 0 || start >= duration
+      || (length !== undefined && (!Number.isFinite(length) || length <= 0 || length > 60))
+      || (length === undefined && start !== 0)) throw new RangeError('波形範圍必須在來源內，片段不可超過 60 秒');
+    const validAudio = list => Array.isArray(list) && list.length <= 256 && !list.some(stream => !stream || typeof stream !== 'object'
+      || !Number.isInteger(stream.channels) || stream.channels < 1 || stream.channels > 64
+      || (stream.timestampOffset !== undefined && !Number.isFinite(stream.timestampOffset)));
+    if (!validAudio(audio)) throw new TypeError('波形來源音訊描述無效');
+    const ensureCurrent = () => { if (closed || cancelled(session)) throw new IngestSupersededError(); };
+    ensureCurrent();
+    const sourceKey = cacheKeyFor(src), segmentDuration = Math.min(length ?? duration, duration - start);
+    const check = () => {
+      ensureCurrent();
+      if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在波形讀取期間變更，請重新載入');
+    };
+    const progress = payload => reportProgress(session, { jobId: 'source-wave', stage: 'source-waveform',
+      label: '優先產生波形', queued: false, start, length: segmentDuration, totalDuration: duration, ...payload });
+    progress({ pct: start / duration * 100 });
+    const hit = readCache(src, audio, false);
+    check();
+    if (hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio))) {
+      progress({ pct: 100, done: true, outcome: 'success', label: '波形已就緒' });
+      ensureCurrent();
+      return { wave: hit.meta.wave, channels: [], cached: true, temporary: false, start: 0, duration, complete: true, sourceKey };
+    }
+    // 主程序重用既有 probe owner；renderer 的舊描述不可決定換檔後的聲道或來源時鐘。
+    if (options.describeAudio) {
+      audio = await options.describeAudio(src);
+      check();
+      if (!validAudio(audio)) throw new TypeError('無法確認波形來源音訊描述');
+    }
+    const seek = sourceClockSeek(start, audio[0]);
+    const clocks = audio.map(stream => ({ ...stream, timestampOffset: timestampOffset(stream) + seek.seek - start }));
+    const plan = buildAudioIngestPlan(clocks, { waveOnly: true });
+    if (!plan.waveLabel) {
+      progress({ pct: 100, done: true, outcome: 'success', label: '來源沒有音訊' });
+      return { wave: null, channels: [], cached: false, temporary: false, start: 0, duration, complete: true, sourceKey };
+    }
+    const complete = start === 0 && segmentDuration >= duration;
+    const file = options.createTempPath?.('source-wave.wav')
+      || path.join(tempRoot, crypto.randomBytes(12).toString('hex') + '.source-wave.wav');
+    try {
+      const wave = await produceTemporaryFile(file, async out => {
+        const owner = fs.lstatSync(out, { bigint: true });
+        check();
+        const filters = [...plan.filters, `${plan.waveLabel}apad=whole_dur=${segmentDuration},atrim=duration=${segmentDuration}[sourcewave]`];
+        const args = ['-y', '-ss', String(seek.seek), '-i', src, '-vn', '-sn', '-dn',
+          '-filter_complex', filters.join(';'), '-map', '[sourcewave]', '-t', String(segmentDuration),
+          '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', out];
+        await ffmpegExecution.execute(args, { executionKind: 'direct', deferTerminal: true,
+          duration: segmentDuration, jobId: 'source-wave', label: '優先產生波形',
+          onProcess: child => session.ownProcess?.(child),
+          onProgress: payload => progress({ ...payload, pct: Number.isFinite(payload.pct)
+            ? (start + segmentDuration * Math.max(0, Math.min(100, payload.pct)) / 100) / duration * 100 : null }),
+        });
+        check();
+        const current = fs.lstatSync(out, { bigint: true });
+        if (!current.isFile() || current.isSymbolicLink() || current.dev !== owner.dev || current.ino !== owner.ino || current.size <= 0n) {
+          throw new Error('波形暫存缺少完整內容或檔案身分已變更');
+        }
+        progress({ pct: (start + segmentDuration) / duration * 100, done: true, outcome: 'success',
+          label: complete ? '波形已就緒' : '波形片段已備妥' });
+        ensureCurrent();
+      });
+      return { wave, channels: [], cached: false, temporary: true, start, duration: segmentDuration, complete, sourceKey };
+    } catch (error) {
+      progress({ done: true, outcome: 'failed', errorCode: error.code || 'SOURCE_WAVE_FAILED', errorMsg: error.message });
+      throw error;
+    }
+  }
+
   async function ingest(request, session = {}) {
     if (closed || cancelled(session)) throw new IngestSupersededError();
-    const portable = await preparePortableCache(request, session);
+    let portable = await preparePortableCache(request, session);
     let description = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
     if (closed || cancelled(session)) throw new IngestSupersededError();
     let pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: request.needsProxy });
     let index = 0;
     let plan = planIntake(request, false, description, portable, pipelines[index]);
+    if (plan.needsSourceVerification) {
+      portable = await preparePortableCache(request, session, true);
+      if (closed || cancelled(session)) throw new IngestSupersededError();
+      plan = planIntake(request, false, description, portable, pipelines[index]);
+    }
     if (plan.needsVideoDescription) {
       description = await describeMissingProxy(request.src, request.audio, true);
       if (closed || cancelled(session)) throw new IngestSupersededError();
@@ -1298,7 +1402,7 @@ function createMediaIntakeRuntime(options = {}) {
         try {
           await ffmpegExecution.execute(plan.args, {
             executionKind: 'direct', deferTerminal: true,
-            onProgress: payload => reportProgress(session, payload),
+            onProgress: payload => reportProgress(session, { ...payload, stage: 'transcoding' }),
             onStderr: text => { stderr = (stderr + text).slice(-16000); },
             duration: request.duration, jobId: 'ingest', label: plan.label,
             onProcess: process => session.ownProcess?.(process),
@@ -1346,6 +1450,15 @@ function createMediaIntakeRuntime(options = {}) {
     let pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: true });
     let index = 0;
     let plan = planIntake(request, true, description, portable, pipelines[index]);
+    if (plan.needsSourceVerification) {
+      try { portable = await preparePortableCache(request, session, true); }
+      catch (error) {
+        if (closed || cancelled(session)) return { response: null, completion: null };
+        throw error;
+      }
+      if (closed || cancelled(session)) return { response: null, completion: null };
+      plan = planIntake(request, true, description, portable, pipelines[index]);
+    }
     if (plan.needsVideoDescription) {
       description = await describeMissingProxy(src, audio, true);
       if (closed || cancelled(session)) return { response: null, completion: null };
@@ -1406,7 +1519,7 @@ function createMediaIntakeRuntime(options = {}) {
         try {
           await ffmpegExecution.execute(plan.args, {
             executionKind: 'direct', deferTerminal: true,
-            onProgress: payload => reportProgress(session, payload),
+            onProgress: payload => reportProgress(session, { ...payload, stage: 'transcoding' }),
             onStderr: text => { stderr = (stderr + text).slice(-16000); },
             duration, jobId: id, label: plan.label,
             onProcess: process => { writer = process; session.ownProcess?.(process); if (readinessError) stopUnreadyWriter(); },
@@ -1565,6 +1678,7 @@ function createMediaIntakeRuntime(options = {}) {
     produceTemporaryFile,
     releaseStream,
     stream,
+    waveform,
   });
 }
 

@@ -7,6 +7,19 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
+const readyWave = (duration=1,amplitude=16384) => {
+  const frames=Math.round(duration*4000),bytes=frames*2;
+  const wav=new ArrayBuffer(44+bytes),view=new DataView(wav);
+  for(const [at,text] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']]){
+    for(let i=0;i<text.length;i++) view.setUint8(at+i,text.charCodeAt(i));
+  }
+  view.setUint32(4,36+bytes,true);view.setUint32(16,16,true);view.setUint16(20,1,true);
+  view.setUint16(22,1,true);view.setUint32(24,4000,true);view.setUint32(28,8000,true);
+  view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,bytes,true);
+  for(let i=0;i<frames;i++) view.setInt16(44+i*2,i%2?-amplitude:amplitude,true);
+  return wav;
+};
+
 const desktopMock = vi.hoisted(() => ({
   isDesktop: true,
   fileURL: vi.fn(),
@@ -205,6 +218,273 @@ describe('reset-scoped media ownership', () => {
     }finally{elements.mockRestore();peaks.mockRestore();vi.unstubAllGlobals();}
   });
 
+  it.each(['primary','secondary'])('%s 的完成波形不等待播放聲道 metadata 才顯示',async kind=>{
+    resetAudioProject();Media.ensureCtx();
+    const owner={id:'wave-ready',name:'A.mov',path:'C:/A.mov',dur:1,in:0,out:1,offset:0,vtrack:0,
+      primary:kind==='primary',audioSrc:kind==='primary'?'video':'clip:wave-ready',audioSourceId:'ready-source'};
+    State.clips=[owner];
+    // 真正的單聲道 PCM WAV；波形內容先可讀，播放元素的 metadata 刻意仍在等。
+    desktopMock.ingest.mockResolvedValue({cached:true,channels:[{file:'channel.m4a',sourceStream:0,sourceChannel:0}],wave:'ready.wav'});
+    desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:async()=>readyWave()}));
+    const gate=deferred(),audio=vi.spyOn(Media._intakeSession,'materializeAudioElements').mockReturnValue(gate.promise);
+    const work=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],1,owner)
+      :Media._clipIngest(owner,{audio:[{channels:1}]});
+    try{
+      await vi.waitFor(()=>expect(audio).toHaveBeenCalledOnce());
+      await vi.waitFor(()=>expect(owner.peaks?.length).toBeGreaterThan(0));
+      expect(Math.min(...owner.peaks)).toBeCloseTo(-0.5,3);
+      expect(Math.max(...owner.peaks)).toBeCloseTo(0.5,3);
+      expect(Media.tracks).toEqual([]);
+      expect(Wave._sourceState(owner,false)?.mix.path).toBe('ready.wav');
+    }finally{
+      gate.resolve([]);await work;audio.mockRestore();vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(['primary','secondary'])('%s 先取得來源波形，不等待 Proxy 與完整母素材驗證',async kind=>{
+    resetAudioProject();Media.ensureCtx();
+    const owner={id:'source-wave',name:'A.mov',path:'C:/A.mov',dur:1,in:0,out:1,offset:0,vtrack:0,
+      primary:kind==='primary',audioSrc:kind==='primary'?'video':'clip:source-wave',audioSourceId:'source-wave'};
+    State.clips=[owner];
+    desktopMock.prepareSourceWaveform=vi.fn().mockResolvedValue({wave:'source-wave.wav',temporary:true,start:0,duration:1,complete:true,sourceKey:'source-key'});
+    desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);
+    const gate=deferred();desktopMock.ingest.mockReturnValue(gate.promise);
+    desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:async()=>readyWave()}));
+    const work=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],1,owner)
+      :Media._clipIngest(owner,{audio:[{channels:1}]});
+    try{
+      await vi.waitFor(()=>expect(owner.peaks?.length).toBeGreaterThan(0));
+      expect(Math.min(...owner.peaks)).toBeCloseTo(-0.5,3);
+      expect(Math.max(...owner.peaks)).toBeCloseTo(0.5,3);
+      await vi.waitFor(()=>expect(desktopMock.ingest).toHaveBeenCalledOnce());
+      expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce();
+      expect(desktopMock.cleanupAudio).toHaveBeenCalledWith('source-wave.wav');
+      expect(Wave._sourceState(owner,false)?.mix.path).toBeNull();
+    }finally{
+      gate.resolve({channels:[]});await work;vi.unstubAllGlobals();
+      delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
+    }
+  });
+
+  it('mpv 初開即載入有效波形，重 intake 仍保留原本的延後資格',async()=>{
+    resetAudioProject();
+    desktopMock.mpv={launch:vi.fn().mockResolvedValue({ok:true,duration:1}),quit:vi.fn().mockResolvedValue()};
+    resetPlayerAdapter(desktopMock);
+    desktopMock.prepareSourceWaveform=vi.fn().mockResolvedValue({wave:'warm-wave.wav',cached:true,start:0,duration:1,complete:true,sourceKey:'source-key'});
+    desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:async()=>readyWave()}));
+    try{
+      await expect(Media._loadViaMpv('C:/A.mov',{duration:1,audio:[{channels:1}]},null,null,{deferInitialAudio:true})).resolves.toBe(true);
+      await vi.waitFor(()=>expect(State.clips[0]?.peaks?.length).toBeGreaterThan(0));
+      expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce();
+      expect(desktopMock.ingest).not.toHaveBeenCalled();
+      expect(Media._deferredInitialAudioIngest).toBeTypeOf('function');
+      expect(Wave._sourceState(State.clips[0],false)?.mix.path).toBe('warm-wave.wav');
+    }finally{
+      Media.reset();vi.unstubAllGlobals();delete desktopMock.prepareSourceWaveform;
+    }
+  });
+
+  it('HTML 原生 MKV 也先顯示分段波形，再開始完整驗證，不重跑舊 waveAudio',async()=>{
+    desktopMock.stat=vi.fn().mockResolvedValue({exists:true,size:1024});
+    desktopMock.probe.mockResolvedValue({duration:61,video:{codec:'h264',fps:25,width:64,height:48},audio:[{channels:1}]});
+    desktopMock.waveAudio=vi.fn().mockResolvedValue('legacy.wav');
+    desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);
+    desktopMock.ingest.mockResolvedValue({channels:[]});
+    const first=deferred(),gate=deferred();desktopMock.prepareSourceWaveform=vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(gate.promise);
+    desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>url.endsWith('native-first.wav')?readyWave(60):readyWave()})));
+    domMock.video.readyState=1;domMock.video.duration=61;
+    let loaded=false;
+    const loading=Media.loadDesktopMedia('C:/native.mkv').then(()=>{loaded=true;});
+    try{
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce());
+      await vi.waitFor(()=>expect(loaded).toBe(true));
+      expect(desktopMock.ingest).not.toHaveBeenCalled();
+      first.resolve({wave:'native-first.wav',temporary:true,start:0,duration:60,sourceKey:'native'});
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(2));
+      expect(State.clips[0].peaks).toHaveLength(60*100*2);
+      expect(desktopMock.ingest).not.toHaveBeenCalled();
+      expect(desktopMock.waveAudio).not.toHaveBeenCalled();
+      gate.resolve({wave:'native-last.wav',temporary:true,start:60,duration:1,sourceKey:'native'});
+      await vi.waitFor(()=>expect(State.clips[0].peaks).toHaveLength(61*100*2));
+      await vi.waitFor(()=>expect(desktopMock.ingest).toHaveBeenCalledOnce());
+    }finally{
+      first.resolve({});gate.resolve({});await loading;
+      await Promise.all([...Media._sourceWavePreparations.values()].map(entry=>entry.promise));
+      vi.unstubAllGlobals();
+      delete desktopMock.stat;delete desktopMock.waveAudio;delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
+    }
+  });
+
+  it('同母素材切片共用優先波形，刪除原片段後由存續片段接收完成結果',async()=>{
+    resetAudioProject();Media.ensureCtx();
+    const first={id:'first',name:'A.mov',path:'C:/A.mov',dur:1,in:0,out:0.5,offset:0,vtrack:0,
+      audioSrc:'clip:shared',audioSourceId:'shared'};
+    const second={...first,id:'second',in:0.5,out:1,offset:0.5};State.clips=[first,second];
+    const gate=deferred();desktopMock.prepareSourceWaveform=vi.fn().mockReturnValue(gate.promise);
+    desktopMock.ingest.mockResolvedValue({channels:[]});
+    desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:async()=>readyWave()}));
+    const one=Media._clipIngest(first,{audio:[{channels:1}]}),two=Media._clipIngest(second,{audio:[{channels:1}]});
+    try{
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce());
+      expect(desktopMock.ingest).not.toHaveBeenCalled();
+      State.clips=[second];gate.resolve({wave:'shared.wav',cached:true,start:0,duration:1,complete:true,sourceKey:'source-key'});await Promise.all([one,two]);
+      expect(first.peaks).toBeUndefined();
+      expect(Math.max(...second.peaks)).toBeCloseTo(0.5,3);
+      expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce();
+    }finally{
+      gate.resolve({});await Promise.all([one,two]);vi.unstubAllGlobals();delete desktopMock.prepareSourceWaveform;
+    }
+  });
+
+  it.each([['primary','cancel'],['secondary','cancel'],['primary','reset'],['secondary','reset']])(
+    '%s 優先波形在 %s 後不啟動重 intake，晚到暫存須清理',async(kind,mutation)=>{
+    resetAudioProject();Media.ensureCtx();
+    const owner={id:'cancel-wave',name:'A.mov',path:'C:/A.mov',dur:1,in:0,out:1,offset:0,vtrack:0,
+      primary:kind==='primary',audioSrc:kind==='primary'?'video':'clip:cancel-wave',audioSourceId:'cancel-wave'};
+    State.clips=[owner];
+    const gate=deferred();desktopMock.prepareSourceWaveform=vi.fn().mockReturnValue(gate.promise);
+    desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);
+    const work=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],1,owner)
+      :Media._clipIngest(owner,{audio:[{channels:1}]});
+    try{
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce());
+      if(mutation==='reset') Media.reset();
+      else await Media.cancelProxyJobs();
+      await work;
+      expect(desktopMock.ingest).not.toHaveBeenCalled();
+      gate.resolve({wave:'cancelled.wav',temporary:true});
+      await vi.waitFor(()=>expect(desktopMock.cleanupAudio).toHaveBeenCalledWith('cancelled.wav'));
+      expect(owner.peaks).toBeUndefined();
+      expect(Wave._sourceState(owner,false)).toBeNull();
+    }finally{
+      gate.resolve({});await work;delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
+    }
+  });
+
+  it('已有有效波形略過優先抽取，失敗時仍交由正常 ingest 補齊',async()=>{
+    resetAudioProject();Media.ensureCtx();
+    const source={id:'ready',name:'A.mov',path:'C:/A.mov',dur:1,in:0,out:1,offset:0,vtrack:0,
+      audioSrc:'clip:ready',audioSourceId:'ready',peaks:new Float32Array(200).fill(0.3)};State.clips=[source];
+    desktopMock.prepareSourceWaveform=vi.fn().mockRejectedValue(new Error('wave unavailable'));
+    desktopMock.ingest.mockResolvedValue({channels:[]});
+    const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    try{
+      await Media._clipIngest(source,{audio:[{channels:1}]});
+      expect(desktopMock.prepareSourceWaveform).not.toHaveBeenCalled();
+      source.peaks=null;
+      await Media._clipIngest(source,{audio:[{channels:1}]});
+      expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce();
+      expect(desktopMock.ingest).toHaveBeenCalledTimes(2);
+    }finally{warn.mockRestore();delete desktopMock.prepareSourceWaveform;}
+  });
+
+  it.each([false,true])('來源分段先顯示真正時間範圍，換素材=%s 時禁止混合不同來源',async changed=>{
+    resetAudioProject();Media.ensureCtx();
+    const source={id:'segments',name:'long.mov',path:'C:/long.mov',dur:61,in:0,out:61,offset:0,vtrack:0,
+      audioSrc:'clip:segments',audioSourceId:'segments'};State.clips=[source];
+    const gate=deferred();desktopMock.prepareSourceWaveform=vi.fn()
+      .mockResolvedValueOnce({wave:'first.wav',temporary:true,start:0,duration:60,complete:false,sourceKey:'original'})
+      .mockReturnValueOnce(gate.promise);
+    desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);
+    desktopMock.ingest.mockResolvedValue({channels:[]});
+    desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>url.endsWith('first.wav')?readyWave(60):readyWave(1,8192)})));
+    const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    const work=Media._clipIngest(source,{audio:[{channels:1}]});
+    try{
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(2));
+      expect(source.peaks).toHaveLength(60*100*2);
+      expect(Math.max(...source.peaks)).toBeCloseTo(0.5,3);
+      expect(desktopMock.ingest).not.toHaveBeenCalled();
+      expect(desktopMock.prepareSourceWaveform.mock.calls[1][0]).toMatchObject({start:60,length:1,duration:61});
+      const {MediaIntakeJobs}=await import('../src/media-intake-jobs.js');
+      expect(MediaIntakeJobs.snapshot().jobs.find(job=>job.progress?.overall)?.progress.pct).toBeCloseTo(60/61*100,4);
+      gate.resolve({wave:'last.wav',temporary:true,start:60,duration:1,complete:false,sourceKey:changed?'replacement':'original'});
+      await work;
+      if(changed){
+        expect(source.peaks).toBeNull();
+        expect(Wave._sourceState(source,false)?.mix.peaks).toBeNull();
+      }else{
+        expect(source.peaks).toHaveLength(61*100*2);
+        expect(source.peaks[60*100*2]).toBeCloseTo(-0.25,3);
+        expect(source.peaks[60*100*2+1]).toBeCloseTo(0.25,3);
+      }
+      expect(desktopMock.cleanupAudio).toHaveBeenCalledWith('first.wav');
+      expect(desktopMock.cleanupAudio).toHaveBeenCalledWith('last.wav');
+      expect(desktopMock.ingest).toHaveBeenCalledOnce();
+    }finally{
+      gate.resolve({});await work;warn.mockRestore();vi.unstubAllGlobals();
+      delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
+    }
+  });
+
+  it('分段期間真正切片複製的較早波形，也必須在來源變更後撤回',async()=>{
+    resetAudioProject();Media.ensureCtx();State.videoTracks=[{visible:true}];
+    const source={id:'split-wave',name:'long.mov',path:'C:/long.mov',dur:121,in:0,out:121,offset:0,vtrack:0,
+      audioSrc:'clip:split-wave',audioSourceId:'split-wave'};State.clips=[source];
+    const second=deferred(),third=deferred();desktopMock.prepareSourceWaveform=vi.fn()
+      .mockResolvedValueOnce({wave:'one.wav',temporary:true,start:0,duration:60,sourceKey:'original'})
+      .mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise);
+    desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);desktopMock.ingest.mockResolvedValue({channels:[]});
+    desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
+    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>readyWave(60)})));
+    const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    const work=Media._clipIngest(source,{audio:[{channels:1}]});
+    try{
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(2));
+      expect(Media.splitClipAt(30)).toBe(true);
+      const right=State.clips.find(clip=>clip!==source),firstPeaks=right.peaks;
+      second.resolve({wave:'two.wav',temporary:true,start:60,duration:60,sourceKey:'original'});
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(3));
+      expect(source.peaks).not.toBe(firstPeaks);expect(right.peaks).toBe(firstPeaks);
+      third.resolve({wave:'new-source.wav',temporary:true,start:120,duration:1,sourceKey:'replacement'});
+      await work;
+      expect(source.peaks===null).toBe(true);expect(right.peaks===null).toBe(true);
+      expect(Wave.getSourceWaveform(right,right.peaks).peaks).toBeNull();
+    }finally{
+      second.resolve({});third.resolve({});await work;warn.mockRestore();vi.unstubAllGlobals();
+      delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
+    }
+  });
+
+  it.each([['primary','reset'],['secondary','reset'],['primary','replace'],['secondary','replace']])(
+    '%s 的並行波形讀取在 %s 後不可發布至新來源',async(kind,mutation)=>{
+      resetAudioProject();Media.ensureCtx();
+      const owner={id:'wave-late',name:'A.mov',path:'C:/A.mov',dur:1,in:0,out:1,offset:0,vtrack:0,
+        primary:kind==='primary',audioSrc:kind==='primary'?'video':'clip:wave-late',audioSourceId:'late-source'};
+      State.clips=[owner];
+      desktopMock.ingest.mockResolvedValue({cached:true,channels:[{file:'channel.m4a',sourceStream:0,sourceChannel:0}],wave:'late.wav'});
+      desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
+      const gate=deferred(),read=vi.fn().mockReturnValue(gate.promise);
+      vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:read}));
+      const audio=vi.spyOn(Media._intakeSession,'materializeAudioElements').mockResolvedValue([]);
+      const parse=vi.spyOn(Wave,'calcFromWav');
+      const work=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],1,owner)
+        :Media._clipIngest(owner,{audio:[{channels:1}]});
+      try{
+        await vi.waitFor(()=>expect(read).toHaveBeenCalledOnce());
+        if(mutation==='reset') Media.reset();
+        const replacement={...owner,name:'B.mov',path:'C:/B.mov'};
+        State.clips=[replacement];
+        const nextPeaks=new Float32Array([-0.25,0.25]);
+        replacement.peaks=Wave.setSourceMixPeaks(replacement,nextPeaks,{mixPath:'next.wav'});
+        gate.resolve(readyWave());await work;
+        expect(parse).not.toHaveBeenCalled();
+        expect(owner.peaks).toBeUndefined();
+        expect(replacement.peaks).toBe(nextPeaks);
+        expect(Wave._sourceState(replacement,false)?.mix).toMatchObject({path:'next.wav',peaks:nextPeaks});
+      }finally{
+        gate.resolve(readyWave());await work;audio.mockRestore();parse.mockRestore();vi.unstubAllGlobals();
+      }
+    });
+
   it('解除切割影片保留兩段的效果與原淡化視窗',async()=>{
     resetAudioProject();
     const left={id:'left',name:'A.mov',path:'C:/A.mov',dur:10,in:0,out:5,offset:0,vtrack:0,
@@ -301,6 +581,7 @@ describe('reset-scoped media ownership', () => {
       createAnalyser(){ return { connect: vi.fn(), disconnect: vi.fn(), fftSize: 32 }; }
       createMediaElementSource(){ return { channelCount: 2, connect: vi.fn(), disconnect: vi.fn() }; }
       createChannelSplitter(){ return { connect: vi.fn(), disconnect: vi.fn() }; }
+      createChannelMerger(){ return { connect: vi.fn(), disconnect: vi.fn() }; }
       decodeAudioData(){ return Promise.resolve({
         duration: 1, numberOfChannels: 1, sampleRate: 100,
         getChannelData: () => new Float32Array(100),

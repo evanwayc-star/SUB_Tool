@@ -203,6 +203,29 @@ describe('native media intake runtime', () => {
     } finally { observedGrant?.mockRestore(); await fixture.runtime.close(); }
   });
 
+  it.each(['ingest', 'stream'])('%s 嚴格本機舊快取在 admission 清除後，重建必須重新取得可攜母素材證據', async mode => {
+    const authority = new FileAuthority();
+    const fixture = repairFixture(async args => writeIntakeOutputs(args), { fileAuthority: authority });
+    const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [] };
+    let observedGrant;
+    try {
+      const first = await fixture.runtime.ingest(request);
+      const metadata = path.join(cacheDirectory(first.proxy), 'meta.json');
+      const raw = JSON.parse(fs.readFileSync(metadata, 'utf8')), evidence = raw.sourceContent;
+      delete raw.sourceContent; delete raw.sourceKeys;
+      fs.unlinkSync(path.join(path.dirname(first.proxy), 'cache-meta.json'));
+      fs.writeFileSync(metadata, JSON.stringify(raw));
+      observedGrant = clearAfterNextCacheRead(fixture.runtime, authority);
+      const work = await fixture.runtime[mode](request);
+      await work.completion;
+      const result = work.response || work;
+      expect(result.cached).toBe(false);
+      expect(fixture.calls).toHaveLength(2);
+      const publication = JSON.parse(fs.readFileSync(path.join(path.dirname(result.proxy), 'cache-meta.json'), 'utf8'));
+      expect(publication.sourceContent).toEqual(evidence);
+    } finally { observedGrant?.mockRestore(); await fixture.runtime.close(); }
+  });
+
   it.each(['ingest', 'stream'].flatMap(mode => ['close', 'cancel', 'invalid'].map(action => [mode, action])))
   ('%s 清除快取後重查色彩期間 %s 不得產生 writer、URL 或安全標記', async (mode, action) => {
     let entered, release, revoked = false;
@@ -355,7 +378,10 @@ describe('native media intake runtime', () => {
       progress.length = 0;
       const cached = await runtime[mode](request, { owner: { ...owner, requestId: 'cached' }, progressTarget: owner.sender });
       expect(cached.cached).toBe(true);
-      expect(progress).toEqual([expect.objectContaining({ sessionId: 'project', requestId: 'cached', done: true, outcome: 'success' })]);
+      expect(progress).toEqual([
+        expect.objectContaining({ sessionId: 'project', requestId: 'cached', stage: 'cache-check', pct: null }),
+        expect.objectContaining({ sessionId: 'project', requestId: 'cached', stage: 'cache-ready', pct: 100, done: true, outcome: 'success' }),
+      ]);
     } finally { await runtime.close(); }
   });
 
@@ -651,8 +677,12 @@ describe('native media intake runtime', () => {
       sendProgress.mockClear();
       await expect(runtime.ingest(request, { progressTarget })).resolves.toMatchObject({ cached: true });
       expect(calls).toHaveLength(1);
-      expect(sendProgress).toHaveBeenCalledExactlyOnceWith(progressTarget, {
-        jobId: 'ingest', label: '使用既有快取', pct: 100, done: true, outcome: 'success',
+      expect(sendProgress).toHaveBeenCalledTimes(2);
+      expect(sendProgress).toHaveBeenNthCalledWith(1, progressTarget, {
+        jobId: 'ingest', stage: 'cache-check', label: '檢查 Proxy 與音訊快取', pct: null,
+      });
+      expect(sendProgress).toHaveBeenNthCalledWith(2, progressTarget, {
+        jobId: 'ingest', stage: 'cache-ready', label: '使用既有快取', pct: 100, done: true, outcome: 'success',
       });
     } finally { await runtime.close(); }
   });
@@ -743,7 +773,7 @@ describe('native media intake runtime', () => {
       expect(await queued).toBe('next-source');
       expect(runtime.releaseStream('l-fixed')).toBe(false);
       expect(fs.existsSync(calls[0].at(-1))).toBe(false);
-      expect(progress[0]).toMatchObject({ label: '驗證共用 Proxy 的母素材', pct: 0 });
+      expect(progress.find(event => event.stage === 'source-verification')).toMatchObject({ label: '驗證母素材內容', pct: 0 });
       expect(progress.filter(event => event.done)).toEqual([expect.objectContaining({ done: true, outcome: 'failed', errorCode: 'STREAM_READINESS_TIMEOUT' })]);
     } finally { finish(); await coordinator.cancelAllAndWait(); await runtime.close(); }
   });

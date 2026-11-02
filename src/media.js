@@ -463,6 +463,122 @@ const Media = {
     if(buffer) source.peaks=Wave.setSourceBuffer(source,wave,details);
     else{ source.peaks=wave; Wave.setSourceMixPeaks(source,wave,details); }
   },
+  async _loadOriginalWave(source,{wave,channels},owns,{decodeFallback=false,temporary=false,duration=0,transform=null}={}){
+    if(!wave||!owns()) return false;
+    try{
+      return await MediaIntakeJobs.prepareWaveform(async({report,owns:ownsJob})=>{
+        const current=()=>ownsJob()&&owns();
+        report({label:'讀取波形',pct:null});
+        const url=await DESK.fileURL(wave);
+        if(!current()) return false;
+        const response=await fetch(url);
+        if(!current()) return false;
+        const bytes=await response.arrayBuffer();
+        if(!current()) return false;
+        report({label:'整理波形',pct:null});
+        let peaks=Wave.calcFromWav(bytes,duration);
+        if(!peaks&&decodeFallback){
+          const buffer=await AudioEngine.decodeAudioData(bytes);
+          if(!current()) return false;
+          peaks=Wave.calcPeaks(buffer,-1);
+        }
+        if(!peaks||!current()) return false;
+        if(transform) peaks=transform(peaks);
+        if(!peaks||!current()) return false;
+        const sourceClip=this._liveClipForSource(source);
+        if(!sourceClip) return false;
+        // 獨立母素材波形的暫存檔由 caller 釋放；已讀 peaks 可繼續使用，不能留下失效路徑。
+        this._commitOriginalWave(sourceClip,peaks,{mixPath:temporary?null:wave,channels});
+        report({label:'波形已就緒',pct:100});
+        emit('media:timeline');
+        return true;
+      });
+    }catch(error){
+      if(owns()&&error?.name!=='AbortError') console.warn('原音波形讀取失敗:',error);
+      return false;
+    }
+  },
+  _sourceWavePreparations:new Map(),
+  async _prepareSourceWaveform(source,path,audio,duration,owns=()=>true){
+    if(!DESK?.prepareSourceWaveform||!audio?.length||!owns()||!Number.isFinite(duration)||duration<=0) return false;
+    const live=this._liveClipForSource(source);
+    if(!live) return false;
+    const key=clipSourceFingerprint(source),previous=this._sourceWavePreparations.get(key);
+    if(previous?.owns()) return previous.promise;
+    const totalBuckets=Math.ceil(duration*Wave.resolution);
+    if(live.peaks?.length>=totalBuckets*2||Wave._sourceState(live,false)?.mix.peaks?.length>=totalBuckets*2) return true;
+    const version=this._bgVersion;
+    const current=()=>this._bgVersion===version&&owns()&&!!this._liveClipForSource(source);
+    const entry={owns:current,promise:null};
+    this._sourceWavePreparations.set(key,entry);
+    entry.promise=(async()=>{
+      let published=null;
+      const publishedViews=new Set();
+      try{
+        return await MediaIntakeJobs.prepareWaveform(async({report,owns:ownsJob})=>{
+          const active=()=>current()&&ownsJob();
+          report({label:'優先產生波形',pct:null,overall:true,queued:true});
+          let completed=0,sourceKey=null,combined=null;
+          while(completed<duration&&active()){
+            let result;
+            try{
+              result=await MediaIntakeJobs.prepareSourceWaveform({path,audio,duration,start:completed,length:Math.min(60,duration-completed)});
+              if(!active()) return false;
+              if(!result?.wave||typeof result.sourceKey!=='string'||!result.sourceKey
+                ||!Number.isFinite(result.start)||!Number.isFinite(result.duration)||result.duration<=0)
+                throw new Error('母素材波形片段資訊不完整');
+              if(sourceKey&&sourceKey!==result.sourceKey) throw new Error('母素材在波形準備期間變更');
+              sourceKey=result.sourceKey;
+              const whole=result.start===0&&result.duration>=duration;
+              if(!whole&&(Math.abs(result.start-completed)>1e-6||result.duration>Math.min(60,duration-completed)+1e-6))
+                throw new Error('母素材波形片段時間不連續');
+              const end=whole?duration:Math.min(duration,result.start+result.duration);
+              // 只發布已完成的來源桶；尾端尚未讀取的區域不能被當成靜音或拉伸。
+              const loaded=await this._loadOriginalWave(source,{wave:result.wave},active,{
+                temporary:!!result.temporary,duration:result.duration,
+                transform:peaks=>{
+                  if(whole) published=peaks;
+                  else{
+                    combined ||= new Float32Array(totalBuckets*2);
+                    const first=Math.round(result.start*Wave.resolution)*2;
+                    const last=Math.min(totalBuckets,Math.ceil(end*Wave.resolution))*2;
+                    combined.set(peaks.subarray(0,last-first),first);
+                    published=combined.subarray(0,last);
+                  }
+                  publishedViews.add(published);
+                  return published;
+                },
+              });
+              if(!loaded||!active()) return false;
+              completed=end;
+              report({label:'優先產生波形',pct:completed/duration*100,overall:true,queued:false});
+            }finally{
+              if(result?.temporary&&result.wave){
+                try{ await DESK.cleanupAudio(result.wave); }catch(error){ console.warn('暫存波形清理失敗:',error); }
+              }
+            }
+          }
+          return active()&&completed>=duration;
+        });
+      }catch(error){
+        // 來源在段與段之間換檔或失敗時，撤回本次部分結果，不能與下一份來源混合。
+        if(current()&&published){
+          // 切片／History 可能複製較早的 subarray；同源每個存續片段都須撤回本次 view。
+          for(const clip of State.clips){
+            if(clipSourceFingerprint(clip)===key&&publishedViews.has(clip.peaks)) clip.peaks=null;
+          }
+          for(const peaks of publishedViews) Wave.clearSourceMixPeaks(source,peaks);
+          if(publishedViews.has(this._effectOriginalPeaks.get(source.audioSourceId))) this._effectOriginalPeaks.delete(source.audioSourceId);
+          emit('media:timeline');
+        }
+        if(current()&&error?.name!=='AbortError') console.warn('優先波形準備失敗，沿用背景處理:',error);
+        return false;
+      }finally{
+        if(this._sourceWavePreparations.get(key)===entry) this._sourceWavePreparations.delete(key);
+      }
+    })();
+    return entry.promise;
+  },
   _syncEngine: null,
   initSyncEngine() {
     if(!this._syncEngine) {
@@ -843,7 +959,10 @@ const Media = {
   async cacheNativeRoutingAudio(clip, path, duration, audio){
     if(!DESK?.ingest || !clip || !path || !(audio||[]).length) return;
     const myVer=this._bgVersion;
+    const current=()=>this._bgVersion===myVer&&!!this._liveClipForSource(clip);
     try{
+      if(DESK.prepareSourceWaveform) await this._prepareSourceWaveform(clip,path,audio,duration,current);
+      if(!current()) return;
       // 與解除影音／外部音檔共用 ingest 佇列，避免同一路徑同時寫入 cache。
       const res=await MediaIntakeJobs.ingest({path,duration,needsProxy:false,audio,queue:true});
       const liveClip=this._liveClipForSource(clip);
@@ -870,6 +989,8 @@ const Media = {
           Object.assign(track,AudioPipeline.sourceDescriptorFor(liveClip,entry.descriptor));
         }
       }
+      if(DESK.prepareSourceWaveform&&res?.wave) await this._loadOriginalWave(clip,res,current);
+      if(!current()) return;
       emit('media:timeline');
     }catch(e){ console.warn('native audio cache:',e); }
   },
@@ -1382,6 +1503,8 @@ const Media = {
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
     try{
+      if(DESK?.prepareSourceWaveform) await this._prepareSourceWaveform(primary,p,audio,dur,current);
+      if(!current()) return;
       res=await MediaIntakeJobs.ingest({path:p,duration:dur,needsProxy,audio,queue:true});
       if(!current()) return; // 使用者已換另一個檔，丟棄結果
       if(res.proxy){
@@ -1403,6 +1526,9 @@ const Media = {
       const livePrimary=this._liveClipForSource(primary);
       if(!livePrimary) return;
       const descriptors=AudioPipeline.registerSource(livePrimary,chs,chs.length);
+      // 已完成的低取樣率波形獨立讀取，不等待最慢聲道的播放 metadata。
+      // 發布仍經同一來源／效果 owner，較新的素材與效果不受晚到原音覆蓋。
+      const waveReady=this._loadOriginalWave(primary,res,current,{decodeFallback:true});
       if(chs.length){
         // 並行載入所有聲道，大幅縮短多聲道（8ch MXF 等）的等待時間
         const els=await this._intakeSession.materializeAudioElements(chs,{
@@ -1432,26 +1558,7 @@ const Media = {
       if(this.playing) this.startElementSources(this._mpvTime);
       notifyAudioTracks();
 
-      if(res.wave){
-        try{
-          const wavUrl=await DESK.fileURL(res.wave);
-          if(!current()) return;
-          const r=await fetch(wavUrl);
-          if(!current()) return;
-          const buf=await r.arrayBuffer();
-          if(!current()) return;
-          let pk=Wave.calcFromWav(buf);
-          if(!pk){
-            const ab=await AudioEngine.decodeAudioData(buf);
-            if(!current()) return;
-            pk=Wave.calcPeaks(ab,-1);
-          }
-          if(!current()) return;
-          const sourceClip=this._liveClipForSource(primary);
-          if(!sourceClip) return;
-          this._commitOriginalWave(sourceClip,pk,{mixPath:res.wave,channels:chs}); emit('media:timeline');
-        }catch(e){ if(!current()) return; }
-      }
+      await waveReady;
       if(current()) setStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');
     }catch(error){
       for(const element of stagedElements) this._disposeMediaElement(element);
@@ -2827,6 +2934,8 @@ const Media = {
     // needsProxy:true（v4.25）：加入的片段一律備 720p 短 GOP proxy——原檔可能非原生（ProRes/MXF）
     // 或過大（>600MB WebCodecs 讀不進來）；沒有 proxy 時預覽引擎解不了它 →【無法參與疊層合成】
     // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
+    if(DESK?.prepareSourceWaveform) await this._prepareSourceWaveform(c,c.path,info?.audio||[],c.dur,owns);
+    if(!owns()) return;
     let res; try{ res = await MediaIntakeJobs.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
     catch(e){ if(owns()) setStatus('影片音訊抽取失敗：' + (e?.message||e), ''); return; }
     if(!res || !owns()) return;
@@ -2844,6 +2953,7 @@ const Media = {
     let sourceClip=this._liveClipForSource(c);
     if(!sourceClip) return;
     const descriptors=AudioPipeline.registerSource(sourceClip,chs,chs.length);
+    const waveReady=this._loadOriginalWave(c,res,owns);
     if(chs.length){
       const els=await this._intakeSession.materializeAudioElements(chs,{
         owns,
@@ -2870,18 +2980,7 @@ const Media = {
         if(this.playing) this._restartElements();
       }
     }
-    if(res.wave){
-      try{
-        const buf = await fetch(await DESK.fileURL(res.wave)).then(r => r.arrayBuffer());
-        if(owns()){
-          sourceClip=this._liveClipForSource(c);
-          if(!sourceClip) return;
-          const peaks=Wave.calcFromWav(buf);
-          if(peaks) this._commitOriginalWave(sourceClip,peaks,{mixPath:res.wave,channels:chs});
-          emit('media:timeline');
-        }
-      }catch(e){ console.warn('clip wave', e); }
-    }
+    await waveReady;
     if(!owns()) return;
     notifyAudioTracks(); setStatus(`影片已加入序列：${this._liveClipForSource(c)?.name||c.name}`, 'ok');
     return true;
@@ -4303,6 +4402,7 @@ const Media = {
     this._bgVersion++;
     this._cancelDeferredInitialAudioIngest();
     this._intakeSession.invalidate();
+    this._sourceWavePreparations.clear();
     this._deferredPrimaryProxy=null;
     this._deferredPrimaryProxyPromise=null;
     this.pendingChannels=[];
@@ -4359,6 +4459,7 @@ const Media = {
     this._deferredPrimaryProxy=null;
     this._deferredPrimaryProxyPromise=null;
     this._intakeSession.invalidate();
+    this._sourceWavePreparations.clear();
     this._setActiveStreamLease(null);
     if(!keptAudio.length) this._assetEpoch.invalidate();
     this._sequenceEditVersion+=1;
