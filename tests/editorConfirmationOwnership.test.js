@@ -33,12 +33,145 @@ beforeEach(()=>{
 afterAll(()=>{ui.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('editor confirmation ownership and invalidation',()=>{
+  it('備註時間輸入期間其他備註更新重繪，保留草稿並可提交與復原',async()=>{
+    const Notes=await import('../src/notes.js');
+    State.notes=[{id:'editing',time:1,text:'原稿',done:false}];History.reset();Notes.renderNotes();
+    const label=document.querySelector('.note-item[data-id="editing"] .nt-time');
+    label.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    const input=label.querySelector('input');expect(input).not.toBeNull();
+    input.value='00:00:03:00';
+    State.notes.push({id:'background',time:2,text:'新增',done:false});History.record('背景新增備註');
+    Notes.renderNotes();
+    expect(document.querySelector('.note-item[data-id="editing"] .nt-time input')).toBe(input);
+    expect(input.value).toBe('00:00:03:00');expect(State.notes[0].time).toBe(1);
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(input.isConnected).toBe(false);
+    expect(State.notes.find(note=>note.id==='editing').time).toBe(3);
+    History.undo();expect(State.notes.find(note=>note.id==='editing').time).toBe(1);
+    History.undo();expect(State.notes.map(note=>note.id)).toEqual(['editing']);
+  });
+
+  it('備註文字輸入期間重繪保留焦點與草稿，並更新同列其他欄位',async()=>{
+    const Notes=await import('../src/notes.js');
+    const note={id:'editing',time:1,text:'原稿',done:false};
+    State.notes=[note];History.reset();Notes.renderNotes();
+    const text=document.querySelector('.note-item[data-id="editing"] .nt-text');
+    text.setAttribute('tabindex','0');text.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    expect(document.activeElement).toBe(text);text.innerText='新的草稿';
+    note.done=true;note.time=2;History.record('背景更新備註狀態');
+    Notes.renderNotes();
+    expect(document.querySelector('.note-item[data-id="editing"] .nt-text')).toBe(text);
+    expect(document.activeElement).toBe(text);expect(text.innerText).toBe('新的草稿');
+    expect(document.querySelector('.note-item[data-id="editing"] .nt-done-cb').checked).toBe(true);
+    const {secToEncore}=await import('../src/time.js');
+    expect(document.querySelector('.note-item[data-id="editing"] .nt-time').textContent).toBe(secToEncore(2,State.fps,State.dropFrame));
+    expect(note.text).toBe('原稿');text.blur();expect(note.text).toBe('新的草稿');
+    History.undo();expect(State.notes[0]).toMatchObject({text:'原稿',done:true,time:2});
+    History.undo();expect(State.notes[0]).toMatchObject({text:'原稿',done:false,time:1});
+  });
+
+  it('替換工作區後重繪不可保留或提交舊備註時間草稿',async()=>{
+    const Notes=await import('../src/notes.js');
+    State.notes=[{id:'same',time:1,text:'舊專案',done:false}];History.reset();Notes.renderNotes();
+    const label=document.querySelector('.nt-time');label.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    const input=label.querySelector('input');input.value='00:00:03:00';
+    State.notes=[{id:'same',time:5,text:'新專案',done:false}];History.reset();Notes.renderNotes();
+    expect(document.querySelector('.nt-time input')).toBeNull();
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(State.notes).toEqual([{id:'same',time:5,text:'新專案',done:false}]);
+  });
+
+  it('Undo 後其他備註編輯建立歷史分支，仍保留原備註的時間草稿',async()=>{
+    const Notes=await import('../src/notes.js');
+    State.notes=[{id:'editing',time:1,text:'原稿',done:false}];History.reset();Notes.renderNotes();
+    State.notes[0].text='前一個編輯';History.record('先修改');History.undo();
+    const label=document.querySelector('.note-item[data-id="editing"] .nt-time');
+    label.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    const input=label.querySelector('input');input.value='00:00:03:00';
+    State.notes.push({id:'background',time:2,text:'其他備註',done:false});History.record('新增其他備註');
+    Notes.renderNotes();
+    expect(document.querySelector('.note-item[data-id="editing"] .nt-time input')).toBe(input);
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(State.notes.find(note=>note.id==='editing').time).toBe(3);
+    History.undo();expect(State.notes.find(note=>note.id==='editing').time).toBe(1);
+    History.undo();expect(State.notes.map(note=>note.id)).toEqual(['editing']);
+  });
+
+  it('備註重繪在草稿前後插入其他列時不移動焦點',async()=>{
+    const Notes=await import('../src/notes.js');
+    const note={id:'editing',time:2,text:'原稿',done:false};State.notes=[note];History.reset();Notes.renderNotes();
+    const label=document.querySelector('.nt-time');label.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    const input=label.querySelector('input');input.value='00:00:03:00';
+    State.notes=[{id:'before',time:1,text:'前',done:false},note,{id:'after',time:4,text:'後',done:false}];
+    History.record('新增其他備註');Notes.renderNotes();
+    expect([...document.querySelectorAll('#notesList .note-item')].map(row=>row.dataset.id)).toEqual(['before','editing','after']);
+    expect(document.activeElement).toBe(input);expect(input.value).toBe('00:00:03:00');
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    expect(note.time).toBe(2);
+  });
+
+  it('重設歷史後即使保留同一備註物件，舊時間草稿也不能提交',async()=>{
+    const Notes=await import('../src/notes.js');
+    const note={id:'editing',time:1,text:'原稿',done:false};State.notes=[note];History.reset();Notes.renderNotes();
+    const label=document.querySelector('.nt-time');label.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    const input=label.querySelector('input');input.value='00:00:03:00';
+    History.reset();Notes.renderNotes();
+    expect(document.querySelector('.nt-time input')).toBeNull();
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(note.time).toBe(1);expect(History.stack).toHaveLength(1);
+  });
+
   it('old clear-all confirmation preserves notes of replacement workspace',async()=>{
     const Notes=await import('../src/notes.js');
     State.notes=[{id:'old',time:1,text:'old'}];Notes.renderNotes();Notes.clearAllNotes();
     State.notes=[{id:'new',time:2,text:'new'}];History.reset();
     [...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent.includes('確定清除')).click();
     expect(State.notes).toEqual([{id:'new',time:2,text:'new'}]);
+  });
+  it.each(['text','time','done'])('清除備註確認期間同一備註的 %s 更新不被舊確認刪除',async field=>{
+    const Notes=await import('../src/notes.js');
+    const note={id:'note',time:1,text:'原始備註',done:false};
+    State.notes=[note];History.reset();Notes.renderNotes();Notes.clearAllNotes();
+    const value=field==='text'?'背景更新':field==='time'?2:true;
+    note[field]=value;History.record('背景修改備註');
+    [...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent.includes('確定清除')).click();
+    expect(State.notes).toEqual([note]);expect(note[field]).toBe(value);
+    expect(History.stack).toHaveLength(2);
+    History.undo();expect(State.notes[0][field]).not.toBe(value);
+    History.redo();expect(State.notes[0][field]).toBe(value);
+  });
+  it('清除原備註時保留確認期間另外新增的備註與歷史',async()=>{
+    const Notes=await import('../src/notes.js');
+    State.notes=[{id:'old',time:1,text:'原備註',done:false}];History.reset();Notes.renderNotes();Notes.clearAllNotes();
+    State.notes.push({id:'new',time:2,text:'新備註',done:false});History.record('背景新增備註');
+    Notes.renderNotes();document.querySelector('.note-item[data-id="new"]').dispatchEvent(new MouseEvent('click',{bubbles:true}));
+    [...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent.includes('確定清除')).click();
+    expect(State.notes.map(note=>note.id)).toEqual(['new']);
+    expect(document.querySelector('.note-item[data-id="new"]').classList.contains('nt-selected')).toBe(true);
+    History.undo();expect(State.notes.map(note=>note.id)).toEqual(['old','new']);
+    History.redo();expect(State.notes.map(note=>note.id)).toEqual(['new']);
+  });
+  it.each(['選單','確認'])('批次刪除備註的%s等待期間內容更新時保留較新資料',async phase=>{
+    const Notes=await import('../src/notes.js');
+    State.notes=[{id:'first',time:1,text:'原稿',done:false},{id:'second',time:2,text:'第二則',done:false}];
+    History.reset();Notes.renderNotes();
+    const first=document.querySelector('.note-item[data-id="first"]');
+    const second=document.querySelector('.note-item[data-id="second"]');
+    first.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+    second.dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:true}));
+    first.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true}));
+    const menu=[...document.querySelectorAll('#ctxmenu .ci')].find(x=>x.textContent.includes('刪除選取備註'));
+    expect(menu).toBeDefined();
+    const edit=()=>{State.notes[0].text='背景更新';History.record('背景修改備註');};
+    if(phase==='選單')edit();
+    menu.click();
+    if(phase==='確認'){
+      const confirm=[...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent.includes('確定刪除'));
+      expect(confirm).toBeDefined();edit();confirm.click();
+    }
+    expect(State.notes.map(note=>note.text)).toEqual(['背景更新','第二則']);
+    History.undo();expect(State.notes[0].text).toBe('原稿');
+    History.redo();expect(State.notes[0].text).toBe('背景更新');
   });
   it('search drops removed text after normal edit redraw',async()=>{
     const Search=await import('../src/subtitle-search.js');

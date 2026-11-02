@@ -28,7 +28,7 @@ function fixture(bytes = Buffer.from('unchanged original mother source')) {
   return { root, media, source };
 }
 
-function runtimeFor(root, profile, { execute, allowSidecarCache = true, sendProgress, describeAudio } = {}) {
+function runtimeFor(root, profile, { execute, allowSidecarCache = true, sendProgress, describeAudio, describeVideo } = {}) {
   const cacheRoot = path.join(root, profile, 'mediacache');
   const tempRoot = path.join(root, profile, 'tmp');
   fs.mkdirSync(tempRoot, { recursive: true });
@@ -38,7 +38,7 @@ function runtimeFor(root, profile, { execute, allowSidecarCache = true, sendProg
       output.endsWith('proxy.mp4') ? proxyBytes : Buffer.from('complete source channel'));
   }));
   const runtime = createMediaIntakeRuntime({ cacheRoot, tempRoot,
-    fileAuthority: authority, allowSidecarCache, sendProgress, describeAudio, delay: async () => {}, ffmpegExecution: { execute: run } });
+    fileAuthority: authority, allowSidecarCache, sendProgress, describeAudio, describeVideo, delay: async () => {}, ffmpegExecution: { execute: run } });
   runtimes.push(runtime);
   return { runtime, run, authority, cacheRoot };
 }
@@ -145,6 +145,89 @@ function denyWriteHandles(directory) {
 }
 
 describe('母素材與 Proxy 同處的跨電腦快取', () => {
+  it.each(['missing-stream', 'missing-channel', 'empty', 'duplicate', 'stream-gap'].flatMap(layout =>
+    [false, true].map(versioned => ({ layout, versioned }))))
+  ('未知或不完整 layout=$layout、已有版本=$versioned 的波形不隨 Proxy-only 補建取得新規格', async ({ layout, versioned }) => {
+    const original = fixture(), audio = [{ channels: 2 }, { channels: 1 }];
+    const producer = runtimeFor(original.root, 'ambiguous-wave-producer');
+    const saved = await producer.runtime.ingest(request(original.source, audio));
+    const oldWave = fs.readFileSync(saved.wave), oldProxy = fs.readFileSync(saved.proxy);
+    const oldChannels = saved.channels.map(channel => fs.readFileSync(channel.file));
+    for (const file of [metadata(saved.wave), path.join(path.dirname(saved.wave), 'cache-meta.json')]) {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!versioned) delete raw.waveMixVersion;
+      if (layout === 'missing-stream') raw.channels.forEach(channel => { delete channel.sourceStream; });
+      if (layout === 'missing-channel') raw.channels.forEach(channel => { delete channel.sourceChannel; });
+      if (layout === 'empty') raw.channels = [];
+      if (layout === 'duplicate') raw.channels[1].sourceChannel = 0;
+      if (layout === 'stream-gap') raw.channels[2].sourceStream = 2;
+      fs.writeFileSync(file, JSON.stringify(raw));
+    }
+    const reader = runtimeFor(original.root, 'ambiguous-wave-reader', {
+      describeVideo: async () => ({ width: 320, height: 180 }),
+    });
+    // Old proxy has no color version, forcing the real proxy-only publication.
+    const proxyOnly = await reader.runtime.ingest(request(original.source));
+    expect(proxyOnly.cached).toBe(false);
+    expect(proxyOnly.wave).toBeNull();
+    expect(proxyOnly.proxy).not.toBe(saved.proxy);
+    const publication = JSON.parse(fs.readFileSync(metadata(proxyOnly.proxy), 'utf8'));
+    expect(publication.wave).toBeNull();
+    expect(publication).not.toHaveProperty('waveMixVersion');
+    expect(fs.readFileSync(saved.wave)).toEqual(oldWave);
+    expect(fs.readFileSync(saved.proxy)).toEqual(oldProxy);
+    expect(saved.channels.map(channel => fs.readFileSync(channel.file))).toEqual(oldChannels);
+    const normal = await reader.runtime.ingest(request(original.source, audio));
+    expect(normal.wave).not.toBe(saved.wave);
+    expect(JSON.parse(fs.readFileSync(metadata(normal.wave), 'utf8')).waveMixVersion).toBe(1);
+  });
+  it('不完整的舊 index 不會污染另一份具完整 layout 的新波形 publication', async () => {
+    const original = fixture(), audio = [{ channels: 2 }, { channels: 1 }];
+    const producer = runtimeFor(original.root, 'mixed-publication-producer');
+    const saved = await producer.runtime.ingest(request(original.source, audio));
+    const index = metadata(saved.wave), raw = JSON.parse(fs.readFileSync(index, 'utf8'));
+    delete raw.waveMixVersion;
+    raw.channels.forEach(channel => { delete channel.sourceStream; });
+    fs.writeFileSync(index, JSON.stringify(raw));
+    const reader = runtimeFor(original.root, 'mixed-publication-reader');
+    const wave = await reader.runtime.waveform({ src: original.source, duration: 1, audio });
+    expect(wave).toMatchObject({ cached: true, temporary: false, wave: saved.wave });
+    expect(reader.run).not.toHaveBeenCalled();
+    expect(JSON.parse(fs.readFileSync(index, 'utf8'))).toEqual(raw);
+  });
+  it('多 stream 舊波形規格不再沿用；保留 Proxy 與逐聲道並只補建波形', async () => {
+    const original = fixture(), audio = [{ channels: 2 }, { channels: 1 }];
+    const producer = runtimeFor(original.root, 'legacy-mix-producer');
+    const saved = await producer.runtime.ingest(request(original.source, audio));
+    const oldWave = fs.readFileSync(saved.wave), oldProxy = fs.readFileSync(saved.proxy);
+    const oldChannels = saved.channels.map(channel => fs.readFileSync(channel.file));
+    for (const file of [metadata(saved.wave), path.join(path.dirname(saved.wave), 'cache-meta.json')]) {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      delete raw.waveMixVersion;
+      fs.writeFileSync(file, JSON.stringify(raw));
+    }
+    const reader = runtimeFor(original.root, 'legacy-mix-reader', { execute: async (args, options = {}) => {
+      if (typeof options.outputDescriptor === 'number') fs.writeSync(options.outputDescriptor, Buffer.from('correct provisional mix'));
+      else for (const output of outputsOf(args)) fs.writeFileSync(output, Buffer.from('correct permanent mix'));
+    } });
+    const provisional = await reader.runtime.waveform({ src: original.source, duration: 1, audio });
+    expect(provisional).toMatchObject({ cached: false, temporary: true });
+    expect(fs.readFileSync(provisional.wave, 'utf8')).toBe('correct provisional mix');
+    reader.run.mockClear();
+    const refreshed = await reader.runtime.ingest(request(original.source, audio));
+    expect(refreshed.cached).toBe(false);
+    expect(refreshed.proxy).toBe(saved.proxy);
+    expect(refreshed.channels.map(channel => channel.file)).toEqual(saved.channels.map(channel => channel.file));
+    expect(refreshed.wave).not.toBe(saved.wave);
+    expect(outputsOf(reader.run.mock.calls[0][0])).toEqual([refreshed.wave]);
+    expect(fs.readFileSync(saved.proxy)).toEqual(oldProxy);
+    expect(saved.channels.map(channel => fs.readFileSync(channel.file))).toEqual(oldChannels);
+    expect(fs.readFileSync(saved.wave)).toEqual(oldWave);
+    expect(JSON.parse(fs.readFileSync(metadata(refreshed.wave), 'utf8')).waveMixVersion).toBe(1);
+    const repeat = await reader.runtime.ingest(request(original.source, audio));
+    expect(repeat.cached).toBe(true);
+    expect(repeat.wave).toBe(refreshed.wave);
+  });
   it('獨立波形直接沿用嚴格本機舊 wave，不等待缺少的 Proxy、聲道或 portable SHA', async () => {
     const original = fixture(), producer = runtimeFor(original.root, 'wave-producer');
     const saved = await producer.runtime.ingest(request(original.source, [{ channels: 2 }]));
@@ -152,7 +235,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     for (const channel of saved.channels) fs.unlinkSync(channel.file);
     fs.unlinkSync(path.join(path.dirname(saved.wave), 'cache-meta.json'));
     const raw = JSON.parse(fs.readFileSync(metadata(saved.wave), 'utf8'));
-    delete raw.sourceContent; delete raw.sourceKeys;
+    delete raw.sourceContent; delete raw.sourceKeys; delete raw.waveMixVersion;
     const originalMetadata = JSON.stringify(raw);
     fs.writeFileSync(metadata(saved.wave), originalMetadata);
     const open = fsp.open;
@@ -183,7 +266,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const reader = runtimeFor(original.root, 'wave-reader', { sendProgress: (_target, payload) => progress.push(payload),
       execute: async (args, options) => {
         options.onProgress({ pct: 25 });
-        for (const file of outputsOf(args)) fs.writeFileSync(file, 'fresh source wave');
+        fs.writeSync(options.outputDescriptor, Buffer.from('fresh source wave'));
       } });
     const result = await reader.runtime.waveform(request(moved.source, [{ channels: 2 }, { channels: 1 }]), {
       owner: { sender: {}, sessionId: 'wave-session', requestId: 'wave-request' },
@@ -198,7 +281,8 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     expect(args).not.toContain('-c:v'); expect(args).not.toContain('aac');
     expect(filters).toContain('amix=inputs=2:normalize=0');
     expect(filters).not.toContain('asplit'); expect(filters).not.toContain('[co');
-    expect(outputsOf(args)).toEqual([result.wave]);
+    expect(args.slice(-3)).toEqual(['-f', 'wav', 'fd:']);
+    expect(reader.run.mock.calls[0][1].outputDescriptor).toEqual(expect.any(Number));
     expect(fs.readFileSync(movedMetadata)).toEqual(before);
     expect(progress).toContainEqual(expect.objectContaining({ stage: 'source-waveform', pct: 25,
       sessionId: 'wave-session', requestId: 'wave-request', label: '優先產生波形' }));
@@ -208,9 +292,10 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
   it.each(['cancel', 'source-change', 'empty', 'foreign-output'])('獨立波形 %s 不可交付完成內容，僅清理本工作暫存', async action => {
     const original = fixture();
     let output, revoked = false, moved;
-    const reader = runtimeFor(original.root, 'wave-reader', { execute: async args => {
-      output = outputsOf(args)[0];
-      if (action !== 'empty') fs.writeFileSync(output, 'owned wave');
+    const reader = runtimeFor(original.root, 'wave-reader', { execute: async (_args, options) => {
+      const temp = path.join(original.root, 'wave-reader', 'tmp');
+      output = path.join(temp, fs.readdirSync(temp)[0]);
+      if (action !== 'empty') fs.writeSync(options.outputDescriptor, Buffer.from('owned wave'));
       if (action === 'cancel') revoked = true;
       if (action === 'source-change') fs.writeFileSync(original.source, 'different source bytes');
       if (action === 'foreign-output') {
@@ -229,14 +314,17 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const reader = runtimeFor(original.root, 'wave-segment', {
       describeAudio: async () => [{ channels: 1, timestampOffset: -5 }],
       sendProgress: (_target, payload) => progress.push(payload),
-      execute: async (args, options) => { options.onProgress({ pct: 50 }); fs.writeFileSync(args.at(-1), 'segment wave'); },
+      execute: async (_args, options) => { options.onProgress({ pct: 50 }); fs.writeSync(options.outputDescriptor, Buffer.from('segment wave')); },
     });
     const result = await reader.runtime.waveform({ src: original.source, duration: 120, start: 60, length: 60,
       audio: [{ channels: 2, timestampOffset: 0 }] });
     expect(result).toMatchObject({ start: 60, duration: 60, complete: false, temporary: true, sourceKey: cacheKeyFor(original.source) });
     const args = reader.run.mock.calls[0][0];
     expect(args[args.indexOf('-ss') + 1]).toBe('65');
-    expect(args[args.indexOf('-t') + 1]).toBe('60');
+    expect(args).not.toContain('-t');
+    expect(args[args.indexOf('-filter_complex') + 1]).toContain(
+      'aresample=4000,apad=whole_len=240000,atrim=end_sample=240000,asetpts=N/SR/TB',
+    );
     expect(args[args.indexOf('-filter_complex') + 1]).not.toContain('pan=');
     expect(progress.filter(event => !event.done).map(event => event.pct)).toEqual([50, 75]);
     expect(progress.at(-1)).toMatchObject({ pct: 100, done: true, label: '波形片段已備妥' });
@@ -499,7 +587,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
       if (!swapped && file === metaPath) { replace(); swapped = true; }
       return result;
     });
-    reader.runtime.clearAll(moved.source);
+    await reader.runtime.clearAll(moved.source);
     expect(swapped).toBe(true);
     expect(fs.existsSync(wrongProxy)).toBe(true);
     expect(fs.readFileSync(wrongProxy)).toEqual(wrongBytes);
@@ -522,30 +610,29 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
       }
       return rename(from, to, ...args);
     });
-    expect(reader.runtime.clearAll(moved.source)).toEqual({ bytes: 0 });
+    expect(await reader.runtime.clearAll(moved.source)).toEqual({ bytes: 0, incomplete: true });
     expect(claimed).toBeTruthy();
-    const retained = recreated ? claimed : directory;
-    expect(fs.readFileSync(path.join(retained, path.relative(directory, wrongProxy)))).toEqual(wrongBytes);
-    expect(fs.readFileSync(path.join(retained, 'meta.json'))).toEqual(wrongMetadata);
+    expect(fs.readFileSync(path.join(claimed, path.relative(directory, wrongProxy)))).toEqual(wrongBytes);
+    expect(fs.readFileSync(path.join(claimed, 'meta.json'))).toEqual(wrongMetadata);
     if (recreated) {
       const originalProxy = path.join(directory, path.relative(cacheDir(saved.proxy), saved.proxy));
       expect(fs.readFileSync(originalProxy)).toEqual(proxyBytes);
-    } else expect(fs.existsSync(claimed)).toBe(false);
+    } else expect(fs.existsSync(directory)).toBe(false);
   });
 
   it('clearAll 取得正確目錄後刪除失敗，還原原位置而非遺留失效的快取路徑', async () => {
     const { saved, moved, reader, directory } = await replacePreviouslyVerifiedCache('ingest', { defer: true });
     reader.authority.grantTrustedFile(moved.source, { read: true });
-    const remove = fs.rmSync;
+    const remove = fs.unlinkSync;
     let attempted = false;
-    vi.spyOn(fs, 'rmSync').mockImplementation((file, ...args) => {
-      if (path.basename(file).startsWith('.subtool-clear-')) {
+    vi.spyOn(fs, 'unlinkSync').mockImplementation((file, ...args) => {
+      if (String(file).includes('.subtool-clear-')) {
         attempted = true;
         throw Object.assign(new Error('temporary cache removal failure'), { code: 'EACCES' });
       }
       return remove(file, ...args);
     });
-    expect(reader.runtime.clearAll(moved.source)).toEqual({ bytes: 0 });
+    expect(await reader.runtime.clearAll(moved.source)).toEqual({ bytes: 0, incomplete: true });
     expect(attempted).toBe(true);
     expect(fs.readFileSync(path.join(directory, path.relative(cacheDir(saved.proxy), saved.proxy)))).toEqual(proxyBytes);
     expect(fs.readdirSync(path.dirname(directory)).filter(name => name.startsWith('.subtool-clear-'))).toEqual([]);
@@ -573,7 +660,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
       }
       return result;
     });
-    expect(reader.runtime.clearAll(moved.source)).toEqual({ bytes: 0 });
+    expect(await reader.runtime.clearAll(moved.source)).toEqual({ bytes: 0, incomplete: true });
     expect(replaced).toBe(true);
     expect(fs.readFileSync(wrongProxy)).toEqual(wrongBytes);
     expect(fs.readFileSync(path.join(directory, 'meta.json'))).toEqual(wrongMetadata);
@@ -613,7 +700,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
   it.each(['ingest', 'stream'])('%s 共用目錄換成另一母素材後，清目前素材不刪除舊映射的新內容', async mode => {
     const { moved, reader, directory, wrongProxy, wrongBytes, wrongMetadata } = await replacePreviouslyVerifiedCache(mode);
     reader.authority.grantTrustedFile(moved.source, { read: true });
-    reader.runtime.clearAll(moved.source);
+    await reader.runtime.clearAll(moved.source);
     expect(fs.existsSync(wrongProxy)).toBe(true);
     expect(fs.readFileSync(wrongProxy)).toEqual(wrongBytes);
     expect(fs.readFileSync(path.join(directory, 'meta.json'))).toEqual(wrongMetadata);
@@ -635,12 +722,12 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     expect(warm.cached).toBe(true);
     expect(fs.existsSync(path.join(directory, 'source-' + cacheKeyFor(moved.source) + '.json'))).toBe(false);
     reader.authority.grantTrustedFile(moved.source, { read: true });
-    const readdir = fs.readdirSync;
-    const temporaryFailure = vi.spyOn(fs, 'readdirSync').mockImplementation((file, ...args) => {
+    const opendir = fs.opendirSync;
+    const temporaryFailure = vi.spyOn(fs, 'opendirSync').mockImplementation((file, ...args) => {
       if (file === directory) throw Object.assign(new Error('temporary metadata read failure'), { code: 'EIO' });
-      return readdir(file, ...args);
+      return opendir(file, ...args);
     });
-    reader.runtime.clearAll(moved.source);
+    expect(await reader.runtime.clearAll(moved.source)).toEqual({ bytes: 0, incomplete: true });
     temporaryFailure.mockRestore();
     expect(fs.readFileSync(warm.proxy)).toEqual(proxyBytes);
     const open = fsp.open;
@@ -663,11 +750,11 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const reused = await second.runtime[mode](request(moved.source));
     expect(reused.cached).toBe(true);
     if (mode === 'stream') {
-      second.runtime.clearAll(moved.source);
+      await second.runtime.clearAll(moved.source);
       expect(fs.readFileSync(reused.proxy)).toEqual(proxyBytes);
       expect(second.runtime.releaseStream(reused.streamLeaseId)).toBe(true);
     }
-    second.runtime.clearAll(moved.source);
+    await second.runtime.clearAll(moved.source);
     expect(fs.existsSync(reused.proxy)).toBe(false);
     expect(fs.readFileSync(saved.proxy)).toEqual(proxyBytes);
   });
@@ -950,7 +1037,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const localCopy = path.join(local.cacheRoot, cacheKeyFor(original.source));
     fs.mkdirSync(path.dirname(localCopy), { recursive: true });
     fs.cpSync(cacheDir(saved.proxy), localCopy, { recursive: true });
-    expect(local.runtime.cleanOrphans()).toEqual({ removed: 0, bytes: 0 });
+    expect(await local.runtime.cleanOrphans()).toEqual({ removed: 0, bytes: 0, incomplete: true });
     const restored = await local.runtime.ingest(request(original.source, [{ channels: 2 }]));
     expect(restored.cached).toBe(true);
     expect(local.run).not.toHaveBeenCalled();

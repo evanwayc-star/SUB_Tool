@@ -50,7 +50,8 @@ beforeEach(async()=>{
   Object.assign(State,{clips:[],videoTracks:[{name:'V1',visible:true,locked:false}],
     tracks:[],cues:[],notes:[],duration:0,externalAudioState:[],externalAudioEnd:0,fps:25,dropFrame:false});
   clip=Seq.add({id:'source',name:'source',path:'C:/source.mov',primary:true,in:0,out:8,dur:8,offset:0,vtrack:0});
-  bridge={launch:vi.fn(async()=>({ok:true})),loadfile:vi.fn(async()=>({ok:true})),
+  let sourceGeneration=0;
+  bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'initial'})),loadfile:vi.fn(async()=>({ok:true,sourceSessionId:`load-${++sourceGeneration}`})),
     seek:vi.fn(async time=>{Media.observeMpvEvent({event:'property-change',name:'time-pos',data:time});return true;}),
     present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
     cancelPresent:vi.fn(async()=>true),rate:vi.fn(async()=>true),direction:vi.fn(async()=>true),
@@ -91,6 +92,18 @@ describe('片段速度編輯的完整公開生命週期',()=>{
     proxy.resolve({proxy:'C:/late.proxy.mp4'});expect(await pending).toBe(false);
     expect(bridge.loadfile).not.toHaveBeenCalled();expect(History.stack).toHaveLength(1);
   });
+  it('Undo 在 Proxy 準備期間取消未完成編輯，晚到回覆不能載入來源',async()=>{
+    State.cues.push({id:'background',track:0,start:1,end:2,text:'background'});History.record('背景字幕');
+    const proxy=deferred();desk.ingest.mockReturnValueOnce(proxy.promise);
+    const refresh=vi.spyOn(Media,'refreshClipPlayback');
+    const pending=setClipSpeed(clip,2,true);
+    await vi.waitFor(()=>expect(desk.ingest).toHaveBeenCalledOnce());
+    expect(clip.reverse).toBe(true);History.undo();
+    expect(refresh.mock.calls[0][1].signal.aborted).toBe(true);expect(State.cues).toEqual([]);
+    expect(State.clips[0].reverse).toBe(false);
+    proxy.resolve({proxy:'C:/late.proxy.mp4'});expect(await pending).toBe(false);
+    expect(bridge.loadfile).not.toHaveBeenCalled();expect(History.stack).toHaveLength(2);expect(History.hi).toBe(0);
+  });
   it.each(['proxy','load','frame'])('History reset 撤銷 %s 等待中的原生速度预覽，再建立已確認基準',async stage=>{
     const wait=deferred();
     const next=Seq.add({id:'next',in:0,out:2,dur:2,offset:8,vtrack:0});History.reset();
@@ -106,7 +119,7 @@ describe('片段速度編輯的完整公開生命週期',()=>{
     expect(clip.speed).toBeUndefined();expect(clip.reverse).toBeUndefined();expect(next.offset).toBe(8);
     expect(History.stack[0].snap.clipGeo[0]).toMatchObject({speed:1,reverse:false});
     expect(History.stack[0].snap.clipGeo[1]).toMatchObject({offset:8,name:'background'});
-    wait.resolve(stage==='proxy'?{proxy:'C:/source.proxy.mp4'}:stage==='load'?{ok:true}:{backend:'mpv',presentedSourceTime:1});
+    wait.resolve(stage==='proxy'?{proxy:'C:/source.proxy.mp4'}:stage==='load'?{ok:true,sourceSessionId:'deferred-load'}:{backend:'mpv',presentedSourceTime:1});
     expect(await editing).toBe(false);expect(History.stack).toHaveLength(1);
     expect(clip.speed).toBeUndefined();expect(next.offset).toBe(8);expect(Media.displayTime()).toBe(2);
     if(stage==='proxy') expect(bridge.loadfile).not.toHaveBeenCalled();
@@ -137,7 +150,7 @@ describe('片段速度編輯的完整公開生命週期',()=>{
     const loaded=deferred();bridge.loadfile.mockReturnValueOnce(loaded.promise);
     const controller=new AbortController();const pending=setClipSpeed(clip,2,true,{signal:controller.signal});
     await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalledWith('C:/source.proxy.mp4'));
-    controller.abort();const seek=Media.seek(5);loaded.resolve({ok:true});
+    controller.abort();const seek=Media.seek(5);loaded.resolve({ok:true,sourceSessionId:'deferred-load'});
     expect(await pending).toBe(false);expect((await seek).status).toBe('presented');
     expect(bridge.loadfile.mock.calls.map(args=>args[0])).toEqual(['C:/source.proxy.mp4','C:/source.mov']);
     expect(Media.displayTime()).toBe(5);expect(clip.reverse).toBeUndefined();expect(History.stack).toHaveLength(1);
@@ -153,7 +166,7 @@ describe('片段速度編輯的完整公開生命週期',()=>{
     const pending=setClipSpeed(clip,2,true);
     await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalledWith('C:/source.proxy.mp4'));
     const replacement={...clip,speed:1,reverse:false};State.clips=[replacement];
-    loaded.resolve({ok:true});expect(await pending).toBe(false);
+    loaded.resolve({ok:true,sourceSessionId:'deferred-load'});expect(await pending).toBe(false);
     expect(Media._mpvPath).toBe('C:/source.proxy.mp4');expect(replacement.speed).toBe(1);expect(History.stack).toHaveLength(1);
     expect((await Media.seek(2)).status).toBe('presented');
     expect(bridge.loadfile.mock.calls.map(args=>args[0])).toEqual(['C:/source.proxy.mp4','C:/source.mov']);
@@ -192,7 +205,7 @@ describe('片段速度編輯的完整公開生命週期',()=>{
     expect(Media.mpvSourceTransitionPending()).toBe(true);
     Media.observeMpvEvent({event:'property-change',name:'time-pos',data:0});
     expect(Media.vTime()).toBe(.08);
-    loaded.resolve({ok:true});await flush();
+    loaded.resolve({ok:true,sourceSessionId:'deferred-load'});await flush();
     expect(bridge.seek).toHaveBeenCalledWith(.08,undefined);
     expect(bridge.direction).toHaveBeenCalledWith('backward');
     expect(bridge.present).toHaveBeenLastCalledWith(5.84,expect.any(Object));
@@ -221,7 +234,7 @@ describe('片段速度編輯的完整公開生命週期',()=>{
     oldFrame.resolve({backend:'mpv',presentedSourceTime:1});
     expect((await oldSeek).status).not.toBe('presented');await flush();
     expect(Media.mpvSourceTransitionPending()).toBe(true);expect(Media.vTime()).toBe(2);
-    loaded.resolve({ok:true});expect(await editing).toBe(true);
+    loaded.resolve({ok:true,sourceSessionId:'deferred-load'});expect(await editing).toBe(true);
     expect(bridge.present).toHaveBeenLastCalledWith(6,expect.any(Object));
     expect(Media.vTime()).toBe(6);expect(Media.displayTime()).toBe(1);
     expect(Media.mpvSourceTransitionPending()).toBe(false);

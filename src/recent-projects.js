@@ -36,10 +36,14 @@ function fmtWhen(ms) {
 async function openByToken(token) {
   /* 與工具列的「開啟專案」同一道守衛：沒存檔就先問，不可以直接蓋掉。 */
   try {
-    await Project.open(() => DESK.openRecentProject(token));
+    await Project.open(async () => {
+      const input = await DESK.openRecentProject(token);
+      if (!input) throw new Error('無法開啟專案，請確認檔案或儲存裝置後重試');
+      return input;
+    });
   } catch (err) {
-    /* 檔案被移走或改名時主程序會把它從清單移除並丟錯，這裡如實告訴使用者，
-       並重畫選單——否則那一列會一直留著讓人一再踩空。 */
+    /* 目前的開啟失敗須告知使用者；過期讀取錯誤由 Project.open 攔下。
+       清單仍保留項目，讓暫時離線的儲存裝置恢復後可重試。 */
     showToast(String(err?.message || err).replace(/^Error:\s*/, ''));
     await renderRecentMenu();
   }
@@ -66,11 +70,10 @@ export async function renderRecentMenu() {
   for (const item of list) {
     const b = document.createElement('button');
     b.type = 'button';
-    /* 檔案已不在時標灰但仍可點——點了會得到明確的錯誤並自動從清單移除，
-       比直接不顯示更好解釋「我的專案去哪了」。 */
+    /* 無法找到時標灰但仍可點，儲存裝置恢復後可用相同項目重試。 */
     b.style.cssText = 'display:block;text-align:left;line-height:1.3;'
       + (item.missing ? 'opacity:.45;' : '');
-    b.title = item.missing ? `找不到檔案：${item.path}` : item.path;
+    b.title = item.missing ? `找不到檔案，請確認儲存裝置後重試：${item.path}` : item.path;
     const name = document.createElement('div');
     name.textContent = (item.missing ? '⚠ ' : '') + item.name;
     const when = document.createElement('div');

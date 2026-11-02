@@ -73,6 +73,19 @@ it('多次 preview 只在保存建立一筆 History，Undo/Redo 恢復全部配�
   History.redo(); expect(State.audioProject).toEqual(saved);
 });
 
+it('Undo 在配線預覽中關閉視窗並撤銷草稿，舊儲存按鈕不能重新提交', () => {
+  const initial=structuredClone(State.audioProject);
+  State.cues.push({id:'cue',start:0,end:1,text:'編輯',track:0});History.record('字幕');
+  open();click('.audio-output-count-preset[data-count="4"]');
+  const staleSave=button('儲存輸出設定');
+  expect(State.audioProject.buses).toHaveLength(4);
+  History.undo();
+  expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+  expect(State.audioProject).toEqual(initial);expect(State.cues).toEqual([]);
+  staleSave.click();vi.runAllTimers();
+  expect(State.audioProject).toEqual(initial);expect(History.stack).toHaveLength(2);expect(History.hi).toBe(0);
+});
+
 it('來源↔輸出往返共用一次編輯；子頁存檔仍可由父頁取消', () => {
   const initial=structuredClone(State.audioProject);
   source(); route(0,State.audioProject.buses[7].id);

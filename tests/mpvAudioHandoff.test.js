@@ -30,9 +30,9 @@ describe('mpv 背景聲道接管',()=>{
       createMediaElementSource:()=>node(),createChannelSplitter:()=>node(),createChannelMerger:()=>node(),
       createBufferSource:()=>({...node(),playbackRate:{value:1},start:vi.fn((unused,time)=>sounds.push({nativeMuted,elementPlaying:true,time})),stop:vi.fn()})};
     window.AudioContext=function(){return context;};vi.stubGlobal('Audio',AudioElement);
-    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({ok:true,duration:12})),
+    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({ok:true,duration:12,sourceSessionId:'initial'})),
       play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),present:vi.fn(time=>['seek','switch'].includes(action)?presented.promise:Promise.resolve({backend:'mpv',presentedSourceTime:time})),
-      loadfile:vi.fn(async()=>({ok:true,duration:9})),
+      loadfile:vi.fn(async()=>({ok:true,duration:9,sourceSessionId:'next'})),
       quit:vi.fn(async()=>{}),onEvent:vi.fn(),mute:vi.fn(async value=>{
         if(value){await muteAck.promise;nativeMuted=true;} else nativeMuted=false;
       })};

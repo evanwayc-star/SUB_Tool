@@ -688,28 +688,34 @@
     let _jobs = [];
     let _deliveryFormatPresets = [];
     let _isDragging = false;
+    let _closing = false;
     const _retryActions = new Map();
+    const releaseRetryActions = () => { _closing = true; _retryActions.clear(); };
+    window.addEventListener('beforeunload', releaseRetryActions);
+    window.addEventListener('pagehide', releaseRetryActions);
 
     const sameRetryTarget = (job, action) => job.id === action.job.id
       && (job.attempt || 0) === (action.job.attempt || 0)
-      && job.status === action.job.status && job.payload?.outPath === action.job.payload?.outPath;
+      && job.status === action.job.status && job.payload?.outPath === action.job.payload?.outPath
+      && JSON.stringify(job.outputAuthority || null) === JSON.stringify(action.job.outputAuthority || null);
 
-    async function retryFromCard(job, chooseDirectory, refresh) {
+    async function retryFromCard(job, mode, refresh) {
       if (_retryActions.get(job.id)?.pending) return;
-      const action = { job, pending: true, message: chooseDirectory ? '請選擇這份工作的原輸出資料夾…' : '正在重試…', refresh };
+      const action = { job, pending: true, message: mode === 'directory' ? '請選擇這份工作的原輸出資料夾…'
+        : mode === 'confirm' ? '請重新確認這份工作的輸出位置…' : '正在重試…', refresh };
       _retryActions.set(job.id, action);
       refresh();
-      const owns = () => _retryActions.get(job.id) === action && _jobs.some(current => sameRetryTarget(current, action));
+      const owns = () => !_closing && _retryActions.get(job.id) === action && _jobs.some(current => sameRetryTarget(current, action));
       try {
-        const result = chooseDirectory
-          ? await window.queueAPI.retryWithOutputDirectory(job.id)
-          : await window.queueAPI.retryJob(job.id);
+        const result = mode === 'directory' ? await window.queueAPI.retryWithOutputDirectory(job.id)
+          : mode === 'confirm' ? await window.queueAPI.retryWithOutputConfirmation(job.id)
+            : await window.queueAPI.retryJob(job.id);
         if (!owns()) return;
-        if (chooseDirectory ? result?.status === 'retried' : result === true) {
+        if (mode !== 'retry' ? result?.status === 'retried' : result === true) {
           action.message = '已重新加入佇列';
           await loadData();
         } else {
-          action.message = (chooseDirectory && result?.message) || (result?.status === 'cancelled'
+          action.message = (mode !== 'retry' && result?.message) || (result?.status === 'cancelled'
             ? '已取消選擇，原工作與輸出位置已保留。'
             : '無法重試。請確認來源檔仍存在；若輸出位置未經授權或已變更，請按「重新選擇原輸出資料夾並重試」。');
         }
@@ -930,6 +936,14 @@
         if (job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
           actionHtml += '<button type="button" class="primary" data-action="retry">重試</button>';
           actionHtml += `<button type="button" data-action="retry-directory" title="原輸出位置：${escapeHTML(outPath)}">重新選擇原輸出資料夾並重試</button>`;
+          const evidence = job.outputAuthority?.destinationEvidence;
+          const needsConfirmation = !evidence || (evidence.version === 1 && evidence.identity !== null)
+            || (evidence.version !== 1 && (evidence.version !== 2 || !Array.isArray(evidence.identity)
+              || evidence.identity.length !== 6 || evidence.identity.some((value, index) => typeof value !== 'string'
+                || !(index < 4 ? /^\d+$/ : /^-?\d+$/).test(value)) || !/^[0-9a-f]{64}$/.test(evidence.sha256 || '')));
+          if ((job.status === 'failed' || job.status === 'stopped') && needsConfirmation) {
+            actionHtml += '<button type="button" data-action="retry-confirm-output">重新確認輸出並重試</button>';
+          }
         }
         if (job.status === 'done' || job.status === 'failed' || job.status === 'missing-source' || job.status === 'stopped') {
           actionHtml += '<button type="button" data-action="clear">清除紀錄</button>';
@@ -987,8 +1001,9 @@
           if (current) current.refresh = refreshRetry;
         };
         refreshRetry();
-        el.querySelector('[data-action="retry"]')?.addEventListener('click', () => retryFromCard(job, false, refreshRetry));
-        el.querySelector('[data-action="retry-directory"]')?.addEventListener('click', () => retryFromCard(job, true, refreshRetry));
+        el.querySelector('[data-action="retry"]')?.addEventListener('click', () => retryFromCard(job, 'retry', refreshRetry));
+        el.querySelector('[data-action="retry-directory"]')?.addEventListener('click', () => retryFromCard(job, 'directory', refreshRetry));
+        el.querySelector('[data-action="retry-confirm-output"]')?.addEventListener('click', () => retryFromCard(job, 'confirm', refreshRetry));
         el.querySelector('[data-action="clear"]')?.addEventListener('click', () => window.queueAPI.clearJob(job.id));
         el.querySelector('[data-action="show-output"]')?.addEventListener('click', () => window.queueAPI.showItemInFolder(outPath));
         el.querySelector('[data-action="open-log"]')?.addEventListener('click', () => window.queueAPI.openPath(logPath));
@@ -1232,6 +1247,7 @@
 
     async function loadData() {
       const data = await window.queueAPI.getAll();
+      if (_closing) return;
       _jobs = data.jobs;
       _deliveryFormatPresets = Array.isArray(data.deliveryFormatPresets) ? data.deliveryFormatPresets : [];
       _isPaused = data.isPaused;

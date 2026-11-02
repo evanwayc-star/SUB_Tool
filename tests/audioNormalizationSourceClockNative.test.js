@@ -9,6 +9,9 @@ import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const require = createRequire(import.meta.url);
 const { createAudioNormalizationRuntime } = require('../electron/audio-normalization-runtime.js');
+const { createMediaIntakeRuntime } = require('../electron/media-intake-runtime.js');
+const { FileAuthority } = require('../electron/file-authority.js');
+const { motherSourceFingerprint } = require('../electron/mother-source-evidence.js');
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 const { createMediaProbe } = require('../electron/media-probe.js');
 const { audioLimiterFilter } = require('../shared/audio-loudness.cjs');
@@ -24,6 +27,51 @@ function amplitude(bytes, frequency, start = .62, end = .78) {
 }
 
 describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預覽 WAV 的來源時鐘', () => {
+  it.each([false,true])('獨占 handle 產出 %s 模式 WAV 可 seek 且保留選取 stream 與來源時鐘',async isTruePeak=>{
+    const directory=fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()),'subtool-normalization-clock-native-'));
+    const source=path.join(directory,'multiple.mkv');
+    const execution=createFFmpegExecution({getFFmpegPath:()=>FFMPEG,getUserDataDir:()=>directory});
+    const probe=createMediaProbe({executable:FFPROBE});
+    const owner=createMediaIntakeRuntime({tempRoot:directory,cacheRoot:directory,
+      fileAuthority:new FileAuthority({internalDirectories:[directory]})});
+    const run=args=>{
+      const result=spawnSync(FFMPEG,['-hide_banner','-nostdin','-loglevel','error',...args],
+        {windowsHide:true,timeout:20000,maxBuffer:2*1024*1024});
+      expect(result.error||result.status,result.stderr?.toString()).toBe(0);return result.stdout;
+    };
+    let serial=0;
+    const makeRuntime=owned=>createAudioNormalizationRuntime({
+      createTempPath:()=>path.join(directory,`preview-${serial++}.wav`),
+      execute:(args,options)=>execution.execute(args,{...options,executionKind:'direct'}),
+      probe:(file,options)=>probe.describe(file,options),fingerprintSource:motherSourceFingerprint,
+      ...(owned?{produceTemporaryFile:(file,work)=>owner.produceTemporaryFile(file,work)}:{}),
+      removeFile:file=>fs.promises.unlink(file),
+    });
+    try{
+      run(['-y','-itsoffset','0.5','-f','lavfi','-i','color=red:s=64x48:r=10:d=2',
+        '-itsoffset','1.5','-f','lavfi','-i','sine=frequency=440:sample_rate=48000:duration=1',
+        '-itsoffset','0','-f','lavfi','-i','sine=frequency=880:sample_rate=48000:duration=2.5',
+        '-map','0:v:0','-map','1:a:0','-map','2:a:0','-c:v','libx264','-c:a','pcm_s16le',source]);
+      const options={isTruePeak,sourceStream:0,maximumAmplitude:-6,targetLoudness:-12};
+      const expected=await makeRuntime(false).normalize(source,options);
+      const actual=await makeRuntime(true).normalize(source,options);
+      const decode=file=>run(['-i',file,'-ar','4000','-ac','1','-f','f32le','pipe:1']);
+      const first=decode(expected.outputPath),second=decode(actual.outputPath);
+      expect(second).toEqual(first);
+      expect(second.length/4).toBe(8000);
+      expect(amplitude(second,440,.1,.8)).toBeLessThan(.001);
+      expect(amplitude(second,440,1.2,1.8)).toBeGreaterThan(.01);
+      expect(amplitude(second,880,1.2,1.8)).toBeLessThan(.005);
+      const stat=fs.statSync(actual.outputPath),header=fs.readFileSync(actual.outputPath).subarray(0,12);
+      expect(header.toString('ascii',0,4)).toBe('RIFF');expect(header.toString('ascii',8,12)).toBe('WAVE');
+      expect(header.readUInt32LE(4)+8).toBe(stat.size);
+    }finally{
+      await owner.close();await execution.cancelAllAndWait();await probe.cancelAllAndWait();
+      const resolved=fs.realpathSync(directory);
+      if(path.dirname(resolved)!==fs.realpathSync(tmpdir())||!path.basename(resolved).startsWith('subtool-normalization-clock-native-')) throw new Error('拒絕清除平衡化測試目錄外的資料');
+      fs.rmSync(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:50});
+    }
+  },30000);
   it.each([[.1, -80], [1, -80], [1, -72]])('整體響度為 -inf 的 %s 秒、峰值 %s dB 底噪在預覽與交付保持原音', async (duration, peakDb) => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-normalization-clock-native-'));
     const source = path.join(directory, 'low-level.wav');

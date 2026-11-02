@@ -86,6 +86,29 @@ describe('字幕比對 session', () => {
     })).toEqual({ accepted: false, reason: 'unknown-cue' });
   });
 
+  it('切換比對軌道後，舊列的樣式套用命令不能修改仍存在的字幕', () => {
+    const matched = [], sent = [];
+    const session = createSubtitleCompareSession({
+      port: { open: payload => sent.push(payload), sync: payload => sent.push(payload) },
+      onMatchStyle: command => { matched.push(command); return true; },
+    });
+    const project = snapshot();
+    project.tracks.push({ name: 'C' });
+    project.cues.push({ id:'third', track:2, start:10, end:11, text:'第三軌' });
+    session.open(project);
+    const revision = session.revision();
+    expect(session.handleCommand({type:'select',revision,leftTrack:0,rightTrack:2})).toMatchObject({accepted:true});
+    expect(sent.at(-1).plan.rows[0].right.id).toBe('third');
+    expect(session.handleCommand({type:'match-style',revision,targetCueId:'left',sourceCueId:'right'}))
+      .toEqual({accepted:false,reason:'stale-pair'});
+    expect(session.handleCommand({type:'seek',revision,cueId:'right'}))
+      .toEqual({accepted:false,reason:'stale-row'});
+    expect(matched).toEqual([]);
+    expect(session.handleCommand({type:'match-style',revision,targetCueId:'left',sourceCueId:'third'}))
+      .toMatchObject({accepted:true});
+    expect(matched).toHaveLength(1);
+  });
+
   it('關閉後不再同步，也拒絕 command', () => {
     const sent = [];
     const session = createSubtitleCompareSession({

@@ -30,6 +30,7 @@
 'use strict';
 
 const path = require('path');
+const { assertOutputAuthority, assertDestinationEvidence, assertDeliveryDestinationEvidence, assertDistinctSourceEntries, captureDestinationEvidence, outputReservationEntry, needsDeliveryDestinationConfirmation } = require('./export-lease');
 
 /**
  * 匯出工作狀態枚舉。
@@ -587,7 +588,7 @@ function createExportQueue(deps) {
     },
 
     /* ── 執行前的來源檢查 ───────────────────────────────────────────── */
-    inspectSources(job) {
+    inspectSources(job, { skipOutputAuthority = false } = {}) {
       const d = dir();
       const sourcePaths = admission.sourcePathsOf(job);
       const missing = sourcePaths.filter(sourcePath => {
@@ -615,7 +616,7 @@ function createExportQueue(deps) {
       } catch (error) {
         return { ok: false, sourcePaths, status: JOB_STATUS.FAILED, errorMsg: error.message || String(error) };
       }
-      if (!canWriteDelivery(job?.payload?.outPath)) {
+      if (!skipOutputAuthority && !canWriteDelivery(job?.payload?.outPath)) {
         return {
           ok: false, sourcePaths, status: JOB_STATUS.FAILED,
           errorMsg: `匯出輸出位置未經授權：${job?.payload?.outPath || ''}\n請按「重新選擇原輸出資料夾並重試」；舊輸出鎖無法安全清理時，請以新檔名建立交付工作。`,
@@ -661,10 +662,11 @@ function createExportQueue(deps) {
     },
 
     /* ── 對外的工作交易 ───────────────────────────────────────────── */
-    retryJob(jobId) {
+    retryJob(jobId, { reauthorizedOutput = false, confirmedOutput = null, oldDirectoryUnavailable = false } = {}) {
       if (this.shuttingDown) return false;
       const job = state.get(jobId);
       if (!job || typeof isRetryable !== 'function' || !isRetryable(job.status)) return false;
+      if (activeQueueRunners.has(jobId) || activeJobs.has(jobId)) return false;
       /* outcome journal 還在時，舊 attempt 的 tombstone 仍會在重啟時壓過同 id 的
          queued snapshot。先清好舊 artifacts，再以遞增 attempt 原子寫入新 snapshot；
          journal 清理失敗也不會造成 ABA，因為啟動時 generation 較新的工作必須勝出。 */
@@ -680,21 +682,53 @@ function createExportQueue(deps) {
         if (outcome.status !== job.status || !this.finalizeTerminalOutcome(outcome)) return false;
       }
       const nextAttempt = Math.max(attemptOf(job), attemptOf(outcome)) + 1;
-      const inspected = this.inspectSources(job);
+      if (oldDirectoryUnavailable && !confirmedOutput) return false;
+      const inspected = this.inspectSources(job, { skipOutputAuthority: !!confirmedOutput });
       if (!inspected.ok) return false;
-      try { admission.assertOutputAvailable(job); } catch (error) { return false; }
+      let candidate = job;
+      if (confirmedOutput) {
+        if (!needsDeliveryDestinationConfirmation(job.outputAuthority)) return false;
+        try {
+          if (!oldDirectoryUnavailable) assertOutputAuthority(job.outputAuthority, job.payload.outPath);
+          assertOutputAuthority(confirmedOutput, confirmedOutput.requestedPath);
+          assertDeliveryDestinationEvidence(confirmedOutput);
+          candidate = { ...job, payload: { ...job.payload, outPath: confirmedOutput.requestedPath } };
+          admission.assertOutputFormat(candidate);
+          assertDistinctSourceEntries(inspected.sourcePaths, candidate.payload.outPath);
+        } catch (error) { return false; }
+      }
+      try { admission.assertOutputAvailable(candidate); } catch (error) { return false; }
+      // 一般 retry 只能沿用入列時的完整目錄身分；上層目錄能力不能讓同名
+      // 新子目錄自動取得這份工作。只有可信 picker 完成明確重選才能更新。
+      if (captureOutputAuthority && !reauthorizedOutput && !confirmedOutput) {
+        if (!job.outputAuthority) return false;
+        try { assertOutputAuthority(job.outputAuthority, job.payload.outPath); } catch (error) { return false; }
+      }
       let outputAuthority;
-      try { outputAuthority = captureOutputAuthority?.(job.payload.outPath); } catch (error) { return false; }
+      try { outputAuthority = confirmedOutput || captureOutputAuthority?.(job.payload.outPath); } catch (error) { return false; }
       const committed = mutatePersistedJob(jobId, current => {
+        if (confirmedOutput) {
+          if (!oldDirectoryUnavailable) assertOutputAuthority(current.outputAuthority, current.payload.outPath);
+          assertOutputAuthority(confirmedOutput, confirmedOutput.requestedPath);
+          assertDeliveryDestinationEvidence(confirmedOutput);
+          assertDistinctSourceEntries(inspected.sourcePaths, candidate.payload.outPath);
+          current.payload = candidate.payload;
+        }
         current.sourcePaths = inspected.sourcePaths;
         current.attempt = nextAttempt;
-        if (outputAuthority) current.outputAuthority = outputAuthority;
+        if (outputAuthority) {
+          if (!confirmedOutput && Object.hasOwn(current.outputAuthority || {}, 'destinationEvidence')) {
+            outputAuthority.destinationEvidence = current.outputAuthority.destinationEvidence;
+          }
+          current.outputAuthority = outputAuthority;
+        }
         return state.retry(current.id);
       });
       if (!committed.ok) {
         if (committed.error) log(`無法保存重試工作 ${jobId}：`, committed.error);
         return false;
       }
+      if (confirmedOutput) grantPersistedCapabilities(committed.job);
       if (outcome) {
         try { store.resolveTerminalOutcomes(dir(), [jobId]); } catch (error) {
           /* 新 attempt 已落盤；保留舊 journal 也安全，restore 會由較大的 attempt 收斂它。 */
@@ -1098,14 +1132,18 @@ function createExportQueue(deps) {
     },
 
     /* ── 入列與排程 ─────────────────────────────────────────────────── */
-    addJob(job) {
+    addJob(job, admittedOutput = null) {
       if (this.shuttingDown) throw new Error('程式正在關閉，無法再加入匯出工作');
       const d = this.ensureDir();
       job.sourcePaths = store.collectSourcePaths(job.payload);
       admission.assertJobAdmissible(job);
       admission.assertOutputAvailable(job);
       // Evidence comes from the trusted picker authority, never from renderer data.
-      if (captureOutputAuthority) job.outputAuthority = captureOutputAuthority(job.payload.outPath);
+      if (admittedOutput) {
+        assertOutputAuthority(admittedOutput, job.payload.outPath);
+        assertDestinationEvidence(admittedOutput);
+        job.outputAuthority = structuredClone(admittedOutput);
+      } else if (captureOutputAuthority) job.outputAuthority = captureDestinationEvidence(captureOutputAuthority(job.payload.outPath));
       state.add(job);
       try { store.persistJob(d, job, state.jobs().length - 1); } catch (error) {
         state.remove(job.id);
@@ -1269,11 +1307,20 @@ function createExportAdmission(deps) {
      在真正 spawn 前再擋一次。兩道時機不同，都需要。 */
   function assertOutputAvailable(job, excludeId = job?.id) {
     const key = outputKey(job);
+    let entry;
+    try { entry = outputReservationEntry(job.payload.outPath); }
+    catch (error) { throw fail('無法確認匯出目的檔的實際目錄項，請重新選擇輸出檔案', 'DELIVERY_DESTINATION_UNVERIFIABLE'); }
     for (const existing of currentJobs()) {
       if (!existing || existing.id === excludeId || !activeReservesOutput(existing.status)) continue;
       let existingKey;
       try { existingKey = outputKey(existing); } catch (error) { continue; }
-      if (key !== existingKey) continue;
+      if (key !== existingKey) {
+        if (entry === null) continue;
+        let existingEntry;
+        try { existingEntry = outputReservationEntry(existing.payload.outPath); }
+        catch (error) { throw fail('無法確認佇列中輸出檔案的實際目錄項', 'DELIVERY_DESTINATION_UNVERIFIABLE'); }
+        if (entry !== existingEntry) continue;
+      }
       const error = fail(`同一個輸出檔案已在匯出佇列中：${job.payload.outPath}`, 'OUTPUT_BUSY');
       error.conflictingJobId = existing.id;
       throw error;
@@ -1314,6 +1361,9 @@ function createExportAdmission(deps) {
     if (sourceKeys.includes(outputKey(job))) {
       throw fail(`匯出不可覆蓋母素材：${outputPath}`, 'OUTPUT_OVERWRITES_SOURCE');
     }
+    // Existing Windows short names and symbolic source aliases can refer to
+    // the same directory entry despite having different reservation keys.
+    assertDistinctSourceEntries(sourcePaths, outputPath);
     return sourcePaths;
   }
 

@@ -299,6 +299,9 @@ video.addEventListener('pause',()=>{
 video.addEventListener('seeked',()=>{updatePlayhead();renderVideoSub();updateNoteActive(Media.displayTime());});
 window.addEventListener('mpv:seeked',e=>{updatePlayhead();renderVideoSub();updateNoteActive(e.detail);});
 video.addEventListener('ended',()=>{
+  // 間隙與純音訊的時間軸由虛擬時鐘驅動，舊影片晚到的 ended 不得停掉外音。
+  // 真正發生在 presentation 等待中的 ended 仍交給 session 裁定並取消該工作。
+  if(!Media.playbackTransitionPending()&&(Media.inGap()||Media.audioOnlyTimeline())) return;
   if(Media.seqContinueAtEnd()) return;
   Media.observePlayerPlaybackState(false,{source:'html5',reason:'ended'});
 }); // 兩種 presenter 的實際結束都回到 presentation session

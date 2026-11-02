@@ -53,6 +53,8 @@ vi.mock('../src/decode/source-frame-index.js',()=>({sourceFrameWindow:vi.fn(()=>
 let Media;
 let State;
 let resetPlayerAdapter;
+let nativeGeneration = 0;
+const nativeSuccess = () => ({ok:true,sourceSessionId:`presentation-${++nativeGeneration}`});
 
 describe('Media presentation runtime', () => {
   beforeAll(async () => {
@@ -170,7 +172,7 @@ describe('Media presentation runtime', () => {
 
   it.each(['pause','new-seek','new-seek-reverse-play','reset','reverse-play'])('native capture holds the real Media presenter and respects %s',async action=>{
     const {activateMpvTransport}=await import('../src/media-player-adapter.js');
-    const bridge={launch:vi.fn(async()=>({ok:true})),present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
+    const bridge={launch:vi.fn(async()=>nativeSuccess()),present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
       play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),mute:vi.fn(async()=>{})};
     const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
     State.clips[0].path='C:/program.mov';Media._mpvPath='C:/program.mov';Media._nativeReverse=false;
@@ -201,7 +203,7 @@ describe('Media presentation runtime', () => {
   it.each(['negative acknowledgement','rejection','reverse preparation','success','superseded'])('native clip activation %s cannot acknowledge the previous mother source',async outcome=>{
     const {activateMpvTransport}=await import('../src/media-player-adapter.js');
     let release;
-    const bridge={launch:vi.fn(async()=>({ok:true})),loadfile:vi.fn(async()=>({ok:true})),
+    const bridge={launch:vi.fn(async()=>nativeSuccess()),loadfile:vi.fn(async()=>nativeSuccess()),
       present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
       pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),mute:vi.fn(async()=>{})};
     if(outcome==='negative acknowledgement')bridge.loadfile.mockResolvedValueOnce({ok:false});
@@ -218,7 +220,7 @@ describe('Media presentation runtime', () => {
       if(outcome==='superseded'){
         await vi.waitFor(()=>expect(release).toBeTypeOf('function'));
         const current=Media.requestPresentation(104);
-        release({ok:true});
+        release(nativeSuccess());
         await expect(pending).resolves.toMatchObject({status:'failed',error:{name:'AbortError'}});
         await expect(current).resolves.toMatchObject({status:'presented',presentedTime:104});
         expect(bridge.present).toHaveBeenCalledOnce();expect(bridge.present.mock.lastCall[0]).toBe(14);
@@ -236,7 +238,7 @@ describe('Media presentation runtime', () => {
 
   it.each(['false','reject'])('公開原生跨段 direction %s 不可當成已接受的方向繼續起播',async outcome=>{
     const {activateMpvTransport}=await import('../src/media-player-adapter.js');
-    const bridge={launch:vi.fn(async()=>({ok:true})),loadfile:vi.fn(async()=>({ok:true})),
+    const bridge={launch:vi.fn(async()=>nativeSuccess()),loadfile:vi.fn(async()=>nativeSuccess()),
       play:vi.fn(async()=>null),pause:vi.fn(async()=>{}),seek:vi.fn(async()=>{}),
       present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
       rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),mute:vi.fn(async()=>{})};
@@ -270,7 +272,7 @@ describe('Media presentation runtime', () => {
   it.each(['success','reject','pause-resolve','pause-reject'])('公開原生自動跨段起播 %s 由同一 owner 交接聲音',async action=>{
     const {activateMpvTransport}=await import('../src/media-player-adapter.js');
     let resolve,reject;const starting=new Promise((done,fail)=>{resolve=done;reject=fail;});
-    const bridge={launch:vi.fn(async()=>({ok:true})),loadfile:vi.fn(async()=>({ok:true})),
+    const bridge={launch:vi.fn(async()=>nativeSuccess()),loadfile:vi.fn(async()=>nativeSuccess()),
       play:vi.fn(()=>starting),pause:vi.fn(async()=>{}),seek:vi.fn(async()=>{}),
       rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),mute:vi.fn(async()=>{})};
     const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
@@ -303,7 +305,7 @@ describe('Media presentation runtime', () => {
   it.each(['pause','error','end-file'])('原生起播等待期間的 %s 回報保留正確播放意圖',async reason=>{
     const {activateMpvTransport}=await import('../src/media-player-adapter.js');
     let resolve;const starting=new Promise(done=>{resolve=done;});
-    const bridge={launch:vi.fn(async()=>({ok:true})),play:vi.fn(()=>starting),
+    const bridge={launch:vi.fn(async()=>nativeSuccess()),play:vi.fn(()=>starting),
       pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),mute:vi.fn(async()=>{})};
     const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
     State.clips[0].path='C:/program.mov';Media._mpvPath='C:/program.mov';Media._mpvTime=15;
@@ -326,7 +328,7 @@ describe('Media presentation runtime', () => {
   it.each(['resolve','reject'])('使用者暫停後晚到的 native play property 與 %s 不得重起音',async outcome=>{
     const {activateMpvTransport}=await import('../src/media-player-adapter.js');
     let resolve,reject;const starting=new Promise((done,fail)=>{resolve=done;reject=fail;});
-    const bridge={launch:vi.fn(async()=>({ok:true})),play:vi.fn().mockReturnValueOnce(starting).mockResolvedValue(null),
+    const bridge={launch:vi.fn(async()=>nativeSuccess()),play:vi.fn().mockReturnValueOnce(starting).mockResolvedValue(null),
       pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),mute:vi.fn(async()=>{})};
     const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
     State.clips[0].path='C:/program.mov';Media._mpvPath='C:/program.mov';Media.tracks=[];Media.externalAudioSources=[];
@@ -354,7 +356,7 @@ describe('Media presentation runtime', () => {
     const {resetAudioProject,ensureAudioSourceMap}=await import('../src/state.js');
     let resolve;const starting=new Promise(done=>{resolve=done;});
     let loaded;const loading=new Promise(done=>{loaded=done;});
-    const bridge={launch:vi.fn(async()=>({ok:true})),loadfile:vi.fn(async()=>({ok:true})),
+    const bridge={launch:vi.fn(async()=>nativeSuccess()),loadfile:vi.fn(async()=>nativeSuccess()),
       play:vi.fn(()=>starting),pause:vi.fn(async()=>{}),seek:vi.fn(async()=>{}),
       rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),mute:vi.fn(async()=>null)};
     const saved={src:domMock.video.src,currentSrc:Object.getOwnPropertyDescriptor(domMock.video,'currentSrc'),readyState:Object.getOwnPropertyDescriptor(domMock.video,'readyState')};
@@ -387,7 +389,7 @@ describe('Media presentation runtime', () => {
           const oldTime=Media.vTime();
           Media.observeMpvEvent({event:'property-change',name:'time-pos',data:0});
           expect(Media.vTime()).toBe(oldTime);
-          loaded({ok:true});
+          loaded(nativeSuccess());
         }
       }else Media.play();
       await vi.waitFor(()=>expect((backend==='mpv'?bridge.play:domMock.video.play)).toHaveBeenCalledOnce());
@@ -400,7 +402,7 @@ describe('Media presentation runtime', () => {
       expect(original.currentTime).toBeCloseTo(sourceTime,8);
       expect(outside.currentTime).toBeCloseTo(timelineTime-100+4,8);
     }finally{
-      loaded({ok:true});resolve(null);await starting;Media.pause({seekOnPause:false});Media.resetPresentationSession('delayed-clock-finished');
+      loaded(nativeSuccess());resolve(null);await starting;Media.pause({seekOnPause:false});Media.resetPresentationSession('delayed-clock-finished');
       Media.tracks=[];Media.externalAudioSources=[];runtime?.stopBoundsFeeder();resetPlayerAdapter(null,domMock.video);
       domMock.video.src=saved.src;Object.defineProperty(domMock.video,'currentSrc',saved.currentSrc);
       if(saved.readyState)Object.defineProperty(domMock.video,'readyState',saved.readyState);else delete domMock.video.readyState;
@@ -486,7 +488,7 @@ describe('Media presentation runtime', () => {
     const old=deferred(),latest=deferred();
     const elements=vi.spyOn(AudioEngine,'startElements'),buffers=vi.spyOn(AudioEngine,'startBuffers');
     const originalSource={src:domMock.video.src,currentSrc:domMock.video.currentSrc};
-    const bridge={launch:vi.fn(async()=>({ok:true})),loadfile:vi.fn(async()=>({ok:true})),
+    const bridge={launch:vi.fn(async()=>nativeSuccess()),loadfile:vi.fn(async()=>nativeSuccess()),
       present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),seek:vi.fn(async()=>{}),
       play:vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(latest.promise),
       pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),mute:vi.fn(async()=>{})};

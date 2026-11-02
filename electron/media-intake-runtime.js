@@ -6,16 +6,22 @@ const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
-const { motherSourceFingerprintSync, portableSourceFingerprint } = require('./mother-source-evidence');
+const { motherSourceFingerprint, motherSourceFingerprintSync, portableSourceFingerprint } = require('./mother-source-evidence');
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
 const { buildIngestArgs, previewPipelineCandidates, previewFallbackAllowed } = require('./ffmpeg-execution-engine');
 const { sourceAudioClockFilter, sourceClockSeek, timestampOffset } = require('./media-source-clock');
+const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
+const { createTemporaryOutputOwnership } = require('./temporary-output-ownership');
 const SOURCE_CACHE_VERSION = 'source-v3';
 const PORTABLE_SOURCE_FORMAT = SOURCE_CACHE_VERSION + '-sha256';
 
 function cacheKeyFor(src) {
   // v3 隔離未對齊影片來源 PTS 的舊音訊／Proxy；母素材取樣規則保持單一 owner。
   return motherSourceFingerprintSync(src, { namespace: SOURCE_CACHE_VERSION, digestLength: 16 });
+}
+
+async function cacheKeyForAsync(src) {
+  return motherSourceFingerprint(src, { namespace: SOURCE_CACHE_VERSION, digestLength: 16 });
 }
 
 function ownsMediaIntake(owner, scope) {
@@ -33,6 +39,11 @@ function buildAudioIngestPlan(audio, { waveOnly = false } = {}) {
   const channelMaps = [];
   const waveContribs = [];
   const audioArr = Array.isArray(audio) ? audio : [];
+  // Match Wave.calcPeaks(): every original channel has equal weight, including
+  // channels from streams with different widths. Keep enough precision for
+  // large layouts rather than rounding a valid contribution down to zero.
+  const totalChannels = audioArr.reduce((sum, stream) => sum + sourceChannelCount(stream), 0);
+  const contribution = totalChannels ? (1 / totalChannels).toFixed(12) : '1';
   let channelIndex = 0;
 
   audioArr.forEach((stream, streamIndex) => {
@@ -43,7 +54,14 @@ function buildAudioIngestPlan(audio, { waveOnly = false } = {}) {
     filters.push(`[0:a:${streamIndex}]${sourceAudioClockFilter(stream)}[at${streamIndex}]`);
 
     if (count === 1) {
-      if (waveOnly) { waveContribs.push(`[at${streamIndex}]`); return; }
+      if (waveOnly) {
+        if (totalChannels === 1) waveContribs.push(`[at${streamIndex}]`);
+        else {
+          filters.push(`[at${streamIndex}]volume=${contribution}[wm${streamIndex}]`);
+          waveContribs.push(`[wm${streamIndex}]`);
+        }
+        return;
+      }
       filters.push(`[at${streamIndex}]asplit=2[co${channelIndex}][wv${streamIndex}]`);
       channels.push({
         label: base,
@@ -52,7 +70,11 @@ function buildAudioIngestPlan(audio, { waveOnly = false } = {}) {
         sourceChannel: 0,
       });
       channelMaps.push(`[co${channelIndex}]`);
-      waveContribs.push(`[wv${streamIndex}]`);
+      if (totalChannels === 1) waveContribs.push(`[wv${streamIndex}]`);
+      else {
+        filters.push(`[wv${streamIndex}]volume=${contribution}[wm${streamIndex}]`);
+        waveContribs.push(`[wm${streamIndex}]`);
+      }
       channelIndex++;
       return;
     }
@@ -74,8 +96,7 @@ function buildAudioIngestPlan(audio, { waveOnly = false } = {}) {
         channelIndex++;
       }
     }
-    const average = (1 / count).toFixed(4);
-    const sum = Array.from({ length: count }, (_, sourceChannel) => `${average}*c${sourceChannel}`).join('+');
+    const sum = Array.from({ length: count }, (_, sourceChannel) => `${contribution}*c${sourceChannel}`).join('+');
     filters.push(`[${waveOnly ? 'at' : 'wv'}${streamIndex}]pan=mono|c0=${sum}[wm${streamIndex}]`);
     waveContribs.push(`[wm${streamIndex}]`);
   });
@@ -105,26 +126,145 @@ function createMediaIntakeRuntime(options = {}) {
   let streamServerReady = null;
   let streamPort = null;
   let closed = false;
+  let runtimeGeneration = 0;
+  const drainingServers = new Set();
   const streamJobs = new Map();
   const activeCacheDirs = new Map();
+  const activeCacheSources = new Map();
   const portableHits = new Map();
   const portableHashes = new Set();
+  const cleanupTasks = new Map();
+  const sidecarCleanups = new Set();
+  const cleanupHandles = new Set();
+  let drainingCleanup = false;
+  let closeOperation = null;
   const inspectedCacheOwners = new WeakMap();
+  // All produced temp paths cross IPC as strings. Share owner/tombstone state
+  // across same-process runtime reconstruction for this exact temp root.
+  const temporaryOwnership = tempRoot ? createTemporaryOutputOwnership({ tempRoot, rootAuthority: options.tempRootAuthority }) : null;
+  let sourceWaveRoot = temporaryOwnership?.rootAuthority || options.tempRootAuthority || null;
+  const cleanupRoots = new Map();
+  const sidecarRoots = new Map();
+  const sourceWaveKey = file => {
+    const absolute = path.resolve(file);
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  };
   const cacheRoot = () => {
     const value = typeof options.cacheRoot === 'function' ? options.cacheRoot() : options.cacheRoot;
     return value || tempRoot;
   };
 
-  function protectCacheDir(dir) {
-    activeCacheDirs.set(dir, (activeCacheDirs.get(dir) || 0) + 1);
+  // 清理能力要綁定可信入口取得的根目錄身分，不能在刪除時把同名新根
+  // 當作原本的授權；選到巢狀授權時也不能退回較寬的祖先根。
+  function assertCleanupAncestors(target) {
+    for (const root of cleanupRoots.values()) {
+      if (withinCachePath(root.requestedPath, target)) captureOutputAuthority(target, root);
+    }
+  }
+
+  function registerCleanupRoot(directory) {
+    try {
+      if (!directory || !fileAuthority.canManageInternalFile(directory)) return false;
+      assertCleanupAncestors(path.join(directory, '.cleanup-root-check'));
+      const key = sourceWaveKey(directory), previous = cleanupRoots.get(key);
+      const authority = previous || (tempRoot && key === sourceWaveKey(tempRoot) && sourceWaveRoot)
+        || captureOutputDirectory(directory);
+      captureOutputAuthority(path.join(directory, '.cleanup-root-check'), authority);
+      if (!previous) cleanupRoots.set(key, authority);
+      if (tempRoot && key === sourceWaveKey(tempRoot) && !sourceWaveRoot) {
+        sourceWaveRoot = authority;
+        temporaryOwnership?.setRootAuthority(authority);
+      }
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function grantManagedCleanupRoot(directory, verify = () => {}) {
+    verify();
+    assertCleanupAncestors(path.join(directory, '.cleanup-root-check'));
+    const key = sourceWaveKey(directory), previous = cleanupRoots.get(key);
+    const authority = previous || captureOutputDirectory(directory);
+    captureOutputAuthority(path.join(directory, '.cleanup-root-check'), authority);
+    fileAuthority.grantManagedCacheDirectory(directory);
+    verify();
+    assertCleanupAncestors(path.join(directory, '.cleanup-root-check'));
+    captureOutputAuthority(path.join(directory, '.cleanup-root-check'), authority);
+    if (!previous) cleanupRoots.set(key, authority);
+  }
+
+  function cleanupAuthority(target) {
+    const candidates = [...cleanupRoots.values()]
+      .filter(root => withinCachePath(root.requestedPath, target))
+      .sort((a, b) => b.requestedPath.length - a.requestedPath.length);
+    if (!candidates.length) return null;
+    try { assertCleanupAncestors(target); return captureOutputAuthority(target, candidates[0]); }
+    catch (_) { return null; }
+  }
+
+  function canUseCacheCandidate(directory) {
+    try {
+      let existing = directory;
+      for (;;) {
+        try { fs.lstatSync(existing); break; }
+        catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          const parent = path.dirname(existing);
+          if (parent === existing) throw error;
+          existing = parent;
+        }
+      }
+      assertCleanupAncestors(path.join(existing, '.cleanup-root-check'));
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function forgetRemovedCleanupRoots(directory) {
+    for (const [key, authority] of cleanupRoots) {
+      if (withinCachePath(directory, authority.requestedPath)) cleanupRoots.delete(key);
+    }
+  }
+
+  function protectSource(src) {
+    if (src) activeCacheSources.set(src, (activeCacheSources.get(src) || 0) + 1);
+    let released = false;
     return () => {
-      const count = activeCacheDirs.get(dir) || 0;
-      if (count <= 1) activeCacheDirs.delete(dir);
-      else activeCacheDirs.set(dir, count - 1);
+      if (released) return;
+      released = true;
+      if (src) {
+        const sourceCount = activeCacheSources.get(src) || 0;
+        if (sourceCount <= 1) activeCacheSources.delete(src);
+        else activeCacheSources.set(src, sourceCount - 1);
+      }
     };
   }
 
-  function cacheCandidates(src, key = cacheKeyFor(src)) {
+  function protectCacheDir(dir, src) {
+    activeCacheDirs.set(dir, (activeCacheDirs.get(dir) || 0) + 1);
+    const releaseSource = protectSource(src);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const count = activeCacheDirs.get(dir) || 0;
+      if (count <= 1) activeCacheDirs.delete(dir);
+      else activeCacheDirs.set(dir, count - 1);
+      releaseSource();
+    };
+  }
+
+  function withSourceLease(work, sourceOf = request => request?.src, guardSession = false) {
+    return async (...args) => {
+      const release = protectSource(sourceOf(args[0]));
+      if (guardSession) {
+        const original = args[1] || {}, generation = runtimeGeneration;
+        args[1] = { ...original, isCancelled: () => generation !== runtimeGeneration || !!original.isCancelled?.() };
+      }
+      try { return await work(...args); }
+      finally { release(); }
+    };
+  }
+
+  function cacheCandidates(src, key = cacheKeyFor(src), onUncertain = null) {
     const candidates = [];
     if (allowSidecarCache) {
       try {
@@ -137,10 +277,11 @@ function createMediaIntakeRuntime(options = {}) {
     if (portable) {
       // 共享目錄可被同步或搬移工作取代；先前驗證的路徑不能替新內容作證。
       // 讀取、補建與清理都必須使用同一份仍有效的母素材證據。
-      const current = inspectCacheDirectory(portable.dir);
+      const current = inspectCacheDirectory(portable.dir, [], !!onUncertain);
       if (!current.error && sameSourceContent(current.sourceContent, portable.sourceContent)) {
         if (!candidates.includes(portable.dir)) candidates.push(portable.dir);
       } else if (!current.error) portableHits.delete(key);
+      else if (onUncertain) onUncertain();
       // 暫時讀不到 metadata 不代表映射永久失效；保留它供稍後重試，本次不准入。
     }
     return candidates;
@@ -151,6 +292,25 @@ function createMediaIntakeRuntime(options = {}) {
     const directory = canonicalCachePath(root), target = canonicalCachePath(file);
     return target === directory || target.startsWith(directory + path.sep);
   };
+  function sidecarRoot(src) { return path.join(path.dirname(src), '.subtool_Cache'); }
+  function sidecarAuthority(src, { allowMissing = false } = {}) {
+    try {
+      const directory = sidecarRoot(src), parent = fs.realpathSync.native(path.dirname(src));
+      const key = sourceWaveKey(directory), previous = sidecarRoots.get(key);
+      let stat;
+      try { stat = fs.lstatSync(directory); }
+      catch (error) { if (allowMissing && !previous && error.code === 'ENOENT') return { missing: true }; throw error; }
+      if (!stat.isDirectory() || stat.isSymbolicLink()
+        || canonicalCachePath(fs.realpathSync.native(directory)) !== canonicalCachePath(path.join(parent, '.subtool_Cache'))) return null;
+      const authority = previous || captureOutputDirectory(directory);
+      captureOutputAuthority(path.join(directory, '.sidecar-root-check'), authority);
+      if (!previous) sidecarRoots.set(key, authority);
+      return authority;
+    } catch (_) { return null; }
+  }
+  function isSidecarCandidate(src, directory) { return withinCachePath(sidecarRoot(src), directory); }
+  if (tempRoot) registerCleanupRoot(tempRoot);
+  if (typeof options.cacheRoot === 'string') registerCleanupRoot(options.cacheRoot);
   function cachePathEscape() {
     const error = new Error('快取元件超出實際目錄');
     error.code = 'CACHE_PATH_ESCAPE';
@@ -276,6 +436,7 @@ function createMediaIntakeRuntime(options = {}) {
       proxy: relative(meta.proxy),
       ...(meta.proxy && options.describeVideo ? { proxyColorVersion: 1 } : {}),
       wave: relative(meta.wave),
+      ...(meta.wave ? { waveMixVersion: 1 } : {}),
       channels: (meta.channels || []).map(channel => ({
         label: channel.label,
         file: relative(channel.file),
@@ -359,6 +520,21 @@ function createMediaIntakeRuntime(options = {}) {
     && left.sha256 === right.sha256 && left.size === right.size;
   const sameAudioLayout = (left, right) => left.length === right.length && left.every((channel, index) =>
     channel.sourceStream === right[index].sourceStream && channel.sourceChannel === right[index].sourceChannel);
+  // A wave's mix version is meaningful only with its ordered source-channel
+  // layout. A proxy-only publication can otherwise carry and incorrectly
+  // certify an older wave whose missing coordinates hide multiple streams.
+  function completeAudioLayout(channels) {
+    if (!channels.length) return false;
+    let stream = 0, channel = 0;
+    for (const entry of channels) {
+      if (entry.sourceStream === stream && entry.sourceChannel === channel) { channel++; continue; }
+      if (channel > 0 && entry.sourceStream === stream + 1 && entry.sourceChannel === 0) {
+        stream++; channel = 1; continue;
+      }
+      return false;
+    }
+    return true;
+  }
 
   function writeMeta(metaPath, publicationPath, meta, sourceContent, sourceKey, audio, verify) {
     verify();
@@ -420,13 +596,13 @@ function createMediaIntakeRuntime(options = {}) {
     return entry.kind === 'publication' ? raw.publicationVersion === 1 : raw.sourceKey === entry.sourceKey;
   }
 
-  function inspectCacheDirectory(dir, audio = []) {
+  function inspectCacheDirectory(dir, audio = [], bounded = false) {
     try {
       const owner = cacheDirectoryOwner(dir);
       const realDirectory = realCacheDirectory(dir);
       const records = [];
       let uncertain = false;
-      for (const entry of metadataEntries(fs.readdirSync(dir, { withFileTypes: true }))) {
+      for (const entry of metadataEntries(bounded ? readCleanupEntries(dir) : fs.readdirSync(dir, { withFileTypes: true }))) {
         const file = path.join(dir, entry.file);
         try {
           checkCacheComponent(realDirectory, file);
@@ -461,6 +637,12 @@ function createMediaIntakeRuntime(options = {}) {
       const variants = resolved.map(({ meta, raw }) => {
         const inspected = inspectMeta(meta, sizes);
         if (options.describeVideo && raw.proxyColorVersion !== 1) inspected.meta.proxy = null;
+        // Even a previously versioned entry can be a proxy-only publication
+        // made from ambiguous old metadata. Reject that wave without dropping
+        // the actual file, Proxy, or channel artifacts.
+        const layout = inspected.audioLayout;
+        if (!completeAudioLayout(layout) || (raw.waveMixVersion !== 1 && layout.at(-1).sourceStream !== 0))
+          inspected.meta.wave = null;
         return inspected;
       });
       if (!variants.length) return { dir, files: [], error: 'CACHE_METADATA_MISSING', metadataMissing: !uncertain };
@@ -489,8 +671,8 @@ function createMediaIntakeRuntime(options = {}) {
     return cacheCandidates(src, key).map(dir => inspectSourceCache(dir, [], key, portable));
   }
 
-  function inspectSourceCache(dir, audio, key, portable) {
-    const hit = inspectCacheDirectory(dir, audio);
+  function inspectSourceCache(dir, audio, key, portable, bounded = false) {
+    const hit = inspectCacheDirectory(dir, audio, bounded);
     if (hit.error) return hit;
     const mapped = portable && canonicalCachePath(dir) === canonicalCachePath(portable.dir);
     if (mapped && !sameSourceContent(hit.sourceContent, portable.sourceContent)) {
@@ -509,17 +691,20 @@ function createMediaIntakeRuntime(options = {}) {
     const key = cacheKeyFor(src), portable = portableHits.get(key);
     let partial = null;
     for (const dir of cacheCandidates(src, key)) {
+      if (!canUseCacheCandidate(dir)) continue;
+      const sidecar = isSidecarCandidate(src, dir) ? sidecarAuthority(src) : null;
+      if (isSidecarCandidate(src, dir) && !sidecar) continue;
+      const verify = () => { if (sidecar) captureOutputAuthority(path.join(sidecar.requestedPath, '.sidecar-root-check'), sidecar); };
       // 候選只是路徑提示；實際讀到的這份 metadata 仍須符合當次來源證據。
       const hit = inspectSourceCache(dir, audio, key, portable);
       if (hit.error) continue;
       if (coversAudioRequest(hit.meta, audio) && (!needsProxy || hit.meta.proxy)) {
-        fileAuthority.grantManagedCacheDirectory(dir);
-        return hit;
+        try { grantManagedCleanupRoot(dir, verify); return hit; } catch (_) { continue; }
       }
-      partial ||= hit;
+      if (!partial) partial = { hit, verify };
     }
-    if (partial) fileAuthority.grantManagedCacheDirectory(partial.dir);
-    return partial;
+    if (partial) { try { grantManagedCleanupRoot(partial.hit.dir, partial.verify); } catch (_) { return null; } }
+    return partial?.hit || null;
   }
 
   async function preparePortableCache({ src, audio = [], needsProxy }, session, requireContent = false) {
@@ -544,8 +729,14 @@ function createMediaIntakeRuntime(options = {}) {
       if (allowSidecarCache) roots.unshift(path.join(path.dirname(src), '.subtool_Cache'));
       const size = fs.statSync(src).size;
       for (const root of new Set(roots)) {
+        const sidecar = canonicalCachePath(root) === canonicalCachePath(sidecarRoot(src)) ? sidecarAuthority(src) : null;
+        if (canonicalCachePath(root) === canonicalCachePath(sidecarRoot(src)) && !sidecar) continue;
+        const verifyRoot = () => {
+          if (sidecar) captureOutputAuthority(path.join(root, '.sidecar-root-check'), sidecar);
+          else assertCleanupAncestors(path.join(root, '.cleanup-root-check'));
+        };
         let entries;
-        try { entries = await fsp.readdir(root, { withFileTypes: true }); } catch (error) { entries = []; }
+        try { verifyRoot(); entries = await fsp.readdir(root, { withFileTypes: true }); verifyRoot(); } catch (error) { entries = []; }
         ensureCurrent();
         for (const entry of entries) {
           // 不追逐 symlink 或任意 metadata 路徑，只查看原本位置的 cache key 目錄。
@@ -553,14 +744,14 @@ function createMediaIntakeRuntime(options = {}) {
           const dir = path.join(root, entry.name), records = [];
           try {
             for (const metadata of metadataEntries(await fsp.readdir(dir, { withFileTypes: true }))) {
-              ensureCurrent();
+              ensureCurrent(); verifyRoot();
               let file;
               try {
                 file = await openCacheComponent(dir, path.join(dir, metadata.file));
-                ensureCurrent();
+                ensureCurrent(); verifyRoot();
                 if ((await file.stat()).size > 1024 * 1024) continue;
                 const raw = JSON.parse(await file.readFile('utf8'));
-                if (acceptedRecord(metadata, raw)) records.push({ ...metadata, raw });
+                verifyRoot(); if (acceptedRecord(metadata, raw)) records.push({ ...metadata, raw });
               } catch (error) { ensureCurrent(); }
               finally { if (file) await file.close(); }
             }
@@ -571,13 +762,14 @@ function createMediaIntakeRuntime(options = {}) {
           const sourceKeys = records.filter(record => sameSourceContent(record.raw.sourceContent, sourceContent))
             .flatMap(record => record.kind === 'binding' ? [record.raw.sourceKey]
               : Array.isArray(record.raw.sourceKeys) ? record.raw.sourceKeys : []);
-          candidates.push({ dir, sourceContent, sourceKeys });
+          try { verifyRoot(); candidates.push({ dir, sourceContent, sourceKeys, verifyRoot }); } catch (_) {}
         }
       }
       check();
       // 這台電腦已完整驗證過且來源 strict key 未變，免重讀整支大型素材。
       let verifiedPartial = null;
       for (const candidate of candidates) {
+        try { candidate.verifyRoot(); } catch (_) { continue; }
         if (!Array.isArray(candidate.sourceKeys) || !candidate.sourceKeys.includes(sourceKey)) continue;
         const hit = inspectCacheDirectory(candidate.dir, audio);
         if (hit.error || !sameSourceContent(hit.sourceContent, candidate.sourceContent)
@@ -611,11 +803,12 @@ function createMediaIntakeRuntime(options = {}) {
     check();
     const sourceContent = { format: PORTABLE_SOURCE_FORMAT, size: fs.statSync(src).size, sha256 };
     if (direct && (!sameSourceContent(direct.sourceContent, sourceContent) || !direct.sourceKeys.includes(sourceKey))) {
-      bindPortableCache(direct.dir, sourceContent, sourceKey);
+      if (!isSidecarCandidate(src, direct.dir) || sidecarAuthority(src)) bindPortableCache(direct.dir, sourceContent, sourceKey);
     }
     if (!directComplete) {
       let partial = null;
       for (const candidate of candidates) {
+        try { candidate.verifyRoot(); } catch (_) { continue; }
         if (candidate.sourceContent.sha256 !== sha256) continue;
         const hit = inspectCacheDirectory(candidate.dir, audio);
         if (hit.error || !sameSourceContent(hit.sourceContent, sourceContent)) continue;
@@ -663,34 +856,54 @@ function createMediaIntakeRuntime(options = {}) {
 
   function writeCacheDir(src) {
     const key = cacheKeyFor(src), portable = portableHits.get(key);
+    const central = cacheRoot();
+    // 測試或嵌入式 caller 若尚未建立中央根，只能為本次獨占建立的目錄登記；
+    // 已存在但未登記的根不能在清理或後續工作中被默默採信。
+    if (!cleanupRoots.has(sourceWaveKey(central))) {
+      try { fs.mkdirSync(path.dirname(central), { recursive: true }); fs.mkdirSync(central); grantManagedCleanupRoot(central); }
+      catch (_) {}
+    }
     const admitted = dir => {
       const hit = inspectSourceCache(dir, [], key, portable);
       return !hit.error || hit.metadataMissing;
     };
     for (const dir of cacheCandidates(src, key)) {
-      if (!admitted(dir) || !isDirWritable(dir) || !admitted(dir)) continue;
-      fileAuthority.grantManagedCacheDirectory(dir);
-      return dir;
+      let sidecar = null;
+      if (isSidecarCandidate(src, dir)) {
+        sidecar = sidecarAuthority(src, { allowMissing: true });
+        if (sidecar?.missing) {
+          try { fs.mkdirSync(sidecarRoot(src)); sidecar = sidecarAuthority(src); } catch (_) { sidecar = null; }
+        }
+        if (!sidecar) continue;
+      }
+      const ownsSidecar = () => {
+        if (!sidecar) return true;
+        try { captureOutputAuthority(path.join(sidecar.requestedPath, '.sidecar-root-check'), sidecar); return true; }
+        catch (_) { return false; }
+      };
+      if (!ownsSidecar() || !canUseCacheCandidate(dir) || !admitted(dir) || !isDirWritable(dir)
+        || !ownsSidecar() || !canUseCacheCandidate(dir) || !admitted(dir)) continue;
+      try { grantManagedCleanupRoot(dir, () => { if (!ownsSidecar()) throw cacheDirectoryChanged(); }); return dir; } catch (_) { continue; }
     }
     const fallback = path.join(cacheRoot(), key);
-    if (!admitted(fallback) || !isDirWritable(fallback) || !admitted(fallback)) {
+    if (!canUseCacheCandidate(fallback) || !admitted(fallback) || !isDirWritable(fallback)
+      || !canUseCacheCandidate(fallback) || !admitted(fallback)) {
       throw new Error('無法建立媒體快取，請確認快取目錄權限與來源');
     }
-    fileAuthority.grantManagedCacheDirectory(fallback);
+    grantManagedCleanupRoot(fallback);
     return fallback;
   }
 
   function dirSize(dir) {
     let total = 0;
-    try {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const entryPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) total += dirSize(entryPath);
-        else {
-          try { total += fs.statSync(entryPath).size; } catch (error) {}
-        }
-      }
-    } catch (error) {}
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      const stat = fs.lstatSync(entryPath);
+      if (stat.isSymbolicLink()) throw cachePathEscape();
+      if (stat.isDirectory()) total += dirSize(entryPath);
+      else if (stat.isFile()) total += stat.size;
+      else throw cachePathEscape();
+    }
     return total;
   }
 
@@ -699,136 +912,684 @@ function createMediaIntakeRuntime(options = {}) {
     let folders = 0;
     let bytes = 0;
     try {
+      const authority = cleanupRoots.get(sourceWaveKey(root));
+      if (!authority) throw cacheDirectoryChanged();
+      const verify = () => captureOutputAuthority(path.join(root, '.cache-info-check'), authority);
+      verify();
       for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
+        verify();
+        const stat = fs.lstatSync(path.join(root, entry.name));
+        if (stat.isSymbolicLink()) throw cachePathEscape();
+        if (!stat.isDirectory()) continue;
         folders++;
         bytes += dirSize(path.join(root, entry.name));
       }
-    } catch (error) {}
+      verify();
+    } catch (error) { return { root, unavailable: true }; }
     return { root, folders, bytes };
   }
 
-  function cleanOrphans() {
-    const root = cacheRoot();
-    let removed = 0;
-    let bytes = 0;
+  function captureCentralEntry(target, authority) {
+    const parent = captureOutputAuthority(target, authority);
+    const entry = fs.lstatSync(target, { bigint: true });
+    if (entry.isSymbolicLink()) throw cachePathEscape();
+    return { target, parent, entry };
+  }
+
+  // 清理前後最多掃 20,000 項、2,048 個目錄、48 層；任何越界、符號連結
+  // 或 I/O 不確定都保留整筆，不使用「部分看見」的內容授權遞迴刪除。
+  function readCleanupEntries(dir, limit = 20000) {
+    const handle = fs.opendirSync(dir), entries = [];
     try {
-      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      for (;;) {
+        const entry = handle.readSync();
+        if (!entry) break;
+        if (entries.length >= limit) throw new Error('快取清理列舉超過上限');
+        entries.push(entry);
+      }
+      return entries;
+    } finally { handle.closeSync(); }
+  }
+
+  function captureCleanupTree(target, budget = { entries: 0, directories: 0 }, initialDepth = 0) {
+    const entries = [];
+    let bytes = 0;
+    const visit = (file, relative, depth) => {
+      if (depth > 48 || ++budget.entries > 20000) throw new Error('快取清理快照超過上限');
+      const before = fs.lstatSync(file, { bigint: true });
+      if (before.isSymbolicLink() || (!before.isFile() && !before.isDirectory())) throw new Error('快取包含未確認的目錄項');
+      entries.push([relative, String(before.dev), String(before.ino), String(before.mode),
+        String(before.size), String(before.mtimeNs), relative ? String(before.ctimeNs) : null]);
+      if (before.isFile()) {
+        bytes += Number(before.size);
+        if (!Number.isSafeInteger(bytes)) throw new Error('快取大小超過上限');
+      }
+      if (before.isDirectory()) {
+        if (++budget.directories > 2048) throw new Error('快取清理目錄數超過上限');
+        const names = readCleanupEntries(file, 20000 - budget.entries).map(entry => entry.name).sort();
+        for (const name of names) visit(path.join(file, name), relative ? `${relative}/${name}` : name, depth + 1);
+      }
+      const after = fs.lstatSync(file, { bigint: true });
+      if (!sameCentralEntry(before, after, true) || (relative && before.ctimeNs !== after.ctimeNs)) throw cacheDirectoryChanged();
+    };
+    visit(target, '', initialDepth);
+    return { proof: JSON.stringify(entries), entries, bytes };
+  }
+
+  // 清理候選須讀完整內容，不能以抽樣或時間戳代替。每次 I/O
+  // 交出主行程後都重新確認來源目錄、活動 writer 與工作世代。
+  function cleanupDigestQueue(check) {
+    const pending = [];
+    async function flush() {
+      if (!pending.length) return;
+      const batch = pending.splice(0), handles = [];
+      const all = async promises => {
+        const results = await Promise.allSettled(promises);check();
+        const failure = results.find(result => result.status === 'rejected');
+        if (failure) throw failure.reason;
+        return results.map(result => result.value);
+      };
+      try {
+        check();
+        const opened = await Promise.allSettled(batch.map(async item => {
+          const handle = await fsp.open(item.file, 'r');handles.push(handle);cleanupHandles.add(handle);return handle;
+        }));
+        check();
+        const failure = opened.find(result => result.status === 'rejected');
+        if (failure) throw failure.reason;
+        for (let index=0;index<batch.length;index++) {
+          const item=batch[index];item.handle=opened[index].value;item.position=0;
+          item.hash=crypto.createHash('sha256');
+          item.buffer=Buffer.allocUnsafe(Math.min(1024*1024,Math.max(1,Number(item.entry.size))));
+          item.same=stat=>sameCentralEntry(item.entry,stat,true)&&item.entry.ctimeNs===stat.ctimeNs;
+        }
+        const before=await all(batch.map(item=>item.handle.stat({bigint:true})));
+        if (before.some((stat,index)=>!batch[index].same(stat))) throw cacheDirectoryChanged();
+        for (;;) {
+          const active=batch.filter(item=>item.position<Number(item.entry.size));
+          if (!active.length) break;
+          const reads=await all(active.map(item=>item.handle.read(item.buffer,0,Math.min(item.buffer.length,Number(item.entry.size)-item.position),item.position)));
+          for(let index=0;index<active.length;index++) {
+            const item=active[index],count=reads[index].bytesRead;
+            if (!count) throw cacheDirectoryChanged();
+            item.hash.update(item.buffer.subarray(0,count));item.position+=count;
+          }
+        }
+        const after=await all(batch.map(item=>item.handle.stat({bigint:true})));
+        if (after.some((stat,index)=>!batch[index].same(stat))) throw cacheDirectoryChanged();
+        for(const item of batch) {
+          if (!item.same(fs.lstatSync(item.file,{bigint:true}))) throw cacheDirectoryChanged();
+          item.accept(item.hash.digest('hex'));
+        }
+      } finally {
+        const closedHandles = await Promise.allSettled(handles.map(async handle=>{
+          await handle.close();cleanupHandles.delete(handle);
+        }));
+        const failure=closedHandles.find(result=>result.status==='rejected');
+        if (failure) throw failure.reason;
+      }
+      check();
+    }
+    return {
+      add(item) { pending.push(item);return pending.length >= 32 ? flush() : null; },
+      async finish() { await flush(); },
+    };
+  }
+
+  function cleanupDigest(entries, hashes) {
+    const hash = crypto.createHash('sha256');
+    for (let index=0;index<entries.length;index++) if (hashes[index] !== undefined) {
+      hash.update(entries[index][0]).update('\0').update(entries[index][4]).update('\0').update(hashes[index]);
+    }
+    return hash.digest('hex');
+  }
+
+  async function cleanupContentDigest(directory, snapshot, check) {
+    const hashes = [], queue = cleanupDigestQueue(check);
+    try {
+      check();
+      for (let index=0;index<snapshot.entries.length;index++) {
+        const [relative, dev, ino, mode, size, mtime, ctime] = snapshot.entries[index];
+        const file = relative ? path.join(directory, ...relative.split('/')) : directory;
+        const entry = fs.lstatSync(file, { bigint: true });
+        if (!entry.isFile()) continue;
+        if (![entry.dev,entry.ino,entry.mode,entry.size,entry.mtimeNs,entry.ctimeNs].map(String)
+          .every((value,i)=>i===5 && ctime===null || value===[dev,ino,mode,size,mtime,ctime][i])) throw cacheDirectoryChanged();
+        const pending=queue.add({file,entry,accept:digest=>{hashes[index]=digest;}});
+        if(pending){await pending;check();}
+      }
+      await queue.finish();check();
+      return cleanupDigest(snapshot.entries, hashes);
+    } catch (error) { throw error; }
+  }
+
+  async function captureCleanupSnapshot(directory, check, budget = { entries: 0, directories: 0 }, initialDepth = 0) {
+    const entries = [], hashes = [], queue = cleanupDigestQueue(check);
+    let bytes = 0;
+    function visit(file, relative, depth) {
+      if (depth > 48 || ++budget.entries > 20000) throw new Error('快取清理快照超過上限');
+      const before = fs.lstatSync(file, { bigint: true });
+      if (before.isSymbolicLink() || (!before.isFile() && !before.isDirectory())) throw cacheDirectoryChanged();
+      const index=entries.length;
+      entries.push([relative, String(before.dev), String(before.ino), String(before.mode),
+        String(before.size), String(before.mtimeNs), relative ? String(before.ctimeNs) : null]);
+      if (before.isDirectory()) {
+        if (++budget.directories > 2048) throw new Error('快取清理目錄數超過上限');
+        const names=readCleanupEntries(file, 20000 - budget.entries).map(entry => entry.name).sort();
+        return (async()=>{
+          for(const name of names){
+            const pending=visit(path.join(file, name),relative ? `${relative}/${name}` : name,depth+1);
+            if(pending){await pending;check();}
+          }
+          const after=fs.lstatSync(file,{bigint:true});
+          if(!sameCentralEntry(before,after,true)||(relative&&before.ctimeNs!==after.ctimeNs))throw cacheDirectoryChanged();
+        })();
+      } else {
+        bytes += Number(before.size);
+        if (!Number.isSafeInteger(bytes)) throw new Error('快取大小超過上限');
+        return queue.add({file,entry:before,accept:digest=>{hashes[index]=digest;}});
+      }
+    }
+    try { check();const pending=visit(directory, '', initialDepth);if(pending){await pending;check();}await queue.finish();check(); }
+    catch (error) { throw error; }
+    return { entries, hashes, proof: JSON.stringify(entries), bytes, digest: cleanupDigest(entries, hashes) };
+  }
+
+  // 整棵隔離樹完成准入後，逐檔重新讀取並立即核對再刪除；任何衝突
+  // 保留尚未處理的檔案。這仍是多個系統呼叫，不能宣稱原子刪除。
+  async function removeVerifiedCleanupTree(directory, snapshot, check) {
+    let removedBytes = 0;
+    const active = new Set();
+    const ready = [];
+    let wake = null;
+    const completed = result => {
+      ready.push(result);
+      if (wake) { const notify=wake;wake=null;notify(); }
+    };
+    try {
+      const files=snapshot.entries.map((entry,index)=>({entry,index})).filter(({index})=>snapshot.hashes[index]!==undefined);
+      const launch=({entry,index})=>{
+        const work=(async()=>{
+        const expectedHash=snapshot.hashes[index];
+        const relative=entry[0],file=relative?path.join(directory,...relative.split('/')):directory;
+        const same=stat=>stat.isFile()&&!stat.isSymbolicLink()
+          && [stat.dev,stat.ino,stat.mode,stat.size,stat.mtimeNs,stat.ctimeNs].map(String)
+            .every((value,i)=>i===5&&entry[6]===null||value===entry[i+1]);
+        let handle;
+        try {
+          handle=await fsp.open(file,'r');cleanupHandles.add(handle);check();
+          if(!same(fs.fstatSync(handle.fd,{bigint:true})))throw cacheDirectoryChanged();
+          const hash=crypto.createHash('sha256'),buffer=Buffer.allocUnsafe(Math.min(1024*1024,Math.max(1,Number(entry[4]))));
+          let position=0;
+          while(position<Number(entry[4])){
+            const {bytesRead}=await handle.read(buffer,0,Math.min(buffer.length,Number(entry[4])-position),position);check();
+            if(!bytesRead)throw cacheDirectoryChanged();hash.update(buffer.subarray(0,bytesRead));position+=bytesRead;
+          }
+          if(!same(fs.fstatSync(handle.fd,{bigint:true}))||hash.digest('hex')!==expectedHash)throw cacheDirectoryChanged();
+        } finally {
+          if(handle){await handle.close();cleanupHandles.delete(handle);}
+        }
+        check();return {file,same};
+        })();
+        const tracked=work.then(value=>({tracked,value}),error=>({tracked,error}));
+        active.add(tracked);
+        tracked.then(completed);
+      };
+      let next=0;
+      while(next<files.length || active.size){
+        while(next<files.length&&active.size<32)launch(files[next++]);
+        if (!ready.length) await new Promise(resolve=>{wake=resolve;});
+        check();
+        const result=ready.shift();
+        active.delete(result.tracked);
+        if(result.error)throw result.error;
+        const {file,same}=result.value,current=fs.lstatSync(file,{bigint:true});
+        if(!same(current))throw cacheDirectoryChanged();
+        fs.unlinkSync(file);removedBytes+=Number(current.size);
+      }
+      for (let index=snapshot.entries.length-1;index>=0;index--) {
+        if (snapshot.hashes[index] !== undefined) continue;
+        check();
+        const entry=snapshot.entries[index],file=entry[0]?path.join(directory,...entry[0].split('/')):directory;
+        const current=fs.lstatSync(file,{bigint:true});
+        if (!current.isDirectory() || current.isSymbolicLink()
+          || String(current.dev)!==entry[1] || String(current.ino)!==entry[2] || String(current.mode)!==entry[3]) throw cacheDirectoryChanged();
+        fs.rmdirSync(file);
+      }
+      return { complete:true, removedBytes };
+    } catch (_) { return { complete:false, removedBytes }; }
+    finally { await Promise.allSettled([...active]); }
+  }
+
+  function sameCentralEntry(left, right, content = false) {
+    return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+      && (!content || (left.size === right.size && left.mtimeNs === right.mtimeNs));
+  }
+
+  function ownsCentralEntry(owner, { content = false } = {}) {
+    try {
+      assertOutputAuthority(owner.parent, owner.target);
+      return sameCentralEntry(owner.entry, fs.lstatSync(owner.target, { bigint: true }), content);
+    } catch (_) { return false; }
+  }
+
+  // 先把剛核對的目錄項移入本次獨占隔離目錄，再以 inode 及內容時間
+  // 確認取得的是原項；若有疑慮只嘗試放回空位，不覆蓋較新目錄項。
+  async function removeCentralEntry(owner, root, authority, snapshot, eligible = () => true, check = () => {}) {
+    const holder = path.join(root, '.subtool-cleanup-retained-' + crypto.randomBytes(12).toString('hex'));
+    const staged = path.join(holder, 'entry');
+    let holderOwner, holderAuthority, moved = false, removed = false;
+    const checkHolder = () => {
+      assertOutputAuthority(holderAuthority, path.join(holder, '.check'));
+    };
+    try {
+      check();
+      if (!ownsCentralEntry(owner, { content: true }) || captureCleanupTree(owner.target).proof !== snapshot.proof) return false;
+      fs.mkdirSync(holder);
+      holderOwner = captureOutputDirectory(holder);
+      holderAuthority = captureOutputAuthority(path.join(holder, '.check'), authority);
+      const holderEntry=holderAuthority.parents.at(-1);
+      if(holderEntry.dev!==holderOwner.dev || holderEntry.ino!==holderOwner.ino) throw cacheDirectoryChanged();
+      checkHolder();
+      if (!ownsCentralEntry(owner, { content: true })) return false;
+      fs.renameSync(owner.target, staged);
+      moved = true;
+      checkHolder();
+      if (!sameCentralEntry(owner.entry, fs.lstatSync(staged, { bigint: true }), true)
+        || captureCleanupTree(staged).proof !== snapshot.proof || !eligible(staged)) return false;
+      const current = () => {
+        check();checkHolder();
+        if (!sameCentralEntry(owner.entry, fs.lstatSync(staged, { bigint: true }))) throw cacheDirectoryChanged();
+      };
+      const digest = await cleanupContentDigest(staged, snapshot, current);
+      current();
+      if (digest !== snapshot.digest || !eligible(staged)) return false;
+      if (!sameCentralEntry(owner.entry, fs.lstatSync(staged, { bigint: true }), true) || captureCleanupTree(staged).proof !== snapshot.proof) return false;
+      const result=await removeVerifiedCleanupTree(staged,snapshot,current);
+      if (!result.complete) return result;
+      moved = false; removed = true;
+      forgetRemovedCleanupRoots(owner.target);
+      return result;
+    } catch (_) { return { complete:false, removedBytes:0 }; }
+    finally {
+      if (moved && holderOwner) {
+        try {
+          checkHolder(); assertOutputAuthority(owner.parent, owner.target);
+          if (!sameCentralEntry(owner.entry, fs.lstatSync(staged, { bigint: true }))) throw cacheDirectoryChanged();
+          try { fs.lstatSync(owner.target); }
+          catch (error) { if (error.code === 'ENOENT') { fs.renameSync(staged, owner.target); moved = false; } }
+        } catch (_) {}
+      }
+      if (!moved && holderOwner) { try { checkHolder(); fs.rmdirSync(holder); } catch (_) {} }
+      // 保留無法證明歸屬的隔離資料；後續清理不得視為孤兒再次刪除。
+      if (!removed && moved) options.log?.('[cache] retained uncertain cleanup:', holder);
+    }
+  }
+
+  function cleanOrphans() {
+    const generation = runtimeGeneration, cleanup = { targets: new Set(), uncertain: false };
+    const task = (closed || drainingCleanup) ? Promise.resolve({ removed: 0, bytes: 0, incomplete: true }) : cleanOrphansWork(generation, cleanup);
+    cleanupTasks.set(task, cleanup);
+    task.then(() => cleanupTasks.delete(task), () => cleanupTasks.delete(task));
+    return task;
+  }
+
+  async function cleanOrphansWork(generation, cleanup) {
+    const root = cacheRoot();
+    const authority = cleanupRoots.get(sourceWaveKey(root));
+    let removed = 0;
+    let bytes = 0, incomplete = false;
+    if (!authority) return { removed, bytes, incomplete: true };
+    try {
+      captureOutputAuthority(path.join(root, '.cleanup-root-check'), authority);
+      // 凍結整批候選後才開始刪除；否則前一筆完成期間新增的下一筆內容
+      // 會被當作本次掃描看到的舊孤兒。所有候選共用同一掃描預算。
+      const candidates = [], budget = { entries: 0, directories: 0 };
+      const rootEntries = readCleanupEntries(root);
+      for (const entry of rootEntries) if (entry.isDirectory()) {
+        try { cleanup.targets.add(sourceWaveKey(fs.realpathSync.native(path.join(root, entry.name)))); }
+        catch (_) { cleanup.uncertain = true; }
+      }
+      for (const entry of rootEntries) {
+        if (generation !== runtimeGeneration) { incomplete = true; break; }
+        captureOutputAuthority(path.join(root, '.cleanup-root-check'), authority);
+        if (entry.name.startsWith('.subtool-cleanup-retained-')) { incomplete = true; continue; }
         if (!entry.isDirectory()) continue;
         const dir = path.join(root, entry.name);
-        if (activeCacheDirs.has(dir)) continue;
-        const inspected = inspectCacheDirectory(dir);
-        const remove = inspected.metadataMissing || (!inspected.error && !inspected.retained);
-        if (!remove) continue;
-        const size = dirSize(dir);
+        const physicalDir = fs.realpathSync.native(dir);
+        if ([...activeCacheDirs.keys(), ...activeCacheSources.keys()].some(writer => withinCachePath(physicalDir, fs.realpathSync.native(writer)))) { incomplete = true; continue; }
+        let owner, snapshot;
+        const check = () => {
+          if (generation !== runtimeGeneration) throw cacheDirectoryChanged();
+          captureOutputAuthority(path.join(root, '.cleanup-root-check'), authority);
+          if ([...activeCacheDirs.keys(), ...activeCacheSources.keys()].some(writer => withinCachePath(physicalDir, fs.realpathSync.native(writer)))) throw cacheDirectoryChanged();
+        };
         try {
-          fs.rmSync(dir, { recursive: true, force: true });
-          removed++;
-          bytes += size;
-        } catch (error) {}
+          owner = captureCentralEntry(dir, authority);
+          snapshot = await captureCleanupSnapshot(dir, () => {
+            if (generation !== runtimeGeneration || !ownsCentralEntry(owner, { content: true })
+              || [...activeCacheDirs.keys(), ...activeCacheSources.keys()].some(writer => withinCachePath(physicalDir, fs.realpathSync.native(writer)))) throw cacheDirectoryChanged();
+          }, budget);
+          check();
+        } catch (_) { incomplete = true; continue; }
+        const inspected = inspectCacheDirectory(dir, [], true);
+        const remove = inspected.metadataMissing || (!inspected.error && !inspected.retained);
+        if (!remove) {
+          if (inspected.error || (inspected.files.some(file => file.state === 'unknown')
+            && !inspected.files.some(file => file.state === 'complete'))) incomplete = true;
+          continue;
+        }
+        candidates.push({ dir, owner, snapshot, inspected });
       }
-    } catch (error) {}
-    return { removed, bytes };
+      for (const { dir, owner, snapshot, inspected } of candidates) {
+        try {
+          captureOutputAuthority(path.join(root, '.cleanup-root-check'), authority);
+          const physicalDir = fs.realpathSync.native(dir);
+          if ([...activeCacheDirs.keys(), ...activeCacheSources.keys()].some(writer => withinCachePath(physicalDir, fs.realpathSync.native(writer)))) { incomplete = true; continue; }
+          const check = () => {
+            if (generation !== runtimeGeneration) throw cacheDirectoryChanged();
+            if ([...activeCacheDirs.keys(), ...activeCacheSources.keys()].some(writer => withinCachePath(physicalDir, fs.realpathSync.native(writer)))) throw cacheDirectoryChanged();
+          };
+          const removedEntry = await removeCentralEntry(owner, root, authority, snapshot, staged => {
+            const current = inspectCacheDirectory(staged, [], true);
+            const sameContent = (!inspected.sourceContent && !current.sourceContent)
+              || sameSourceContent(inspected.sourceContent, current.sourceContent);
+            const sameKeys = JSON.stringify([...(inspected.sourceKeys || [])].sort()) === JSON.stringify([...(current.sourceKeys || [])].sort());
+            return !!inspected.metadataMissing === !!current.metadataMissing && !!inspected.error === !!current.error
+              && sameContent && sameKeys && (current.metadataMissing || (!current.error && !current.retained));
+          }, check);
+          if (!removedEntry?.complete) { bytes += removedEntry?.removedBytes || 0;incomplete = true; continue; }
+          removed++;
+          bytes += snapshot.bytes;
+        } catch (error) { incomplete = true; }
+      }
+    } catch (error) { incomplete = true; }
+    return { removed, bytes, incomplete };
   }
 
   function clearAll(currentSrc) {
+    const generation = runtimeGeneration;
+    const cleanup = { targets: new Set(), uncertain: false, source: currentSrc || null };
+    const task = (closed || drainingCleanup) ? Promise.resolve({ bytes: 0, incomplete: true }) : clearAllWork(currentSrc, generation, cleanup);
+    cleanupTasks.set(task, cleanup);
+    task.then(() => cleanupTasks.delete(task), () => cleanupTasks.delete(task));
+    return task;
+  }
+
+  function sourceCleanupTasks(src) {
+    if (!cleanupTasks.size) return [];
+    try {
+      const sourceIdentity = fs.statSync(src, { bigint: true });
+      const sourcePath = sourceWaveKey(fs.realpathSync.native(src));
+      // 即使目錄已被隔離改名，仍以原實體父目錄與 basename 識別。
+      const physicalCandidate = file => {
+        try { return sourceWaveKey(fs.realpathSync.native(file)); }
+        catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          return sourceWaveKey(path.join(fs.realpathSync.native(path.dirname(file)), path.basename(file)));
+        }
+      };
+      const candidates = new Set();
+      for (const file of cacheCandidates(src)) {
+        try { candidates.add(physicalCandidate(file)); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+      return [...cleanupTasks].filter(([,cleanup]) => {
+        if (cleanup.uncertain) return true;
+        if (cleanup.source) {
+          const other = fs.statSync(cleanup.source, { bigint: true });
+          if ((other.dev === sourceIdentity.dev && other.ino === sourceIdentity.ino)
+            || sourceWaveKey(fs.realpathSync.native(cleanup.source)) === sourcePath) return true;
+        }
+        return [...cleanup.targets].some(target => [...candidates].some(candidate =>
+          withinCachePath(target, candidate) || withinCachePath(candidate, target)));
+      })
+        .map(([task]) => task);
+    } catch (_) { return [...cleanupTasks.keys()]; }
+  }
+
+  async function waitSourceCleanups(src) {
+    let tasks;
+    while ((tasks = sourceCleanupTasks(src)).length) await Promise.allSettled(tasks);
+  }
+
+  async function clearAllWork(currentSrc, generation, cleanup) {
+    if (generation !== runtimeGeneration) return { bytes: 0, incomplete: true };
     const root = cacheRoot();
+    const authority = cleanupRoots.get(sourceWaveKey(root));
+    const ownsCentralRoot = () => {
+      if (!authority) return false;
+      try { captureOutputAuthority(path.join(root, '.cleanup-root-check'), authority); return true; }
+      catch (_) { return false; }
+    };
     const canonical = file => {
       const resolved = path.resolve(file);
       return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
     };
-    const removeUnleased = target => {
-      const resolved = canonical(target);
-      const writers = [...activeCacheDirs.keys()].map(canonical);
-      if (writers.includes(resolved)) return 0;
+    const physical = file => canonical(fs.realpathSync.native(file));
+    const activePaths = () => [...activeCacheDirs.keys(), ...activeCacheSources.keys(), ...(currentSrc ? [currentSrc] : [])].map(physical);
+    // 含活躍 writer 的祖先先凍結全部非活躍 sibling；不讀 writer 內容，
+    // 也不在刪除一個 sibling 後把新加入或新改寫的另一項重新採信。
+    let bytes = 0, incomplete = false;
+    const freezeUnleased = async (target, writers, budget, depth = 0) => {
+      if (depth > 48 || path.basename(target).startsWith('.subtool-cleanup-retained-')) { incomplete = true; return null; }
+      const resolved = physical(target), owner = captureCentralEntry(target, authority);
+      if (writers.includes(resolved)) { incomplete = true; return null; }
       if (writers.some(writer => writer.startsWith(resolved + path.sep))) {
+        if (++budget.entries > 20000 || ++budget.directories > 2048) throw new Error('快取清理快照超過上限');
+        const names = readCleanupEntries(target, 20000 - budget.entries).map(entry => entry.name).sort();
+        const children = [];
+        for (const name of names) {
+          const child = await freezeUnleased(path.join(target, name), writers, budget, depth + 1);
+          if (child) children.push(child);
+        }
+        if (!ownsCentralEntry(owner, { content: true })) throw cacheDirectoryChanged();
+        return { owner, children };
+      }
+      const check = () => {
+        if (generation !== runtimeGeneration || !ownsCentralEntry(owner, { content: true })
+          || activePaths().some(writer => withinCachePath(resolved, writer))) throw cacheDirectoryChanged();
+      };
+      const snapshot = await captureCleanupSnapshot(target, check, budget, depth);
+      check();
+      return { owner, snapshot };
+    };
+    const removeFrozen = async (frozen, ownsAncestors = () => true) => {
+      if (!frozen) return 0;
+      if (!ownsAncestors() || !ownsCentralEntry(frozen.owner, { content: true })) { incomplete = true; return 0; }
+      const { owner } = frozen, target = owner.target, resolved = physical(target);
+      const current = () => ownsAncestors() && ownsCentralEntry(owner);
+      const writers = activePaths();
+      if (writers.includes(resolved)) { incomplete = true; return 0; }
+      if (frozen.children) {
         let removed = 0;
-        try {
-          for (const entry of fs.readdirSync(target)) removed += removeUnleased(path.join(target, entry));
-        } catch (error) {}
+        for (const child of frozen.children) { if (!current()) { incomplete = true; break; } removed += await removeFrozen(child, current); }
         return removed;
       }
-      let size = dirSize(target);
+      if (writers.some(writer => writer.startsWith(resolved + path.sep))) { incomplete = true; return 0; }
+      let size = frozen.snapshot.bytes;
       try { const stat = fs.statSync(target); if (stat.isFile()) size = stat.size; } catch (error) {}
-      try { fs.rmSync(target, { recursive: true, force: true }); return size; }
-      catch (error) { return 0; }
+      try {
+        if (!ownsCentralRoot() || !current()) { incomplete = true; return 0; }
+        const check = () => {
+          if (generation !== runtimeGeneration || !ownsAncestors()
+            || activePaths().some(writer => withinCachePath(resolved, writer))) throw cacheDirectoryChanged();
+        };
+        const result=await removeCentralEntry(owner, root, authority, frozen.snapshot, () => true, check);
+        if (result?.complete) return size;
+        incomplete = true; return result?.removedBytes || 0;
+      } catch (error) { incomplete = true; return 0; }
     };
-    let bytes = removeUnleased(root);
-    try { fs.mkdirSync(root, { recursive: true }); } catch (error) {}
+    // 根本身是持久授權，不刪除再重建，避免同名新根被誤認為原目錄。
+    if (ownsCentralRoot()) {
+      try {
+        const writers = activePaths(), budget = { entries: 0, directories: 0 };
+        const frozen = [];
+        const rootEntries = readCleanupEntries(root);
+        for (const entry of rootEntries) {
+          try { cleanup.targets.add(physical(path.join(root, entry.name))); }
+          catch (_) { cleanup.uncertain = true; }
+        }
+        for (const entry of rootEntries) {
+          if (!ownsCentralRoot()) { incomplete = true; break; }
+          try { const candidate = await freezeUnleased(path.join(root, entry.name), writers, budget); if (candidate) frozen.push(candidate); }
+          catch (_) { incomplete = true; }
+        }
+        // 所有同層候選均凍結後才刪除；不在刪除前一筆後採信較新的下一筆。
+        for (const candidate of frozen) {
+          if (!ownsCentralRoot()) { incomplete = true; break; }
+          try { bytes += await removeFrozen(candidate); } catch (_) { incomplete = true; }
+        }
+      }
+      catch (_) { incomplete = true; }
+    } else { incomplete = true; }
     if (currentSrc && fileAuthority.canRead(currentSrc)) {
       try {
         const sidecarRoot = canonical(path.join(path.dirname(currentSrc), '.subtool_Cache'));
+        const sidecarOwner = sidecarAuthority(currentSrc);
+        if (!sidecarOwner) {
+          try { fs.lstatSync(sidecarRoot); incomplete = true; }
+          catch (error) { if (error.code !== 'ENOENT') incomplete = true; }
+          return { bytes, incomplete };
+        }
+        const assertSidecar = () => captureOutputAuthority(path.join(sidecarRoot, '.cleanup-root-check'), sidecarOwner);
         const key = cacheKeyFor(currentSrc), portable = portableHits.get(key);
-        const removeSidecar = dir => {
-          const target = canonical(dir);
-          if ([...activeCacheDirs.keys()].some(active => {
-            const writer = canonical(active);
+        const removeSidecar = async dir => {
+          const target = physical(dir);
+          const registered = cleanupRoots.get(sourceWaveKey(dir));
+          if (sidecarCleanups.has(target)) { incomplete = true; return 0; }
+          if (activePaths().some(writer => {
             return writer === target || writer.startsWith(target + path.sep);
-          })) return 0;
+          })) { incomplete = true; return 0; }
           const quarantine = path.join(path.dirname(dir), '.subtool-clear-' + crypto.randomBytes(12).toString('hex'));
-          if (canonical(path.dirname(quarantine)) !== sidecarRoot) return 0;
-          let moved = false;
+          if (canonical(path.dirname(quarantine)) !== sidecarRoot) { incomplete = true; return 0; }
+          sidecarCleanups.add(target);
+          let moved = false, ownedDirectory = dir, directoryIdentity = null;
           const restore = () => {
             if (!moved) return;
             // 另一個 writer 已重建原路徑時保留私有隔離目錄，不能覆蓋它的新內容。
-            try { if (!fs.existsSync(dir)) { fs.renameSync(quarantine, dir); moved = false; } } catch (error) {}
+            try {
+              assertSidecar();
+              if (!directoryIdentity || !sameDirectory(directoryIdentity, fs.lstatSync(quarantine, { bigint: true }))) return;
+              try { fs.lstatSync(dir); }
+              catch (error) { if (error.code === 'ENOENT') { fs.renameSync(quarantine, dir); moved = false; } }
+            } catch (error) {}
           };
           const sameDirectory = (left, right) => left.isDirectory() && !left.isSymbolicLink()
             && right.isDirectory() && !right.isSymbolicLink() && left.dev === right.dev && left.ino === right.ino;
+          const check = () => {
+            if (generation !== runtimeGeneration || activePaths().some(writer => writer === target || writer.startsWith(target + path.sep))) throw cacheDirectoryChanged();
+            assertSidecar();
+            if (directoryIdentity && !sameDirectory(directoryIdentity, fs.lstatSync(ownedDirectory, { bigint: true }))) throw cacheDirectoryChanged();
+          };
           try {
+            check();
             const before = fs.lstatSync(dir, { bigint: true });
-            if (!before.isDirectory() || before.isSymbolicLink()) return 0;
-            const accepted = inspectSourceCache(dir, [], key, portable);
-            if (accepted.error && !accepted.metadataMissing) return 0;
+            if (!before.isDirectory() || before.isSymbolicLink()) { incomplete = true; return 0; }
+            directoryIdentity = before;
+            const snapshot = await captureCleanupSnapshot(dir, check);
+            check();
+            const accepted = inspectSourceCache(dir, [], key, portable, true);
+            if (accepted.error && !accepted.metadataMissing) { incomplete = true; return 0; }
+            if (!sameDirectory(before, fs.lstatSync(dir, { bigint: true })) || captureCleanupTree(dir).proof !== snapshot.proof) { incomplete = true; return 0; }
             // 先原子取得將刪除的目錄物件，再核對身分與來源；不對先前候選路徑直接刪除。
             fs.renameSync(dir, quarantine);
             moved = true;
+            ownedDirectory = quarantine;
+            assertSidecar();
             const claimed = fs.lstatSync(quarantine, { bigint: true });
-            const current = inspectCacheDirectory(quarantine);
+            const current = inspectCacheDirectory(quarantine, [], true);
             if (!sameDirectory(before, claimed)
               || (accepted.sourceContent && (current.error || !sameSourceContent(current.sourceContent, accepted.sourceContent)))
               || (current.sourceContent && !accepted.sourceContent)
-              || (current.error && !current.metadataMissing)) { restore(); return 0; }
-            const size = dirSize(quarantine);
-            if (!sameDirectory(claimed, fs.lstatSync(quarantine, { bigint: true }))) { restore(); return 0; }
-            fs.rmSync(quarantine, { recursive: true, force: true });
+              || (current.error && !current.metadataMissing)
+              || captureCleanupTree(quarantine).proof !== snapshot.proof) { incomplete = true; restore(); return 0; }
+            const size = snapshot.bytes;
+            if (!sameDirectory(claimed, fs.lstatSync(quarantine, { bigint: true })) || captureCleanupTree(quarantine).proof !== snapshot.proof) { incomplete = true; restore(); return 0; }
+            const finalDigest = await cleanupContentDigest(quarantine, snapshot, check);
+            check();
+            if (finalDigest !== snapshot.digest || !sameDirectory(claimed, fs.lstatSync(quarantine, { bigint: true })) || captureCleanupTree(quarantine).proof !== snapshot.proof) { incomplete = true; restore(); return 0; }
+            assertSidecar();
+            const removed=await removeVerifiedCleanupTree(quarantine,snapshot,check);
+            if (!removed.complete) { incomplete = true;restore();return removed.removedBytes; }
+            if (cleanupRoots.get(sourceWaveKey(dir)) === registered) cleanupRoots.delete(sourceWaveKey(dir));
             moved = false;
             return size;
-          } catch (error) { restore(); return 0; }
+          } catch (error) { incomplete = true; restore(); return 0; }
+          finally { sidecarCleanups.delete(target); }
         };
-        for (const dir of cacheCandidates(currentSrc, key)) {
-          // 可攜命中仍在原 key 目錄；清理只接受目前素材旁已驗證的 cache 目錄。
-          if (canonical(path.dirname(dir)) !== sidecarRoot || !/^[a-f0-9]{16}$/.test(path.basename(dir))) continue;
-          if (fs.existsSync(dir)) bytes += removeSidecar(dir);
+        const sidecarCandidates = cacheCandidates(currentSrc, key, () => { incomplete = true; cleanup.uncertain = true; })
+          .filter(dir => canonical(path.dirname(dir)) === sidecarRoot && /^[a-f0-9]{16}$/.test(path.basename(dir)));
+        for (const dir of sidecarCandidates) {
+          try { cleanup.targets.add(physical(dir)); }
+          catch (error) { if (error.code !== 'ENOENT') cleanup.uncertain = true; }
         }
-      } catch (error) {}
+        for (const dir of sidecarCandidates) {
+          // 可攜命中仍在原 key 目錄；清理只接受目前素材旁已驗證的 cache 目錄。
+          try { fs.lstatSync(dir); bytes += await removeSidecar(dir); }
+          catch (error) { if (error.code !== 'ENOENT') incomplete = true; }
+        }
+      } catch (error) { incomplete = true; }
     } else if (currentSrc) {
+      incomplete = true;
       options.log?.('[sec] cache clear source blocked:', currentSrc);
     }
-    return { bytes };
+    return { bytes, incomplete };
   }
 
   // 舊式 proxy／音訊 IPC 尚未交接輸出路徑時，由同一交易持有暫存。
   // produce 必須等待 native writer close；成功交接沿用既有 renderer cleanup。
-  async function produceTemporaryFile(file, produce) {
+  function assertTemporaryOwner(target, owner) {
+    const current = fs.lstatSync(target, { bigint: true });
+    if (!owner || !current.isFile() || current.isSymbolicLink()
+      || current.dev !== owner.dev || current.ino !== owner.ino) {
+      throw new Error('媒體暫存檔案身分已變更');
+    }
+  }
+
+  function isOwnedTemporary(file) {
+    try { return !!temporaryOwnership?.lookup(file); }
+    catch (_) { return false; }
+  }
+
+  function hasUnsafeTemporaryFiles() {
+    return temporaryOwnership?.hasUnsafe() || false;
+  }
+  async function produceTemporaryFile(file, produce, { assertParent = null, reservation = null } = {}) {
     const target = path.resolve(file);
     if (closed || !withinCachePath(tempRoot, target) || !fileAuthority.canManageInternalFile(target)
       || typeof produce !== 'function') throw new Error('無法建立此媒體暫存工作');
     const forget = () => { try { options.forgetTemporaryFile?.(target); } catch (ignored) {} };
+    let record = reservation;
+    if (!record) {
+      try { record = temporaryOwnership.reserve(target); }
+      catch (error) { if (error.code !== 'TEMP_PATH_REUSED') forget(); throw error; }
+    }
+    if (record.target !== target || temporaryOwnership.lookup(target)?.record !== record || !record.writing || record.retired)
+      throw new Error('媒體暫存工作歸屬無效');
+    const checkParent = () => { assertOutputAuthority(record.authority, target); assertParent?.(); };
     let descriptor = null, owner = null;
+    let completed = false;
     try {
+      checkParent();
       descriptor = fs.openSync(target, 'wx');
       owner = fs.fstatSync(descriptor, { bigint: true });
+      record.owner = owner;
       fs.closeSync(descriptor); descriptor = null;
-      await produce(target);
+      await produce(target, owner);
+      // produce 可同步發送進度並在 await 交接時讓出執行權；此後不可將
+      // 被別人替換的同名檔案當成本工作結果交給 caller。
+      checkParent(); temporaryOwnership.assertOwner(record);
+      completed = true;
       return target;
     } catch (error) {
       if (descriptor !== null) {
         try { owner ||= fs.fstatSync(descriptor, { bigint: true }); } catch (statError) {}
         try { fs.closeSync(descriptor); } catch (closeError) {}
       }
-      if (owner) {
+      if (owner && !record.retired) {
         try {
+          checkParent();
           // 不讓出 JS 執行權後再用過去的 metadata 刪檔；這不是 OS atomic compare-delete。
           const current = fs.lstatSync(target, { bigint: true });
           if (current.isFile() && !current.isSymbolicLink() && current.dev === owner.dev && current.ino === owner.ino) {
@@ -840,11 +1601,27 @@ function createMediaIntakeRuntime(options = {}) {
           }
         } catch (cleanupError) {
           // 不掩蓋原生失敗；暫時無法回收的檔案仍保留 quit 時的清理登記。
-          if (cleanupError.code === 'ENOENT') forget();
+          if (cleanupError.code === 'ENOENT' || cleanupError.code === 'SOURCE_WAVE_PARENT_CHANGED') forget();
         }
       } else if (error.code === 'EEXIST') forget();
       throw error;
+    } finally {
+      if (!reservation) { record.writing = false; if (!completed) record.retired = true; }
     }
+  }
+
+  function assertTemporaryOutput(file, owner) {
+    const found = temporaryOwnership?.lookup(file);
+    if (!found || found.alias || !found.record.writing || found.record.retired
+      || found.record.owner !== owner) throw new Error('媒體暫存工作歸屬無效');
+    return temporaryOwnership.assertOwner(found.record);
+  }
+
+  function withTemporaryDescriptor(file, owner, work, { truncate = false } = {}) {
+    assertTemporaryOutput(file, owner);
+    return temporaryOwnership.withDescriptor(file, owner, work, {
+      truncate, assertParent: () => assertTemporaryOutput(file, owner),
+    });
   }
 
   function cleanupGeneratedFile(file) {
@@ -854,7 +1631,35 @@ function createMediaIntakeRuntime(options = {}) {
       options.log?.('[sec] ffmpeg:cleanup blocked (outside cache):', file);
       return false;
     }
+    const authority = cleanupAuthority(target);
+    if (!authority) return false;
+    const found = temporaryOwnership?.lookup(target);
+    if (found) {
+      const { record: sourceWave, alias } = found;
+      if (alias || sourceWave.writing || sourceWave.retired || !sourceWave.owner) return false;
+      try { temporaryOwnership.assertOwner(sourceWave); }
+      catch (_) {
+        sourceWave.retired = true;
+        try { options.forgetTemporaryFile?.(sourceWave.target); } catch (ignored) {}
+        return false;
+      }
+      try {
+        fs.unlinkSync(sourceWave.target);
+        sourceWave.retired = true;
+        options.forgetTemporaryFile?.(sourceWave.target);
+        return true;
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          sourceWave.retired = true;
+          try { options.forgetTemporaryFile?.(sourceWave.target); } catch (ignored) {}
+        }
+        return false;
+      }
+    }
+    // 私有 TMP 只清理由本程序交易持有的檔案；舊式中央快取清理仍保留。
+    if (withinCachePath(tempRoot, target)) return false;
     try {
+      assertOutputAuthority(authority, target);
       fs.unlinkSync(target);
       options.forgetTemporaryFile?.(target);
       return true;
@@ -1266,8 +2071,8 @@ function createMediaIntakeRuntime(options = {}) {
     };
   }
 
-  function protectPlan(plan) {
-    const releases = [...new Set([plan.dir, ...(plan.readDirs || [])])].map(protectCacheDir);
+  function protectPlan(plan, src) {
+    const releases = [...new Set([plan.dir, ...(plan.readDirs || [])])].map(dir => protectCacheDir(dir, src));
     return () => { for (const release of releases) release(); };
   }
 
@@ -1296,17 +2101,22 @@ function createMediaIntakeRuntime(options = {}) {
 
   // 這份波形只證明本次已授權母素材的內容；未知跨機快取仍由 ingest 完整驗證。
   // 獨立暫存不寫 portable index/binding，也不參與 Proxy／逐聲道 publication。
-  async function waveform({ src, duration, audio = [], start = 0, length }, session = {}) {
+  async function waveform({ src, duration, audio = [], start = 0, length, ignoreCached = false }, session = {}) {
     if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(start) || start < 0 || start >= duration
       || (length !== undefined && (!Number.isFinite(length) || length <= 0 || length > 60))
       || (length === undefined && start !== 0)) throw new RangeError('波形範圍必須在來源內，片段不可超過 60 秒');
+    if (typeof ignoreCached !== 'boolean') throw new TypeError('波形快取選項無效');
     const validAudio = list => Array.isArray(list) && list.length <= 256 && !list.some(stream => !stream || typeof stream !== 'object'
       || !Number.isInteger(stream.channels) || stream.channels < 1 || stream.channels > 64
       || (stream.timestampOffset !== undefined && !Number.isFinite(stream.timestampOffset)));
     if (!validAudio(audio)) throw new TypeError('波形來源音訊描述無效');
     const ensureCurrent = () => { if (closed || cancelled(session)) throw new IngestSupersededError(); };
     ensureCurrent();
+    while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
+    ensureCurrent();
     const sourceKey = cacheKeyFor(src), segmentDuration = Math.min(length ?? duration, duration - start);
+    const segmentSamples = Math.max(1, Math.round(segmentDuration * 4000));
+    if (!Number.isSafeInteger(segmentSamples)) throw new RangeError('波形片段長度無效');
     const check = () => {
       ensureCurrent();
       if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在波形讀取期間變更，請重新載入');
@@ -1314,7 +2124,7 @@ function createMediaIntakeRuntime(options = {}) {
     const progress = payload => reportProgress(session, { jobId: 'source-wave', stage: 'source-waveform',
       label: '優先產生波形', queued: false, start, length: segmentDuration, totalDuration: duration, ...payload });
     progress({ pct: start / duration * 100 });
-    const hit = readCache(src, audio, false);
+    const hit = ignoreCached ? null : readCache(src, audio, false);
     check();
     if (hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio))) {
       progress({ pct: 100, done: true, outcome: 'success', label: '波形已就緒' });
@@ -1337,51 +2147,105 @@ function createMediaIntakeRuntime(options = {}) {
     const complete = start === 0 && segmentDuration >= duration;
     const file = options.createTempPath?.('source-wave.wav')
       || path.join(tempRoot, crypto.randomBytes(12).toString('hex') + '.source-wave.wav');
+    const sourceWavePath = path.resolve(file);
+    let sourceWave;
     try {
-      const wave = await produceTemporaryFile(file, async out => {
-        const owner = fs.lstatSync(out, { bigint: true });
-        check();
-        const filters = [...plan.filters, `${plan.waveLabel}apad=whole_dur=${segmentDuration},atrim=duration=${segmentDuration}[sourcewave]`];
-        const args = ['-y', '-ss', String(seek.seek), '-i', src, '-vn', '-sn', '-dn',
-          '-filter_complex', filters.join(';'), '-map', '[sourcewave]', '-t', String(segmentDuration),
-          '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', out];
-        await ffmpegExecution.execute(args, { executionKind: 'direct', deferTerminal: true,
-          duration: segmentDuration, jobId: 'source-wave', label: '優先產生波形',
-          onProcess: child => session.ownProcess?.(child),
-          onProgress: payload => progress({ ...payload, pct: Number.isFinite(payload.pct)
-            ? (start + segmentDuration * Math.max(0, Math.min(100, payload.pct)) / 100) / duration * 100 : null }),
-        });
-        check();
-        const current = fs.lstatSync(out, { bigint: true });
-        if (!current.isFile() || current.isSymbolicLink() || current.dev !== owner.dev || current.ino !== owner.ino || current.size <= 0n) {
-          throw new Error('波形暫存缺少完整內容或檔案身分已變更');
+      sourceWave = temporaryOwnership.reserve(sourceWavePath);
+    } catch (error) {
+      if (error.code === 'TEMP_PATH_REUSED') throw error;
+      try { options.forgetTemporaryFile?.(sourceWavePath); } catch (ignored) {}
+      throw new Error('來源波形暫存目錄無法確認', { cause: error });
+    }
+    const authority = sourceWave.authority;
+    const assertParent = () => {
+      try { assertOutputAuthority(authority, sourceWavePath); }
+      catch (cause) { throw Object.assign(new Error('來源波形暫存目錄身分已變更', { cause }), { code: 'SOURCE_WAVE_PARENT_CHANGED' }); }
+    };
+    let completedOwner;
+    try {
+      const wave = await produceTemporaryFile(file, async (out, owner) => {
+        completedOwner = owner;
+        sourceWave.owner = owner;
+        let fd;
+        const unsafe = () => new Error('波形暫存缺少完整內容或檔案身分已變更');
+        const verifyOutput = (requireContent = false) => {
+          let current, opened;
+          try { assertParent(); current = fs.lstatSync(out, { bigint: true }); opened = fs.fstatSync(fd, { bigint: true }); }
+          catch (_) { throw unsafe(); }
+          if (!owner || !current.isFile() || current.isSymbolicLink() || !opened.isFile()
+            || current.dev !== owner.dev || current.ino !== owner.ino
+            || opened.dev !== owner.dev || opened.ino !== owner.ino || (requireContent && opened.size <= 0n)) throw unsafe();
+        };
+        try {
+          const before = fs.lstatSync(out, { bigint: true });
+          if (!owner || !before.isFile() || before.isSymbolicLink() || before.dev !== owner.dev || before.ino !== owner.ino) throw unsafe();
+          fd = fs.openSync(out, 'r+');
+          verifyOutput();
+          check();
+          // 時間式 atrim 在容器粗 timebase 與極短尾段可能裁出零 samples；
+          // 先轉成最終取樣率，再以同一整數 sample 數補零與裁切。
+          const filters = [...plan.filters, `${plan.waveLabel}aresample=4000,apad=whole_len=${segmentSamples},atrim=end_sample=${segmentSamples},asetpts=N/SR/TB[sourcewave]`];
+          const args = ['-y', '-ss', String(seek.seek), '-i', src, '-vn', '-sn', '-dn',
+            '-filter_complex', filters.join(';'), '-map', '[sourcewave]',
+            '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', '-f', 'wav', 'fd:'];
+          await ffmpegExecution.execute(args, { executionKind: 'direct', deferTerminal: true,
+            outputDescriptor: fd,
+            duration: segmentDuration, jobId: 'source-wave', label: '優先產生波形',
+            onProcess: child => session.ownProcess?.(child),
+            onProgress: payload => progress({ ...payload, pct: Number.isFinite(payload.pct)
+              ? (start + segmentDuration * Math.max(0, Math.min(100, payload.pct)) / 100) / duration * 100 : null }),
+          });
+          check();
+          verifyOutput(true);
+        } finally {
+          if (fd !== undefined) fs.closeSync(fd);
         }
+      }, { assertParent, reservation: sourceWave });
+      try {
+        check(); assertParent(); assertTemporaryOwner(wave, completedOwner);
         progress({ pct: (start + segmentDuration) / duration * 100, done: true, outcome: 'success',
           label: complete ? '波形已就緒' : '波形片段已備妥' });
-        ensureCurrent();
-      });
+        // 通知觀察者可同步換工作，也可在 microtask 更換來源或暫存路徑。
+        await Promise.resolve();
+        check(); assertParent(); assertTemporaryOwner(wave, completedOwner);
+      }
+      catch (error) {
+        // 等待交接時若目錄項已變更，只撤回清理登記，不刪除新物件。
+        try {
+          assertParent(); assertTemporaryOwner(wave, completedOwner);
+          fs.unlinkSync(wave);
+        } catch (ignored) {}
+        try { options.forgetTemporaryFile?.(wave); } catch (ignored) {}
+        throw error;
+      }
       return { wave, channels: [], cached: false, temporary: true, start, duration: segmentDuration, complete, sourceKey };
     } catch (error) {
+      sourceWave.retired = true;
       progress({ done: true, outcome: 'failed', errorCode: error.code || 'SOURCE_WAVE_FAILED', errorMsg: error.message });
       throw error;
-    }
+    } finally { sourceWave.writing = false; }
   }
 
   async function ingest(request, session = {}) {
     if (closed || cancelled(session)) throw new IngestSupersededError();
+    while (sourceCleanupTasks(request.src).length) await waitSourceCleanups(request.src);
+    if (closed || cancelled(session)) throw new IngestSupersededError();
     let portable = await preparePortableCache(request, session);
     let description = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
+    while (sourceCleanupTasks(request.src).length) await waitSourceCleanups(request.src);
     if (closed || cancelled(session)) throw new IngestSupersededError();
     let pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: request.needsProxy });
     let index = 0;
     let plan = planIntake(request, false, description, portable, pipelines[index]);
     if (plan.needsSourceVerification) {
       portable = await preparePortableCache(request, session, true);
+      while (sourceCleanupTasks(request.src).length) await waitSourceCleanups(request.src);
       if (closed || cancelled(session)) throw new IngestSupersededError();
       plan = planIntake(request, false, description, portable, pipelines[index]);
     }
     if (plan.needsVideoDescription) {
       description = await describeMissingProxy(request.src, request.audio, true);
+      while (sourceCleanupTasks(request.src).length) await waitSourceCleanups(request.src);
       if (closed || cancelled(session)) throw new IngestSupersededError();
       pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: request.needsProxy });
       plan = planIntake(request, false, description, portable, pipelines[index]);
@@ -1391,7 +2255,7 @@ function createMediaIntakeRuntime(options = {}) {
       return Object.assign({ cached: true }, plan.meta);
     }
 
-    let unprotect = protectPlan(plan);
+    let unprotect = protectPlan(plan, request.src);
     try {
       await delay(1000);
       if (cancelled(session)) throw new IngestSupersededError();
@@ -1420,7 +2284,7 @@ function createMediaIntakeRuntime(options = {}) {
           const next = planIntake(request, false, description, portable, pipelines[index]);
           if (next.cached || next.needsVideoDescription) throw new Error('媒體快取在重試期間變更，請重新載入');
           plan = next;
-          unprotect = protectPlan(plan);
+          unprotect = protectPlan(plan, request.src);
         }
       }
       if (closed || cancelled(session)) throw new IngestSupersededError();
@@ -1438,6 +2302,8 @@ function createMediaIntakeRuntime(options = {}) {
   async function stream({ src, duration, audio }, session = {}) {
     const port = await ensureStreamServer();
     if (closed || cancelled(session)) return { response: null, completion: null };
+    while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
+    if (closed || cancelled(session)) return { response: null, completion: null };
     let portable;
     try { portable = await preparePortableCache({ src, duration, audio, needsProxy: true }, session); }
     catch (error) {
@@ -1445,6 +2311,7 @@ function createMediaIntakeRuntime(options = {}) {
       throw error;
     }
     let description = options.describeVideo ? await describeMissingProxy(src, audio) : null;
+    while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
     if (closed || cancelled(session)) return { response: null, completion: null };
     const request = { src, needsProxy: true, audio };
     let pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: true });
@@ -1456,30 +2323,44 @@ function createMediaIntakeRuntime(options = {}) {
         if (closed || cancelled(session)) return { response: null, completion: null };
         throw error;
       }
+      while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
       if (closed || cancelled(session)) return { response: null, completion: null };
       plan = planIntake(request, true, description, portable, pipelines[index]);
     }
     if (plan.needsVideoDescription) {
       description = await describeMissingProxy(src, audio, true);
+      while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
       if (closed || cancelled(session)) return { response: null, completion: null };
       pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: true });
       plan = planIntake(request, true, description, portable, pipelines[index]);
     }
+    const verifySource = () => {
+      let current;
+      try { current = cacheKeyFor(src); } catch (_) {}
+      if (current !== portable.sourceKey) {
+        const error = new Error('母素材在串流準備期間變更，請重新載入');
+        error.code = 'SOURCE_CHANGED';
+        throw error;
+      }
+    };
     if (plan.cached) {
       if (closed || cancelled(session)) return { response: null, completion: null };
       const verifySourceOwner = plan.streamGuard();
+      verifySource();
       reportCacheHit(session);
       if (closed || cancelled(session)) return { response: null, completion: null };
+      verifySource();
       const id = createStreamId('c-');
       streamJobs.set(id, {
         filePath: plan.meta.proxy, done: true, error: null,
         owner: session.owner, verifySourceOwner,
-        releaseCache: protectCacheDir(plan.dir),
+        releaseCache: protectCacheDir(plan.dir, src),
       });
       return Object.assign({
         cached: true,
         streamUrl: `http://127.0.0.1:${port}/${id}`,
         streamLeaseId: id,
+        sourceKey: portable.sourceKey,
       }, plan.meta);
     }
 
@@ -1488,7 +2369,7 @@ function createMediaIntakeRuntime(options = {}) {
     let streamGuard = null;
     const job = { filePath: plan.meta.proxy, done: false, error: null, owner: session.owner,
       verifySourceOwner: observed => { if (!streamGuard) throw cacheDirectoryChanged(); streamGuard(observed); },
-      releaseCache: protectCacheDir(plan.dir) };
+      releaseCache: protectCacheDir(plan.dir, src) };
     streamJobs.set(id, job);
     // close/cancel 也可在等待可播 bytes 期間收回 registry；URL 只有仍持有
     // 同一 lease 才能交給 renderer，不能以 writer 後來完成重新取得資格。
@@ -1500,7 +2381,7 @@ function createMediaIntakeRuntime(options = {}) {
       plan.dispose();
       return { response: null, completion: null };
     }
-    let unprotect = protectPlan(plan);
+    let unprotect = protectPlan(plan, src);
     let writer = null;
     let readinessError = null;
     let preparationReady = false;
@@ -1542,9 +2423,9 @@ function createMediaIntakeRuntime(options = {}) {
           const next = planIntake(request, true, description, portable, pipelines[index]);
           if (next.cached || next.needsVideoDescription) throw new Error('媒體快取在重試期間變更，請重新載入');
           plan = next;
-          unprotect = protectPlan(plan);
+          unprotect = protectPlan(plan, src);
           job.releaseCache();
-          job.releaseCache = protectCacheDir(plan.dir);
+          job.releaseCache = protectCacheDir(plan.dir, src);
           job.filePath = plan.meta.proxy;
         }
       }
@@ -1601,12 +2482,14 @@ function createMediaIntakeRuntime(options = {}) {
         stopUnreadyWriter();
         throw readinessError;
       }
+      verifySource();
       published = true;
       return {
         response: {
           cached: false,
           streamUrl: `http://127.0.0.1:${port}/${id}`,
           streamLeaseId: id,
+          sourceKey: portable.sourceKey,
           proxy: plan.meta.proxy,
           channels: plan.meta.channels,
           wave: plan.meta.wave,
@@ -1616,7 +2499,7 @@ function createMediaIntakeRuntime(options = {}) {
       };
     } catch (error) {
       // 未交付的exception也必須等writer settle，不能讓coordinator提前准入下一個。
-      if (!readinessError && ['CACHE_DIRECTORY_CHANGED', 'CACHE_PATH_ESCAPE'].includes(error.code)) {
+      if (!readinessError && ['CACHE_DIRECTORY_CHANGED', 'CACHE_PATH_ESCAPE', 'SOURCE_CHANGED'].includes(error.code)) {
         readinessError = error;
         stopUnreadyWriter();
       }
@@ -1628,10 +2511,29 @@ function createMediaIntakeRuntime(options = {}) {
     }
   }
 
-  async function close() {
+  function close() {
     closed = true;
+    runtimeGeneration++;
+    if (closeOperation) return closeOperation;
+    const operation = closeRuntime();
+    closeOperation = operation;
+    operation.then(() => { if (closeOperation === operation) closeOperation = null; },
+      () => { if (closeOperation === operation) closeOperation = null; });
+    return operation;
+  }
+
+  async function closeRuntime() {
+    drainingCleanup = true;
+    try {
+      await Promise.allSettled([...cleanupTasks.keys()]);
+      const cleanupCloseResults = await Promise.allSettled([...cleanupHandles].map(async handle=>{
+        await handle.close();cleanupHandles.delete(handle);
+      }));
+      const cleanupCloseFailure = cleanupCloseResults.find(result=>result.status==='rejected');
+      if (cleanupCloseFailure) throw cleanupCloseFailure.reason;
+    } finally { drainingCleanup = false; }
     await Promise.allSettled([...portableHashes]);
-    if (!streamServer) return;
+    if (!streamServer) { await Promise.all([...drainingServers].map(drainServer)); return; }
     const server = streamServer;
     await streamServerReady.catch(() => {});
     streamServer = null;
@@ -1639,10 +2541,41 @@ function createMediaIntakeRuntime(options = {}) {
     streamPort = null;
     for (const id of streamJobs.keys()) releaseStream(id);
     streamJobs.clear();
-    await new Promise(resolve => {
-      server.close(() => resolve());
-      server.closeAllConnections?.();
-    });
+    const entry = { server, done: false, started: false, completion: null };
+    entry.completion = new Promise(resolve => server.once('close', () => { entry.done = true; resolve(); }));
+    drainingServers.add(entry);
+    await drainServer(entry);
+  }
+
+  async function drainServer(entry) {
+    if (!entry.done) {
+      if (!entry.started) { entry.server.close(); entry.started = true; }
+      entry.server.closeAllConnections?.();
+      await entry.completion;
+    }
+    drainingServers.delete(entry);
+  }
+
+  async function resume() {
+    // Never revive leases from the closed generation. Finish closing any old
+    // listener before a later request can create a fresh server and URLs.
+    const generation = runtimeGeneration;
+    if (closeOperation) await closeOperation.catch(() => {});
+    // A newer close owns the runtime and must not be undone by an older resume.
+    if (runtimeGeneration !== generation) return false;
+    // A failed cleanup close left a tracked handle. Retry the complete close
+    // before accepting work; a second failure keeps the runtime closed.
+    if (cleanupHandles.size) {
+      const retry = close();
+      const retryGeneration = runtimeGeneration;
+      await retry;
+      if (runtimeGeneration !== retryGeneration) return false;
+    }
+    const resumeGeneration = runtimeGeneration;
+    await Promise.all([...drainingServers].map(drainServer));
+    if (closeOperation || runtimeGeneration !== resumeGeneration) return false;
+    closed = false;
+    return true;
   }
 
   function releaseStream(streamLeaseId, owner) {
@@ -1669,16 +2602,25 @@ function createMediaIntakeRuntime(options = {}) {
     cancel,
     cleanOrphans,
     cleanupGeneratedFile,
+    registerCleanupRoot,
+    hasUnsafeTemporaryFiles,
+    hasUnsafeSourceWaveFiles: hasUnsafeTemporaryFiles,
     clearAll,
     close,
-    ingest,
+    resume,
+    ingest: withSourceLease(ingest, undefined, true),
     inspectCache,
     isDirWritable,
     isPreviewCacheMedia,
+    isOwnedTemporary,
+    isSourceWaveTemporary: isOwnedTemporary,
+    assertTemporaryOutput,
+    withTemporaryDescriptor,
     produceTemporaryFile,
     releaseStream,
-    stream,
-    waveform,
+    sourceKey: withSourceLease(cacheKeyForAsync, src => src),
+    stream: withSourceLease(stream, undefined, true),
+    waveform: withSourceLease(waveform, undefined, true),
   });
 }
 

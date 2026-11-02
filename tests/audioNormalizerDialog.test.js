@@ -10,6 +10,7 @@ const requests = vi.hoisted(() => {
   };
   return pending;
 });
+const modal = vi.hoisted(()=>({generation:0,session:null}));
 
 vi.mock('../src/media.js', () => ({
   Media: { audioEffects: { targets: source => [source] } },
@@ -17,7 +18,11 @@ vi.mock('../src/media.js', () => ({
 }));
 vi.mock('../src/state.js', () => ({ IS_DESKTOP: true }));
 vi.mock('../src/ui.js', () => ({
-  openModal: (title, html) => { document.getElementById('modalBody').innerHTML = html; },
+  openModal: (title, html) => {
+    document.getElementById('modalBody').innerHTML = html;
+    const owner=++modal.generation;
+    return modal.session={isCurrent:()=>modal.generation===owner,close:()=>{if(modal.generation===owner)modal.generation++;}};
+  },
   closeModal: () => {},
   showToast: () => {},
 }));
@@ -26,7 +31,29 @@ import { openHardLimiterDialog } from '../src/audio-normalizer-dialog.js';
 
 beforeEach(() => {
   requests.length = 0;
+  modal.generation++;
   document.getElementById('modalBody').innerHTML = '';
+});
+
+it('對話框關閉後，晚到聲量分析不得修改仍連接的隱藏面板',async()=>{
+  openHardLimiterDialog({id:'a',path:'C:/a.wav'});
+  const panel=document.querySelector('.hard-limiter-panel');
+  const before=panel.querySelector('#hlAnalysisStatus').textContent;
+  modal.session.close();
+  expect(panel.isConnected).toBe(true);
+  requests[0].resolve({maxDb:-2,meanDb:-14,minDb:-28,dynamicRangeDb:12});
+  await Promise.resolve();
+  expect(panel.querySelector('#hlAnalysisStatus').textContent).toBe(before);
+});
+
+it('來源在量測期間改變時，不把舊來源量測顯示為新來源的精準結果',async()=>{
+  const source={id:'a',path:'C:/original.wav'};
+  openHardLimiterDialog(source);
+  source.path='C:/replacement.wav';
+  requests[0].resolve({maxDb:-2,meanDb:-14,minDb:-28,dynamicRangeDb:12});
+  await Promise.resolve();
+  expect(document.getElementById('hlAnalysisStatus').textContent).toContain('來源已變更');
+  expect(document.getElementById('hlAnalyzedMax').textContent).not.toBe('-2 dB');
 });
 
 it('短音訊的平均 RMS 不誤標為 ITU 精準量測', async () => {

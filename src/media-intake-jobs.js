@@ -11,6 +11,8 @@ function cancelled(){
 export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.crypto.randomUUID()}){
   let session={id:id(),used:false};
   const pending=new Map();
+  // 終態事件可能早於 IPC 回覆：畫面可移除已完成工作，交接仍由 session 持有。
+  const awaitingReply=new Set();
   const snapshot=()=>({sessionId:session.id,count:pending.size,hasProxy:[...pending.values()].some(job=>job.proxy),
     jobs:[...pending.values()].map(job=>({requestId:job.requestId,proxy:job.proxy,local:job.local,
       progress:job.progress?{...job.progress}:null}))});
@@ -25,14 +27,17 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     const job={owner,requestId,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,
       progress:local?{stage:'waveform',label:'準備波形',pct:null}:sourceWave?{stage:'source-waveform',label:'等候優先產生波形',pct:null,queued:true}:null};
     if(!local) owner.used=true;
-    pending.set(requestId,job);publish();
+    pending.set(requestId,job);awaitingReply.add(job);publish();
+    // A synchronous observer may already have replaced the session in publish().
+    if(owner!==session){awaitingReply.delete(job);return aborted;}
     let native;
     try{native=local?action({
       owns:()=>owner===session&&pending.get(requestId)===job,
       report(data){
         if(owner!==session||pending.get(requestId)!==job) return false;
         job.progress={stage:'waveform',label:data?.label||'準備波形',pct:data?.pct,
-          overall:!!data?.overall,queued:!!data?.queued};publish();return true;
+          overall:!!data?.overall,queued:!!data?.queued};publish();
+        return owner===session&&pending.get(requestId)===job;
       },
     }):bridge[method]({...options,sessionId:owner.id,requestId});}
     catch(error){native=Promise.reject(error);}
@@ -47,10 +52,14 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       delivered=result;if(owner!==session) discard(result);return result;
     });
     return Promise.race([resultPromise,aborted]).then(result=>{
+      awaitingReply.delete(job);
       if(owner!==session){discard(result);throw cancelled();}
       if(method!=='streamIngest'||result?.cached||job.terminal) finish(job);
+      // finish() synchronously notifies observers; they can replace the
+      // workspace before this result is handed over to its original caller.
+      if(owner!==session){discard(result);throw cancelled();}
       return result;
-    },error=>{if(owner!==session) discard(delivered);finish(job);throw error;});
+    },error=>{awaitingReply.delete(job);if(owner!==session) discard(delivered);finish(job);throw error;});
   }
   return {
     ingest:options=>run('ingest',options),
@@ -68,11 +77,11 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       if(!job||job.owner!==session) return false;
       if(payload.done){job.terminal=true;finish(job);}
       else {job.progress={...payload};publish();}
-      return true;
+      return job.owner===session;
     },
     reset(){
       const previous=session;session={id:id(),used:false};
-      for(const job of pending.values()) job.abort();
+      for(const job of new Set([...pending.values(),...awaitingReply])) job.abort();
       pending.clear();publish();
       if(!previous.used||!bridge?.cancelMediaIntake) return Promise.resolve();
       try{return Promise.resolve(bridge.cancelMediaIntake({sessionId:previous.id}));}

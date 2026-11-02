@@ -16,6 +16,66 @@ beforeEach(async()=>{
   cancel=vi.fn(()=>jobs.reset());bindView(cancel);
 });
 
+it('原生終態通知同步換專案時不發布舊工作完成事件或覆蓋新狀態',async()=>{
+  const {on}=await import('../src/events.js');
+  const events=vi.spyOn(window,'dispatchEvent');
+  const work=jobs.ingest({path:'old.mxf',needsProxy:true});
+  const rejected=expect(work).rejects.toMatchObject({name:'AbortError'});
+  let revoked=false;
+  on('media:intakeJobs',state=>{
+    if(!revoked&&state.count===0){
+      revoked=true;
+      void jobs.reset();
+      setStatus('新專案已載入','ok');
+    }
+  });
+  expect(progress({...requests[0],jobId:'ingest-old',done:true,outcome:'success',label:'舊轉檔'})).toBe(false);
+  await rejected;
+  expect(document.getElementById('stMsg').textContent).toBe('新專案已載入');
+  expect(events.mock.calls.some(([event])=>event.type==='desk:ingest-done')).toBe(false);
+  resolve({cached:true});
+});
+
+it('較早訂閱者同步換專案後，畫面不顯示外層通知中已失效的背景工作',async()=>{
+  vi.resetModules();
+  const {on}=await import('../src/events.js');
+  let shouldReset=true;
+  on('media:intakeJobs',state=>{
+    if(shouldReset&&state.count){
+      shouldReset=false;void jobs.reset();setStatus('新專案已載入','ok');
+    }
+  });
+  ({MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js'));
+  ({bindMediaIntakeView:bindView}=await import('../src/media-intake-view.js'));
+  ({setStatus}=await import('../src/ui.js'));
+  bindView(()=>jobs.reset());
+  const work=jobs.ingest({path:'old.mxf',needsProxy:true});
+  await expect(work).rejects.toMatchObject({name:'AbortError'});
+  expect(jobs.snapshot().count).toBe(0);
+  expect(document.getElementById('stMsg').textContent).toBe('新專案已載入');
+  expect(getComputedStyle(document.getElementById('stProxyCancelBtn')).display).toBe('none');
+  expect(window.subtool.ingest).not.toHaveBeenCalled();
+});
+
+it('同專案同步新增第二份工作時，畫面以最新工作數呈現',async()=>{
+  vi.resetModules();
+  const pending=[];
+  window.subtool.ingest=vi.fn(()=>new Promise(done=>pending.push(done)));
+  const {on}=await import('../src/events.js');
+  let next,spawnNext=true;
+  on('media:intakeJobs',state=>{
+    if(spawnNext&&state.count===1){spawnNext=false;next=jobs.ingest({path:'next.mxf'});}
+  });
+  ({MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js'));
+  ({bindMediaIntakeView:bindView}=await import('../src/media-intake-view.js'));
+  bindView(()=>jobs.reset());
+  const first=jobs.ingest({path:'first.mxf'});
+  expect(jobs.snapshot().count).toBe(2);
+  expect(document.getElementById('stMsg').textContent).toContain('另有 1 項背景工作');
+  pending.forEach(done=>done({cached:true}));
+  await Promise.all([first,next]);
+});
+
 it('播放及暫停的公開操作不覆蓋母素材驗證百分比',async()=>{
   const {togglePlayPause,shuttlePause}=await import('../src/transport-controller.js');
   const {Media}=await import('../src/media.js');
@@ -112,13 +172,30 @@ it('已開始的優先波形顯示在後來Proxy之前，排隊不遮住進度�
   expect(document.getElementById('stMsg').textContent).toContain('驗證母素材內容… 19%');
   progress({...waveOptions,stage:'source-waveform',label:'優先產生波形',queued:false,pct:7});
   progress({...requests[0],stage:'source-verification',label:'驗證母素材內容',pct:20});
-  expect(document.getElementById('stMsg').textContent).toBe('優先產生波形… 7%（另有 1 項背景工作）');
+  expect(document.getElementById('stMsg').textContent).toBe('7% 波形｜20% 驗證母素材');
   finishWave({wave:'source.wav'});await wave;
   expect(document.getElementById('stMsg').textContent).toBe('驗證母素材內容… 20%');
   const queued=jobs.prepareSourceWaveform({path:'next.mxf'});
   expect(document.getElementById('stMsg').textContent).toContain('驗證母素材內容… 20%');
   finishWave({wave:'next.wav'});await queued;
   resolve({});await proxy;
+});
+
+it.each([['source-verification','驗證母素材內容','驗證母素材'],['transcoding','轉檔 Proxy','Proxy 轉檔']])('波形與 %s 並行時各自顯示百分比且提供完整無障礙資訊',async(stage,label,short)=>{
+  let report,finish;
+  const wave=jobs.prepareWaveform(control=>{report=control.report;return new Promise(done=>{finish=done;});});
+  const proxy=jobs.ingest({path:'demo.mxf',needsProxy:true});
+  progress({...requests[0],stage,label,pct:20});report({label:'優先產生波形',pct:7,overall:true});
+  const message=document.getElementById('stMsg');
+  expect(message.textContent).toContain('7% 波形');expect(message.textContent).toContain('20% '+short);
+  expect(message.getAttribute('aria-label')).toContain('優先產生波形');
+  expect(message.getAttribute('aria-label')).toContain(label);
+  expect(message.title).toBe(message.getAttribute('aria-label'));
+  expect([...message.children].map(child=>child.className)).toEqual(['status-pair-item','status-pair-separator','status-pair-item']);
+  expect(getComputedStyle(document.getElementById('stProxyCancelBtn')).display).not.toBe('none');
+  setStatus('匯出 50%','busy','lock');expect(message.textContent).toBe('匯出 50%');expect(message.classList.contains('status-pair')).toBe(false);
+  setStatus('匯出完成','ok','unlock');expect(message.textContent).toContain('20% '+short);expect(message.classList.contains('status-pair')).toBe(true);
+  finish();await wave;resolve({});await proxy;
 });
 
 it('整體波形保持累積進度與ETA，分段完成不宣告整片或清掉外層工作',async()=>{
@@ -136,18 +213,20 @@ it('整體波形保持累積進度與ETA，分段完成不宣告整片或清掉�
   expect(document.getElementById('stMsg').textContent).toContain('驗證母素材內容… 3%');
   const first=jobs.prepareSourceWaveform({path:'demo.mxf',start:0,length:60,duration:600});
   progress({...chunks[0].options,stage:'source-waveform',label:'優先產生波形',queued:false,pct:8});
-  expect(document.getElementById('stMsg').textContent).toContain('優先產生波形… 8%');
+  expect(document.getElementById('stMsg').textContent).toContain('8% 波形');
+  expect(document.getElementById('stMsg').textContent).toContain('3% 驗證母素材');
   progress({...chunks[0].options,stage:'source-waveform',done:true,outcome:'success',pct:100});
   chunks[0].done({wave:'first.wav',start:0,duration:60});await first;
   report({label:'優先產生波形',pct:10,overall:true});
   const second=jobs.prepareSourceWaveform({path:'demo.mxf',start:60,length:60,duration:600});
   progress({...chunks[1].options,stage:'source-waveform',label:'優先產生波形',queued:false,pct:19});
-  expect(document.getElementById('stMsg').textContent).toContain('優先產生波形… 10%');
+  expect(document.getElementById('stMsg').textContent).toContain('10% 波形');
   now=4000;
   progress({...chunks[1].options,stage:'source-waveform',done:true,outcome:'success',pct:100});
   chunks[1].done({wave:'second.wav',start:60,duration:60});await second;
   report({label:'優先產生波形',pct:20,overall:true});
-  expect(document.getElementById('stMsg').textContent).toContain('20% [已用 00:04 / 預估剩餘 00:16]');
+  expect(document.getElementById('stMsg').textContent).toContain('20% 波形');
+  expect(document.getElementById('stMsg').getAttribute('aria-label')).toContain('20% [已用 00:04 / 預估剩餘 00:16]');
   expect(dispatched.mock.calls.some(([event])=>event.type==='desk:ingest-done')).toBe(false);
   expect(jobs.snapshot().count).toBe(2);
   finishOverall();await overall;
@@ -170,7 +249,7 @@ it('截圖真正寫入後才顯示完成toast，並保留背景工作百分比',
     toBlob:callback=>callback(new Blob(['jpeg'],{type:'image/jpeg'})),
   }});
   let finishWrite;
-  window.subtool.reserveScreenshotPath=vi.fn(async()=>({path:'C:/Shot-1.jpg',name:'Shot-1.jpg'}));
+  window.subtool.reserveScreenshotPath=vi.fn(async()=>({path:'C:/Shot-1.jpg',name:'Shot-1.jpg',token:'test-token'}));
   window.subtool.writeScreenshot=vi.fn(()=>new Promise(done=>{finishWrite=done;}));
   window.subtool.releaseScreenshotPath=vi.fn(async()=>{});
   const work=jobs.ingest({path:'demo.mxf',needsProxy:true});
@@ -178,8 +257,10 @@ it('截圖真正寫入後才顯示完成toast，並保留背景工作百分比',
   const {takeScreenshot}=await import('../src/commands.js');
   const screenshot=takeScreenshot();
   await vi.waitFor(()=>expect(window.subtool.writeScreenshot).toHaveBeenCalled());
+  expect(window.subtool.writeScreenshot).toHaveBeenCalledWith('C:/Shot-1.jpg', expect.any(String), 'test-token');
   expect(document.getElementById('toast').textContent).not.toContain('截圖已儲存');
   finishWrite('C:/Shot-1.jpg');await screenshot;
+  expect(window.subtool.releaseScreenshotPath).toHaveBeenCalledWith('C:/Shot-1.jpg', 'test-token');
   expect(document.getElementById('toast').textContent).toBe('截圖已儲存：Shot-1.jpg');
   expect(document.getElementById('toast').classList.contains('show')).toBe(true);
   expect(document.getElementById('stMsg').textContent).toBe('轉檔 Proxy… 42%');

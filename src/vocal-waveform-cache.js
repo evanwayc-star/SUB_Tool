@@ -53,15 +53,18 @@ export class VocalWaveformCache {
     } catch (_) { return []; }
   }
   /** Persist explicit display intent synchronously, including while fingerprinting is pending. */
-  rememberPreference(key, selected) {
+  rememberPreference(key, selected, descriptor = null, { order = null } = {}) {
     if (!key || !this.localStorage) return false;
+    if (order !== null && (!Number.isSafeInteger(order) || order <= 0 || this.selectionOrders.get(descriptor) !== order)) return false;
     try {
-      const records = this.preferences().filter(record => record.key !== key).sort((a, b) => b.accessed - a.accessed);
+      const records = this.preferences().filter(record => record.key !== key || (record.descriptor ?? null) !== descriptor)
+        .sort((a, b) => b.accessed - a.accessed);
       this.preferenceClock = Math.max(this.preferenceClock + 1, Date.now(), (records[0]?.accessed || 0) + 1);
-      records.unshift({ key, selected: !!selected, accessed: this.preferenceClock });
+      records.unshift({ key, selected: !!selected, descriptor, accessed: this.preferenceClock });
       records.splice(MAX_ENTRIES);
       let raw = JSON.stringify(records);
       while (raw.length > MAX_PREFERENCE_CHARS && records.length) { records.pop(); raw = JSON.stringify(records); }
+      if (order !== null && this.selectionOrders.get(descriptor) !== order) return false;
       this.localStorage.setItem(PREFERENCE_KEY, raw); return true;
     } catch (_) { return false; }
   }
@@ -109,8 +112,12 @@ export class VocalWaveformCache {
           if (request.result?.sha256 === record.sha256) store.put({ ...request.result, accessed: Date.now() });
         };
       });
-      const preference = preferenceKey ? this.preferences().find(item => item.key === preferenceKey) : null;
-      return selectedOnly && !(preference?.selected ?? record.selected) ? null : peaks;
+      const preference = preferenceKey ? this.preferences().find(item => item.key === preferenceKey && item.descriptor === descriptor) : null;
+      // A path or browser file metadata is not content identity. Only a
+      // preference verified against this exact source/model descriptor can
+      // override the selected state of the content-addressed cache record.
+      const verified = preference?.descriptor === descriptor ? preference.selected : record.selected;
+      return selectedOnly && !verified ? null : peaks;
     } catch (_) { return null; }
   }
   async write(descriptor, duration, peaks) {

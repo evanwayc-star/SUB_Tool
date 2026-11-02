@@ -21,7 +21,7 @@
      尤其是讀檔時，必須做好舊版專案檔缺乏該欄位的防呆保護 (Fallback)。
 ============================================================================== */
 import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount, ensureVideoTrackCount, resetVideoTracks,
-  normalizeAudioProject, resetAudioProject, deselect } from './state.js';
+  normalizeAudioProject, registerAudioSource, resetAudioProject, deselect } from './state.js';
 import { $ } from './dom.js';
 import { encodeUTF16LE, decodeText, bytesToB64, b64ToBytes, downloadBytes, readFile, escapeHTML } from './util.js';
 import { Media } from './media.js';
@@ -177,6 +177,12 @@ const _projectLoadSession = new ProjectLoadSession({
 });
 let _openRequestGeneration = 0;
 let _saveEpoch = 0;
+const _workspaceInvalidationListeners = new Set();
+function _notifyWorkspaceInvalidated() {
+  for (const listener of [..._workspaceInvalidationListeners]) {
+    try { listener(); } catch (error) { console.error('專案失權通知失敗', error); }
+  }
+}
 let _saveTail = Promise.resolve();
 let _cancelFontPrompt = null;
 
@@ -224,7 +230,10 @@ function _savedExternalAudioSources(){
   try{ live=Media.externalAudio?.list?.() || []; }catch(e){}
   // 尚未能重新開啟（例如暫時找不到檔案）的來源也要繼續留在專案檔，避免下一次儲存遺失。
   const pending=_projectLoadSession.activePlan?.pendingExternalAudioSources?.()||[];
-  return _normalExternalAudioSources([...(Array.isArray(live)?live:[]), ...pending]);
+  // Undo 可能已更新期望的純資料，但尚在非同步重建 runtime asset。
+  // 已存在的 runtime 資料優先，其餘由 History 狀態與復原計畫補足。
+  const wanted=Array.isArray(State.externalAudioState)?State.externalAudioState:[];
+  return _normalExternalAudioSources([...(Array.isArray(live)?live:[]), ...wanted, ...pending]);
 }
 /* 開啟專案到主影片尚未重建的短暫期間，clip 會保存在 ProjectLoadSession 的 restore plan。
    儲存／dirty 判斷都必須把它們算進去，否則純圖片專案會在重開後尚未還原
@@ -238,6 +247,13 @@ function _unrestoredClips(){
 }
 function _savedClips(){
   return [...(Array.isArray(State.clips)?State.clips:[]),..._unrestoredClips()];
+}
+
+function _projectClip(clip){
+  const metadata=Seq.persistentMetadata(clip);
+  delete metadata.id;delete metadata.audioSrc;delete metadata.web;
+  if(!metadata.audioSourceId&&clip.audioSrc) metadata.audioSourceId=String(clip.audioSrc);
+  return metadata;
 }
 
 function _normalisedProjectData(rawData){
@@ -311,12 +327,7 @@ function _buildProjectData({snapshot=null,workspace=null}={}){
       ...(t.scale!=null?{scale:t.scale}:{}),...(t.opacity!=null?{opacity:t.opacity}:{}),...(t.posX!=null?{posX:t.posX}:{}),...(t.posY!=null?{posY:t.posY}:{})})),
     videoTrackCount:committed.videoTracks.length||1, // 向下相容：舊版讀取用
     vtracksCollapsed:!!State.vtracksCollapsed,
-    clips:committed.clips.map(c=>{
-      const metadata=Seq.persistentMetadata(c);
-      delete metadata.id; delete metadata.audioSrc; delete metadata.web;
-      if(!metadata.audioSourceId&&c.audioSrc) metadata.audioSourceId=String(c.audioSrc);
-      return metadata;
-    }),
+    clips:committed.clips.map(_projectClip),
     // v3：只存純資料的 project bus / source routing / export stream；Media 的 runtime 資源絕不寫入專案檔。
     audioProject:committed.audioProject,
     // v3：外部音檔獨立於影片 clip，路徑只在桌面版用來重開。
@@ -360,6 +371,7 @@ function _onSaved(fullPath, webName, snapshot){
 }
 
 function _saveProject(asNew){
+  History.setExternalAudioSnapshotProvider(_savedExternalAudioSources);
   // Capture the bytes and dirty baseline together, before any picker or disk IO.
   const data=_buildProjectData();
   const snapshot=JSON.stringify(data);
@@ -373,18 +385,23 @@ function _saveProject(asNew){
       const saveAs=asNew||!_savePath;
       let pth=null;
       if(IS_DESKTOP){
-        pth=await (saveAs?DESK.saveProject(name,bytesToB64(bytes)):DESK.writeProject(_savePath,bytesToB64(bytes)));
+        const response=await (saveAs?DESK.saveProject(name,bytesToB64(bytes)):DESK.writeProject(_savePath,bytesToB64(bytes)));
         if(!owns()) return null;
-        if(!pth){
-          if(!saveAs) showToast('儲存專案失敗，請嘗試「另存新檔」');
+        if(response?.code==='PROJECT_DESTINATION_CHANGED'){
+          showToast('專案檔在儲存期間已變更，請另存新檔');
           return null;
         }
+        if(typeof response!=='string'||!response){
+          if(!saveAs||response) showToast('儲存專案失敗，請嘗試「另存新檔」');
+          return null;
+        }
+        pth=response;
       }else downloadBytes(bytes,name,'application/json');
       _onSaved(pth,name,snapshot);
       showToast(saveAs?'已另存新檔':'已儲存專案');
       return pth||name;
-    }catch(error){
-      if(owns()) showToast('儲存專案失敗：'+error.message);
+    }catch{
+      if(owns()) showToast('儲存專案失敗，請嘗試「另存新檔」');
       return null;
     }
   });
@@ -405,7 +422,10 @@ async function _autoSave(){
     const autoSaveDir=dir+'.subtool_AutoSave/';
     const res=await DESK.writeProject(autoSaveDir+name, bytesToB64(bytes)).catch(()=>null);
     // 已送出的舊備份安全完成；換專案或另存新路徑後不再回報到目前工作區。
-    if(res&&current()) setStatus('自動備份：'+name,'ok');
+    if(current()){
+      if(res?.code==='PROJECT_DESTINATION_CHANGED') showToast('自動備份失敗：專案檔在儲存期間已變更，請另存新檔');
+      else if(typeof res==='string'&&res) setStatus('自動備份：'+name,'ok');
+    }
   } else {
     // Fix #2：瀏覽器版改用 localStorage 避免每 3 分鐘觸發下載干擾工作流
     try{
@@ -482,6 +502,7 @@ function resetProject(){
   emit('render:all');
   ++_openRequestGeneration;
   _saveEpoch++;
+  _notifyWorkspaceInvalidated();
   _editGuardDone=false;
   _savePath=null;
   _saveBaseName=null;
@@ -497,9 +518,12 @@ function resetProject(){
 }
 
 // 播放點、縮放與軌道收合仍隨專案保存，方便下次還原檢視；它們不是內容編輯。
+// clip.fps 是母素材來源影格率，瀏覽器會在播放後非同步偵測，並非使用者
+// 修改專案格網。保留實測值供播放器及手動存檔，但不讓測量本身產生 dirty。
 // 未儲存判斷與等待 picker 時的丟棄同意使用相同投影，避免兩處規則分歧。
 function _projectContentString(data){
-  return JSON.stringify({...data,playhead:0,pxPerSec:0,vtracksCollapsed:false});
+  const clips=Array.isArray(data.clips)?data.clips.map(({fps,...clip})=>clip):data.clips;
+  return JSON.stringify({...data,clips,playhead:0,pxPerSec:0,vtracksCollapsed:false});
 }
 
 // 開啟同意要涵蓋選檔後的 FileReader、字型與素材查詢，直到真正取代 State。
@@ -536,6 +560,7 @@ function isProjectDirty() {
 }
 
 function _beginProjectLoad(){
+  History.setExternalAudioSnapshotProvider(_savedExternalAudioSources);
   const sourceIds=[..._savedClips(),..._savedExternalAudioSources()].map(source=>source.audioSourceId);
   const finishHistory=History.beginProjectRestore({sourceIds});
   const workspace=_buildProjectData();
@@ -556,7 +581,37 @@ function _finishProjectLoad(context){
     snapshot.externalAudioState=_normalExternalAudioSources(snapshot.externalAudioState);
     _lastSavedDataStr=JSON.stringify(_buildProjectData({snapshot,workspace:context.workspace}));
   }
+  _projectLoadSession.activePlan?.setBaselineRevision?.(context.savedRevision);
   setStatus('專案已載入','ok');
+}
+
+// Browser relink can materialize legacy source IDs only after the deferred
+// baseline. Replay just that plan-owned source registration into the original
+// saved projection; never adopt unrelated live edits or an intervening save.
+function _rebaseLegacyBrowserSources(plan){
+  if(IS_DESKTOP||!plan?.owns?.()||plan!==_projectLoadSession.activePlan
+    ||plan.baselineRevision?.()!==_savedWriteRevision||!_lastSavedDataStr) return;
+  let baseline;
+  try{baseline=JSON.parse(_lastSavedDataStr);}catch(error){return;}
+  if(!Array.isArray(baseline.clips)) return;
+  // The browser cannot reopen the original path. Require its saved name and
+  // byte length to match the file explicitly selected for this handoff; these
+  // checks reject obvious replacements, but are not a content fingerprint.
+  if(!baseline.media?.name||baseline.media.name!==State.mediaName
+    ||!(Number(baseline.media.size)>0)||Number(baseline.media.size)!==Number(State.mediaSize)) return;
+  let changed=false;
+  for(const handoff of plan.legacyHandoffs?.()||[]){
+    const {saved,clip,sourceId,evidence}=handoff;
+    if(!evidence||!State.clips.includes(clip)||clip.audioSourceId!==sourceId) continue;
+    const expected=JSON.stringify({..._projectClip(saved),fps:0});
+    const matches=baseline.clips.filter(item=>!item.audioSourceId&&JSON.stringify({...item,fps:0})===expected);
+    if(matches.length!==1) continue;
+    matches[0].audioSourceId=sourceId;
+    baseline.audioProject=registerAudioSource(baseline.audioProject,sourceId,evidence.channels,evidence.options,evidence.allocation);
+    History.rebaseRestoredSource?.(clip.id,sourceId,{...evidence,allocation:baseline.audioProject});
+    changed=true;
+  }
+  if(changed) _lastSavedDataStr=JSON.stringify(baseline);
 }
 
 /* ProjectLoadSession owns the latest-wins generation, serial runtime tail, and
@@ -566,6 +621,7 @@ function _isCurrentProjectLoad(generation){ return _projectLoadSession.isCurrent
 function _appendProjectLoad(generation,work){ return _projectLoadSession.append(generation,work); }
 function _queueProjectLoad(work){
   const generation=_projectLoadSession.begin({preserveMaterial:true});
+  _notifyWorkspaceInvalidated();
   _cancelFontPrompt?.();
   return _appendProjectLoad(generation,()=>work(generation));
 }
@@ -647,37 +703,41 @@ function _restoreSubtitleTrack(raw,index){
 
 /* ===== 8. 專案 .subtool ============================================== */
 
-async function _autoRelinkMissingMedia(data, projectPath) {
+async function _autoRelinkMissingMedia(data, projectPath, owns = () => true) {
   if (!IS_DESKTOP || typeof DESK.findRelinkTarget !== 'function') return false;
   let changed = false;
   
   async function checkAndRelink(obj, pathKey) {
-    if (!obj || !obj[pathKey]) return;
+    if (!owns()) return false;
+    if (!obj || !obj[pathKey]) return true;
     const p = obj[pathKey];
     try {
       const stat = await DESK.stat(p);
+      if (!owns()) return false;
       if (!stat.exists) {
         const newPath = await DESK.findRelinkTarget(projectPath, p);
+        if (!owns()) return false;
         if (newPath && newPath !== p) {
           obj[pathKey] = newPath;
           changed = true;
         }
       }
     } catch(e) {}
+    return owns();
   }
   
-  if (data.media) await checkAndRelink(data.media, 'path');
+  if (data.media && !await checkAndRelink(data.media, 'path')) return changed;
   
   if (Array.isArray(data.clips)) {
     for (const clip of data.clips) {
-      await checkAndRelink(clip, 'path');
-      await checkAndRelink(clip, 'audioSrc');
+      if (!await checkAndRelink(clip, 'path')) return changed;
+      if (!await checkAndRelink(clip, 'audioSrc')) return changed;
     }
   }
   
   if (Array.isArray(data.externalAudioSources)) {
     for (const src of data.externalAudioSources) {
-      await checkAndRelink(src, 'path');
+      if (!await checkAndRelink(src, 'path')) return changed;
     }
   }
   return changed;
@@ -708,6 +768,11 @@ const Project = {
     const epoch=_saveEpoch,generation=_projectLoadSession.generation;
     return ()=>epoch===_saveEpoch&&_isCurrentProjectLoad(generation);
   },
+  onWorkspaceInvalidated(listener){
+    if(typeof listener!=='function') throw new TypeError('缺少專案失權通知');
+    _workspaceInvalidationListeners.add(listener);
+    return ()=>_workspaceInvalidationListeners.delete(listener);
+  },
   // 交付准入也必須看見離線／尚未完成復原的 placement；不交出 restore plan owner。
   unrestoredClips(){ return _unrestoredClips().map(clip=>Seq.persistentMetadata(clip)); },
   identity: _projectIdentity,
@@ -728,20 +793,29 @@ const Project = {
      restore 後才還原播放點；不能再靠已移除的全域 media:projectReady 訂閱。 */
   async finishMediaRelink(generation,plan){
     if(!_isCurrentProjectLoad(generation)||_projectLoadSession.activePlan!==plan) return false;
-    return _projectLoadSession.restoreMedia(generation,{kind:'ready'});
+    const restored=await _projectLoadSession.restoreMedia(generation,{kind:'ready'});
+    if(restored&&_isCurrentProjectLoad(generation)&&_projectLoadSession.activePlan===plan) _rebaseLegacyBrowserSources(plan);
+    return restored;
   },
   // 保留明確名稱給既有 browser 呼叫端；實際語意由同一個跨平台 completion 收斂。
   finishBrowserMediaRelink(generation,plan){ return this.finishMediaRelink(generation,plan); },
   startNewProject(work){
-    const generation=_projectLoadSession.begin();
+    // 準備新工作區仍可能因期間編輯或例外而取消；先轉交未重連資料，
+    // 實際完成清空後才解除舊計畫，避免取消時把離線素材從存檔中移除。
+    const generation=_projectLoadSession.begin({preserveMaterial:true});
+    _notifyWorkspaceInvalidated();
     _cancelFontPrompt?.();
     return _appendProjectLoad(generation,async()=>{
       const result=await work();
-      if(result!==false && _isCurrentProjectLoad(generation)) this.establishCleanBaseline();
+      if(result!==false && _isCurrentProjectLoad(generation)){
+        _projectLoadSession.clearPlan();
+        this.establishCleanBaseline();
+      }
       return result;
     });
   },
   establishCleanBaseline(){
+    History.setExternalAudioSnapshotProvider(_savedExternalAudioSources);
     _lastSavedDataStr=JSON.stringify(_buildProjectData());
   },
   async _checkMissingFonts(data) {
@@ -808,6 +882,7 @@ const Project = {
     clearAsrSession();
     State.presetEdit=null;
     _saveEpoch++;
+    _notifyWorkspaceInvalidated();
     _autoRelinkNeedsSave = false;
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
     // Media.reset() 會釋放播放器資源，但不覆寫專案顯示名稱／路徑；讀取新專案時
@@ -934,7 +1009,7 @@ const Project = {
   async _loadDesktop(r,data,generation,consent=null){
     if(!await _confirmProjectFonts(data,generation)) return;
 
-    const autoRelinked = await _autoRelinkMissingMedia(data, r.path);
+    const autoRelinked = await _autoRelinkMissingMedia(data, r.path, () => _isCurrentProjectLoad(generation));
     if(!_isCurrentProjectLoad(generation)) return;
     const mp=data.media&&data.media.path;
     // stat 是唯讀，可在碰 State 之前先完成；若期間有更新請求，舊專案完全不進入 runtime。

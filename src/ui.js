@@ -31,15 +31,24 @@ function setStatus(msg, kind, force = false) {
 }
 
 // 進度的生命週期由 MediaIntakeJobs 持有；UI 只負責顯示優先序，不鎖住匯出。
-export function setMediaIntakeStatus(msg, kind = 'busy') {
+export function setMediaIntakeStatus(msg, kind = 'busy', detail = null, parts = null) {
   if (!_status) _status = {msg:$('stMsg')?.textContent || '',kind:''};
-  _mediaIntakeStatus = msg == null ? null : {msg,kind};
+  _mediaIntakeStatus = msg == null ? null : {msg,kind,detail,parts};
   renderStatus(_statusLocked ? _status : _mediaIntakeStatus || _status);
 }
 
-function renderStatus({msg,kind}) {
+function renderStatus({msg,kind,detail,parts}) {
   const msgEl = $('stMsg');
-  if (msgEl) msgEl.textContent = msg;
+  if (msgEl) {
+    msgEl.classList.toggle('status-pair',Array.isArray(parts));
+    if(Array.isArray(parts)){
+      msgEl.replaceChildren(...parts.map((text,index)=>{
+        const span=document.createElement('span');span.className=index===1?'status-pair-separator':'status-pair-item';span.textContent=text;return span;
+      }));
+    }else msgEl.textContent = msg;
+    msgEl.title=detail||msg;
+    msgEl.setAttribute('aria-label',detail||msg);
+  }
   const d = $('stDot');
   if (d) {
     d.className = 'dot' + (kind ? (' ' + kind) : '');
@@ -306,16 +315,19 @@ async function openCacheDialog() {
   try {
     info = await DESK.cacheInfo();
   } catch (e) {
-    info = { folders: 0, bytes: 0, root: '' };
+    info = { unavailable: true };
   }
   
   if (!loading.isCurrent()) return;
   
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const summary = !info || info.unavailable === true
+    ? '<div>無法確認中央快取狀態，請檢查快取目錄與權限。</div>'
+    : `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>`;
   const html =
     `<div style="padding:4px 2px;line-height:1.9">` +
-    `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>` +
-    `<div style="font-size:11px;color:var(--muted);word-break:break-all;margin-top:2px">${esc(info.root || '')}</div>` +
+    summary +
+    `<div style="font-size:11px;color:var(--muted);word-break:break-all;margin-top:2px">${esc(info?.root || '')}</div>` +
     `<div style="font-size:12px;color:var(--muted);margin-top:8px">說明：Proxy、聲道與波形優先保存在「影片同資料夾的 <code>.subtool_Cache</code>」內，無法寫入時使用本機中央快取。同一來源識別可沿用已完成的檔案；搬移、改名、換電腦或素材變更可能需要重建。快取不會因放了幾天而過期；缺件只補建缺少部分。此處管理的是本機的中央快取。</div>` +
     `</div>`;
     
@@ -324,7 +336,10 @@ async function openCacheDialog() {
         try {
           const r = await DESK.cacheCleanOrphans();
           if (!session.isCurrent()) return;
-          showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}`);
+          const cleaned = `清理 ${r.removed} 個項目，釋放 ${_fmtBytes(r.bytes)}`;
+          if (r.incomplete === true) showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}；部分項目仍在使用或無法確認，已保留`);
+          else if (r.incomplete === false) showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}`);
+          else showToast(`已處理孤兒快取，${cleaned}`);
           await openCacheDialog();
         } catch (error) {
           if (session.isCurrent()) showToast('清理快取失敗：' + error.message);
@@ -350,7 +365,9 @@ async function openCacheDialog() {
             try {
               const r = await DESK.cacheClearAll(sourcePath);
               if (!confirmation.isCurrent() || !ownsSource()) return;
-              showToast(`已清除快取，釋放 ${_fmtBytes(r.bytes)}`);
+              if (r.incomplete === true) showToast(`已處理部分快取，釋放 ${_fmtBytes(r.bytes)}；部分項目仍在使用或無法確認，已保留`);
+              else if (r.incomplete === false) showToast(`已清除快取，釋放 ${_fmtBytes(r.bytes)}`);
+              else showToast(`已處理快取，釋放 ${_fmtBytes(r.bytes)}`);
               confirmation.close();
             } catch (error) {
               if (confirmation.isCurrent() && ownsSource()) showToast('清除快取失敗：' + error.message);

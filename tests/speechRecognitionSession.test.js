@@ -24,6 +24,147 @@ describe('語音辨識背景工作階段管理器 (speech-recognition-session)',
     commit: vi.fn()
   });
 
+  it('同一工作同步更新對話框時，後續 listener 不得收到較舊快照',async()=>{
+    let changed=false;
+    const first=onAsrSessionChange(snapshot=>{
+      if(snapshot?.progress.status==='preparing'&&!changed){changed=true;setAsrSessionDialogOpen(false,snapshot.id);}
+    });
+    const seen=[];const second=onAsrSessionChange(snapshot=>{
+      if(snapshot?.progress.status==='preparing') seen.push(snapshot.dialogOpen);
+    });
+    const work=startPendingWork();
+    try{
+      expect(getAsrSession().dialogOpen).toBe(false);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every(open=>open===false)).toBe(true);
+    }finally{first();second();work.cancel();await work.promise;}
+  });
+
+  it.each([
+    ['extracting','extractAudio'],['transcribing','transcribe'],['aligning','resolveAlignment'],
+  ])('%s 通知同步取代工作時，不再呼叫舊 %s adapter',async(status,blockedAdapter)=>{
+    let replacement,triggered=false;
+    const release=vi.fn(),adapters={
+      extractAudio:vi.fn(async()=>({duration:1})),
+      transcribe:vi.fn(async()=>[]),
+      resolveAlignment:vi.fn(async()=>({segments:[]})),
+      commit:vi.fn(async()=>0),releaseResources:release,
+    };
+    const unsubscribe=onAsrSessionChange(snapshot=>{
+      if(snapshot?.progress.status===status&&!triggered){
+        triggered=true;replacement=startPendingWork({clips:[{id:'new',in:0,out:1}]});
+      }
+    });
+    const old=startAsrWork({taskMode:'align',clips:[{id:'old',in:0,out:1}],transcript:'原稿'},adapters);
+    try{
+      await expect(old.promise).resolves.toMatchObject({status:'replaced'});
+      expect(replacement).toBeTruthy();
+      expect(adapters[blockedAdapter]).not.toHaveBeenCalled();
+      expect(adapters.commit).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(getAsrSession()?.id).toBe(replacement.id);
+    }finally{unsubscribe();replacement?.cancel();if(replacement)await replacement.promise;}
+  });
+
+  it('準備通知同步啟動新工作時，舊 caller 不能取得新工作的 identity 或使用舊 adapters', async () => {
+    let replacement;
+    const oldExtract=vi.fn(async()=>({duration:1}));
+    const unsubscribe=onAsrSessionChange(snapshot=>{
+      if(snapshot?.progress.status==='preparing'&&!replacement){
+        replacement=true;
+        replacement=startPendingWork({clips:[{id:'replacement',in:0,out:1}]});
+      }
+    });
+    const old=startAsrWork({clips:[{id:'original',in:0,out:1}]},{
+      extractAudio:oldExtract,transcribe:async()=>[],commit:async()=>0,
+    });
+    unsubscribe();
+    expect(old.id).not.toBe(replacement.id);
+    expect(getAsrSession().id).toBe(replacement.id);
+    await expect(old.promise).resolves.toMatchObject({status:'replaced'});
+    expect(oldExtract).not.toHaveBeenCalled();
+    replacement.cancel();await replacement.promise;
+  });
+
+  it('取消通知同步啟動新工作時，舊取消不能清除新工作', async () => {
+    const old=startPendingWork({clips:[{id:'original',in:0,out:1}]});
+    let replacement;
+    const unsubscribe=onAsrSessionChange(snapshot=>{
+      if(snapshot?.progress.status==='cancelled'&&!replacement){
+        replacement=true;
+        replacement=startPendingWork({clips:[{id:'replacement',in:0,out:1}]});
+      }
+    });
+    old.cancel();unsubscribe();
+    expect(getAsrSession()?.id).toBe(replacement.id);
+    await expect(old.promise).resolves.toMatchObject({status:'cancelled'});
+    replacement.cancel();await replacement.promise;
+  });
+
+  it('取消通知中再次取消同一工作時只通知及釋放一次', async () => {
+    const releaseResources=vi.fn();
+    const old=startAsrWork({clips:[{id:'original',in:0,out:1}]},{
+      extractAudio:async()=>({duration:1}),
+      transcribe:({signal})=>new Promise(resolve=>signal.addEventListener('abort',()=>resolve([]),{once:true})),
+      commit:vi.fn(),releaseResources,
+    });
+    let cancelledNotifications=0;
+    const unsubscribe=onAsrSessionChange(snapshot=>{
+      if(snapshot?.id===old.id&&snapshot.progress.status==='cancelled'){
+        cancelledNotifications++;
+        if(cancelledNotifications<4) cancelActiveAsrSession(old.id);
+      }
+    });
+    old.cancel();unsubscribe();await old.promise;
+    expect(cancelledNotifications).toBe(1);
+    expect(releaseResources).toHaveBeenCalledOnce();
+  });
+
+  it('已完成的工作收到遲到取消時保留成功結果', async () => {
+    const work=startAsrWork({clips:[{id:'done',in:0,out:1}]},{
+      extractAudio:async()=>({duration:1}),transcribe:async()=>[{start:0,end:1,text:'完成'}],
+      commit:async()=>({count:1}),
+    });
+    await expect(work.promise).resolves.toMatchObject({status:'completed',count:1});
+    work.cancel();
+    expect(getAsrSession()).toMatchObject({id:work.id,progress:{status:'completed'},result:{count:1}});
+  });
+
+  it('清除通知中啟動新工作時，不再將舊的空快照送給後續訂閱者', async () => {
+    const old=startPendingWork();let replacement,replaceOnce=false;
+    const startNew=onAsrSessionChange(snapshot=>{
+      if(!snapshot&&!replaceOnce){replaceOnce=true;replacement=startPendingWork();}
+    });
+    const observed=[];const observe=onAsrSessionChange(snapshot=>observed.push(snapshot?.id||null));
+    clearAsrSession(old.id);startNew();observe();
+    expect(getAsrSession()?.id).toBe(replacement.id);
+    expect(observed.at(-1)).toBe(replacement.id);
+    await old.promise;replacement.cancel();await replacement.promise;
+  });
+
+  it('清除通知中重複清除空工作時只通知一次', async () => {
+    const work=startPendingWork();let notifications=0;
+    const unsubscribe=onAsrSessionChange(snapshot=>{
+      if(!snapshot){notifications++;if(notifications<4)clearAsrSession();}
+    });
+    clearAsrSession(work.id);unsubscribe();await work.promise;
+    expect(notifications).toBe(1);
+    expect(getAsrSession()).toBeNull();
+  });
+
+  it('重複設定相同視窗狀態不重入快照通知', async () => {
+    const work=startPendingWork();let notifications=0;
+    const unsubscribe=onAsrSessionChange(snapshot=>{
+      if(snapshot?.id===work.id && !snapshot.dialogOpen){
+        notifications++;
+        if(notifications<4)setAsrSessionDialogOpen(false,work.id);
+      }
+    });
+    expect(setAsrSessionDialogOpen(false,work.id)).toBe(true);
+    unsubscribe();work.cancel();await work.promise;
+    expect(notifications).toBe(1);
+  });
+
   it('啟動完整工作時建立不可變初始快照並通知訂閱者', async () => {
     const events = [];
     const unsub = onAsrSessionChange(s => events.push(s ? { ...s } : null));

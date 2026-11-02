@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
+import { createNativePreviewRuntime } from '../src/media-player-adapter.js';
 
 const require = createRequire(import.meta.url);
 const { createMpvHost } = require('../electron/mpv-host.js');
@@ -31,11 +32,15 @@ class FakeWindow {
 
 function socketThatReportsDuration(duration = 123.5, { loadEvents = true } = {}) {
   const socket = new EventEmitter();
+  socket.observerIds = {};
+  socket.testPaused = true;
   socket.destroy = vi.fn(() => socket.emit('close'));
   let loadedPath = null;
   let entryId = 0;
   socket.write = vi.fn(raw => {
     const message = JSON.parse(raw);
+    if(message.command?.[0]==='observe_property')socket.observerIds[message.command[2]]=message.command[1];
+    if(message.command?.[0]==='set_property'&&message.command[1]==='pause')socket.testPaused=message.command[2];
     if (message.command?.[0] === 'loadfile') {
       loadedPath = message.command[1];
       entryId++;
@@ -48,19 +53,21 @@ function socketThatReportsDuration(duration = 123.5, { loadEvents = true } = {})
     if (typeof message.request_id !== 'number') return;
     const data = message.command?.[0] === 'loadfile' ? {playlist_entry_id:entryId}
       : message.command?.[1] === 'path' ? loadedPath
-      : message.command?.[1] === 'time-pos' ? 0 : duration;
+      : message.command?.[1] === 'time-pos' ? 0
+      : message.command?.[0] === 'get_property' && message.command?.[1] === 'pause' ? socket.testPaused : duration;
     queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data, error: 'success' }) + '\n')));
   });
   return socket;
 }
 
-function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spawnFailure, describeSource, socketFactory } = {}) {
+function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spawnFailure, describeSource, socketFactory, onEvent } = {}) {
   FakeWindow.instances = [];
   const parent = { isDestroyed: () => false, getContentBounds: () => ({ x: 100, y: 200 }) };
   const children = [];
   const sockets = [];
   const events = [];
   const delays = [];
+  let tempId = 0;
   const host = createMpvHost({
     BrowserWindow: guideLoad ? class extends FakeWindow {
       constructor(options) {
@@ -83,6 +90,10 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spaw
       return socket;
     }),
     fs: { writeFileSync: vi.fn(), createWriteStream: createLog || vi.fn(() => null) },
+    temporaryFiles: {
+      create: extension => ({ file: `C:/tmp/subtool-${++tempId}.${extension}` }),
+      write: vi.fn(), stream: createLog || (() => null), remove: vi.fn(),
+    },
     path: { join: (...parts) => parts.join('/') },
     url: { pathToFileURL: filePath => ({ href: 'file:///' + filePath }) },
     getMainWindow: () => parent,
@@ -94,7 +105,7 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spaw
     guideHtml: '<!doctype html>',
     describeSource,
     fontsDir: () => 'C:/fonts',
-    onEvent: event => events.push(event),
+    onEvent: event => { events.push(event); onEvent?.(event); },
     log: vi.fn(),
     now: vi.fn(() => 9001),
     delay: async ms => { delays.push(ms); },
@@ -171,8 +182,8 @@ describe('Windows mpv host lifecycle', () => {
       socket.emit('data', Buffer.from(JSON.stringify({ request_id: playCommand.request_id, error: 'success' }) + '\n'));
       await playing;
       const presented = host.present(9.96, { exact: true, tolerance: 0.05 });
-      await Promise.resolve();
-      socket.emit('data', Buffer.from(JSON.stringify({ event: 'property-change', name: 'time-pos', data: 9.96 }) + '\n'));
+      await new Promise(resolve=>setTimeout(resolve,0));
+      socket.emit('data', Buffer.from(JSON.stringify({ event: 'property-change', name: 'time-pos', id:socket.observerIds['time-pos'], data: 9.96 }) + '\n'));
       await expect(presented).resolves.toEqual({ backend: 'mpv', presentedSourceTime: 9.96 });
     } finally { host.quit(); }
   });
@@ -232,7 +243,7 @@ describe('Windows mpv host lifecycle', () => {
     try {
       for (let index = 0; index < 50; index++) await Promise.resolve();
       expect(loaded).toBe(true);
-      await expect(launch).resolves.toEqual({ ok: true, duration: 123.5 });
+      await expect(launch).resolves.toEqual({ ok: true, duration: 123.5, sourceSessionId: expect.any(String) });
     } finally { host.quit(); await launch.catch(() => {}); }
   });
 
@@ -427,17 +438,18 @@ describe('Windows mpv host lifecycle', () => {
   it('mother clock owns duration, time-pos, seek acknowledgement and subtitle placement', async () => {
     const describeSource=vi.fn(async()=>({video:{timestampOffset:-.5}}));
     const {host,sockets,children,events}=make({duration:3.5,describeSource});
-    await expect(host.launch({src:'D:/mother.mkv'})).resolves.toEqual({ok:true,duration:3});
+    const launched=await host.launch({src:'D:/mother.mkv'});
+    expect(launched).toEqual({ok:true,duration:3,sourceSessionId:expect.any(String)});
     expect(describeSource).toHaveBeenCalledWith('D:/mother.mkv');
     expect(children[0].args).toContain('--sub-delay=0.5');
     const pending=host.present(2.8,{exact:true,tolerance:.000001});
-    await Promise.resolve();
+    await new Promise(resolve=>setTimeout(resolve,0));
     const socket=sockets[0];
-    socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'time-pos',data:3.3})+'\n'));
+    socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'time-pos',id:socket.observerIds['time-pos'],data:3.3})+'\n'));
     await expect(pending).resolves.toEqual({backend:'mpv',presentedSourceTime:2.8});
     socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:3.5})+'\n'));
-    expect(events).toContainEqual({event:'property-change',name:'time-pos',data:2.8});
-    expect(events).toContainEqual({event:'property-change',name:'duration',data:3});
+    expect(events).toContainEqual({event:'property-change',name:'time-pos',id:socket.observerIds['time-pos'],data:2.8,sourceSessionId:launched.sourceSessionId});
+    await vi.waitFor(()=>expect(events).toContainEqual({event:'property-change',name:'duration',data:3,sourceSessionId:launched.sourceSessionId}));
     expect(socket.write.mock.calls.map(([raw])=>JSON.parse(raw).command)).toContainEqual(['seek',3.3,'absolute+exact']);
     host.quit();
   });
@@ -564,7 +576,7 @@ describe('Windows mpv host lifecycle', () => {
     expect(latestSettled).toBe(false);
     loadedPath = 'D:\\media\\b.mxf';
     socket.emit('data', Buffer.from('{"event":"start-file","playlist_entry_id":3}\n{"event":"file-loaded"}\n'));
-    await expect(latest).resolves.toEqual({ ok: true, duration: 200 });
+    await expect(latest).resolves.toEqual({ ok: true, duration: 200, sourceSessionId: expect.any(String) });
     host.quit();
   });
 
@@ -595,7 +607,7 @@ describe('Windows mpv host lifecycle', () => {
         {event:'start-file',playlist_entry_id:3}]);
       await flush();expect.soft(settled).toBe(false);
       emit([{event:'file-loaded'},{event:'playback-restart'}]);
-      expect(await latest).toEqual({ok:true,duration:200});
+      expect(await latest).toEqual({ok:true,duration:200,sourceSessionId:expect.any(String)});
     }finally{host.quit();}
   });
 
@@ -621,7 +633,7 @@ describe('Windows mpv host lifecycle', () => {
       if(order==='ACK-before-events')ack();else events();
       await flush();expect(settled).toBe(false);
       if(order==='ACK-before-events')events();else ack();
-      expect(await loading).toEqual({ok:true,duration:123.5});
+      expect(await loading).toEqual({ok:true,duration:123.5,sourceSessionId:expect.any(String)});
     }finally{host.quit();}
   });
 
@@ -669,7 +681,7 @@ describe('Windows mpv host lifecycle', () => {
       if(action==='new-source')latest=host.loadFile('D:/media/latest.mxf');
       socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,data:'D:/media/old.mxf',error:'success'})+'\n'));
       expect(await old).toEqual({ok:false,duration:0});
-      if(latest)expect(await latest).toEqual({ok:true,duration:123.5});
+      if(latest)expect(await latest).toEqual({ok:true,duration:123.5,sourceSessionId:expect.any(String)});
     }finally{host.quit();}
   });
 
@@ -707,17 +719,269 @@ describe('Windows mpv host lifecycle', () => {
   it('啟動與換檔在來源就緒時立即回傳，不固定等待 400ms 或反覆查 duration', async () => {
     const { host, sockets, delays } = make();
     await expect(host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } }))
-      .resolves.toEqual({ ok: true, duration: 123.5 });
+      .resolves.toEqual({ ok: true, duration: 123.5, sourceSessionId: expect.any(String) });
     expect(delays).toEqual([]);
 
     sockets[0].write.mockClear();
-    await expect(host.loadFile('D:/media/b.mxf')).resolves.toEqual({ ok: true, duration: 123.5 });
+    await expect(host.loadFile('D:/media/b.mxf')).resolves.toEqual({ ok: true, duration: 123.5, sourceSessionId: expect.any(String) });
     const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
     expect(commands.filter(command => command[0] === 'get_property')).toEqual([
       ['get_property', 'path'],
       ['get_property', 'duration'],
     ]);
     expect(delays).toEqual([]);
+  });
+
+  it('來源已確認但 mpv 尚無 duration 時，以同一來源 probe 的時間軸長度補回',async()=>{
+    const describeSource=vi.fn(async file=>({duration:file.includes('proxy')?8:12,
+      video:{timestampOffset:file.includes('proxy')?0:-.5}}));
+    const {host}=make({duration:null,describeSource});
+    try{
+      await expect(host.launch({src:'D:/mother.mkv'})).resolves.toEqual({ok:true,duration:12,sourceSessionId:expect.any(String)});
+      await expect(host.loadFile('D:/proxy.mp4')).resolves.toEqual({ok:true,duration:8,sourceSessionId:expect.any(String)});
+      expect(describeSource.mock.calls.map(([file])=>file)).toEqual(['D:/mother.mkv','D:/proxy.mp4']);
+    }finally{host.quit();}
+  });
+
+  it('mpv 有有效 duration 時仍優先使用其已換算的來源時鐘',async()=>{
+    const describeSource=vi.fn(async()=>({duration:12,video:{timestampOffset:-.5}}));
+    const {host}=make({duration:3.5,describeSource});
+    try{
+      await expect(host.launch({src:'D:/mother.mkv'})).resolves.toEqual({ok:true,duration:3,sourceSessionId:expect.any(String)});
+      await expect(host.loadFile('D:/other.mkv')).resolves.toEqual({ok:true,duration:3,sourceSessionId:expect.any(String)});
+    }finally{host.quit();}
+  });
+
+  it.each([null,0,-1,NaN,Infinity])('來源 probe 長度 %s 無效且 mpv 尚無長度時，不補造長度',async duration=>{
+    const describeSource=vi.fn(async()=>({duration,video:{timestampOffset:-.5}}));
+    const {host}=make({duration:null,describeSource});
+    try{
+      await expect(host.launch({src:'D:/mother.mkv'})).resolves.toEqual({ok:true,duration:0,sourceSessionId:expect.any(String)});
+      await expect(host.loadFile('D:/other.mkv')).resolves.toEqual({ok:true,duration:0,sourceSessionId:expect.any(String)});
+    }finally{host.quit();}
+  });
+
+  it('舊來源 duration 查詢等待時切到新來源，舊 probe 退路不得回報',async()=>{
+    const describeSource=vi.fn(async file=>({duration:file.includes('old')?100:5,video:{timestampOffset:0}}));
+    const {host,sockets}=make({duration:null,describeSource});
+    await host.launch({src:'D:/initial.mkv'});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let held;
+    socket.write.mockImplementation(raw=>{
+      const message=JSON.parse(raw);
+      if(!held&&message.command[0]==='get_property'&&message.command[1]==='duration'){held=message;return;}
+      write(raw);
+    });
+    try{
+      const old=host.loadFile('D:/old.mkv');
+      for(let i=0;i<30&&!held;i++)await Promise.resolve();
+      expect(held).toBeTruthy();
+      const latest=host.loadFile('D:/latest.mkv');
+      await expect(latest).resolves.toEqual({ok:true,duration:5,sourceSessionId:expect.any(String)});
+      socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,data:null,error:'success'})+'\n'));
+      await expect(old).resolves.toEqual({ok:false,duration:0});
+    }finally{host.quit();}
+  });
+
+  it('遲到的舊 duration 通知只觸發目前已確認來源的查詢，且帶 session 身分',async()=>{
+    const {host,sockets,events}=make();
+    const initial=await host.launch({src:'D:/same.mkv'});
+    const reloaded=await host.loadFile('D:/same.mkv');
+    expect(initial.sourceSessionId).toEqual(expect.any(String));
+    expect(reloaded.sourceSessionId).toEqual(expect.any(String));
+    expect(reloaded.sourceSessionId).not.toBe(initial.sourceSessionId);
+    const socket=sockets[0],write=socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw=>{
+      const m=JSON.parse(raw);
+      if(m.command[0]==='get_property'&&m.command[1]==='duration'){
+        queueMicrotask(()=>socket.emit('data',Buffer.from(JSON.stringify({request_id:m.request_id,data:5,error:'success'})+'\n')));return;
+      }
+      write(raw);
+    });
+    try{
+      events.length=0;
+      socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:100})+'\n'));
+      await vi.waitFor(()=>expect(events).toContainEqual(expect.objectContaining({
+        event:'property-change',name:'duration',data:5,sourceSessionId:reloaded.sourceSessionId,
+      })));
+      expect(events.some(event=>event.name==='duration'&&event.data===100)).toBe(false);
+    }finally{host.quit();}
+  });
+
+  it('來源 duration 查詢遲到且同一路徑已重載時，不交出舊 session 結果',async()=>{
+    const {host,sockets,events}=make();
+    const initial=await host.launch({src:'D:/same.mkv'});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let held;
+    socket.write.mockImplementation(raw=>{
+      const m=JSON.parse(raw);
+      if(!held&&m.command[0]==='get_property'&&m.command[1]==='duration'){held=m;return;}
+      write(raw);
+    });
+    try{
+      events.length=0;
+      socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:100})+'\n'));
+      await vi.waitFor(()=>expect(held).toBeTruthy());
+      const reloaded=await host.loadFile('D:/same.mkv');
+      expect(reloaded.sourceSessionId).not.toBe(initial.sourceSessionId);
+      socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,data:100,error:'success'})+'\n'));
+      await Promise.resolve();await Promise.resolve();
+      expect(events.filter(event=>event.name==='duration')).toEqual([]);
+    }finally{host.quit();}
+  });
+
+  it('載入期間 duration 通知不取用，初始查詢完成後對同一 session 補查',async()=>{
+    const {host,sockets,events}=make();await host.launch({src:'D:/old.mkv'});
+    const socket=sockets[0],write=socket.write.getMockImplementation(),queries=[];
+    socket.write.mockImplementation(raw=>{
+      const m=JSON.parse(raw);
+      if(m.command[0]==='get_property'&&m.command[1]==='duration'){queries.push(m);return;}
+      write(raw);
+    });
+    try{
+      const loading=host.loadFile('D:/new.mkv');
+      await vi.waitFor(()=>expect(queries).toHaveLength(1));
+      events.length=0;
+      socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:100})+'\n'));
+      expect(queries).toHaveLength(1);
+      expect(events.filter(event=>event.name==='duration')).toEqual([]);
+      socket.emit('data',Buffer.from(JSON.stringify({request_id:queries[0].request_id,data:5,error:'success'})+'\n'));
+      const loaded=await loading;
+      expect(loaded).toEqual({ok:true,duration:5,sourceSessionId:expect.any(String)});
+      await vi.waitFor(()=>expect(queries).toHaveLength(2));
+      socket.emit('data',Buffer.from(JSON.stringify({request_id:queries[1].request_id,data:10,error:'success'})+'\n'));
+      await vi.waitFor(()=>expect(events).toContainEqual({event:'property-change',name:'duration',data:10,sourceSessionId:loaded.sourceSessionId}));
+    }finally{host.quit();}
+  });
+
+  it('連續 duration 通知共用一筆查詢並在完成後最多補查一次',async()=>{
+    const {host,sockets,events}=make();const started=await host.launch({src:'D:/source.mkv'});
+    const socket=sockets[0],write=socket.write.getMockImplementation(),requests=[];
+    socket.write.mockImplementation(raw=>{
+      const m=JSON.parse(raw);
+      if(m.command[0]==='get_property'&&m.command[1]==='duration'){requests.push(m);return;}
+      write(raw);
+    });
+    const notify=()=>socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:100})+'\n'));
+    const answer=(request,data,error='success')=>socket.emit('data',Buffer.from(JSON.stringify({request_id:request.request_id,data,error})+'\n'));
+    try{
+      events.length=0;notify();notify();notify();
+      expect(requests).toHaveLength(1);
+      answer(requests[0],4);
+      await vi.waitFor(()=>expect(requests).toHaveLength(2));
+      answer(requests[1],5);
+      await vi.waitFor(()=>expect(events.filter(event=>event.name==='duration')).toEqual([
+        {event:'property-change',name:'duration',data:4,sourceSessionId:started.sourceSessionId},
+        {event:'property-change',name:'duration',data:5,sourceSessionId:started.sourceSessionId},
+      ]));
+      expect(requests).toHaveLength(2);
+    }finally{host.quit();}
+  });
+
+  it.each(['error','zero'])('duration 查詢 %s 不回報不可靠值，下一次通知仍可更新',async failure=>{
+    const {host,sockets,events}=make();const started=await host.launch({src:'D:/source.mkv'});
+    const socket=sockets[0],write=socket.write.getMockImplementation(),requests=[];
+    socket.write.mockImplementation(raw=>{
+      const m=JSON.parse(raw);
+      if(m.command[0]==='get_property'&&m.command[1]==='duration'){requests.push(m);return;}
+      write(raw);
+    });
+    const notify=()=>socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:100})+'\n'));
+    const answer=(request,data,error='success')=>socket.emit('data',Buffer.from(JSON.stringify({request_id:request.request_id,data,error})+'\n'));
+    try{
+      events.length=0;notify();answer(requests[0],0,failure==='error'?'property unavailable':'success');
+      for(let i=0;i<8;i++)await Promise.resolve();
+      notify();expect(requests).toHaveLength(2);
+      expect(events.filter(event=>event.name==='duration')).toEqual([]);
+      answer(requests[1],5);
+      await vi.waitFor(()=>expect(events).toContainEqual({event:'property-change',name:'duration',data:5,sourceSessionId:started.sourceSessionId}));
+    }finally{host.quit();}
+  });
+
+  it('播放器結束時撤銷未完成的 duration 查詢及來源 session',async()=>{
+    const {host,sockets,children,events}=make();const started=await host.launch({src:'D:/source.mkv'});
+    const socket=sockets[0],write=socket.write.getMockImplementation();let held;
+    socket.write.mockImplementation(raw=>{
+      const m=JSON.parse(raw);
+      if(m.command[0]==='get_property'&&m.command[1]==='duration'){held=m;return;}
+      write(raw);
+    });
+    try{
+      events.length=0;
+      socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:100})+'\n'));
+      await vi.waitFor(()=>expect(held).toBeTruthy());
+      children[0].child.emit('close',1);
+      expect(events).toContainEqual({event:'disconnected',sourceSessionId:started.sourceSessionId});
+      socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,data:100,error:'success'})+'\n'));
+      for(let i=0;i<8;i++)await Promise.resolve();
+      expect(events.filter(event=>event.name==='duration')).toEqual([]);
+    }finally{host.quit();}
+  });
+
+  it('真實 host 與 renderer adapter 間排隊的舊 session 回覆，重載同路徑後不再有資格',async()=>{
+    let receive;const queued=[];
+    const {host,sockets}=make({onEvent:event=>{
+      if(event.name==='duration')queued.push(event);
+      else receive?.(event);
+    }});
+    const bridge={launch:options=>host.launch(options),loadfile:file=>host.loadFile(file),
+      onEvent:callback=>{receive=callback;}};
+    const runtime=createNativePreviewRuntime({mpv:bridge,video:{},windowTarget:null});
+    try{
+      const initial=await runtime.enterMpv({src:'D:/same.mkv'});
+      runtime.onEvent(()=>{});
+      sockets[0].emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:9})+'\n'));
+      await vi.waitFor(()=>expect(queued).toHaveLength(1));
+      expect(queued[0].sourceSessionId).toBe(initial.sourceSessionId);
+      const reloaded=await runtime.loadfile('D:/same.mkv');
+      expect(reloaded.sourceSessionId).not.toBe(initial.sourceSessionId);
+      expect(runtime.ownsNativeSourceSession(queued[0].sourceSessionId)).toBe(false);
+      sockets[0].emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:9})+'\n'));
+      await vi.waitFor(()=>expect(queued).toHaveLength(2));
+      expect(runtime.ownsNativeSourceSession(queued[1].sourceSessionId)).toBe(true);
+    }finally{runtime.stopBoundsFeeder();host.quit();}
+  });
+
+  it.each(['launch','loadfile'])('真實 host 的 %s 回覆仍在 IPC 排隊時，最新長度會留給已確認的 session',async operation=>{
+    let receive, releaseReply, hostResult;
+    const replyGate=new Promise(resolve=>{releaseReply=resolve;});
+    const {host,sockets}=make({onEvent:event=>receive?.(event)});
+    const bridge={
+      launch:async options=>{
+        const result=await host.launch(options);
+        if(operation==='launch'){hostResult=result;await replyGate;}
+        return result;
+      },
+      loadfile:async path=>{
+        const result=await host.loadFile(path);
+        if(operation==='loadfile'){hostResult=result;await replyGate;}
+        return result;
+      },
+      onEvent:callback=>{receive=callback;},
+    };
+    const runtime=createNativePreviewRuntime({mpv:bridge,video:{},windowTarget:null}), observed=vi.fn();
+    try{
+      if(operation==='loadfile'){
+        await runtime.enterMpv({src:'D:/old.mkv'});
+        runtime.onEvent(observed);
+      }
+      const loading=operation==='launch'?runtime.enterMpv({src:'D:/new.mkv'}):runtime.loadfile('D:/new.mkv');
+      await vi.waitFor(()=>expect(hostResult).toBeTruthy());
+      const socket=sockets[0],write=socket.write.getMockImplementation();
+      socket.write.mockImplementation(raw=>{
+        const message=JSON.parse(raw);
+        if(message.command[0]==='get_property'&&message.command[1]==='duration'){
+          queueMicrotask(()=>socket.emit('data',Buffer.from(JSON.stringify({request_id:message.request_id,data:10,error:'success'})+'\n')));return;
+        }
+        write(raw);
+      });
+      socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'duration',data:999})+'\n'));
+      for(let i=0;i<8;i++)await Promise.resolve();
+      expect(observed.mock.calls.some(([event])=>event.name==='duration')).toBe(false);
+      releaseReply();
+      const result=await loading;
+      expect(result.sourceSessionId).toBe(hostResult.sourceSessionId);
+      if(operation==='launch')runtime.onEvent(observed);
+      await vi.waitFor(()=>expect(observed).toHaveBeenCalledWith({event:'property-change',name:'duration',data:10,sourceSessionId:result.sourceSessionId}));
+    }finally{releaseReply();runtime.stopBoundsFeeder();host.quit();}
   });
 
   it.each([
@@ -896,13 +1160,13 @@ describe('Windows mpv host lifecycle', () => {
     const socket = sockets[0];
     socket.write.mockClear();
     socket.emit('data', Buffer.from(JSON.stringify({
-      event: 'property-change', name: 'pause', data: true,
+      event: 'property-change', name: 'pause', id:socket.observerIds.pause, data: true,
     }) + '\n'));
 
     const pending = host.present(10, { exact: true, tolerance: 0.05 });
-    await Promise.resolve();
+    await new Promise(resolve=>setTimeout(resolve,0));
     socket.emit('data', Buffer.from(JSON.stringify({
-      event: 'property-change', name: 'time-pos', data: 9.98,
+      event: 'property-change', name: 'time-pos', id:socket.observerIds['time-pos'], data: 9.98,
     }) + '\n'));
 
     await expect(pending).resolves.toEqual({ backend: 'mpv', presentedSourceTime: 9.98 });
@@ -969,10 +1233,10 @@ describe('Windows mpv host lifecycle', () => {
     const pending = host.present(0, { exact: true, tolerance: 0.01 });
     void pending.then(value => { result = value; });
     try {
-      socket.emit('data', Buffer.from('{"event":"property-change","name":"time-pos","data":null}\n'));
+      socket.emit('data', Buffer.from(JSON.stringify({event:'property-change',name:'time-pos',id:socket.observerIds['time-pos'],data:null})+'\n'));
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(result).toBeUndefined();
-      socket.emit('data', Buffer.from('{"event":"property-change","name":"time-pos","data":0}\n'));
+      socket.emit('data', Buffer.from(JSON.stringify({event:'property-change',name:'time-pos',id:socket.observerIds['time-pos'],data:0})+'\n'));
       await expect(pending).resolves.toEqual({ backend: 'mpv', presentedSourceTime: 0 });
     } finally { host.quit(); }
   });
@@ -992,7 +1256,7 @@ describe('Windows mpv host lifecycle', () => {
     });
     const pending=host.present(10,{tolerance:.015,waitForFrame:true});
     let settled=false;pending.then(()=>{settled=true;});
-    socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'time-pos',data:10})+'\n'));
+    socket.emit('data',Buffer.from(JSON.stringify({event:'property-change',name:'time-pos',id:socket.observerIds['time-pos'],data:10})+'\n'));
     await new Promise(resolve=>setTimeout(resolve,0));
     expect(settled).toBe(false);
     restarted=true;
@@ -1032,14 +1296,16 @@ describe('Windows mpv host lifecycle', () => {
     await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
     const socket = sockets[0];
     socket.write.mockClear();
+    socket.testPaused=false;
     socket.emit('data', Buffer.from(JSON.stringify({
-      event: 'property-change', name: 'pause', data: false,
+      event: 'property-change', name: 'pause', id:socket.observerIds.pause, data: false,
     }) + '\n'));
+    await vi.waitFor(()=>expect(events).toContainEqual(expect.objectContaining({event:'property-change',name:'pause',data:false})));
 
     const pending = host.present(10, { exact: true, tolerance: 0.05 });
-    await Promise.resolve();
+    await new Promise(resolve=>setTimeout(resolve,0));
     socket.emit('data', Buffer.from(JSON.stringify({
-      event: 'property-change', name: 'time-pos', data: 9.98,
+      event: 'property-change', name: 'time-pos', id:socket.observerIds['time-pos'], data: 9.98,
     }) + '\n'));
 
     let settled = false;
@@ -1060,7 +1326,7 @@ describe('Windows mpv host lifecycle', () => {
     const observed = sockets[0].write.mock.calls
       .map(([raw]) => JSON.parse(raw).command)
       .filter(command => command?.[0] === 'observe_property');
-    expect(observed).toContainEqual(['observe_property', 1, 'time-pos']);
+    expect(observed).toContainEqual(['observe_property', expect.any(Number), 'time-pos']);
     expect(observed.some(command => command[2] === 'video-pts')).toBe(false);
   });
 
@@ -1068,7 +1334,7 @@ describe('Windows mpv host lifecycle', () => {
     const { host, children, sockets } = make();
 
     await expect(host.launch({ src: 'D:/media/source.mxf', bounds: { x: 10, y: 20, w: 320, h: 180 }, audio: [{}, {}] }))
-      .resolves.toEqual({ ok: true, duration: 123.5 });
+      .resolves.toEqual({ ok: true, duration: 123.5, sourceSessionId: expect.any(String) });
 
     const [hostWindow, guideWindow] = FakeWindow.instances;
     expect(hostWindow.setBounds).toHaveBeenCalledWith({ x: 110, y: 220, width: 320, height: 180 });
@@ -1139,7 +1405,7 @@ describe('Windows mpv host lifecycle', () => {
 
     await expect(host.loadFile('D:/media/b.mxf')).resolves.toMatchObject({ ok: true });
     sockets[0].emit('data', Buffer.from(JSON.stringify({
-      event: 'property-change', name: 'time-pos', data: 10,
+      event: 'property-change', name: 'time-pos', id:sockets[0].observerIds['time-pos'], data: 10,
     }) + '\n'));
     await expect(oldPresentation).resolves.toBeNull();
   });
@@ -1147,14 +1413,14 @@ describe('Windows mpv host lifecycle', () => {
   it('mpv 異常結束時也收掉 pipe 與兩個透明視窗，不能留下空白 native overlay', async () => {
     const { host, children, sockets, events } = make();
 
-    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
+    const launched=await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 0, y: 0, w: 100, h: 50 } });
     const [hostWindow, guideWindow] = FakeWindow.instances;
     children[0].child.emit('close', 1);
 
     expect(sockets[0].destroy).toHaveBeenCalledTimes(1);
     expect(hostWindow.destroy).toHaveBeenCalledTimes(1);
     expect(guideWindow.destroy).toHaveBeenCalledTimes(1);
-    expect(events).toContainEqual({ event: 'disconnected' });
+    expect(events).toContainEqual({ event: 'disconnected', sourceSessionId: launched.sourceSessionId });
     expect(host.snapshot()).toMatchObject({ hasHostWindow: false, hasGuideWindow: false, hasClient: false, hasProcess: false });
   });
 
@@ -1178,7 +1444,7 @@ describe('Windows mpv host lifecycle', () => {
 
     // 模擬播放狀態中
     socket.emit('data', Buffer.from(JSON.stringify({
-      event: 'property-change', name: 'pause', data: false,
+      event: 'property-change', name: 'pause', id:socket.observerIds.pause, data: false,
     }) + '\n'));
 
     // 播放中按往後一格：先 pause()，緊接著 present()
@@ -1186,9 +1452,9 @@ describe('Windows mpv host lifecycle', () => {
     const pending = host.present(9.96, { exact: true, tolerance: 0.05 });
 
     // socket 收到 seek 指令並確認，且回報 time-pos
-    await Promise.resolve();
+    await new Promise(resolve=>setTimeout(resolve,0));
     socket.emit('data', Buffer.from(JSON.stringify({
-      event: 'property-change', name: 'time-pos', data: 9.96,
+      event: 'property-change', name: 'time-pos', id:socket.observerIds['time-pos'], data: 9.96,
     }) + '\n'));
 
     // 應順利完成，不被播放狀態的 restarted 阻擋

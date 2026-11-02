@@ -1209,11 +1209,15 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       showToast('🎙 語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
       return;
     }
-    cancelActiveAsrSession(workId);
+    clearAsrSession(workId);
   };
   const cancelRecognition = () => {
     if(!ownsDialog()) return;
-    if(workId) cancelActiveAsrSession(workId);
+    if(workId){
+      const session=getAsrSession();
+      if(session?.id===workId && ['completed','failed','cancelled'].includes(session.progress?.status)) clearAsrSession(workId);
+      else cancelActiveAsrSession(workId);
+    }
     closeOwned();
   };
   const minimizeToBackground = () => {

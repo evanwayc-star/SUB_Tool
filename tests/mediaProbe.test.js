@@ -175,7 +175,8 @@ describe('媒體探測 interface', () => {
       ffmpegExecution: owner(), deliveryCapabilities: owner(), speechCompressionRuntime: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(),
       QueueManager: { prepareForShutdown: done, cancelShutdown: done }, clipAudioCache: { waitForIdle: done },
       clipFrameCache: { waitForIdle: done },
-      screenshotOutput: { close: done, resume: done }, mediaIntakeRuntime: { close: done }, mainWin: null,
+      screenshotOutput: { close: done, resume: done }, directoryOutput: { close: done, resume: done }, fileCommitCoordinator: { close: done, resume: done }, mediaIntakeRuntime: { close: done },
+      mpvHost: { disposeAndWait: done, resume: vi.fn() }, mainWin: null,
       dialog: { showMessageBox: done },
     };
     vm.createContext(context);
@@ -199,6 +200,7 @@ describe('媒體探測 interface', () => {
     context.screenshotOutput.close = vi.fn().mockRejectedValue(new Error('cleanup locked'));
     beforeQuit({ preventDefault() {} });
     await vi.waitFor(() => expect(resume).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(context._quitSequenceStarted).toBe(false));
     expect(context._isAppQuitting).toBe(false);
   });
   it('有效素材在 16 秒後完成探測時，仍保留完整音視訊資訊', async () => {

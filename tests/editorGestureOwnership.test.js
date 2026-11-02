@@ -67,6 +67,46 @@ async function timeline(){
 }
 const mouse=(target,type,y=100)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0,clientX:10,clientY:y}));
 let clickClock=1000;
+it('唯讀來源波形以 canvas 顯示，不建立片段、History 或可定位的區塊',async()=>{
+  const {registerProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
+  const restore=registerProvisionalSourceWaveform({snapshot:()=>({name:'A.mov',duration:1,peaks:Float32Array.from({length:200},(_,i)=>i%2?.5:-.5)})});
+  const line=vi.fn(),ctx=new Proxy({lineTo:line,measureText:()=>({width:1}),createLinearGradient:()=>({addColorStop(){}})}, {get:(target,key)=>target[key]||(()=>{}),set:(target,key,value)=>(target[key]=value,true)});
+  const canvas=vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue(ctx);
+  try{
+    const before=structuredClone(State.clips),history=History.stack.length;
+    await timeline();const row=document.querySelector('.provisional-source-wave');
+    expect(row?.querySelector('canvas')).toBeTruthy();
+    expect(line).toHaveBeenCalled();
+    expect(document.querySelector('.provisional-source-wave-label')?.textContent).toContain('來源時間波形');
+    Media.seek.mockClear();mouse(row,'mousedown');mouse(row,'click');
+    expect(Media.seek).not.toHaveBeenCalled();expect(State.clips).toEqual(before);expect(History.stack).toHaveLength(history);
+  }finally{canvas.mockRestore();restore();}
+});
+it.each(['scrub','rubber'])('專案替換後，舊的 %s 時間軸手勢不影響新專案',async kind=>{
+  await timeline();
+  const send=(target,type,x,y)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,button:0,clientX:x,clientY:y}));
+  Media.seek.mockClear();
+  send(document.getElementById('tlLayer'),'mousedown',80,kind==='scrub'?10:200);
+  expect(Media.seek).toHaveBeenCalledTimes(kind==='scrub'?1:0);
+  Project.apply({version:3,fps:25,duration:30,tracks:[{name:'new'}],cues:[{start:1,end:2,text:'new',track:1}],clips:[],notes:[],media:{}});
+  StateModule.setSelection({kind:'sub',ids:[State.cues[0].id]});
+  const selected=State.selectedId;
+  Media.seek.mockClear();
+  if(kind==='scrub')send(window,'mousemove',240,10);
+  send(window,'mouseup',240,kind==='scrub'?10:200);
+  expect(Media.seek).not.toHaveBeenCalled();
+  expect(State.selectedId).toBe(selected);
+});
+it.each(['scrub','rubber'])('有效的 %s 時間軸手勢仍可定位與完成',async kind=>{
+  await timeline();
+  const send=(target,type,x,y)=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,button:0,clientX:x,clientY:y}));
+  Media.seek.mockClear();
+  send(document.getElementById('tlLayer'),'mousedown',80,kind==='scrub'?10:200);
+  if(kind==='scrub')send(window,'mousemove',240,10);
+  send(window,'mouseup',240,kind==='scrub'?10:200);
+  expect(Media.seek).toHaveBeenLastCalledWith(3);
+  if(kind==='rubber')expect(State.selectedId).toBeNull();
+});
 it.each([1,2])('非主鍵 %s 拖曳不重排字幕軌，也不改字幕索引或 History',async button=>{
   await timeline();History.reset();
   const before=History.snap(),names=State.tracks.map(track=>track.name);
@@ -368,6 +408,18 @@ async function subtitleDrag(){
   parent.dispatchEvent(new MouseEvent('pointermove',{bubbles:true,clientX:200,clientY:100}));expect(State.cues[0].style.posX).toBe(60);
   return parent;
 }
+it('Undo 在字幕幾何拖曳中撤銷手勢，停止拖曳狀態且不接受後續事件',async()=>{
+  const parent=await subtitleDrag();
+  Subtitles.applyCueStylePatch(State.cues[0],{color:'#0000ff'});History.record('背景顏色');
+  expect(parent.classList.contains('dragging')).toBe(true);
+  History.undo();
+  expect(parent.classList.contains('dragging')).toBe(false);
+  expect(State.cues[0].style).toEqual({color:'#ff0000'});
+  parent.dispatchEvent(new MouseEvent('pointermove',{bubbles:true,clientX:250,clientY:100}));
+  parent.dispatchEvent(new MouseEvent('pointerup',{bubbles:true}));
+  expect(State.cues[0].style).toEqual({color:'#ff0000'});
+  expect(History.stack).toHaveLength(2);expect(History.hi).toBe(0);
+});
 it('subtitle preview drag committed snapshot preserves foreign color and excludes only dragged coordinates',async()=>{
   const parent=await subtitleDrag();Subtitles.applyCueStylePatch(State.cues[0],{color:'#0000ff'});History.record('background color');
   expect(History.committedSnapshot().cues[0].style.color).toBe('#0000ff');

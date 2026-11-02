@@ -68,6 +68,19 @@ describe('project save ownership',()=>{
     State.clips=[];State.duration=0;History.reset();
   });
 
+  it('Undo 後外部音訊尚在非同步重建時，History 與實際存檔仍保留期望來源',async()=>{
+    const source={audioSourceId:'restore-me',name:'旁白',path:'C:/voice.wav',duration:8,in:0,out:8,offset:0};
+    runtime.sources=[];State.externalAudioState=[source];Project.establishCleanBaseline();History.reset();
+    State.externalAudioState=[];History.record('刪除旁白');
+    History.undo();
+    expect(State.externalAudioState.map(item=>item.audioSourceId)).toEqual(['restore-me']);
+    expect(runtime.sources).toEqual([]); // 底層音訊仍在非同步重建。
+    expect(History.snap().externalAudioState.map(item=>item.audioSourceId)).toEqual(['restore-me']);
+    await Project.saveAs();
+    expect(decode(desk.saveProject.mock.calls[0][1]).externalAudioSources.map(item=>item.audioSourceId)).toEqual(['restore-me']);
+    expect(isProjectDirty()).toBe(false);
+  });
+
   it('網頁下載在 JSON 開頭寫入建置版本，明確標示無法取得電腦名稱且不影響 dirty',async()=>{
     vi.resetModules();delete window.subtool;
     vi.stubGlobal('__APP_VERSION__','8.6.7');
@@ -162,11 +175,81 @@ describe('project save ownership',()=>{
     expect(savedText(desk.writeProject.mock.calls[1])).toBe('second');expect(isProjectDirty()).toBe(false);
   });
 
+  it('存檔等待期間的播放長度回報不覆蓋較新編輯或改寫存檔快照',async()=>{
+    const {Seq}=await import('../src/sequence.js');
+    State.clips=[{id:'clip',name:'movie',path:'C:/movie.mp4',dur:10,in:0,out:10,offset:0,vtrack:0}];
+    History.reset();
+    await Project.saveAs();
+    const io=deferred();desk.writeProject.mockReturnValueOnce(io.promise);
+    State.cues[0].text='準備保存';const saving=Project.save();
+    await vi.waitFor(()=>expect(desk.writeProject).toHaveBeenCalledOnce());
+    Seq.observeSourceDuration(State.clips[0],12);
+    State.cues[0].text='等待期間更新';
+    io.resolve('C:/project.subtool');await saving;
+    const saved=decode(desk.writeProject.mock.calls[0][1]);
+    expect(saved.cues[0].text).toBe('準備保存');
+    expect(saved.clips[0]).toMatchObject({dur:10,out:10});
+    expect(State.clips[0]).toMatchObject({dur:10,out:10});
+    expect(Seq.sourceDuration(State.clips[0])).toBe(12);
+    expect(isProjectDirty()).toBe(true);
+    await Project.save();expect(isProjectDirty()).toBe(false);
+    expect(decode(desk.writeProject.mock.calls[1][1]).clips[0]).toMatchObject({dur:10,out:10});
+  });
+
   it('returns null on write rejection and allows a later retry',async()=>{
+    const {showToast}=await import('../src/ui.js');
     await Project.saveAs();State.cues[0].text='unsaved';
-    desk.writeProject.mockRejectedValueOnce(new Error('disk unavailable'));
+    showToast.mockClear();
+    desk.writeProject.mockRejectedValueOnce(new Error('C:/private/secret: disk unavailable'));
     await expect(Project.save()).resolves.toBeNull();expect(isProjectDirty()).toBe(true);
+    expect(showToast).toHaveBeenCalledWith('儲存專案失敗，請嘗試「另存新檔」');
+    expect(showToast.mock.calls.flat().join(' ')).not.toContain('C:/private/secret');
     await expect(Project.save()).resolves.toBe('C:/project.subtool');expect(isProjectDirty()).toBe(false);
+  });
+
+  it.each(['save','saveAs'])('%s 收到目的檔衝突時顯示提示並維持未儲存狀態',async kind=>{
+    const {showToast}=await import('../src/ui.js');
+    await Project.saveAs();
+    State.cues[0].text='尚未儲存的變更';
+    const directory=getProjectDir();
+    showToast.mockClear();
+    (kind==='save'?desk.writeProject:desk.saveProject).mockResolvedValueOnce({code:'PROJECT_DESTINATION_CHANGED'});
+    await expect(kind==='save'?Project.save():Project.saveAs()).resolves.toBeNull();
+    expect(showToast).toHaveBeenCalledWith('專案檔在儲存期間已變更，請另存新檔');
+    expect(isProjectDirty()).toBe(true);
+    expect(getProjectDir()).toBe(directory);
+  });
+
+  it('舊專案的衝突回覆晚到時，不對新工作區顯示錯誤',async()=>{
+    const {showToast}=await import('../src/ui.js');
+    await Project.saveAs();State.cues[0].text='尚未儲存';
+    const pending=deferred();desk.writeProject.mockReturnValueOnce(pending.promise);
+    const saving=Project.save();
+    await vi.waitFor(()=>expect(desk.writeProject).toHaveBeenCalledOnce());
+    resetProject();showToast.mockClear();
+    pending.resolve({code:'PROJECT_DESTINATION_CHANGED'});
+    await expect(saving).resolves.toBeNull();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('收到未知儲存結果時不把物件當作檔案路徑或標記已儲存',async()=>{
+    await Project.saveAs();State.cues[0].text='未儲存';
+    desk.writeProject.mockResolvedValueOnce({code:'unexpected',message:'sensitive'});
+    await expect(Project.save()).resolves.toBeNull();
+    expect(isProjectDirty()).toBe(true);
+  });
+
+  it('自動備份遇目的檔衝突時提示失敗，不將錯誤物件當成備份成功',async()=>{
+    const {showToast,setStatus}=await import('../src/ui.js');
+    vi.useFakeTimers();
+    await Project.saveAs();
+    State.cues[0].text='尚未儲存';
+    showToast.mockClear();setStatus.mockClear();
+    desk.writeProject.mockResolvedValueOnce({code:'PROJECT_DESTINATION_CHANGED'});
+    await vi.advanceTimersByTimeAsync(3*60*1000);
+    expect(showToast).toHaveBeenCalledWith('自動備份失敗：專案檔在儲存期間已變更，請另存新檔');
+    expect(setStatus).not.toHaveBeenCalledWith(expect.stringContaining('自動備份：'), 'ok');
+    expect(isProjectDirty()).toBe(true);
   });
 
   it('treats deleting all saved content as a change',async()=>{

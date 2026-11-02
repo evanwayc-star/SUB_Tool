@@ -56,6 +56,7 @@ import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { planCueStyleAssignment } from './subtitle-style-engine.js';
 import { effStyle } from './substyle.js';
 import { assetRange, externalSourceTime } from './external-audio.js';
+import { getProvisionalSourceWaveform } from './provisional-source-waveform.js';
 
 import { on as _onEvent } from './events.js';
 import { selectClip, clearClipSelection } from './clip-model.js';
@@ -87,10 +88,13 @@ function audioRowsHeight(){ return L.audioRowsHeight(audioRowLayout()); }
 /* 每列為一個實際匯入的影音／音檔 source；同一檔切成多段仍共用同一列。 */
 function audioRowLayout(){
   let y0=0;
-  return audioSourceLanes().map((lane,index)=>{
+  const rows=audioSourceLanes().map((lane,index)=>{
     const h=L.sourceAudioRowH(lane.source);
     const row={...lane,kind:'source',index,y0,h}; y0+=h; return row;
   });
+  const preview=getProvisionalSourceWaveform();
+  if(preview) rows.push({provisional:true,preview,y0,h:48,index:rows.length});
+  return rows;
 }
 function atracksHeight(){ return L.atracksHeight(audioRowLayout(), tlLayer?.clientHeight||tlScroll?.clientHeight||0, vtracksHeight()); }
 function tracksTop(){return L.tracksTop(vtracksHeight(), atracksHeight());}
@@ -502,7 +506,7 @@ function renderClipBlocks(){
       locked: !!State.videoTracks[v]?.locked,
       x: timeToX(s),
       w: timeToX(e) - timeToX(s),
-      trimmed: c.in > 0.01 || c.out < c.dur - 0.01,
+      trimmed: c.in > 0.01 || c.out < Seq.sourceDuration(c) - 0.01,
       hasFade: c.fadeIn > 0 || c.fadeOut > 0,
       isImg: c.type === 'image',
       frozen:Seq.isFrozen(c),
@@ -516,7 +520,7 @@ function renderClipBlocks(){
       timeRangeStr: secToEncore(s, State.fps, State.dropFrame) + ' → ' + secToEncore(e, State.fps, State.dropFrame),
       inStr: Number(c.in).toFixed(2),
       outStr: Number(c.out).toFixed(2),
-      durStr: Number(c.dur).toFixed(2)
+      durStr: Seq.sourceDuration(c).toFixed(2)
     });
   }
   paintClipBlocks(tlVtracks, displayList);
@@ -771,6 +775,16 @@ function renderAudioTrackRows(){
 
   const vw=viewportW(), t0=State.viewStart, t1=State.viewStart+vw/State.pxPerSec;
   for(const row of rows){
+    if(row.provisional){
+      const el=document.createElement('div');el.className='audio-project-row provisional-source-wave';el.style.height=row.h+'px';
+      el.title='來源時間波形，素材尚未準備好播放';el.setAttribute('aria-label',el.title);
+      for(const type of ['mousedown','click','contextmenu'])el.addEventListener(type,event=>{event.preventDefault();event.stopPropagation();});
+      const cv=document.createElement('canvas'),width=Math.max(1,Math.round(vw));
+      cv.width=Math.max(1,Math.round(width*devicePixelRatio));cv.height=Math.round((row.h-6)*devicePixelRatio);
+      cv.style.width=width+'px';cv.style.height=(row.h-6)+'px';
+      _drawClipWave(cv,{in:0,out:row.preview.duration,offset:0,speed:1},row.preview.peaks,width,row.h-6,0);
+      el.appendChild(cv);content.appendChild(el);continue;
+    }
     const {sourceId,h}=row;
     const rowEl=document.createElement('div');
     rowEl.className='audio-project-row'+(row.source?.locked?' locked':'');
@@ -1011,6 +1025,12 @@ function renderAtrackGutter(){
 
   for(const row of rows){
     const g=document.createElement('div');
+    if(row.provisional){
+      g.className='agtrack provisional-source-wave-label';g.style.height=row.h+'px';
+      g.textContent='來源時間波形（準備中）';g.title=row.preview.name+'：來源時間，尚未可播放';
+      for(const type of ['mousedown','click','contextmenu'])g.addEventListener(type,event=>{event.preventDefault();event.stopPropagation();});
+      gut.appendChild(g);continue;
+    }
     const source=row.source;
     const laneSources=row.entries.map(entry=>entry.source);
     const laneWave=Wave.getSourceWaveLaneState?.(laneSources);
@@ -1279,14 +1299,15 @@ function beginRendererGesture(mode,{targets=[],context={}}={}){
   const trackOwners=[...tracks];
   const trackField=mode.startsWith('clip-') ? 'vtrack' : 'track';
   const sourceTracks=targets.map(({target})=>({index:target[trackField]||0,track:tracks[target[trackField]||0]}));
-  const ownsWorkspace=targets.length ? Project.captureWorkspaceOwnership() : ()=>true;
-  const owns=()=>!targets.length || ownsWorkspace() && (mode.startsWith('clip-') ? State.videoTracks : State.tracks)===tracks
+  const sourceOwners=mode.startsWith('clip-')?targets.map(({target})=>Seq.captureSourceOwnership(target)):[];
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const owns=()=>ownsWorkspace() && (mode.startsWith('clip-') ? State.videoTracks : State.tracks)===tracks
     && sourceTracks.every(({index,track})=>tracks[index]===track);
   return beginTimelineGestureLifecycle({
     mode,targets,context,
     effects:{
       beginPreview:targets=>History.beginPreview(targets,owns,cancelTimelineDrag),
-      canEdit:()=>sourceTracks.every(({track})=>!track?.locked)
+      canEdit:()=>sourceOwners.every(owns=>owns()) && sourceTracks.every(({track})=>!track?.locked)
         && targets.every(({target})=>(!mode.startsWith('clip-') || !target.locked)
           && tracks[target[trackField]||0]===trackOwners[target[trackField]||0]
           && !tracks[target[trackField]||0]?.locked)
@@ -1543,7 +1564,7 @@ const _handleDragUpdate = (e) => {
       mode:drag.mode,
       original:{
         offset:drag.os,in:drag.oin,out:drag.oout,
-        duration:c.dur,type:c.type,vtrack:drag.ov,speed:c.speed,reverse:c.reverse,
+        duration:Seq.sourceDuration(c),type:c.type,vtrack:drag.ov,speed:c.speed,reverse:c.reverse,
         fadeSourceOffset:drag.ofadeSourceOffset,fadeSourceLength:drag.ofadeSourceLength,
       },
       deltaTime:dt,
@@ -1781,6 +1802,7 @@ window.addEventListener('mouseup',e=>{
   }else if(drag.gesture.kind==='clip'){
     const moved=drag.gesture.hasMoved(), m=drag.mode, c=drag.clip;
     if(!moved){ selectClip(c.id); return; } // 未拖動＝點選該影片段（高亮，供上下鍵/Del）
+    Seq.commitSourceExtent(c);
     if(m==='clip-move'){ Seq.resolveOverlaps(c); Seq.compact(); } // 自由拖放：同軌連鎖右推；收斂空的頂部視訊軌
     Seq.sort(); Seq.recomputeDuration();
     recordHistory(m==='clip-move'?('移動影片：'+c.name):('修剪影片：'+c.name));

@@ -2,7 +2,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const modalState = vi.hoisted(() => ({ generation: 0 }));
-const workspaceState = vi.hoisted(() => ({ generation: 0 }));
+const workspaceState = vi.hoisted(() => ({ generation: 0, listeners: new Set() }));
 const spies = vi.hoisted(() => ({
   openModal: vi.fn((title, html) => {
     const generation = ++modalState.generation;
@@ -43,7 +43,9 @@ vi.mock('../src/history.js', () => ({ recordHistory: vi.fn(), History: {
 } }));
 vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));
-vi.mock('../src/project.js', () => ({ Project: { unrestoredClips: () => [], captureWorkspaceOwnership: () => {
+vi.mock('../src/project.js', () => ({ Project: { unrestoredClips: () => [],
+  onWorkspaceInvalidated: callback => { workspaceState.listeners.add(callback); return () => workspaceState.listeners.delete(callback); },
+  captureWorkspaceOwnership: () => {
   const generation = workspaceState.generation;
   return () => generation === workspaceState.generation;
 } } }));

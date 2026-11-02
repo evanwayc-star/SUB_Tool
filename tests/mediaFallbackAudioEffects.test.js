@@ -44,6 +44,7 @@ const deskMock = vi.hoisted(() => ({
   fileURL: vi.fn(async path => `file:///${String(path).replaceAll('\\', '/')}`),
   waveAudio: vi.fn(),
   cleanupAudio: vi.fn(),
+  audioSourceFingerprint: vi.fn(async () => 'a'.repeat(64)),
 }));
 
 vi.mock('../src/dom.js', () => domMock);
@@ -109,6 +110,7 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     deskMock.ingest.mockReset();
     deskMock.waveAudio.mockReset();
     deskMock.cleanupAudio.mockReset();
+    deskMock.audioSourceFingerprint.mockClear();
     setStatus.mockClear();
     showToast.mockClear();
     deskMock.ingest.mockResolvedValue({ channels: [] });
@@ -126,6 +128,25 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     delete window.subtool.streamIngest;
   });
 
+  it('專案主素材 probe 等待期間被新載入取代，不再啟動舊來源播放準備',async()=>{
+    const {ProjectLoadSession}=await import('../src/project-intake-engine.js');
+    const session=new ProjectLoadSession({media:Media});
+    const generation=session.begin();
+    const plan=session.createRestorePlan(generation,{
+      mediaRelink:true,clips:[{primary:true,path:'C:/media/old.webm',in:0,out:10,dur:10,offset:0}],
+    });
+    const probe=deferred();deskMock.probe.mockImplementationOnce(()=>probe.promise);
+    const loading=session.restoreMedia(generation,{kind:'load',path:'C:/media/old.webm'});
+    await vi.waitFor(()=>expect(deskMock.probe).toHaveBeenCalledOnce());
+    session.begin({preserveMaterial:true});
+    probe.resolve({duration:12,video:{codec:'vp9',fps:25,width:1920,height:1080},audio:[]});
+    await loading;
+    expect(deskMock.fileURL).not.toHaveBeenCalled();
+    expect(State.clips).toHaveLength(0);
+    expect(plan.needsMediaRelink()).toBe(true);
+    expect(session.activePlan.needsMediaRelink()).toBe(true);
+  });
+
   it.each([
     {name:'silent-first',values:[[0],[.8]],durations:[1,1],first:.4,tail:.4},
     {name:'opposite-phase',values:[[.8],[-.8]],durations:[1,1],first:0,tail:0},
@@ -134,6 +155,7 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     {name:'non-contiguous-streams',sourceStreams:[1,3],values:[[.2,.4],[.9]],durations:[1,1],first:.5,tail:.5},
     {name:'reordered-streams',sourceStreams:[3,1],values:[[.2,.4],[.9]],durations:[1,1],first:.5,tail:.5},
   ])('public effect $name mixes all PCM channels before extrema and reloads the same mix',async({values,durations,first,tail,sourceStreams=values.map((unused,index)=>index)})=>{
+    deskMock.probe.mockResolvedValueOnce({audio:Array.from({length:Math.max(...sourceStreams)+1},(_,stream)=>({channels:values[sourceStreams.indexOf(stream)]?.length||0}))});
     const assignments=[];
     class AudioAdapter{constructor(){this.readyState=1;this.duration=1;}set src(value){if(value)assignments.push({value,crossOrigin:this.crossOrigin});this.url=value;}get src(){return this.url||'';}addEventListener(){}removeEventListener(){}pause(){}load(){}}
     vi.stubGlobal('Audio',AudioAdapter);
@@ -193,7 +215,35 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     registry.mockRestore();
   });
 
-  it.each([true,false])('reset during the second processed PCM read releases owned waves but preserves shared outputs (generated=%s)',async generated=>{
+  it.each([false,true])('重新探測聲道保留配線，全部配線=%s 時提示正確',async fullyRouted=>{
+    const {AudioPipeline}=await import('../src/audio-routing-engine.js');
+    class AudioAdapter{constructor(){this.readyState=1;this.duration=1;this.src='';}addEventListener(){}removeEventListener(){}pause(){}load(){}}
+    vi.stubGlobal('Audio',AudioAdapter);
+    const source={id:'changed-layout',path:'C:/media/changed.mov',audioSrc:'video',audioSourceId:'changed-layout',in:0,out:1,dur:1,offset:0,primary:true,
+      descriptors:[{sourceStream:0,sourceChannel:0}]};
+    State.clips=[source];AudioPipeline.registerSource(source,fullyRouted
+      ? [{sourceStream:0,sourceChannel:0},{sourceStream:0,sourceChannel:1}] : source.descriptors);
+    const route=State.audioProject.sourceMaps[source.audioSourceId].channels[0];route.gain=0.4;
+    const routing=JSON.stringify(State.audioProject);
+    deskMock.probe.mockResolvedValueOnce({audio:[{channels:2}]});
+    window.subtool.normalizeAudio=vi.fn(async()=>({outputPath:'C:/cache/new-stereo.wav'}));
+    deskMock.waveAudio.mockImplementation(async path=>path+'.wave.wav');
+    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>wav([.3,.7])})));
+    resetPlayerAdapter(window.subtool,domMock.video);
+    expect(await Media.audioEffects.apply(source,{max:-6,min:-12})).toMatchObject({status:'completed'});
+    expect(Media.tracks.map(track=>[track.sourceStream,track.sourceChannel])).toEqual([[0,0],[0,1]]);
+    expect(Media.projectRouteState(Media.tracks[0])).toMatchObject({audible:true,gain:0.4});
+    expect(JSON.stringify(State.audioProject)).toBe(routing);
+    const message='有音訊聲道尚未配線：請儲存並重新開啟專案，待素材載入後檢查「聲道設定」。';
+    if(fullyRouted) expect(showToast).not.toHaveBeenCalledWith(expect.stringContaining('尚未配線'));
+    else {
+      expect(Media.projectRouteState(Media.tracks[1])).toMatchObject({audible:false,gain:0});
+      expect(showToast).toHaveBeenCalledWith(message);
+    }
+  });
+
+  it.each([true,false])('reset during the second processed PCM read releases uninstalled outputs and owned waves (generated=%s)',async generated=>{
+    deskMock.probe.mockResolvedValueOnce({audio:[{channels:1},{channels:1}]});
     const delayed=deferred(),elements=[];
     class AudioAdapter{constructor(){this.readyState=1;this.duration=1;this.src='';elements.push(this);}addEventListener(){}removeEventListener(){}pause(){}load(){}}
     vi.stubGlobal('Audio',AudioAdapter);
@@ -210,13 +260,15 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
       expect(await work).toMatchObject({status:'replaced'});
       expect(Media.tracks).toEqual([]);expect(Wave.getSourceWaveform(source).peaks).toBeNull();
       expect(elements.every(element=>element.src==='')).toBe(true);
-      expect(deskMock.cleanupAudio.mock.calls.map(([path])=>path)).toEqual(generated?[
-        'C:/cache/stream-0.wav.wave.wav','C:/cache/stream-1.wav.wave.wav',
-      ]:[]);
+      expect(deskMock.cleanupAudio.mock.calls.map(([path])=>path).sort()).toEqual([
+        'C:/cache/stream-0.wav','C:/cache/stream-1.wav',
+        ...(generated?['C:/cache/stream-0.wav.wave.wav','C:/cache/stream-1.wav.wave.wav']:[]),
+      ].sort());
     }finally{window.subtool.waveAudio=waveAudio;}
   });
 
-  it('準備第二條效果波形失敗會清理已產生的第一條波形，保留可重用的處理音訊',async()=>{
+  it('準備第二條效果波形失敗會清理已產生的第一條波形與尚未安裝的整批處理音訊',async()=>{
+    deskMock.probe.mockResolvedValueOnce({audio:[{channels:1},{channels:1}]});
     class AudioAdapter{constructor(){this.readyState=1;this.duration=1;this.src='';}addEventListener(){}removeEventListener(){}pause(){}load(){}}
     vi.stubGlobal('Audio',AudioAdapter);
     const source={id:'failed-effect',path:'C:/media/multistream.mov',audioSrc:'video',audioSourceId:'failed-effect',in:0,out:1,dur:1,offset:0,vtrack:0,primary:true,
@@ -226,7 +278,9 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     deskMock.waveAudio.mockResolvedValueOnce('C:/cache/stream-0.wave.wav').mockRejectedValueOnce(new Error('wave encode failed'));
     resetPlayerAdapter(window.subtool,domMock.video);
     expect(await Media.audioEffects.apply(source,{max:-6,min:-12})).toMatchObject({status:'failed'});
-    expect(deskMock.cleanupAudio).toHaveBeenCalledExactlyOnceWith('C:/cache/stream-0.wave.wav');
+    expect(deskMock.cleanupAudio.mock.calls.map(([path])=>path).sort()).toEqual([
+      'C:/cache/stream-0.wave.wav','C:/cache/stream-0.wav','C:/cache/stream-1.wav',
+    ].sort());
     expect(Media.tracks).toEqual([]);expect(source.audioLimiterSpec).toBeUndefined();
   });
 

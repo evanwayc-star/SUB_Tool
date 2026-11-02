@@ -76,6 +76,65 @@ describe('web mother-source intake ownership', () => {
     vi.spyOn(Media, '_connectStereo').mockReturnValue([]);
   });
 
+  it('網頁重連的格式偵測等待期間被新專案取代，不交接舊主片段',async()=>{
+    const {ProjectLoadSession}=await import('../src/project-intake-engine.js');
+    const session=new ProjectLoadSession({media:Media}),generation=session.begin();
+    const plan=session.createRestorePlan(generation,{mediaRelink:true,clips:[{name:'A.mp4',primary:true,in:0,out:10,dur:10,offset:0}]});
+    const originalCreate=document.createElement.bind(document),probes=[];
+    const createDescriptor=Object.getOwnPropertyDescriptor(URL,'createObjectURL');
+    const revokeDescriptor=Object.getOwnPropertyDescriptor(URL,'revokeObjectURL');
+    let nextUrl=0;
+    Object.defineProperty(URL,'createObjectURL',{configurable:true,value:vi.fn(()=>`blob:test-${++nextUrl}`)});
+    Object.defineProperty(URL,'revokeObjectURL',{configurable:true,value:vi.fn()});
+    vi.spyOn(document,'createElement').mockImplementation(tag=>{
+      if(tag!=='video')return originalCreate(tag);
+      const probe={readyState:0,onloadedmetadata:null,onerror:null};probes.push(probe);return probe;
+    });
+    try{
+      const loading=Media.loadVideoFile({name:'A.mp4',size:2_000_000_000},plan);
+      await vi.waitFor(()=>expect(probes).toHaveLength(1));
+      session.begin({preserveMaterial:true});probes[0].onloadedmetadata();await loading;
+      expect(State.clips).toEqual([]);expect(probeAndMaybeExtract).not.toHaveBeenCalled();
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:test-1');
+      expect(Media.objectURLs).not.toContain('blob:test-1');
+      expect(plan.needsMediaRelink()).toBe(true);expect(session.activePlan.needsMediaRelink()).toBe(true);
+    }finally{
+      Media.reset();vi.restoreAllMocks();
+      if(createDescriptor)Object.defineProperty(URL,'createObjectURL',createDescriptor);else delete URL.createObjectURL;
+      if(revokeDescriptor)Object.defineProperty(URL,'revokeObjectURL',revokeDescriptor);else delete URL.revokeObjectURL;
+    }
+  });
+
+
+  it('已交接的網頁主片段在後續音訊探測失權時保留其 blob URL',async()=>{
+    const {ProjectLoadSession}=await import('../src/project-intake-engine.js');
+    const session=new ProjectLoadSession({media:Media}),generation=session.begin();
+    const plan=session.createRestorePlan(generation,{mediaRelink:true,clips:[{name:'A.mp4',primary:true,in:0,out:10,dur:10,offset:0}]});
+    const originalCreate=document.createElement.bind(document),probes=[],audio=deferred();
+    const createDescriptor=Object.getOwnPropertyDescriptor(URL,'createObjectURL');
+    const revokeDescriptor=Object.getOwnPropertyDescriptor(URL,'revokeObjectURL');let nextUrl=0;
+    Object.defineProperty(URL,'createObjectURL',{configurable:true,value:vi.fn(()=>`blob:committed-${++nextUrl}`)});
+    Object.defineProperty(URL,'revokeObjectURL',{configurable:true,value:vi.fn()});
+    vi.spyOn(document,'createElement').mockImplementation(tag=>{
+      if(tag!=='video')return originalCreate(tag);
+      const probe={readyState:0,onloadedmetadata:null,onerror:null};probes.push(probe);return probe;
+    });
+    probeAndMaybeExtract.mockReturnValue(audio.promise);
+    try{
+      const loading=Media.loadVideoFile({name:'A.mp4',size:2_000_000_000},plan);
+      await vi.waitFor(()=>expect(probes).toHaveLength(1));probes[0].onloadedmetadata();
+      await vi.waitFor(()=>expect(probeAndMaybeExtract).toHaveBeenCalledOnce());
+      expect(State.clips[0].web.url).toBe('blob:committed-1');
+      session.begin({preserveMaterial:true});audio.resolve();await loading;
+      expect(URL.revokeObjectURL).not.toHaveBeenCalledWith('blob:committed-1');
+      expect(Media.objectURLs).toContain('blob:committed-1');
+    }finally{
+      audio.resolve();Media.reset();vi.restoreAllMocks();
+      if(createDescriptor)Object.defineProperty(URL,'createObjectURL',createDescriptor);else delete URL.createObjectURL;
+      if(revokeDescriptor)Object.defineProperty(URL,'revokeObjectURL',revokeDescriptor);else delete URL.revokeObjectURL;
+    }
+  });
+
   it('late native capability detection for A cannot replace B', async () => {
     const probes = new Map();
     let urlSequence = 0;
@@ -115,6 +174,8 @@ describe('web mother-source intake ownership', () => {
       expect(State.clips).toHaveLength(1);
       expect(State.clips[0]).toMatchObject({ name: 'B.mp4', primary: true });
       expect(domMock.video.src).toBe('blob:B.mp4:3');
+      expect(URL.revokeObjectURL).not.toHaveBeenCalledWith('blob:B.mp4:3');
+      expect(Media.objectURLs).toContain('blob:B.mp4:3');
       expect(probeAndMaybeExtract).toHaveBeenCalledTimes(1);
       expect(probeAndMaybeExtract).toHaveBeenCalledWith(b, expect.objectContaining({ owns: expect.any(Function) }));
     } finally {

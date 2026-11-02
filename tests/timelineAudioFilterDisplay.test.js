@@ -4,6 +4,28 @@ import { paintClipWave } from '../src/timeline-renderer.js';
 import { Wave } from '../src/waveform-decoder.js';
 
 describe('時間軸音訊濾鏡標記與波形圖繪製', () => {
+  function pcm(samples,rate=4000,value=16384){
+    const b=new ArrayBuffer(44+samples*2),v=new DataView(b);
+    v.setUint32(0,0x52494646);v.setUint32(4,36+samples*2,true);v.setUint32(8,0x57415645);
+    v.setUint32(12,0x666d7420);v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+    v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
+    v.setUint32(36,0x64617461);v.setUint32(40,samples*2,true);
+    for(let i=0;i<samples;i++)v.setInt16(44+i*2,i%2?-value:value,true);
+    return b;
+  }
+  it.each([[1,4000],[60-59.123456,4000],[0.1,44100]])('優先來源段 %.6f 秒、%i Hz 容許單一取樣捨入，不接受缺段', (duration,rate)=>{
+    const expected=Math.round(duration*rate);
+    expect(Wave.calcSourceWaveform(pcm(expected,rate,0),duration)).toBeInstanceOf(Float32Array);
+    expect(Wave.calcSourceWaveform(pcm(expected-1,rate),duration)).toBeInstanceOf(Float32Array);
+    expect(Wave.calcSourceWaveform(pcm(expected-2,rate),duration)).toBeNull();
+    expect(Wave.calcSourceWaveform(pcm(0,rate),duration)).toBeNull();
+  });
+  it('一般多來源混音保留短音軌尾端補零',()=>{
+    const peaks=Wave.calcFromWav([pcm(1000),pcm(4000)],1);
+    expect(peaks).toHaveLength(200);
+    expect(peaks[1]).toBeCloseTo(.5);
+    expect(peaks[101]).toBeCloseTo(.25);
+  });
   it.each([[0,4],[4,0],[5,0],[-1,4]])('每像素涵蓋來源 %j 時聚合全部峰值，反向與零端點也一致', (first,last) => {
     const ctx={save:vi.fn(),scale:vi.fn(),beginPath:vi.fn(),moveTo:vi.fn(),lineTo:vi.fn(),stroke:vi.fn(),restore:vi.fn()};
     paintClipWave(ctx,{Hpx:10,cvw:1,res:1,n:5,

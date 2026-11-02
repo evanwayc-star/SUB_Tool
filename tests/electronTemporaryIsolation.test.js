@@ -4,6 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { parse } from 'acorn';
+import { createRequire } from 'node:module';
+
+const ExportLease = createRequire(import.meta.url)('../electron/export-lease.js');
 
 const source = fs.readFileSync(new URL('../electron/main.js', import.meta.url), 'utf8');
 const statements = parse(source, { ecmaVersion: 'latest' }).body;
@@ -25,13 +28,14 @@ function sandbox() {
 function instance(directory, profile) {
   const handlers = new Map();
   const context = vm.createContext({
-    fs, path, os: { tmpdir: () => directory }, Date: { now: () => 1770000000000 },
+    fs, path, ExportLease, os: { tmpdir: () => directory }, Date: { now: () => 1770000000000 },
     app: { getPath: () => path.join(directory, profile), on: (event, handler) => handlers.set(event, handler) },
-    mpvHost: { dispose() {} }, mediaIntakeRuntime: { close: () => Promise.resolve() },
+    mpvHost: { dispose() {} }, mediaIntakeRuntime: { close: () => Promise.resolve(),
+      hasUnsafeTemporaryFiles: () => false, isOwnedTemporary: () => false },
   });
   const selected = statements.filter(node =>
     node.type === 'VariableDeclaration' && node.declarations.some(declaration =>
-      ['TMP', 'tempFiles', 'tmpSeq'].includes(declaration.id.name))
+      ['TMP', 'TMP_OWNER', 'tempFiles', 'tmpSeq'].includes(declaration.id.name))
     || node.type === 'FunctionDeclaration' && ['ensureTmp', 'tmpPath'].includes(node.id.name)
     || registration(node, 'app', 'quit'));
   vm.runInContext(selected.map(text).join('\n'), context);
@@ -66,11 +70,12 @@ describe('主程序的私有暫存所有權', () => {
     expect(fs.readFileSync(b, 'utf8')).toBe('second instance PCM');
   });
 
-  it('退出只回收自己的整個工作目錄，其他 instance 仍可讀寫既有中間檔', () => {
+  it('退出保留沒有 owner 的工作項目，其他 instance 仍可讀寫既有中間檔', () => {
     const directory = sandbox();
     const first = instance(directory, 'profile-a');
     const second = instance(directory, 'profile-b');
-    fs.writeFileSync(first.temporary('wav'), 'first WAV');
+    const firstFile = first.temporary('wav');
+    fs.writeFileSync(firstFile, 'first WAV');
     const other = second.temporary('ass');
     fs.writeFileSync(other, 'second ASS');
     const nested = path.join(first.root, 'adapter-work');
@@ -80,7 +85,8 @@ describe('主程序的私有暫存所有權', () => {
     fs.writeFileSync(sentinel, 'outside either owner');
 
     first.quit();
-    expect(fs.existsSync(first.root)).toBe(false);
+    expect(fs.readFileSync(firstFile, 'utf8')).toBe('first WAV');
+    expect(fs.readFileSync(path.join(nested, 'untracked-intermediate'), 'utf8')).toBe('first adapter');
     expect(fs.readFileSync(other, 'utf8')).toBe('second ASS');
     fs.appendFileSync(other, ' still writing');
     const next = second.temporary('wav');
@@ -88,7 +94,7 @@ describe('主程序的私有暫存所有權', () => {
     expect(fs.readFileSync(next, 'utf8')).toBe('second still active');
     expect(fs.readFileSync(other, 'utf8')).toBe('second ASS still writing');
     second.quit();
-    expect(fs.existsSync(second.root)).toBe(false);
+    expect(fs.readFileSync(other, 'utf8')).toBe('second ASS still writing');
     expect(fs.readFileSync(sentinel, 'utf8')).toBe('outside either owner');
   });
 
@@ -108,9 +114,9 @@ describe('主程序的私有暫存所有權', () => {
     vm.runInNewContext(text(statements.find(node => registration(node, 'ipcMain', 'mpv:detect'))), {
       ipcMain: { handle: (_, handler) => { detect = handler; } },
       mpvEmbeddingSupported: () => true, process: { platform: 'win32' },
-      mpvHost: { detect: () => 'mpv.exe' }, console: { error() {} }, path, TMP: root,
+      mpvHost: { detect: () => 'mpv.exe', logPath: () => path.join(root, 'owned-mpv.log') }, console: { error() {} }, path, TMP: root,
     });
-    expect(detect()).toEqual({ available: true, supported: true, exe: 'mpv.exe', logPath: path.join(root, 'mpv-last.log') });
+    expect(detect()).toEqual({ available: true, supported: true, exe: 'mpv.exe', logPath: path.join(root, 'owned-mpv.log') });
   });
 
   it('播放驗收失敗時只讀取當前 CDP instance 回報的 mpv 記錄', async () => {

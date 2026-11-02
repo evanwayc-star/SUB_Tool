@@ -16,9 +16,9 @@ import { requestPointerSeek } from './timeline-interaction-engine.js';
 import { renderCueBlocks, drawTimeline, updatePlayhead, refreshTrackGutterActive } from './timeline-renderer.js';
 import { emit } from './events.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
-import { ensureProjectSaved } from './project.js';
+import { Project, ensureProjectSaved } from './project.js';
 import { showToast, openModal, closeModal, setStatus } from './ui.js';
-import { recordHistory } from './history.js';
+import { History, recordHistory } from './history.js';
 import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 import { effStyle, getAllPresets, STYLE_DEFAULTS, colorName, posToPx, styleMatchesPreset } from './substyle.js';
 import {
@@ -205,7 +205,8 @@ function cancelSwapMode(){
   sublist.classList.remove('swap-mode');
 }
 
-function openInlineTimeEdit(el, curSec, onCommit){
+const inlineTimeEditors=new Map();
+function openInlineTimeEdit(el, curSec, onCommit, {isCurrent=()=>true,onStale=()=>{},cue=null}={}){
   if(el.querySelector('input')) return;
   const origText = el.textContent;
   const inp = document.createElement('input');
@@ -213,8 +214,15 @@ function openInlineTimeEdit(el, curSec, onCommit){
   setupTimecodeInput(inp);
   el.textContent = ''; el.appendChild(inp); inp.focus(); inp.select();
   let done = false;
+  if(cue) inlineTimeEditors.set(inp,{cue,row:el.closest('.sub-row'),isCurrent,discard:()=>{
+    done=true;inlineTimeEditors.delete(inp);inp.remove();
+  }});
   const fin = (commit) => {
     if(done) return; done = true;
+    inlineTimeEditors.delete(inp);
+    if(!isCurrent()){
+      inp.remove(); el.textContent = origText; onStale(commit); return;
+    }
     if(commit){
       const raw = inp.value.trim();
       if(raw === origText){
@@ -245,6 +253,20 @@ function openInlineTimeEdit(el, curSec, onCommit){
   });
   inp.addEventListener('blur', ()=>fin(true));
   inp.addEventListener('mousedown', e=>e.stopPropagation());
+}
+
+// Relative time input and clamping depend on both endpoints and the grid that
+// were visible when the edit began. A later timing edit owns its own History
+// entry and must not be replaced by this older input.
+function captureInlineTimeEdit(cue,track,row){
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const ownsHistory=History.captureOwnership();
+  const start=cue.start,end=cue.end,timed=cue.timed,trackIndex=cue.track;
+  const fps=State.fps,dropFrame=State.dropFrame;
+  return ()=>ownsWorkspace() && ownsHistory() && row.isConnected && State.cues.find(item=>item.id===cue.id)===cue
+    && cue.track===trackIndex && State.tracks[cue.track||0]===track && !track?.locked
+    && cue.start===start && cue.end===end && cue.timed===timed
+    && State.fps===fps && State.dropFrame===dropFrame;
 }
 
 function formatSubSelectionHTML(){
@@ -398,11 +420,18 @@ function renderSubList(){
 
   const list = filteredSubtitleCues();
   const editingRows = new Map();
+  const timeEditingRows = new Set();
   for(const [txt, {cue, owner}] of textEditors){
     const row=txt.closest('.sub-row');
     if(owner.isCurrent() && !State.tracks[cue.track||0]?.locked && list.includes(cue) && row?.parentElement===sublist)
       editingRows.set(cue.id,row);
     else endTextEditor(txt,true);
+  }
+  for(const [input,editor] of inlineTimeEditors){
+    if(input.isConnected && editor.row?.contains(input) && editor.isCurrent()
+      && list.includes(editor.cue) && editor.row.parentElement===sublist){
+      editingRows.set(editor.cue.id,editor.row);timeEditingRows.add(editor.row);
+    } else editor.discard();
   }
 
   if(list.length===0){
@@ -421,13 +450,21 @@ function renderSubList(){
     const template=document.createElement('template');
     template.innerHTML=html;
     let cursor=sublist.firstChild;
+    const focusedRow=document.activeElement?.closest?.('.sub-row');
     for(const rendered of [...template.content.children]){
       const existing=editingRows.get(rendered.dataset.id);
       const row=existing || rendered;
       if(existing){
         row.className=rendered.className;
-        for(const selector of ['.idx','.times','.sub-sty','.sub-styname'])
+        for(const selector of ['.idx',...(timeEditingRows.has(row)?[]:['.times']),'.sub-sty','.sub-styname'])
           row.querySelector(selector).innerHTML=rendered.querySelector(selector).innerHTML;
+        const text=row.querySelector('.txt');
+        if(text?.contentEditable!=='true') text.innerHTML=rendered.querySelector('.txt').innerHTML;
+      }
+      // Move the other rows around the focused editor; moving the editor node
+      // itself can blur it and commit or discard a still-active draft.
+      if(row===focusedRow && row!==cursor && row.parentElement===sublist){
+        while(cursor && cursor!==row){const next=cursor.nextSibling;sublist.insertBefore(cursor,row.nextSibling);cursor=next;}
       }
       if(row===cursor) cursor=cursor.nextSibling;
       else sublist.insertBefore(row,cursor);
@@ -491,8 +528,13 @@ function renderSubRow(id){
   const c=State.cues.find(x=>x.id===id); if(!c)return;
   const timed=c.timed!==false;
   const times=row.querySelector('.times');
+  const input=times?.querySelector('input.tc-edit'), editor=inlineTimeEditors.get(input);
+  const keepTimeEditor=!!editor && editor.isCurrent();
+  if(editor && !keepTimeEditor) editor.discard();
+  if(!keepTimeEditor){
    if(timed)times.innerHTML=`<span class="tin">${secToEncore(c.start,State.fps,State.dropFrame)}</span> → <span class="tout">${secToEncore(c.end,State.fps,State.dropFrame)}</span><span class="dur">${(c.end-c.start).toFixed(2)}s</span>`;
    else times.innerHTML=`<span class="tin untimed">--:--:--:--</span> → <span class="tout untimed">--:--:--:--</span>`;
+  }
   const txt=row.querySelector('.txt');
   if(txt&&txt.contentEditable!=='true') txt.innerHTML=_txtInner(c.text);
 }
@@ -676,6 +718,8 @@ function discardUnownedTextEditor(txt,c){
 
 function splitCueAtCursor(c, txtEl){
   if(!ownedTextEditor(txtEl,c)) return;
+  const ownsWorkspace=Project.captureWorkspaceOwnership();
+  const track=State.tracks[c.track||0];
   const sel=window.getSelection();
   if(!sel.rangeCount)return;
 
@@ -724,17 +768,19 @@ function splitCueAtCursor(c, txtEl){
     _splittingTextEditors.delete(txtEl);
   }
   const newCue=result.cue;
+  const focusedAfterSplit=document.activeElement;
 
   requestAnimationFrame(()=>{
-    if(!State.cues.includes(newCue)) return;
+    if(!ownsWorkspace() || !State.cues.includes(newCue) || State.tracks[newCue.track||0]!==track ||
+      track?.locked || newCue.text!==textAfter || State.selectedId!==newCue.id ||
+      document.activeElement!==focusedAfterSplit) return;
     const nr=sublist.querySelector(`.sub-row[data-id="${newCue.id}"]`);
     if(!nr)return;
     const nt=nr.querySelector('.txt');
-    if(!nt)return;
+    if(!nt || nt.contentEditable==='true' || !beginTextEditor(nt,newCue))return;
     nt.innerText=textAfter;
     nt.dataset.orig=textAfter;
     nt.contentEditable='true';
-    beginTextEditor(nt,newCue);
     nt.focus();
     try{
       const r=document.createRange(),s=window.getSelection();
@@ -781,16 +827,23 @@ sublist?.addEventListener?.('dblclick', async e => {
     if (!c) return;
     const track=State.tracks[c.track||0];
     if(cueTrackLocked(c,'編輯字幕時間')) return;
+    const isCurrent=captureInlineTimeEdit(c,track,row);
     await ensureProjectSaved();
-    if(!row.isConnected || State.cues.find(item=>item.id===c.id)!==c || State.tracks[c.track||0]!==track || cueTrackLocked(c,'編輯字幕時間')) return;
+    if(!isCurrent()) return;
+    const options={cue:c,isCurrent,onStale:commit=>{
+      if(row.isConnected && State.cues.find(item=>item.id===c.id)===c){
+        if(commit && State.tracks[c.track||0]===track) cueTrackLocked(c,tin?'修改字幕起點':'修改字幕終點');
+        renderSubRow(c.id);
+      }
+    }};
     if (tin) {
       openInlineTimeEdit(tin, c.start || 0, t => {
         if(State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===track) requestTimeEdit(c,'start',t);
-      });
+      },options);
     } else {
       openInlineTimeEdit(tout, c.end || 0, t => {
         if(State.cues.find(item=>item.id===c.id)===c && State.tracks[c.track||0]===track) requestTimeEdit(c,'end',t);
-      });
+      },options);
     }
     return;
   }

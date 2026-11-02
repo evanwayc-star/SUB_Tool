@@ -90,6 +90,32 @@ describe('專案根授權與真實 IPC',()=>{
     expect(f.authority.canWriteProject(destination)).toBe(false);
   });
 
+  it.each(['save', 'saveAs'])('真實 %s IPC 在目的檔改變後回傳受限衝突代碼並保留外部內容',async kind=>{
+    const gate=deferred(),started=deferred();
+    const writer=createAtomicProjectWriter({fsModule:{...fs,...fs.promises,async open(...args){
+      if(args[1]==='r')return fs.promises.open(...args);
+      const handle=await fs.promises.open(...args);started.resolve();await gate.promise;return handle;
+    }}});
+    const f=fixture({writeFile:writer});
+    expect(await f.workspace.open(f.project)).not.toBeNull();
+    const saving=kind==='save'
+      ?f.handler({}, {path:f.project,b64:payload})
+      :saveDialogHandler(f.workspace,f.project)({}, {name:'edit.subtool',b64:payload});
+    await started.promise;
+    try{fs.writeFileSync(f.project,'外部更新內容');}finally{gate.resolve();}
+    expect(await saving).toEqual({code:'PROJECT_DESTINATION_CHANGED'});
+    expect(fs.readFileSync(f.project,'utf8')).toBe('外部更新內容');
+  });
+
+  it('其他原生儲存錯誤不透過 IPC 曝露路徑或細節',async()=>{
+    const secret='C:/private/secret: unexpected native error';
+    const f=fixture({writeFile:async()=>{throw new Error(secret);}});
+    expect(await f.workspace.open(f.project)).not.toBeNull();
+    expect(await f.handler({}, {path:f.project,b64:payload})).toBeNull();
+    expect(await saveDialogHandler(f.workspace,f.project)({}, {name:'edit.subtool',b64:payload})).toBeNull();
+    expect(fs.readFileSync(f.project)).toEqual(projectBytes);
+  });
+
   it('使用者可將備份資料夾本身明確選作新專案的根',async()=>{
     const f=fixture({readFile:createBoundProjectReader()});
     const selected=path.join(f.selected,'.subtool_AutoSave');fs.mkdirSync(selected);
@@ -165,7 +191,7 @@ describe('專案根授權與真實 IPC',()=>{
     const gate=deferred(),started=deferred();
     const reader=createBoundProjectReader({fsModule:{...fs,...fs.promises,async open(...args){
       const handle=await fs.promises.open(...args);
-      return {stat:options=>handle.stat(options),close:()=>handle.close(),async readFile(){
+      return {stat:options=>handle.stat(options),read:(...args)=>handle.read(...args),close:()=>handle.close(),async readFile(){
         const bytes=await handle.readFile();started.resolve();await gate.promise;return bytes;
       }};
     }}});
@@ -185,6 +211,166 @@ describe('專案根授權與真實 IPC',()=>{
     replaceRoot(f);gate.resolve();
     expect(await pending).toBeNull();
     expect(f.authority.canRead(f.project)).toBe(false);
+  });
+
+  it('真實讀取後同 inode 等長內容變更，即使時間戳不變也不可提交舊內容',async()=>{
+    const gate=deferred(),started=deferred();let selected,initial;
+    const descriptors=new Set();
+    const freeze=stat=>{
+      Object.defineProperties(stat,{mtimeNs:{value:initial.mtimeNs},ctimeNs:{value:initial.ctimeNs}});
+      return stat;
+    };
+    const reader=createBoundProjectReader({fsModule:{...fs,...fs.promises,
+      async open(file,...args){
+        const handle=await fs.promises.open(file,...args);
+        if(file!==selected) return handle;
+        return {stat:async options=>freeze(await handle.stat(options)),read:(...readArgs)=>handle.read(...readArgs),
+          readFile:(...readArgs)=>handle.readFile(...readArgs),close:()=>handle.close()};
+      },
+      openSync(file,...args){const fd=fs.openSync(file,...args);if(file===selected)descriptors.add(fd);return fd;},
+      fstatSync(fd,...args){const stat=fs.fstatSync(fd,...args);return descriptors.has(fd)?freeze(stat):stat;},
+      closeSync(fd){descriptors.delete(fd);return fs.closeSync(fd);},
+      statSync(file,...args){const stat=fs.statSync(file,...args);return file===selected?freeze(stat):stat;},
+    }});
+    const f=fixture({readFile:async (...args)=>{const result=await reader(...args);started.resolve();await gate.promise;return result;}});
+    selected=f.project;initial=fs.statSync(selected,{bigint:true});
+    const pending=f.workspace.open(selected);await started.promise;
+    const changed=Buffer.from(projectBytes.toString('utf8').replace('source','target'));
+    expect(changed.length).toBe(projectBytes.length);
+    try{fs.writeFileSync(selected,changed);}finally{gate.resolve();}
+    expect(await pending).toBeNull();
+    expect(f.authority.canRead(selected)).toBe(false);
+    expect(fs.readFileSync(selected)).toEqual(changed);
+  });
+
+  it('正式開啟只在提交前同步核對一次完整內容',async()=>{
+    let selected,verifiedBytes=0;
+    const owned=new Set();
+    const reader=createBoundProjectReader({fsModule:{...fs,...fs.promises,
+      openSync(file,...args){const fd=fs.openSync(file,...args);if(file===selected)owned.add(fd);return fd;},
+      closeSync(fd){owned.delete(fd);return fs.closeSync(fd);},
+      readSync(fd,...args){const count=fs.readSync(fd,...args);if(owned.has(fd))verifiedBytes+=count;return count;},
+    }});
+    const f=fixture({readFile:reader});selected=f.project;
+    const original=Buffer.concat([projectBytes,Buffer.alloc(256*1024,0x20)]);fs.writeFileSync(selected,original);
+    const opened=await f.workspace.open(selected);
+    expect(Buffer.from(opened.b64,'base64')).toEqual(original);
+    expect(verifiedBytes).toBe(original.length);
+  });
+
+  it('初次緩衝區雜湊讓出事件迴圈時遭等長改寫，最終核對仍拒絕授權',async()=>{
+    let selected,initial;const modified=deferred(),owned=new Set();
+    const freeze=stat=>{
+      Object.defineProperties(stat,{mtimeNs:{value:initial.mtimeNs},ctimeNs:{value:initial.ctimeNs}});
+      return stat;
+    };
+    const reader=createBoundProjectReader({fsModule:{...fs,...fs.promises,
+      async open(file,...args){
+        const handle=await fs.promises.open(file,...args);
+        if(file!==selected)return handle;
+        return {stat:async options=>freeze(await handle.stat(options)),close:()=>handle.close(),
+          async readFile(options){
+            const data=await handle.readFile(options),changed=Buffer.from(data);
+            changed.write('target',changed.indexOf('source'),'utf8');
+            setImmediate(()=>{try{fs.writeFileSync(selected,changed);}finally{modified.resolve();}});
+            return data;
+          }};
+      },
+      openSync(file,...args){const fd=fs.openSync(file,...args);if(file===selected)owned.add(fd);return fd;},
+      closeSync(fd){owned.delete(fd);return fs.closeSync(fd);},
+      fstatSync(fd,...args){const stat=fs.fstatSync(fd,...args);return owned.has(fd)?freeze(stat):stat;},
+      statSync(file,...args){const stat=fs.statSync(file,...args);return file===selected?freeze(stat):stat;},
+    }});
+    const f=fixture({readFile:reader});selected=f.project;
+    const original=Buffer.concat([projectBytes,Buffer.alloc(2*1024*1024,0x20)]);fs.writeFileSync(selected,original);
+    initial=fs.statSync(selected,{bigint:true});
+    const result=await f.workspace.open(selected);await modified.promise;
+    expect(result).toBeNull();
+    expect(f.authority.canRead(selected)).toBe(false);
+    expect(fs.readFileSync(selected).subarray(0,projectBytes.length).toString()).toContain('target');
+  });
+
+  it('讀取舊專案期間開始新開檔會撤銷舊讀取並釋放 handle',async()=>{
+    const gate=deferred(),started=deferred();let slow,oldHandle,readSignal;
+    const reader=createBoundProjectReader({fsModule:{...fs,...fs.promises,async open(file,...args){
+      const handle=await fs.promises.open(file,...args);
+      if(file!==slow) return handle;
+      return {stat:options=>handle.stat(options),close:()=>handle.close(),
+        async readFile(options){
+          oldHandle=handle;readSignal=options.signal;started.resolve();await gate.promise;
+          return handle.readFile(options);
+        }};
+    }}});
+    const f=fixture({readFile:reader});slow=f.project;
+    const newer=path.join(f.selected,'newer.subtool');fs.writeFileSync(newer,projectBytes);
+    const pending=f.workspace.open(slow);
+    try{
+      await started.promise;
+      expect((await f.workspace.open(newer))?.path).toBe(newer);
+      expect(readSignal.aborted).toBe(true);
+      expect(f.authority.canRead(slow)).toBe(false);
+    }finally{gate.resolve();}
+    expect(await pending).toBeNull();
+    expect(oldHandle.fd).toBe(-1);
+    expect(f.authority.canRead(newer)).toBe(true);
+  });
+
+  it('最後同步內容核對到授權之間不執行同程序的延後改寫',async()=>{
+    const changedDone=deferred();let selected,opened=0,scheduled=false,changed;
+    const owned=new Map();
+    const reader=createBoundProjectReader({fsModule:{...fs,...fs.promises,
+      openSync(file,...args){const fd=fs.openSync(file,...args);if(file===selected)owned.set(fd,++opened);return fd;},
+      closeSync(fd){owned.delete(fd);return fs.closeSync(fd);},
+      readSync(fd,...args){
+        const count=fs.readSync(fd,...args);
+        if(owned.get(fd)===1&&!scheduled){scheduled=true;setImmediate(()=>{fs.writeFileSync(selected,changed);changedDone.resolve();});}
+        return count;
+      },
+    }});
+    const f=fixture({readFile:reader});selected=f.project;
+    const original=Buffer.concat([projectBytes,Buffer.alloc(256*1024,0x20)]);fs.writeFileSync(selected,original);
+    changed=Buffer.from(original);changed.write('target',changed.indexOf('source'),'utf8');
+    const openedProject=await f.workspace.open(selected);
+    expect(openedProject?.path).toBe(selected);
+    expect(Buffer.from(openedProject.b64,'base64')).toEqual(original);
+    expect(fs.readFileSync(selected)).toEqual(original);
+    await changedDone.promise;
+    expect(fs.readFileSync(selected)).toEqual(changed);
+  });
+
+  it('專案暫存檔同步後遭同 inode 改寫，保留外部內容與原專案',async()=>{
+    let stage;
+    const writer=createAtomicProjectWriter({createToken:()=> 'owned',fsModule:{...fs,...fs.promises,
+      async open(file,...args){
+        if(args[0]==='r')return fs.promises.open(file,...args);
+        const handle=await fs.promises.open(file,...args);stage=file;
+        return {stat:options=>handle.stat(options),writeFile:bytes=>handle.writeFile(bytes),close:()=>handle.close(),
+          async sync(){await handle.sync();fs.writeFileSync(file,'external');}};
+      },
+    }});
+    const f=fixture({writeFile:writer});
+    await expect(writer(f.project,Buffer.from('intended'))).rejects.toMatchObject({code:'UNSAFE_PROJECT_OUTPUT'});
+    expect(fs.readFileSync(f.project)).toEqual(projectBytes);
+    expect(fs.readFileSync(stage,'utf8')).toBe('external');
+  });
+
+  it('專案部分寫入後發生錯誤且暫存遭改寫，不可清理外部內容',async()=>{
+    let stage;
+    const writer=createAtomicProjectWriter({createToken:()=> 'partial',fsModule:{...fs,...fs.promises,
+      async open(file,...args){
+        if(args[0]==='r')return fs.promises.open(file,...args);
+        const handle=await fs.promises.open(file,...args);stage=file;
+        return {stat:options=>handle.stat(options),close:()=>handle.close(),sync:()=>handle.sync(),
+          async writeFile(bytes){
+            await handle.writeFile(bytes.subarray(0,3));fs.writeFileSync(file,'external');
+            throw Object.assign(new Error('partial write failed'),{code:'EIO'});
+          }};
+      },
+    }});
+    const f=fixture({writeFile:writer});
+    await expect(writer(f.project,Buffer.from('intended'))).rejects.toThrow('partial write failed');
+    expect(fs.readFileSync(f.project)).toEqual(projectBytes);
+    expect(fs.readFileSync(stage,'utf8')).toBe('external');
   });
 
   it('真實讀取較舊專案等待時，較新開檔維持唯一授權',async()=>{
@@ -207,6 +393,7 @@ describe('專案根授權與真實 IPC',()=>{
   it('待發布的儲存遇到根目錄替換，保留替代目錄與原始專案內容',async()=>{
     const gate=deferred(),started=deferred();
     const writer=createAtomicProjectWriter({fsModule:{...fs,...fs.promises,async open(...args){
+      if(args[1]==='r')return fs.promises.open(...args);
       started.resolve();await gate.promise;return fs.promises.open(...args);
     }}});
     const f=fixture({readFile:createBoundProjectReader(),writeFile:writer});

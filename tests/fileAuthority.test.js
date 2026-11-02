@@ -211,9 +211,9 @@ describe('FileAuthority', () => {
     expect(main).toMatch(/ipcMain\.handle\('fs:fileURL',[\s\S]{0,180}localResourceServer\.urlFor/);
     expect(main).not.toMatch(/ipcMain\.handle\('fs:fileURL',[\s\S]{0,180}allowFileDir/);
     expect(localResource).toMatch(/urlFor\(file\)[\s\S]{0,180}fileAuthority\.canExposeFileURL/);
-    expect(main).toMatch(/createScreenshotOutput\(\{ fileAuthority, tempDir: TMP \}\)/);
+    expect(main).toMatch(/createScreenshotOutput\(\{ fileAuthority, tempDir: TMP, coordinator: fileCommitCoordinator \}\)/);
     expect(main).toMatch(/ipcMain\.handle\('fs:writeScreenshot',[\s\S]{0,180}screenshotOutput\.write/);
-    expect(screenshotOutput).toMatch(/function write\(file, b64\)[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);
+    expect(screenshotOutput).toMatch(/function write\(file, b64, token\)[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);
     expect(main).toMatch(/ipcMain\.handle\('mpv:screenshot',[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);
     expect(main).toMatch(/ipcMain\.handle\('mpv:launch',[\s\S]{0,180}requireReadablePath\('mpv:launch', src\)/);
     expect(main).toMatch(/cache:clearAll[\s\S]{0,180}mediaIntakeRuntime\.clearAll/);

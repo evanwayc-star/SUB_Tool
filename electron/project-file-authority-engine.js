@@ -14,6 +14,8 @@ const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const crypto = require('crypto');
+const { sameSnapshot, digestFile, digestFileSync } = require('./file-content-evidence');
+const { fileCommitCoordinator } = require('./file-commit-coordinator');
 const { PROJECT_FILE, collectProjectMediaPaths, parseProjectBuffer } = require('./file-authority');
 const { captureOutputAuthority } = require('./export-lease');
 const { encodeUTF16LE } = require('../shared/text-encoding.cjs');
@@ -234,23 +236,42 @@ function assertProjectRoot(root) {
 
 // 已選專案的 bytes 必須來自同一個開啟的檔案，且 commit 時路徑仍指向它。
 function createBoundProjectReader({ fsModule = { ...fs, ...fsp } } = {}) {
-  const sameSnapshot = (left, right) => !!left && !!right && left.isFile() && right.isFile()
-    && ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].every(field => left[field] === right[field]);
-  return async (file, { projectRoot } = {}) => {
+  return async (file, { projectRoot, signal } = {}) => {
     assertProjectRoot(projectRoot);
     let handle;
     try {
+      signal?.throwIfAborted();
       handle = await fsModule.open(file, 'r');
+      signal?.throwIfAborted();
       const before = await handle.stat({ bigint: true });
       if (!before.isFile()) throw new Error('專案路徑不是檔案');
-      const buffer = await handle.readFile();
+      const buffer = await handle.readFile({ signal });
+      signal?.throwIfAborted();
       const after = await handle.stat({ bigint: true });
       if (!sameSnapshot(before, after) || BigInt(buffer.length) !== after.size) throw new Error('專案讀取期間內容已變更');
+      // 避免大型專案一次同步雜湊阻塞主行程；等待期間仍可撤銷舊開檔。
+      const hash = crypto.createHash('sha256');
+      for (let offset = 0; offset < buffer.length; offset += 1024 * 1024) {
+        signal?.throwIfAborted();
+        hash.update(buffer.subarray(offset, offset + 1024 * 1024));
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const digest = hash.digest('hex');
       const isCurrent = () => {
-        try { assertProjectRoot(projectRoot); return sameSnapshot(after, fsModule.statSync(file, { bigint: true })); }
+        try {
+          signal?.throwIfAborted();
+          assertProjectRoot(projectRoot);
+          if (!sameSnapshot(after, fsModule.statSync(file, { bigint: true }))
+            || digestFileSync(fsModule, file, after) !== digest
+            || !sameSnapshot(after, fsModule.statSync(file, { bigint: true }))) return false;
+          assertProjectRoot(projectRoot);
+          return true;
+        }
         catch (error) { return false; }
       };
-      if (!isCurrent()) throw new Error('專案讀取期間路徑已變更');
+      // workspace performs this full-content check immediately before grant.
+      // Checking here too would hash the same project synchronously twice,
+      // and the subsequent handle close still leaves a gap before the grant.
       return { buffer, isCurrent };
     } finally { if (handle) await handle.close(); }
   };
@@ -330,55 +351,116 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
     await check();
     const name = path.basename(target);
     if (process.platform === 'win32' && name.includes(':')) throw unsafe();
-    return { root, target: path.join(current, name), check, checkSync, checkRootSync };
+    let destination = path.join(current, name);
+    // The file name itself can be a Windows 8.3 alias. Serializing only its
+    // parent leaves two writers of the same entry in different pending queues.
+    // Resolve an existing regular entry before queue admission, and publish to
+    // that canonical name even if an earlier write replaces its inode.
+    const existing = await statIfPresent(destination);
+    if (existing) {
+      if (!existing.isFile() || existing.isSymbolicLink()) throw unsafe();
+      const resolved = await fsModule.realpath(destination);
+      if (canonical(path.dirname(resolved)) !== canonical(current)) throw unsafe();
+      const resolvedStat = await statIfPresent(resolved);
+      const requestedStat = await statIfPresent(destination);
+      if (!resolvedStat?.isFile() || resolvedStat.isSymbolicLink()
+        || !requestedStat?.isFile() || requestedStat.isSymbolicLink()
+        || !sameFile(existing, resolvedStat) || !sameFile(existing, requestedStat)) throw unsafe();
+      await check();
+      destination = resolved;
+    }
+    return { root, target: destination, check, checkSync, checkRootSync };
   }
+  const destinationChanged = () => Object.assign(new Error('專案檔在儲存期間已變更，請另存新檔以保留目前內容'), { code: 'PROJECT_DESTINATION_CHANGED' });
   const checkTarget = async target => {
     const existing = await statIfPresent(target);
     if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw unsafe();
+    if (!existing) return null;
+    const content = await digestFile(fsModule, target, existing);
+    const after = await statIfPresent(target);
+    if (!sameSnapshot(existing, after) || content.size !== existing.size) throw destinationChanged();
+    return { stat: existing, digest: content.digest };
   };
-  const checkTargetSync = target => {
+  const checkTargetSync = (target, before) => {
     const existing = statIfPresentSync(target);
-    if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw unsafe();
+    if ((existing === null) !== (before === null)
+      || (existing && (!existing.isFile() || existing.isSymbolicLink()
+        || !sameSnapshot(existing, before.stat)))) throw destinationChanged();
+    if (existing) {
+      try {
+        if (digestFileSync(fsModule, target, before.stat) !== before.digest
+          || !sameSnapshot(statIfPresentSync(target), before.stat)) throw destinationChanged();
+      } catch (error) {
+        if (error.code === 'PROJECT_DESTINATION_CHANGED') throw error;
+        throw destinationChanged();
+      }
+    }
   };
   return function writeProject(projectFile, contents, { ensureParent = false, projectRoot = null } = {}) {
     const target = path.resolve(projectFile);
-    // Resolve aliases in call order without blocking main on synchronous path
-    // discovery. Different admitted files can still write concurrently.
-    const preparedResult = admission.then(() => prepareParents(target, ensureParent, projectRoot));
-    admission = preparedResult.catch(() => {});
-    return preparedResult.then(prepared => {
+    const bytes = Buffer.from(contents);
+    const contentDigest = crypto.createHash('sha256').update(bytes).digest('hex');
+    // Reserve the shared destination in call order before any slow path
+    // discovery or staging. Otherwise an older Project save can acquire the
+    // lock after a newer directory export and overwrite its accepted result.
+    return fileCommitCoordinator.withCommitTargets([target], () => {
+      // A backup may create missing parent folders. Do not start that work
+      // until the coordinator has finished resolving this very same target.
+      const preparedResult = admission.then(() => prepareParents(target, ensureParent, projectRoot));
+      admission = preparedResult.catch(() => {});
+      return preparedResult.then(prepared => {
       const key = canonical(prepared.target);
       const operation = (pending.get(key) || Promise.resolve()).then(async () => {
         await prepared.check();
-        await checkTarget(prepared.target);
+        // The previous same-target save has finished. Bind this transaction to
+        // the destination as it exists now, not to the earlier queue admission.
+        const destinationBefore = await checkTarget(prepared.target);
+        await prepared.check();
         // Stage at the selected root, so replacing a nested backup parent cannot
         // redirect the temporary file or make its cleanup touch another owner.
         const temporary = path.join(prepared.root, `${path.basename(target)}.${createToken()}.tmp`);
         let handle;
-        let temporaryOwner;
+        let temporaryOwner, writtenEvidence, completed, preserveTemporary = false;
         try {
           handle = await fsModule.open(temporary, 'wx');
           temporaryOwner = await handle.stat({ bigint: true });
           await prepared.check();
-          await handle.writeFile(contents);
+          await handle.writeFile(bytes);
+          writtenEvidence = await handle.stat({ bigint: true });
           await handle.sync();
+          completed = await handle.stat({ bigint: true });
           await handle.close();
           handle = null;
           await prepared.check();
-          // No await between the final ownership checks and publication: an
-          // earlier async stat result cannot certify a later directory object.
-          prepared.checkSync();
-          checkTargetSync(prepared.target);
-          const current = statIfPresentSync(temporary);
-          if (!current?.isFile() || current.isSymbolicLink() || !sameFile(current, temporaryOwner)) throw unsafe();
-          fsModule.renameSync(temporary, prepared.target);
+          // Serialize publication with alias discovery so an earlier atomic
+          // rename cannot change the target halfway through a later admission.
+          // Final checks and rename remain synchronous within this transaction.
+          const publish = admission.then(() => {
+            prepared.checkSync();
+            checkTargetSync(prepared.target, destinationBefore);
+            const current = statIfPresentSync(temporary);
+            let valid = false;
+            try {
+              valid = sameSnapshot(current, completed) && sameFile(current, temporaryOwner)
+                && digestFileSync(fsModule, temporary, completed) === contentDigest
+                && sameSnapshot(statIfPresentSync(temporary), completed);
+            } catch (_) { valid = false; }
+            if (!valid) { preserveTemporary = true; throw unsafe(); }
+            fsModule.renameSync(temporary, prepared.target);
+          });
+          admission = publish.catch(() => {});
+          await publish;
         } finally {
           if (handle) { try { await handle.close(); } catch (error) {} }
-          if (temporaryOwner) {
+          if (temporaryOwner && !preserveTemporary) {
             try {
               prepared.checkRootSync();
               const current = statIfPresentSync(temporary);
-              if (current?.isFile() && !current.isSymbolicLink() && sameFile(current, temporaryOwner)) fsModule.unlinkSync(temporary);
+              const evidence = completed || writtenEvidence || temporaryOwner;
+              if (current?.isFile() && !current.isSymbolicLink() && sameFile(current, temporaryOwner)
+                && (writtenEvidence || temporaryOwner.size === 0n) && sameSnapshot(current, evidence)
+                && (!writtenEvidence || digestFileSync(fsModule, temporary, evidence) === contentDigest)
+                && sameSnapshot(statIfPresentSync(temporary), evidence)) fsModule.unlinkSync(temporary);
             } catch (error) {}
           }
         }
@@ -388,6 +470,7 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
       });
       pending.set(key, tail);
       return operation;
+      });
     });
   };
 }
@@ -431,6 +514,7 @@ function createProjectWorkspace({
   let pendingStartupPath = null;
   let startupClaimed = false;
   let latestOpenGeneration = 0;
+  let openController = null;
   let committedOpenGeneration = 0;
   let currentProjectKey = null;
 
@@ -459,10 +543,10 @@ function createProjectWorkspace({
   // 身分只用來在目前受信清單內定位，不能以 renderer 的路徑擴張授權。
   const recentToken = item => crypto.createHash('sha256').update(recentPathKey(item.path)).digest('hex');
 
-  async function readProject(projectFile, root) {
+  async function readProject(projectFile, root, signal) {
     if (!isProjectPath(projectFile) || typeof readFile !== 'function') return null;
     try {
-      const result = await readFile(projectFile, { projectRoot: root });
+      const result = await readFile(projectFile, { projectRoot: root, signal });
       if (Buffer.isBuffer(result)) return { buffer: result, isCurrent: null };
       return Buffer.isBuffer(result?.buffer) && typeof result.isCurrent === 'function' ? result : null;
     } catch (error) {
@@ -483,21 +567,30 @@ function createProjectWorkspace({
 
   async function open(projectFile, options) {
     const generation = ++latestOpenGeneration;
-    let root = null;
-    if (typeof captureProjectRoot === 'function') {
-      try { root = captureProjectRoot(projectFile); assertProjectRoot(root); }
-      catch (error) { return null; }
+    openController?.abort();
+    const controller = new AbortController();
+    openController = controller;
+    try {
+      let root = null;
+      if (typeof captureProjectRoot === 'function') {
+        try { root = captureProjectRoot(projectFile); assertProjectRoot(root); }
+        catch (error) { return null; }
+      }
+      const result = await readProject(projectFile, root, controller.signal);
+      if (generation !== latestOpenGeneration || controller.signal.aborted || !result) return null;
+      if (result.isCurrent && !result.isCurrent()) return null;
+      return commitOpen(projectFile, result.buffer, options, root);
+    } finally {
+      if (openController === controller) openController = null;
     }
-    const result = await readProject(projectFile, root);
-    if (generation !== latestOpenGeneration) return null;
-    if (!result || (result.isCurrent && !result.isCurrent())) return null;
-    return commitOpen(projectFile, result.buffer, options, root);
   }
 
   function stageStartup(projectFile) {
     if (!isProjectPath(projectFile)) return false;
     pendingStartupPath = projectFile;
     latestOpenGeneration += 1;
+    openController?.abort();
+    openController = null;
     return true;
   }
 
@@ -592,13 +685,9 @@ function createProjectWorkspace({
   async function openRecent(token) {
     const list = recentList() || [];
     const item = typeof token === 'string' ? list.find(entry => recentToken(entry) === token) : null;
-    if (!item) return null;
-    const result = await open(item.path);
-    if (!result && await missingProbe(item.path)) {
-      const latest = recentList();
-      if (latest !== null) saveRecent(RecentProjects.removeRecent(latest, item.path));
-    }
-    return result;
+    // A missing path may be restored at any time, including immediately after
+    // an asynchronous stat. Retain the entry so the user can retry it.
+    return item ? open(item.path) : null;
   }
 
   function clearRecent() {

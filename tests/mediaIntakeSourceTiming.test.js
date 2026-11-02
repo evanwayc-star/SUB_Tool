@@ -72,11 +72,14 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
       const complete=await runtime.ingest({...request,needsProxy:false});
       const firstPcm=pcm(beginning.wave),laterPcm=pcm(later.wave),fullPcm=pcm(complete.wave);
       expect(firstPcm.length/4).toBe(6000);expect(laterPcm.length/4).toBe(6000);
-      expect(energy(firstPcm,.2,.8,440)).toBeGreaterThan(.08);
+      // Each sine source has 0.125 peak amplitude. Both are Mono, so the
+      // two-channel source mix contributes 0.0625 per frequency even while
+      // the later stream is still silent.
+      expect(energy(firstPcm,.2,.8,440)).toBeCloseTo(.0625,2);
       expect(energy(firstPcm,.2,.8,880)).toBeLessThan(.002);
-      expect(energy(firstPcm,1.1,1.4,880)).toBeGreaterThan(.08);
+      expect(energy(firstPcm,1.1,1.4,880)).toBeCloseTo(.0625,2);
       for(const frequency of [440,880]){
-        expect(energy(laterPcm,.2,1.2,frequency)).toBeGreaterThan(.08);
+        expect(energy(laterPcm,.2,1.2,frequency)).toBeCloseTo(.0625,2);
         expect(energy(laterPcm,.2,1.2,frequency)).toBeCloseTo(energy(fullPcm,1.7,2.7,frequency),3);
       }
       // Compare every interior PCM sample as well as spectral energy, not file existence.
@@ -322,7 +325,11 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
       expect(energy(first, 0.6, 0.9, 440)).toBeLessThan(0.002);
       expect(energy(second, 0.1, 0.8)).toBeLessThan(0.0002);
       expect(energy(second, 1.1, 1.8, 660)).toBeGreaterThan(0.08);
-      expect(energy(wave, 0.6, 0.9, 880)).toBeGreaterThan(0.08);
+      // The first Mono stream has amplitude 0.12 and the second is silent in
+      // this interval; source MIX still divides by both original channels.
+      expect(energy(wave, 0.6, 0.9, 880)).toBeCloseTo(0.06, 2);
+      expect(energy(wave, 0.6, 0.9, 440)).toBeLessThan(0.002);
+      expect(energy(wave, 0.6, 0.9, 660)).toBeLessThan(0.002);
       expect((await probe.describe(result.proxy)).duration).toBeCloseTo(2, 2);
     } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
   }, 30000);

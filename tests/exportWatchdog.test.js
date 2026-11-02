@@ -4,17 +4,20 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const {
-  spawnExportWatchdog,
+  spawnExportWatchdog: spawnWatchdog,
   recoverExportLeases,
 } = require('../electron/export-watchdog');
 const {
   acquireLease,
+  updateLease,
   releaseLease,
   leaseRoot,
   listLeases,
@@ -22,8 +25,15 @@ const {
   stageOutputPath,
   captureOutputDirectory,
   captureOutputAuthority,
+  captureDestinationEvidence,
+  prepareSharedLeaseRoot,
 } = require('../electron/export-lease');
-const authorityFor = outPath => captureOutputAuthority(outPath, captureOutputDirectory(path.dirname(outPath)));
+const authorityFor = outPath => {
+  const authority=captureDestinationEvidence(captureOutputAuthority(outPath,captureOutputDirectory(path.dirname(outPath))));
+  if(authority.destinationEvidence.identity!==null) authority.destinationEvidence={...authority.destinationEvidence,
+    version:2,sha256:crypto.createHash('sha256').update(fs.readFileSync(outPath)).digest('hex')};
+  return authority;
+};
 const stageIdentityFor = file => {
   const stat = fs.lstatSync(file, { bigint: true });
   return { dev: String(stat.dev), ino: String(stat.ino) };
@@ -88,6 +98,7 @@ describe('export watchdog', () => {
   let markerPath;
   let controllers;
   let nativeRuntimes;
+  const spawnExportWatchdog = (config, options) => spawnWatchdog({ ...prepareSharedLeaseRoot(tempDir), ...config }, options);
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-watchdog-'));
@@ -143,7 +154,7 @@ if (mode === 'success') {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function launch(mode, outPath = path.join(tempDir, `${mode}.mp4`), jobId = mode, extra = {}) {
+  function launch(mode, outPath = path.join(tempDir, `${mode}.mp4`), jobId = mode, extra = {}, options = {}) {
     const stderr = [];
     const controller = spawnExportWatchdog({
       ffmpegPath: process.execPath,
@@ -156,6 +167,7 @@ if (mode === 'success') {
       ...extra,
     }, {
       onStderr: chunk => stderr.push(Buffer.from(chunk)),
+      ...options,
     });
     // Some tests deliberately sever IPC or trigger a startup rejection.
     controller.ready.catch(() => {});
@@ -217,6 +229,24 @@ if (mode === 'success') {
     return { recover: resultModule.exports.recoverExportLeases, connections };
   }
 
+  function recoveryWithFilesystem(filesystem, onUpdate = null) {
+    const filename=path.resolve('electron/export-watchdog.js'),runtimeRequire=createRequire(filename);
+    const resultModule={exports:{}};
+    vm.runInNewContext(fs.readFileSync(filename,'utf8'),{
+      module:resultModule,exports:resultModule.exports,process,__dirname:path.dirname(filename),__filename:filename,
+      Buffer,setTimeout,clearTimeout,AbortController,
+      require:name=>{
+        if(name==='fs') return filesystem;
+        if(name==='./export-lease' && onUpdate) {
+          const actual=runtimeRequire(name);
+          return {...actual,updateLease:options=>onUpdate(actual.updateLease,options)};
+        }
+        return runtimeRequire(name);
+      },
+    },{filename});
+    return resultModule.exports.recoverExportLeases;
+  }
+
   function recoveryLease(pids = {}) {
     const outPath = path.join(tempDir, 'recover-transport.mp4');
     const token = 'recovery-transport-token';
@@ -231,7 +261,7 @@ if (mode === 'success') {
     return { outPath, token, stagePath, pipeName };
   }
 
-  async function launchNativeRuntime({ spawnFailure = false } = {}) {
+  async function launchNativeRuntime({ spawnFailure = false, onEvidence = null, onStageStat = null, onStageUnlink = null, onLeaseUpdate = null, deferReady = false } = {}) {
     // Exercise the public standalone owner with real leases, staging and pipe;
     // only the native process adapter is replaced to hold close after an error.
     const filename = path.resolve('electron/export-watchdog.js');
@@ -260,12 +290,14 @@ if (mode === 'success') {
       on: events.on.bind(events),
       disconnect() { this.connected = false; resolveDisconnected(); },
     };
+    let spawnCount = 0;
     const childProcess = { spawn(binary, args) {
       if (binary === 'taskkill') {
         const killer = new EventEmitter();
         setTimeout(() => killer.emit('error', new Error('taskkill failed')), 0);
         return killer;
       }
+      spawnCount++;
       if (!spawnFailure) fs.writeFileSync(args.at(-1), 'native writer still owns this');
       setTimeout(() => {
         if (spawnFailure) child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }));
@@ -277,7 +309,19 @@ if (mode === 'success') {
     vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
       module: resultModule,
       exports: resultModule.exports,
-      require: name => name === 'child_process' ? childProcess : runtimeRequire(name),
+      require: name => {
+        if(name === 'child_process') return childProcess;
+        if(name === 'fs' && (onStageStat || onStageUnlink)) return {...fs,
+          fstatSync(fd,...args){onStageStat?.(fd);return fs.fstatSync(fd,...args);},
+          unlinkSync(file,...args){onStageUnlink?.(file);return fs.unlinkSync(file,...args);}};
+        if(name === './export-lease' && (onEvidence || onLeaseUpdate)){
+          const actual=runtimeRequire(name);
+          return {...actual,
+            assertDeliveryDestinationEvidenceAsync:(...args)=>onEvidence ? onEvidence(actual.assertDeliveryDestinationEvidenceAsync,...args) : actual.assertDeliveryDestinationEvidenceAsync(...args),
+            updateLease:options=>onLeaseUpdate ? onLeaseUpdate(actual.updateLease,options) : actual.updateLease(options)};
+        }
+        return runtimeRequire(name);
+      },
       process: processAdapter,
       __dirname: path.dirname(filename),
       __filename: filename,
@@ -286,16 +330,162 @@ if (mode === 'success') {
     await resultModule.exports.runStandalone();
     const outPath = path.join(tempDir, 'held-native.mp4');
     fs.writeFileSync(outPath, 'previous completed delivery');
-    const runtime = { child, messages, disconnected, outPath, events };
+    const runtime = { child, messages, disconnected, outPath, events, spawnCount:()=>spawnCount };
     nativeRuntimes.push(runtime);
     events.emit('message', {
       type: 'start', ffmpegPath: 'fake-native-ffmpeg', args: [outPath],
       outPath, jobId: 'held-native', queueDir, outputAuthority: authorityFor(outPath),
+      ...prepareSharedLeaseRoot(tempDir),
     });
-    await waitFor(() => messages.some(message => message.type === (spawnFailure ? 'exit' : 'ready')),
+    if (!deferReady) await waitFor(() => messages.some(message => message.type === (spawnFailure ? 'exit' : 'ready')),
       'standalone native adapter did not start or fail');
     return runtime;
   }
+
+  it.each(['start','cancel'])('準備期間外部程序填入 stage，%s 時不能覆寫或清理外部內容', async action => {
+    let calls=0, entered, release;
+    const started=new Promise(resolve=>{entered=resolve;}), gate=new Promise(resolve=>{release=resolve;});
+    const runtime=await launchNativeRuntime({deferReady:true,onEvidence:async(actual,authority,options)=>{
+      if(++calls===2){entered();await gate;}
+      return actual(authority,options);
+    }});
+    try {
+      await started;
+      const stage=activeStage(), before=fs.statSync(stage,{bigint:true}), foreign=Buffer.from('外部填入的資料');
+      expect(before.size).toBe(0n);
+      const writer=spawnSync(process.execPath,['-e',"require('fs').writeFileSync(process.argv[1],Buffer.from(process.argv[2],'base64'))",stage,foreign.toString('base64')],
+        {encoding:'utf8',windowsHide:true});
+      expect(writer.status,writer.stderr).toBe(0);
+      const after=fs.statSync(stage,{bigint:true});
+      expect([after.dev,after.ino]).toEqual([before.dev,before.ino]);
+      if (action==='cancel') runtime.events.emit('message',{type:'stop',reason:'user-stop'});
+      release();
+      await waitFor(()=>runtime.messages.some(message=>['ready','exit'].includes(message.type)), 'watchdog 沒有回報結果');
+      if(runtime.spawnCount()) {runtime.child.exitCode=0;runtime.child.emit('close',0,null);}
+      await runtime.disconnected;
+      expect(runtime.spawnCount()).toBe(0);
+      expect(fs.readFileSync(stage)).toEqual(foreign);
+      expect(fs.readFileSync(runtime.outPath,'utf8')).toBe('previous completed delivery');
+      expect(listLeases(queueDir)).toMatchObject([{valid:true,owner:{retainedResult:{code:'DELIVERY_STAGE_CHANGED'}}}]);
+    } finally { release(); }
+  });
+
+  it('取得空預留的 handle 後立刻遭外部程序填入，仍保留內容與復原紀錄', async () => {
+    let altered=false, stage;
+    const foreign=Buffer.from('搶先填入預留檔的內容');
+    const runtime=await launchNativeRuntime({deferReady:true,onStageStat:()=>{
+      if(altered)return;
+      altered=true;stage=activeStage();
+      const writer=spawnSync(process.execPath,['-e',"require('fs').writeFileSync(process.argv[1],Buffer.from(process.argv[2],'base64'))",stage,foreign.toString('base64')],
+        {encoding:'utf8',windowsHide:true});
+      expect(writer.status,writer.stderr).toBe(0);
+    }});
+    await runtime.disconnected;
+    expect(altered).toBe(true);
+    expect(runtime.spawnCount()).toBe(0);
+    expect(fs.readFileSync(stage)).toEqual(foreign);
+    expect(fs.readFileSync(runtime.outPath,'utf8')).toBe('previous completed delivery');
+    expect(listLeases(queueDir)).toMatchObject([{valid:true,owner:{retainedResult:{code:'DELIVERY_STAGE_CHANGED'}}}]);
+    const recovery=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(recovery.warnings).toEqual([expect.objectContaining({code:'DELIVERY_STAGE_CHANGED'})]);
+    expect(fs.readFileSync(stage)).toEqual(foreign);
+  });
+
+  it.each(['writer-failed','spawn-failed'])('%s 清理首次刪除失敗後保留內容及可復原紀錄', async phase => {
+    let attempts=0, stage;
+    const foreign=Buffer.from('外部程序的新資料');
+    const runtime=await launchNativeRuntime({spawnFailure:phase==='spawn-failed',onStageUnlink:file=>{
+      if(file!==activeStage()) return;
+      attempts++;stage=file;
+      const writer=spawnSync(process.execPath,['-e',"require('fs').writeFileSync(process.argv[1],Buffer.from(process.argv[2],'base64'))",file,foreign.toString('base64')],
+        {encoding:'utf8',windowsHide:true});
+      expect(writer.status,writer.stderr).toBe(0);
+      throw Object.assign(new Error('unlink failed'),{code:'EIO'});
+    }});
+    if(phase==='writer-failed') {runtime.child.exitCode=1;runtime.child.emit('close',1,null);}
+    await runtime.disconnected;
+    expect(attempts).toBe(1);
+    expect(fs.readFileSync(stage)).toEqual(foreign);
+    expect(fs.readFileSync(runtime.outPath,'utf8')).toBe('previous completed delivery');
+    expect(listLeases(queueDir)).toMatchObject([{valid:true,owner:{retainedResult:{code:'PARTIAL_DELETE_UNCERTAIN'}}}]);
+    const recovery=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(recovery.warnings).toEqual([expect.objectContaining({code:'PARTIAL_DELETE_UNCERTAIN'})]);
+    expect(fs.readFileSync(stage)).toEqual(foreign);
+  });
+
+  it('啟動與清理皆失敗且保留紀錄寫入失敗時，同時回報三項原因並提示備份', async () => {
+    let stage;
+    const runtime=await launchNativeRuntime({spawnFailure:true,onStageUnlink:file=>{
+      if(file!==activeStage()) return;
+      stage=file;throw Object.assign(new Error('原本的刪除錯誤'),{code:'EIO'});
+    },onLeaseUpdate:(actual,options)=>{
+      if(options.retainedResult)throw Object.assign(new Error('保留紀錄無法寫入'),{code:'EACCES'});
+      return actual(options);
+    }});
+    await runtime.disconnected;
+    const error=runtime.messages.find(message=>message.type==='error'&&message.code==='PARTIAL_CLEANUP_FAILED');
+    expect(error.message).toContain('原本的刪除錯誤');
+    expect(error.message).toContain('spawn ENOENT');
+    expect(error.message).toContain('保留紀錄無法寫入');
+    expect(error.message).toContain('重新啟動前請先備份');
+    expect(fs.existsSync(stage)).toBe(true);expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('提交前非同步核對內容時收到停止，不發布半成品且釋放原輸出鎖',async()=>{
+    let calls=0,entered,release;
+    const started=new Promise(resolve=>{entered=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+    const runtime=await launchNativeRuntime({onEvidence:async (actual,authority,options)=>{
+      if(++calls===3){entered();await gate;options.signal.throwIfAborted();}
+      return actual(authority,options);
+    }});
+    runtime.child.exitCode=0;runtime.child.emit('close',0,null);
+    try{
+      await started;
+      runtime.events.emit('message',{type:'stop',reason:'user-stop'});
+      release();await runtime.disconnected;
+      expect(runtime.messages.filter(message=>message.type==='exit')).toEqual([expect.objectContaining({ok:false,
+        cleanup:expect.objectContaining({reason:'user-stop',released:true})})]);
+      expect(fs.readFileSync(runtime.outPath,'utf8')).toBe('previous completed delivery');
+      expect(listLeases(queueDir)).toEqual([]);
+    }finally{release();}
+  });
+
+  it.each(['rewrite','truncate','cancel'])('核對目的檔期間 stage 遭 %s 時保留新內容與輸出鎖',async action=>{
+    let calls=0,entered,release;
+    const started=new Promise(resolve=>{entered=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+    const runtime=await launchNativeRuntime({onEvidence:async (actual,authority,options)=>{
+      if(++calls===3){entered();await gate;options.signal.throwIfAborted();}
+      return actual(authority,options);
+    }});
+    const stage=activeStage(),original=fs.readFileSync(stage);
+    runtime.child.exitCode=0;runtime.child.emit('close',0,null);
+    try{
+      await started;
+      const before=fs.statSync(stage,{bigint:true});
+      const foreign=action==='truncate'?Buffer.alloc(0):Buffer.alloc(original.length,0x58);
+      // A separate process changes real bytes while the watchdog is awaiting
+      // destination evidence. Force a visible mtime across filesystems; this
+      // case tests metadata detection, not a same-metadata adversary.
+      const writer=spawnSync(process.execPath,['-e',
+        "const fs=require('fs');fs.writeFileSync(process.argv[1],Buffer.from(process.argv[2],'base64'));const t=new Date(Date.now()-120000);fs.utimesSync(process.argv[1],t,t)",
+        stage,foreign.toString('base64')],{encoding:'utf8',windowsHide:true});
+      expect(writer.status,writer.stderr).toBe(0);
+      const after=fs.statSync(stage,{bigint:true});
+      expect([after.dev,after.ino]).toEqual([before.dev,before.ino]);
+      if(action!=='truncate') expect(after.size).toBe(before.size);
+      if(action==='cancel') runtime.events.emit('message',{type:'stop',reason:'user-stop'});
+      release();await runtime.disconnected;
+      expect(runtime.messages.filter(message=>message.type==='exit')).toEqual([expect.objectContaining({ok:false,
+        cleanup:expect.objectContaining({retainedLease:true})})]);
+      expect(fs.readFileSync(runtime.outPath,'utf8')).toBe('previous completed delivery');
+      expect(fs.readFileSync(stage)).toEqual(foreign);
+      expect(listLeases(queueDir)).toMatchObject([{valid:true,owner:{retainedResult:{code:'DELIVERY_STAGE_CHANGED'}}}]);
+      const recovery=await recoverExportLeases(queueDir,{pipeAttempts:1});
+      expect(recovery.warnings).toEqual([expect.objectContaining({code:'DELIVERY_STAGE_CHANGED'})]);
+      expect(fs.readFileSync(stage)).toEqual(foreign);
+    }finally{release();}
+  });
+
 
   it.each([
     { stopFirst: false, closeCode: 0 },
@@ -349,9 +539,8 @@ if (mode === 'success') {
       const childProcess = require('node:child_process');
       const lease = require(${JSON.stringify(path.resolve('electron/export-lease.js'))});
       const update = lease.updateLease;
-      let updates = 0;
       lease.updateLease = options => {
-        if (++updates === 2) throw Object.assign(new Error('owner rename failed'), { code: 'EACCES' });
+        if (options.writerSpawnPending === false && options.ffmpegPid) throw Object.assign(new Error('owner rename failed'), { code: 'EACCES' });
         return update(options);
       };
       const child = new EventEmitter();
@@ -566,6 +755,42 @@ if (mode === 'success') {
     expect(listLeases(queueDir)).toEqual([]);
   });
 
+  it('入列證據擷取後目的檔出現，真正 watchdog 不啟動 writer 且釋放空 lease', async () => {
+    const outPath=path.join(tempDir,'queued-change.mp4');
+    const authority=authorityFor(outPath);
+    fs.writeFileSync(outPath,'newer external content');
+    const {controller}=launch('success',outPath,'queued-change',{outputAuthority:authority});
+    const result=await controller.completion;
+    expect(result).toMatchObject({ok:false,cleanup:{released:true,retainedLease:false}});
+    expect(fs.existsSync(markerPath)).toBe(false);
+    expect(fs.readFileSync(outPath,'utf8')).toBe('newer external content');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('入列目的檔未改變時真正 watchdog 可正常發布並釋放 lease', async () => {
+    const outPath=path.join(tempDir,'queued-unchanged.mp4');fs.writeFileSync(outPath,'existing output');
+    const authority=authorityFor(outPath);
+    const {controller}=launch('success',outPath,'queued-unchanged',{outputAuthority:authority});
+    expect(await controller.completion).toMatchObject({ok:true});
+    expect(fs.readFileSync(outPath,'utf8')).toBe('complete');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('入列目的檔內容改寫但 metadata 假設相同，真正 watchdog 不啟動 writer', async () => {
+    const outPath=path.join(tempDir,'same-metadata.mp4');
+    fs.writeFileSync(outPath,'original target');
+    const authority=authorityFor(outPath);
+    fs.writeFileSync(outPath,'modified target');
+    // 模擬 Windows 同 inode、同長度改寫的 metadata 碰撞；雜湊仍是確認前內容。
+    authority.destinationEvidence.identity=captureDestinationEvidence(captureOutputAuthority(outPath,captureOutputDirectory(tempDir))).destinationEvidence.identity;
+    const {controller}=launch('success',outPath,'same-metadata',{outputAuthority:authority});
+    const result=await controller.completion;
+    expect(result).toMatchObject({ok:false,cleanup:{released:true,retainedLease:false}});
+    expect(fs.existsSync(markerPath)).toBe(false);
+    expect(fs.readFileSync(outPath,'utf8')).toBe('modified target');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
   it.each(['commit', 'cancel'])('輸出父目錄被同名新目錄替換時 %s 不發布或清除外來檔，保留原 lease', async action => {
     const parent = path.join(tempDir, 'output'), moved = path.join(tempDir, 'previous-output');
     fs.mkdirSync(parent);
@@ -611,8 +836,9 @@ if (mode === 'success') {
     const gate = path.join(tempDir, 'stage-gate');
     fs.writeFileSync(fakeFfmpeg, `const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'owned encoded bytes');
       const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t);},10);`);
-    const { controller, outPath } = launch('wait');
+    const outPath = path.join(tempDir, 'wait.mp4');
     fs.writeFileSync(outPath, 'previous final');
+    const { controller } = launch('wait', outPath);
     await controller.ready;
     const stage = activeStage();
     await waitFor(() => fs.readFileSync(stage, 'utf8') === 'owned encoded bytes', 'writer 尚未完成 stage');
@@ -645,7 +871,7 @@ if (mode === 'success') {
     expect(listLeases(queueDir)).toEqual([]);
   });
 
-  it('編碼中所選 junction 改向不重算 lease key；保留原 stage 且不碰新目錄，恢復原選擇後可清理', async () => {
+  it('編碼中 junction 改向時保留原 stage，恢復目錄後仍需確認內容才能釋鎖', async () => {
     const target = path.join(tempDir, 'target'), outside = path.join(tempDir, 'outside'), alias = path.join(tempDir, 'selected');
     fs.mkdirSync(target); fs.mkdirSync(outside);
     const link = destination => fs.symlinkSync(destination, alias, process.platform === 'win32' ? 'junction' : 'dir');
@@ -666,8 +892,404 @@ if (mode === 'success') {
     expect(fs.readFileSync(foreignOutput, 'utf8')).toBe('foreign final');
     await waitForExit(controller.child);
     fs.unlinkSync(alias); link(target);
+    expect((await recoverExportLeases(queueDir)).warnings).toEqual([expect.objectContaining({code:'PARTIAL_DELETE_UNCERTAIN'})]);
+    expect(fs.readFileSync(stage,'utf8')).toBe('owned bytes');
+    const saved=path.join(tempDir,'junction-reviewed.mp4');fs.renameSync(stage,saved);
     expect((await recoverExportLeases(queueDir)).warnings).toEqual([]);
     expect(listLeases(queueDir)).toEqual([]); expect(fs.existsSync(stage)).toBe(false);
+    expect(fs.readFileSync(saved,'utf8')).toBe('owned bytes');expect(fs.readFileSync(foreignOutput,'utf8')).toBe('foreign final');
+  });
+
+  it.each(['created','replaced','modified','removed'])('編碼期間最終檔被 %s 時保留較新內容，不發布舊工作', async change => {
+    const outPath=path.join(tempDir,'delivery-race.mp4'),gate=path.join(tempDir,'delivery-race-gate');
+    if(change!=='created') fs.writeFileSync(outPath,'original final');
+    fs.writeFileSync(fakeFfmpeg,`const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'owned encoded bytes');
+      const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t);},10);`);
+    const {controller}=launch('wait',outPath,'destination-race');
+    await controller.ready;
+    const stage=activeStage();
+    await waitFor(()=>fs.readFileSync(stage,'utf8')==='owned encoded bytes','尚無實際 stage');
+    if(change==='replaced'||change==='removed') fs.unlinkSync(outPath);
+    const externalContent=change==='modified'?'changed final!':'new external final content';
+    if(change!=='removed') fs.writeFileSync(outPath,externalContent);
+    fs.writeFileSync(gate,'finish');
+    const result=await controller.completion;
+    expect(result).toMatchObject({ok:false,cleanup:{reason:'artifact-commit-failed',retainedLease:true}});
+    if(change==='removed') expect(fs.existsSync(outPath)).toBe(false);
+    else expect(fs.readFileSync(outPath,'utf8')).toBe(externalContent);
+    expect(fs.readFileSync(stage,'utf8')).toBe('owned encoded bytes');
+    expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('編碼後來源改指向目的檔時，真正 watchdog 保留原素材與已完成成品', async context => {
+    const outPath=path.join(tempDir,'source-target.mp4'),source=path.join(tempDir,'source-alias.mp4');
+    const gate=path.join(tempDir,'source-alias-gate');
+    fs.writeFileSync(outPath,'original destination and source');
+    fs.writeFileSync(source,'independent source');
+    // Confirm file symbolic links are available before starting the writer.
+    const link=path.join(tempDir,'link-check');
+    try { fs.symlinkSync(outPath,link,'file'); fs.unlinkSync(link); }
+    catch(error) { if(['EPERM','EACCES','ENOSYS'].includes(error.code)) context.skip('此環境無法建立檔案符號連結'); throw error; }
+    fs.writeFileSync(fakeFfmpeg,`const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'completed output');
+      const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t);},10);`);
+    const messages=[];
+    const {controller}=launch('wait',outPath,'source-alias-race',{sourcePaths:[source]},{onMessage:message=>messages.push(message)});
+    await controller.ready;
+    const stage=activeStage();
+    await waitFor(()=>fs.readFileSync(stage,'utf8')==='completed output','尚無實際 stage');
+    fs.unlinkSync(source);fs.symlinkSync(outPath,source,'file');
+    fs.writeFileSync(gate,'continue');
+    const result=await controller.completion;
+    expect(result).toMatchObject({ok:false,cleanup:{reason:'artifact-commit-failed',retainedLease:true}});
+    expect(messages).toContainEqual(expect.objectContaining({type:'error',code:'OUTPUT_OVERWRITES_SOURCE',
+      message:expect.stringMatching(/母素材.*指向輸出路徑.*暫存成品.*輸出鎖.*保留/)}));
+    expect(fs.readFileSync(outPath,'utf8')).toBe('original destination and source');
+    expect(fs.readFileSync(source,'utf8')).toBe('original destination and source');
+    expect(fs.readFileSync(stage,'utf8')).toBe('completed output');
+    expect(listLeases(queueDir)[0].owner.retainedResult.code).toBe('OUTPUT_OVERWRITES_SOURCE');
+    const recovery=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(recovery.recovered).toEqual([]);
+    expect(recovery.warnings).toContainEqual(expect.objectContaining({code:'OUTPUT_OVERWRITES_SOURCE',
+      message:expect.stringMatching(/母素材.*指向輸出路徑.*暫存成品.*輸出鎖.*保留/)}));
+    expect(fs.readFileSync(stage,'utf8')).toBe('completed output');
+  });
+
+  it('目的檔變更而保留的已完成成品，在重新啟動的自動復原後仍保留', async () => {
+    const outPath=path.join(tempDir,'retained-destination.mp4'),gate=path.join(tempDir,'retained-gate');
+    fs.writeFileSync(outPath,'original final');
+    fs.writeFileSync(fakeFfmpeg,`const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'completed output');
+      const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t);},10);`);
+    const {controller}=launch('wait',outPath,'retained-output');await controller.ready;
+    const stage=activeStage();await waitFor(()=>fs.readFileSync(stage,'utf8')==='completed output','成品尚未寫入');
+    fs.writeFileSync(outPath,'external newer output');fs.writeFileSync(gate,'finish');
+    expect(await controller.completion).toMatchObject({ok:false,cleanup:{retainedLease:true}});
+    await waitForExit(controller.child);
+    let recovery;
+    await waitFor(async()=>{
+      recovery=await recoverExportLeases(queueDir,{pipeAttempts:1});
+      return !recovery.warnings.some(warning=>warning.code==='EXPORT_PROCESS_RUNNING');
+    },'watchdog 尚未退出');
+    expect(recovery.warnings).toEqual(expect.arrayContaining([expect.objectContaining({code:'DELIVERY_DESTINATION_CHANGED'})]));
+    expect(fs.readFileSync(outPath,'utf8')).toBe('external newer output');
+    expect(fs.readFileSync(stage,'utf8')).toBe('completed output');
+    expect(listLeases(queueDir)).toHaveLength(1);
+    // 同名 stage 被外部替換時，不能把外來資料視為原本的保留成品。
+    const owned=stage+'.owned';fs.renameSync(stage,owned);fs.writeFileSync(stage,'foreign output');
+    const replaced=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(replaced.warnings).toEqual(expect.arrayContaining([expect.objectContaining({code:'UNSAFE_DELIVERY_STAGE'})]));
+    expect(fs.readFileSync(stage,'utf8')).toBe('foreign output');
+    fs.unlinkSync(stage);fs.renameSync(owned,stage);
+    // 使用者將已保留成品另存後，舊輸出鎖不應永久阻擋重新使用原路徑。
+    const saved=path.join(tempDir,'recovered-output.mp4');fs.renameSync(stage,saved);
+    const afterSave=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(afterSave.warnings).toEqual([]);
+    expect(fs.readFileSync(saved,'utf8')).toBe('completed output');
+    expect(fs.readFileSync(outPath,'utf8')).toBe('external newer output');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('外來的同名旁置標記不授予未登記的保留資格', async () => {
+    const outPath=path.join(tempDir,'plain-recovery.mp4'),token='plain-recovery';
+    const stage=stageOutputPath(outPath,token);fs.writeFileSync(stage,'owned partial');
+    const lease=acquireLease({queueDir,outPath,token,jobId:'plain-recovery',stagePath:stage,
+      outputStarted:true,outputAuthority:authorityFor(outPath)});
+    updateLease({queueDir,outPath,token,stageIdentity:stageIdentityFor(stage)});
+    const marker=stage+'.retained';fs.writeFileSync(marker,'foreign marker');
+    const result=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(result.warnings).toEqual([]);expect(result.recovered).toHaveLength(1);
+    expect(fs.existsSync(stage)).toBe(false);expect(fs.readFileSync(marker,'utf8')).toBe('foreign marker');
+    expect(listLeases(queueDir)).toEqual([]);expect(lease.owner.token).toBe(token);
+  });
+
+  it('保留收據只能由原 token 寫入，且必須綁定已登記的 stage 身分', () => {
+    const outPath=path.join(tempDir,'receipt.mp4'),token='receipt-owner',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(stage,'owned output');
+    acquireLease({queueDir,outPath,token,jobId:'receipt',stagePath:stage,outputStarted:true,outputAuthority:authorityFor(outPath)});
+    const identity=stageIdentityFor(stage);updateLease({queueDir,outPath,token,stageIdentity:identity});
+    const receipt={version:1,code:'DELIVERY_DESTINATION_CHANGED',stageIdentity:identity};
+    expect(()=>updateLease({queueDir,outPath,token:'foreign',retainedResult:receipt})).toThrow(expect.objectContaining({code:'LEASE_TOKEN_MISMATCH'}));
+    expect(()=>updateLease({queueDir,outPath,token,retainedResult:{...receipt,stageIdentity:{...identity,ino:'999999999'}}})).toThrow(expect.objectContaining({code:'LEASE_CORRUPT'}));
+    expect(listLeases(queueDir)[0].owner.retainedResult).toBeUndefined();
+    updateLease({queueDir,outPath,token,retainedResult:receipt});
+    expect(listLeases(queueDir)[0].owner.retainedResult).toEqual(receipt);
+  });
+
+  it.each(['retained','ordinary'])('%s 成品復原檢查途中輸出目錄消失時不能誤釋放鎖', async kind => {
+    const parent=path.join(tempDir,'output'),moved=path.join(tempDir,'output-moved');fs.mkdirSync(parent);
+    const outPath=path.join(parent,'delivery.mp4'),token='retained-parent-race';
+    const stage=stageOutputPath(outPath,token),saved=path.join(parent,'saved.mp4');
+    fs.writeFileSync(stage,'completed output');
+    acquireLease({queueDir,outPath,token,jobId:'retained-parent-race',stagePath:stage,
+      outputStarted:true,outputAuthority:authorityFor(outPath)});
+    const identity=stageIdentityFor(stage);
+    updateLease({queueDir,outPath,token,stageIdentity:identity});
+    if(kind==='retained') {
+      updateLease({queueDir,outPath,token,retainedResult:{version:1,code:'DELIVERY_DESTINATION_CHANGED',stageIdentity:identity}});
+      fs.renameSync(stage,saved);
+    }
+    const filename=path.resolve('electron/export-watchdog.js'),nativeRequire=createRequire(filename);
+    const actualLease=nativeRequire('./export-lease');let directoryChecks=0;
+    const testModule={exports:{}};
+    vm.runInNewContext(fs.readFileSync(filename,'utf8'),{
+      module:testModule,exports:testModule.exports,process,__dirname:path.dirname(filename),__filename:filename,
+      Buffer,setTimeout,clearTimeout,AbortController,
+      require:name=>name==='./export-lease'?{...actualLease,assertOutputAuthority(...args){
+        const result=actualLease.assertOutputAuthority(...args);
+        if(++directoryChecks===(kind==='retained'?2:1)) fs.renameSync(parent,moved);
+        return result;
+      }}:nativeRequire(name),
+    },{filename});
+    const result=await testModule.exports.recoverExportLeases(queueDir,{pipeAttempts:1,deleteAttempts:1});
+    expect(result.recovered).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(fs.readFileSync(path.join(moved,path.basename(kind==='retained'?saved:stage)),'utf8')).toBe('completed output');
+    expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('仍存活的 watchdog 已登記保留成品時，不發 cleanup 命令或刪除原始成品', async () => {
+    const outPath=path.join(tempDir,'retained-live.mp4'),token='retained-live',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(stage,'completed output');
+    acquireLease({queueDir,outPath,token,jobId:'retained-live',stagePath:stage,outputStarted:true,
+      outputAuthority:authorityFor(outPath),watchdogPid:process.pid,pipeName:'test-live-pipe'});
+    const identity=stageIdentityFor(stage);
+    updateLease({queueDir,outPath,token,stageIdentity:identity});
+    updateLease({queueDir,outPath,token,retainedResult:{version:1,code:'DELIVERY_DESTINATION_CHANGED',stageIdentity:identity}});
+    const transport=recoveryWithTransport(['cleanup'],()=>{throw new Error('不能觸發保留成品 cleanup');});
+    const result=await transport.recover(queueDir,{pipeAttempts:1});
+    expect(result.recovered).toEqual([]);
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.objectContaining({code:'DELIVERY_DESTINATION_CHANGED',message:expect.stringContaining(path.basename(stage))})]));
+    expect(transport.connections).toHaveLength(0);
+    expect(fs.readFileSync(stage,'utf8')).toBe('completed output');expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('重啟復原時整個輸出目錄不存在，不能把 ENOENT 當作 stage 已移走', async () => {
+    const parent=path.join(tempDir,'retained-directory'),moved=path.join(tempDir,'retained-moved');fs.mkdirSync(parent);
+    const outPath=path.join(parent,'delivery.mp4'),token='retained-dir',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(stage,'completed output');
+    acquireLease({queueDir,outPath,token,jobId:'retained-dir',stagePath:stage,outputStarted:true,outputAuthority:authorityFor(outPath)});
+    const identity=stageIdentityFor(stage);updateLease({queueDir,outPath,token,stageIdentity:identity});
+    updateLease({queueDir,outPath,token,retainedResult:{version:1,code:'DELIVERY_DESTINATION_CHANGED',stageIdentity:identity}});
+    fs.renameSync(parent,moved);
+    const result=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(result.recovered).toEqual([]);
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.objectContaining({code:'UNSAFE_DELIVERY_OUTPUT'})]));
+    expect(fs.readFileSync(path.join(moved,path.basename(stage)),'utf8')).toBe('completed output');
+    expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('尚未寫入的預留在檢查中失去輸出目錄時，不能以 stage 不存在為由釋放鎖', async () => {
+    const parent=path.join(tempDir,'reserved-directory'),moved=path.join(tempDir,'reserved-moved');fs.mkdirSync(parent);
+    const outPath=path.join(parent,'delivery.mp4'),token='reserved-dir',stage=stageOutputPath(outPath,token);
+    acquireLease({queueDir,outPath,token,jobId:'reserved-dir',stagePath:stage,outputStarted:false,outputAuthority:authorityFor(outPath)});
+    const filename=path.resolve('electron/export-watchdog.js'),nativeRequire=createRequire(filename);
+    const actualLease=nativeRequire('./export-lease');let movedOnce=false;const testModule={exports:{}};
+    vm.runInNewContext(fs.readFileSync(filename,'utf8'),{
+      module:testModule,exports:testModule.exports,process,__dirname:path.dirname(filename),__filename:filename,
+      Buffer,setTimeout,clearTimeout,AbortController,
+      require:name=>name==='./export-lease'?{...actualLease,assertOutputAuthority(...args){
+        const result=actualLease.assertOutputAuthority(...args);
+        if(!movedOnce){movedOnce=true;fs.renameSync(parent,moved);}
+        return result;
+      }}:nativeRequire(name),
+    },{filename});
+    const result=await testModule.exports.recoverExportLeases(queueDir,{pipeAttempts:1,deleteAttempts:1});
+    expect(result.recovered).toEqual([]);expect(result.warnings).toHaveLength(1);expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('復原刪除原 stage 成功後，即使輸出目錄被替換也不觸碰新檔', async () => {
+    const parent=path.join(tempDir,'unlink-directory'),moved=path.join(tempDir,'unlink-moved');fs.mkdirSync(parent);
+    const outPath=path.join(parent,'delivery.mp4'),token='unlink-parent',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(outPath,'original final');fs.writeFileSync(stage,'owned partial');
+    acquireLease({queueDir,outPath,token,jobId:'unlink-parent',stagePath:stage,outputStarted:true,outputAuthority:authorityFor(outPath)});
+    updateLease({queueDir,outPath,token,stageIdentity:stageIdentityFor(stage)});
+    let interposed=false;
+    const filesystem={...fs,unlinkSync(file){
+      fs.unlinkSync(file);
+      if(!interposed&&path.resolve(file).toLowerCase()===path.resolve(stage).toLowerCase()){
+        interposed=true;fs.renameSync(parent,moved);fs.mkdirSync(parent);
+        fs.writeFileSync(stage,'foreign stage');fs.writeFileSync(outPath,'foreign final');
+      }
+    }};
+    const result=await recoveryWithFilesystem(filesystem)(queueDir,{pipeAttempts:1,deleteAttempts:1});
+    expect(interposed).toBe(true);expect(result.warnings).toEqual([]);expect(result.recovered).toHaveLength(1);
+    expect(fs.readFileSync(stage,'utf8')).toBe('foreign stage');expect(fs.readFileSync(outPath,'utf8')).toBe('foreign final');
+    expect(fs.readFileSync(path.join(moved,'delivery.mp4'),'utf8')).toBe('original final');expect(listLeases(queueDir)).toEqual([]);
+  });
+
+  it('刪除回報 I/O 錯誤後若原 stage 被替換，重試保留外來內容與輸出鎖', async () => {
+    const outPath=path.join(tempDir,'unlink-error.mp4'),token='unlink-error',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(outPath,'original final');fs.writeFileSync(stage,'owned partial');
+    acquireLease({queueDir,outPath,token,jobId:'unlink-error',stagePath:stage,outputStarted:true,outputAuthority:authorityFor(outPath)});
+    updateLease({queueDir,outPath,token,stageIdentity:stageIdentityFor(stage)});
+    let interposed=false;
+    const filesystem={...fs,unlinkSync(file){
+      if(!interposed&&path.resolve(file).toLowerCase()===path.resolve(stage).toLowerCase()){
+        interposed=true;const removed=stage+'.removed';fs.renameSync(stage,removed);
+        fs.writeFileSync(stage,'foreign stage');fs.unlinkSync(removed);
+        throw Object.assign(new Error('unlink acknowledgement failed'),{code:'EIO'});
+      }
+      fs.unlinkSync(file);
+    }};
+    const result=await recoveryWithFilesystem(filesystem)(queueDir,{pipeAttempts:1,deleteAttempts:2,deleteRetryMs:0});
+    expect(interposed).toBe(true);expect(result.recovered).toEqual([]);
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.objectContaining({code:'PARTIAL_CLEANUP_FAILED'})]));
+    expect(fs.readFileSync(stage,'utf8')).toBe('foreign stage');expect(fs.readFileSync(outPath,'utf8')).toBe('original final');
+    expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it.each(['changed-metadata','same-metadata'])('刪除失敗後 stage 同 inode 遭外部程序改寫（%s），之後復原仍保留新內容與輸出鎖', async scenario => {
+    const outPath=path.join(tempDir,'unlink-rewrite.mp4'),token='unlink-rewrite',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(outPath,'original final');fs.writeFileSync(stage,'owned partial');
+    acquireLease({queueDir,outPath,token,jobId:'unlink-rewrite',stagePath:stage,outputStarted:true,outputAuthority:authorityFor(outPath)});
+    updateLease({queueDir,outPath,token,stageIdentity:stageIdentityFor(stage)});
+    let interposed=false, attempts=0;
+    const frozen=fs.lstatSync(stage,{bigint:true});
+    const filesystem={...fs,lstatSync(file,...args){
+      if(interposed&&scenario==='same-metadata'&&path.resolve(file).toLowerCase()===path.resolve(stage).toLowerCase()) return frozen;
+      return fs.lstatSync(file,...args);
+    },unlinkSync(file){
+      if(!interposed&&path.resolve(file).toLowerCase()===path.resolve(stage).toLowerCase()){
+        interposed=true;attempts++;
+        const foreign=scenario==='same-metadata'?'other partial':'foreign content from another process';
+        const result=spawnSync(process.execPath,['-e',"require('fs').writeFileSync(process.argv[1],process.argv[2])",stage,foreign]);
+        expect(result.status).toBe(0);
+        throw Object.assign(new Error('unlink failed'),{code:'EIO'});
+      }
+      if(path.resolve(file).toLowerCase()===path.resolve(stage).toLowerCase()) attempts++;
+      fs.unlinkSync(file);
+    }};
+    const result=await recoveryWithFilesystem(filesystem)(queueDir,{pipeAttempts:1,deleteAttempts:2,deleteRetryMs:0});
+    expect(interposed).toBe(true);expect(attempts).toBe(1);expect(result.recovered).toEqual([]);
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.objectContaining({code:'PARTIAL_CLEANUP_FAILED'})]));
+    expect(fs.readFileSync(stage,'utf8')).toBe(scenario==='same-metadata'?'other partial':'foreign content from another process');
+    expect(fs.readFileSync(outPath,'utf8')).toBe('original final');expect(listLeases(queueDir)).toHaveLength(1);
+    expect(listLeases(queueDir)[0].owner.retainedResult.code).toBe('PARTIAL_DELETE_UNCERTAIN');
+    const later=await recoverExportLeases(queueDir,{pipeAttempts:1,deleteAttempts:2,deleteRetryMs:0});
+    expect(later.recovered).toEqual([]);
+    expect(later.warnings).toEqual(expect.arrayContaining([expect.objectContaining({code:'PARTIAL_DELETE_UNCERTAIN'})]));
+    expect(fs.readFileSync(stage,'utf8')).toBe(scenario==='same-metadata'?'other partial':'foreign content from another process');
+  });
+
+  it('刪除失敗保留紀錄，使用者移走檔案後復原可釋放原鎖', async () => {
+    const outPath=path.join(tempDir,'unlink-locked.mp4'),token='unlink-locked',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(outPath,'原成品');fs.writeFileSync(stage,'待檢查暫存');
+    acquireLease({queueDir,outPath,token,jobId:'unlink-locked',stagePath:stage,outputStarted:true,outputAuthority:authorityFor(outPath)});
+    updateLease({queueDir,outPath,token,stageIdentity:stageIdentityFor(stage)});
+    let attempts=0;
+    const filesystem={...fs,unlinkSync(file){
+      if(file===stage){attempts++;throw Object.assign(new Error('sharing violation'),{code:'EBUSY'});}
+      fs.unlinkSync(file);
+    }};
+    const failed=await recoveryWithFilesystem(filesystem)(queueDir,{pipeAttempts:1,deleteAttempts:6,deleteRetryMs:0});
+    expect(attempts).toBe(1);expect(failed.recovered).toEqual([]);
+    expect(listLeases(queueDir)).toMatchObject([{valid:true,owner:{retainedResult:{code:'PARTIAL_DELETE_UNCERTAIN'}}}]);
+    const retained=path.join(tempDir,'已確認的暫存.mp4');fs.renameSync(stage,retained);
+    const recovered=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(recovered.warnings).toEqual([]);expect(recovered.recovered).toHaveLength(1);
+    expect(listLeases(queueDir)).toEqual([]);expect(fs.readFileSync(retained,'utf8')).toBe('待檢查暫存');
+    expect(fs.readFileSync(outPath,'utf8')).toBe('原成品');
+  });
+
+  it('刪除前身分檢查暫時失敗時不重試刪除同 inode 的外部更新', async () => {
+    const outPath=path.join(tempDir,'guard-error.mp4'),token='guard-error',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(stage,'owned partial');
+    acquireLease({queueDir,outPath,token,jobId:'guard-error',stagePath:stage,outputStarted:true,outputAuthority:authorityFor(outPath)});
+    updateLease({queueDir,outPath,token,stageIdentity:stageIdentityFor(stage)});
+    let failed=false, unlinks=0;
+    const filesystem={...fs,lstatSync(file,...args){
+      if(file===stage&&!failed){
+        failed=true;
+        const writer=spawnSync(process.execPath,['-e',"require('fs').writeFileSync(process.argv[1], 'other partial')",stage],{encoding:'utf8',windowsHide:true});
+        expect(writer.status,writer.stderr).toBe(0);
+        throw Object.assign(new Error('temporary stat error'),{code:'EIO'});
+      }
+      return fs.lstatSync(file,...args);
+    },unlinkSync(file,...args){if(file===stage)unlinks++;return fs.unlinkSync(file,...args);}};
+    const result=await recoveryWithFilesystem(filesystem)(queueDir,{pipeAttempts:1,deleteAttempts:2,deleteRetryMs:0});
+    expect(failed).toBe(true);expect(unlinks).toBe(0);expect(result.recovered).toEqual([]);
+    expect(fs.readFileSync(stage,'utf8')).toBe('other partial');
+    expect(listLeases(queueDir)).toMatchObject([{valid:true,owner:{retainedResult:{code:'PARTIAL_DELETE_UNCERTAIN'}}}]);
+    const later=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(later.warnings).toEqual([expect.objectContaining({code:'PARTIAL_DELETE_UNCERTAIN'})]);
+    expect(fs.readFileSync(stage,'utf8')).toBe('other partial');
+  });
+
+  it('無法保存刪除失敗的保留紀錄時，明確提示重啟前備份', async () => {
+    const outPath=path.join(tempDir,'retain-write-failed.mp4'),token='retain-write-failed',stage=stageOutputPath(outPath,token);
+    fs.writeFileSync(stage,'待備份內容');
+    acquireLease({queueDir,outPath,token,jobId:'retain-write-failed',stagePath:stage,outputStarted:true,outputAuthority:authorityFor(outPath)});
+    updateLease({queueDir,outPath,token,stageIdentity:stageIdentityFor(stage)});
+    const filesystem={...fs,unlinkSync(file){
+      if(file===stage)throw Object.assign(new Error('unlink failed'),{code:'EIO'});
+      fs.unlinkSync(file);
+    }};
+    const recovery=recoveryWithFilesystem(filesystem,(actual,options)=>{
+      if(options.retainedResult)throw Object.assign(new Error('receipt failed'),{code:'EIO'});
+      return actual(options);
+    });
+    const result=await recovery(queueDir,{pipeAttempts:1,deleteAttempts:2,deleteRetryMs:0});
+    expect(result.recovered).toEqual([]);
+    expect(result.warnings).toEqual([expect.objectContaining({code:'PARTIAL_CLEANUP_FAILED',message:expect.stringContaining('重新啟動前請先備份')})]);
+    expect(fs.readFileSync(stage,'utf8')).toBe('待備份內容');expect(listLeases(queueDir)).toHaveLength(1);
+  });
+
+  it('成品完成後母素材無法查證時，真 watchdog 保存 stage 與 lease，復原不刪除', async () => {
+    const outPath=path.join(tempDir,'unverifiable-source.mp4'),source=path.join(tempDir,'mother.mov');
+    const gate=path.join(tempDir,'unverifiable-source-gate'),flag=path.join(tempDir,'deny-source');
+    const shim=path.join(tempDir,'deny-source.cjs');
+    fs.writeFileSync(outPath,'existing output');fs.writeFileSync(source,'original source');
+    fs.writeFileSync(shim,`const fs=require('fs'),path=require('path'),original=fs.lstatSync;
+      fs.lstatSync=function(file,...args){
+        if(path.resolve(String(file)).toLowerCase()===${JSON.stringify(source.toLowerCase())} && fs.existsSync(${JSON.stringify(flag)})){
+          const error=new Error('source unavailable');error.code='EACCES';throw error;
+        }
+        return original.call(this,file,...args);
+      };`);
+    fs.writeFileSync(fakeFfmpeg,`const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'completed output');
+      const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t);},10);`);
+    const messages=[],controller=spawnExportWatchdog({ffmpegPath:process.execPath,args:[fakeFfmpeg,'wait',markerPath,outPath],
+      cwd:tempDir,outPath,sourcePaths:[source],outputAuthority:authorityFor(outPath),jobId:'unverifiable-source',queueDir},{
+      env:{NODE_OPTIONS:`${process.env.NODE_OPTIONS||''} --require="${shim.replace(/\\/g,'/')}"`.trim()},onMessage:message=>messages.push(message),
+    });
+    controller.ready.catch(()=>{});controller.completion.catch(()=>{});controllers.push(controller);
+    await controller.ready;
+    const stage=activeStage();await waitFor(()=>fs.readFileSync(stage,'utf8')==='completed output','成品尚未寫入');
+    fs.writeFileSync(flag,'deny');fs.writeFileSync(gate,'finish');
+    expect(await controller.completion).toMatchObject({ok:false,cleanup:{reason:'artifact-commit-failed',retainedLease:true}});
+    expect(messages).toContainEqual(expect.objectContaining({type:'error',code:'DELIVERY_DESTINATION_UNVERIFIABLE'}));
+    expect(fs.readFileSync(source,'utf8')).toBe('original source');
+    expect(fs.readFileSync(outPath,'utf8')).toBe('existing output');
+    expect(fs.readFileSync(stage,'utf8')).toBe('completed output');
+    expect(listLeases(queueDir)[0].owner.retainedResult.code).toBe('DELIVERY_DESTINATION_UNVERIFIABLE');
+    const recovery=await recoverExportLeases(queueDir,{pipeAttempts:1});
+    expect(recovery.recovered).toEqual([]);
+    expect(recovery.warnings).toContainEqual(expect.objectContaining({code:'DELIVERY_DESTINATION_UNVERIFIABLE'}));
+    expect(fs.readFileSync(stage,'utf8')).toBe('completed output');
+  });
+
+  it('無法儲存保留收據時立即提示重啟前備份，不假稱已可持續保留', async () => {
+    const outPath=path.join(tempDir,'receipt-failure.mp4'),gate=path.join(tempDir,'receipt-failure-gate');
+    const shim=path.join(tempDir,'deny-retention.cjs');
+    fs.writeFileSync(shim,`const fs=require('fs'),original=fs.renameSync;fs.renameSync=function(src,dst){
+      if(String(src).includes('.owner.')&&fs.readFileSync(src,'utf8').includes('"retainedResult"')){
+        const error=new Error('receipt denied');error.code='EACCES';throw error;
+      }return original.apply(this,arguments);};`);
+    fs.writeFileSync(outPath,'original final');
+    fs.writeFileSync(fakeFfmpeg,`const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'completed output');
+      const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t);},10);`);
+    const messages=[],controller=spawnExportWatchdog({ffmpegPath:process.execPath,args:[fakeFfmpeg,'wait',markerPath,outPath],
+      cwd:tempDir,outPath,outputAuthority:authorityFor(outPath),jobId:'receipt-failure',queueDir},{
+      env:{NODE_OPTIONS:`${process.env.NODE_OPTIONS||''} --require="${shim.replace(/\\/g,'/')}"`.trim()},onMessage:message=>messages.push(message),
+    });
+    controller.ready.catch(()=>{});controller.completion.catch(()=>{});controllers.push(controller);
+    await controller.ready;const stage=activeStage();await waitFor(()=>fs.readFileSync(stage,'utf8')==='completed output','成品尚未寫入');
+    fs.writeFileSync(outPath,'external newer output');fs.writeFileSync(gate,'finish');
+    const result=await controller.completion;
+    expect(result).toMatchObject({ok:false,cleanup:{retainedLease:true,retentionRecordError:{code:'EACCES'}}});
+    expect(messages).toContainEqual(expect.objectContaining({type:'error',code:'DELIVERY_DESTINATION_CHANGED',message:expect.stringContaining('重新啟動前請先備份')}));
+    expect(fs.readFileSync(stage,'utf8')).toBe('completed output');
+    expect(fs.readFileSync(outPath,'utf8')).toBe('external newer output');
+    expect(listLeases(queueDir)[0].owner.retainedResult).toBeUndefined();
   });
 
   it('拒絕最後參數不是輸出路徑的工作，不能錯替其他參數而覆蓋正式檔', () => {
@@ -864,18 +1486,21 @@ if (mode === 'success') {
 
   it('recover 找不到 owner pipe 且沒有存活程序時刪除半成品', async () => {
     const outPath = path.join(tempDir, 'stale.mp4');
-    fs.writeFileSync(outPath, 'partial', 'utf8');
+    const token = 'stale-token', stage = stageOutputPath(outPath, token);
+    fs.writeFileSync(outPath, 'existing final', 'utf8');
+    fs.writeFileSync(stage, 'partial', 'utf8');
     acquireLease({
       queueDir,
       outPath,
       jobId: 'stale',
       outputAuthority: authorityFor(outPath),
-      token: 'stale-token',
+      token, stagePath: stage, outputStarted: true,
       watchdogPid: null,
       pipeName: process.platform === 'win32'
         ? '\\\\.\\pipe\\subtool-export-does-not-exist'
         : path.join(tempDir, 'does-not-exist.sock'),
     });
+    updateLease({ queueDir, outPath, token, stageIdentity: stageIdentityFor(stage) });
 
     const recovery = await recoverExportLeases(queueDir, {
       pipeAttempts: 2,
@@ -887,7 +1512,8 @@ if (mode === 'success') {
     expect(recovery.recovered).toEqual([
       expect.objectContaining({ outPath: normalizeOutputPath(outPath), mode: 'stale' }),
     ]);
-    expect(fs.existsSync(outPath)).toBe(false);
+    expect(fs.existsSync(stage)).toBe(false);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('existing final');
     expect(listLeases(queueDir)).toEqual([]);
   });
 
@@ -973,6 +1599,32 @@ if (mode === 'success') {
     expect(listLeases(queueDir)).toEqual([]);
   });
 
+  it.each([true, undefined])('具備目錄授權但缺少 stage 的舊 lease（outputStarted=%s）不能刪目的檔', async outputStarted => {
+    const outPath = path.join(tempDir, 'unproven-final.mp4');
+    const original = Buffer.from('使用者既有交付成品');
+    fs.writeFileSync(outPath, original);
+    const lease = acquireLease({ queueDir, outPath, jobId: 'unproven-final', token: 'unproven-final',
+      outputAuthority: authorityFor(outPath), ...(outputStarted === undefined ? {} : { outputStarted }) });
+    const recovery = await recoverExportLeases(queueDir, { pipeAttempts: 1 });
+    expect(recovery.recovered).toEqual([]);
+    expect(recovery.warnings).toEqual([expect.objectContaining({ code: 'OUTPUT_AUTHORITY_MISSING',
+      message: expect.stringContaining('原目錄或暫存成品身分') })]);
+    expect(fs.readFileSync(outPath)).toEqual(original);
+    expect(listLeases(queueDir)).toEqual([expect.objectContaining({ valid: true, key: lease.key })]);
+  });
+
+  it('可證明尚未啟動輸出的舊 lease 即使缺少 stage 也可安全釋放，保留既有目的檔', async () => {
+    const outPath = path.join(tempDir, 'unused-final.mp4');
+    fs.writeFileSync(outPath, 'existing final');
+    acquireLease({ queueDir, outPath, jobId: 'unused-final', token: 'unused-final',
+      outputAuthority: authorityFor(outPath), outputStarted: false });
+    const recovery = await recoverExportLeases(queueDir, { pipeAttempts: 1 });
+    expect(recovery.warnings).toEqual([]);
+    expect(recovery.recovered).toHaveLength(1);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('existing final');
+    expect(listLeases(queueDir)).toEqual([]);
+  });
+
   it('成品已原子提交但 watchdog 尚未釋放 lease 時，復原不可刪新成品', async () => {
     const outPath = path.join(tempDir, 'committed-existing.mp4');
     const token = 'committed-stage-token';
@@ -1017,17 +1669,26 @@ if (mode === 'success') {
 
   it('半成品刪除失敗時必須 fail closed 保留 lease', async () => {
     const outPath = path.join(tempDir, 'cannot-unlink-as-file.mp4');
-    fs.mkdirSync(outPath);
+    const token = 'delete-failure-token', stage = stageOutputPath(outPath, token);
+    fs.writeFileSync(outPath, 'existing final');
+    fs.writeFileSync(stage, 'owned partial');
     acquireLease({
       queueDir,
       outPath,
       jobId: 'delete-failure',
       outputAuthority: authorityFor(outPath),
-      token: 'delete-failure-token',
+      token, stagePath: stage, outputStarted: true,
       pipeName: null,
     });
+    updateLease({ queueDir, outPath, token, stageIdentity: stageIdentityFor(stage) });
 
-    const recovery = await recoverExportLeases(queueDir, {
+    const filesystem = { ...fs, unlinkSync(file) {
+      if (path.resolve(file).toLowerCase() === path.resolve(stage).toLowerCase()) {
+        throw Object.assign(new Error('拒絕刪除半成品'), { code: 'EACCES' });
+      }
+      return fs.unlinkSync(file);
+    } };
+    const recovery = await recoveryWithFilesystem(filesystem)(queueDir, {
       deleteAttempts: 1,
       deleteRetryMs: 0,
     });
@@ -1039,11 +1700,12 @@ if (mode === 'success') {
         outPath: normalizeOutputPath(outPath),
       }),
     ]);
-    expect(fs.existsSync(outPath)).toBe(true);
+    expect(fs.readFileSync(outPath, 'utf8')).toBe('existing final');
+    expect(fs.readFileSync(stage, 'utf8')).toBe('owned partial');
     expect(listLeases(queueDir)).toHaveLength(1);
   });
 
-  it.each(['directory', 'junction', 'stage'])('重啟 recovery 遇 %s 身分替換保留 foreign bytes 與可辨識 lease，原 owner 回來後才清理', async kind => {
+  it.each(['directory', 'junction', 'stage'])('重啟 recovery 遇 %s 身分替換，還原後仍須由使用者確認暫存內容', async kind => {
     const parent = path.join(tempDir, 'output'), moved = path.join(tempDir, 'moved'), foreign = path.join(tempDir, 'foreign');
     fs.mkdirSync(parent); fs.mkdirSync(foreign);
     const outPath = path.join(parent, 'delivery.mp4'), token = 'identity-recovery';
@@ -1065,8 +1727,12 @@ if (mode === 'success') {
     expect(listLeases(queueDir)).toEqual([expect.objectContaining({ valid: true, key: lease.key })]);
     if (kind === 'stage') { fs.unlinkSync(stagePath); fs.renameSync(stagePath + '.owned', stagePath); }
     else { if (kind === 'junction') fs.unlinkSync(parent); else fs.renameSync(parent, path.join(tempDir, 'foreign-retained')); fs.renameSync(moved, parent); }
+    expect((await recoverExportLeases(queueDir)).warnings).toEqual([expect.objectContaining({code:'PARTIAL_DELETE_UNCERTAIN'})]);
+    expect(fs.readFileSync(stagePath,'utf8')).toBe('owned partial');
+    const saved=path.join(tempDir,`reviewed-${kind}.mp4`);fs.renameSync(stagePath,saved);
     expect((await recoverExportLeases(queueDir)).warnings).toEqual([]);
     expect(fs.existsSync(stagePath)).toBe(false); expect(listLeases(queueDir)).toEqual([]);
+    expect(fs.readFileSync(saved,'utf8')).toBe('owned partial');
   });
 
   it.each(['started', 'stage', 'reservation'])('舊 lease %s 不把現有檔案當成歷史授權', async kind => {

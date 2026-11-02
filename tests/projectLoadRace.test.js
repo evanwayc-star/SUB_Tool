@@ -19,6 +19,8 @@ const uiMock = vi.hoisted(() => ({
   closeModal: vi.fn(),
   showToast: vi.fn(),
   setStatus: vi.fn(),
+  closeMenus: vi.fn(),
+  syncMenuOverlay: vi.fn(),
 }));
 
 vi.mock('../src/media.js', () => ({ Media: mediaMock }));
@@ -406,6 +408,26 @@ describe('project load transactions', () => {
     expect(State.cues.map(c=>c.text)).toEqual(['B']);
   });
 
+  it('最近清單舊讀取於較新開啟意圖後失敗，不顯示過期錯誤', async () => {
+    const old=deferred(), requested=deferred();
+    desk.recentProjects=vi.fn(async()=>[{token:'old',name:'舊專案',path:'C:/old.subtool',missing:false}]);
+    desk.openRecentProject=vi.fn(()=>{requested.resolve();return old.promise;});
+    document.body.insertAdjacentHTML('beforeend','<div id="recentItems"></div>');
+    uiMock.showToast.mockClear();
+    const {renderRecentMenu}=await import('../src/recent-projects.js');
+    await renderRecentMenu();
+    const spy=vi.spyOn(Project,'open');
+    try {
+      document.querySelector('#recentItems button').click();
+      await requested.promise;
+      await expect(Project.open(async()=>null)).resolves.toBe(false);
+      old.resolve(null);
+      await expect(spy.mock.results[0].value).resolves.toBe(false);
+      expect(uiMock.showToast).not.toHaveBeenCalled();
+      expect(desk.recentProjects).toHaveBeenCalledTimes(1);
+    } finally { old.resolve(null); spy.mockRestore(); }
+  });
+
   it('目前 reader 的錯誤仍交給原入口顯示', async () => {
     await expect(Project.open(async()=>{throw new Error('讀檔失敗');})).rejects.toThrow('讀檔失敗');
     expect(mediaMock.reset).not.toHaveBeenCalled();
@@ -644,6 +666,47 @@ describe('project load transactions', () => {
     expect(mediaMock.reset).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['stat','relink'])('較新專案取代後，舊自動重連在 %s 回覆後不再掃描其餘素材',async stage=>{
+    const gate=deferred(),started=deferred();
+    desk.stat.mockImplementation(async file=>{
+      if(stage==='stat'&&file==='C:/audio/A.wav'){started.resolve();return gate.promise;}
+      return {exists:false};
+    });
+    desk.findRelinkTarget=vi.fn(async(_project,file)=>{
+      if(stage==='relink'&&file==='C:/audio/A.wav'){started.resolve();return gate.promise;}
+      return null;
+    });
+    const oldData={...projectData('A',''),media:{},clips:[],externalAudioSources:[
+      {audioSourceId:'a',path:'C:/audio/A.wav'}, {audioSourceId:'b',path:'C:/audio/B.wav'}]};
+    const newData={...projectData('B',''),media:{},clips:[]};
+    const old=Project.loadDesktop({path:'C:/projects/A.subtool',b64:projectB64(oldData)});
+    await started.promise;
+    const next=Project.loadDesktop({path:'C:/projects/B.subtool',b64:projectB64(newData)});
+    gate.resolve(stage==='stat'?{exists:false}:'C:/replacement.wav');
+    await Promise.all([old,next]);
+    expect(desk.stat.mock.calls.map(call=>call[0])).toEqual(['C:/audio/A.wav']);
+    expect(desk.findRelinkTarget).toHaveBeenCalledTimes(stage==='relink'?1:0);
+    expect(State.cues.map(cue=>cue.text)).toEqual(['B']);
+  });
+
+  it.each(['stat','relink'])('同一載入工作遇到 %s 同步錯誤仍繼續嘗試其他素材',async stage=>{
+    desk.stat.mockImplementation(file=>{
+      if(stage==='stat'&&file==='C:/image/A.png') throw new Error('temporary stat error');
+      return Promise.resolve({exists:false});
+    });
+    desk.findRelinkTarget=vi.fn((_project,file)=>{
+      if(stage==='relink'&&file==='C:/image/A.png') throw new Error('temporary relink error');
+      return Promise.resolve(null);
+    });
+    const data={...projectData('A',''),media:{},clips:[
+      {type:'image',path:'C:/image/A.png',dur:1,in:0,out:1,offset:0,vtrack:0},
+      {type:'image',path:'C:/image/B.png',dur:1,in:0,out:1,offset:1,vtrack:0}]};
+    await Project.loadDesktop({path:'C:/projects/A.subtool',b64:projectB64(data)});
+    expect(desk.stat.mock.calls.map(call=>call[0])).toEqual(['C:/image/A.png','C:/image/B.png']);
+    expect(desk.findRelinkTarget).toHaveBeenCalledWith('C:/projects/A.subtool','C:/image/B.png');
+    expect(State.cues.map(cue=>cue.text)).toEqual(['A']);
+  });
+
   it('marks auto-relinked media paths unsaved until the new paths reach the project file', async () => {
     const oldPath = 'C:/media/A.mov';
     const newPath = 'C:/projects/media/A.mov';
@@ -699,6 +762,45 @@ describe('project load transactions', () => {
       null,
       expect.any(Function),
     );
+  });
+
+  it('逐筆復原外部音訊期間刪除已交接來源，存檔不得從 pending 補回', async () => {
+    const second = deferred(), live = [];
+    desk.stat.mockResolvedValue({ exists: true });
+    desk.writeProject = vi.fn(async path => path);
+    mediaMock.externalAudio.list.mockImplementation(() => live);
+    mediaMock.restoreExternalAudioSource.mockImplementation(async source => {
+      if (source.audioSourceId === 'audio-B') await second.promise;
+      const asset = { ...source, id: source.audioSourceId };
+      live.push(asset);
+      State.externalAudioState = live.map(item => ({ ...item }));
+      return asset;
+    });
+    const sources = ['A', 'B'].map(name => ({
+      audioSourceId: `audio-${name}`, name, path: `C:/audio/${name}.wav`,
+      duration: 8, in: 0, out: 8, offset: 0,
+    }));
+    const data = { app: 'SUB Tool', version: 3, media: {}, duration: 8, fps: 25,
+      tracks: [], cues: [], notes: [], clips: [], externalAudioSources: sources };
+    const loading = Project.loadDesktop({ path: 'C:/projects/audio.subtool', b64: projectB64(data) });
+    try {
+      await vi.waitFor(() => expect(mediaMock.restoreExternalAudioSource).toHaveBeenCalledTimes(2));
+      expect(live.map(source => source.audioSourceId)).toEqual(['audio-A']);
+      live.splice(0, 1);
+      State.externalAudioState = [];
+      History.record('刪除已復原的外部音訊');
+      expect(History.stack[History.hi].snap.externalAudioState.map(source => source.audioSourceId)).toEqual(['audio-B']);
+      await Project.save();
+      const saved = JSON.parse(Buffer.from(desk.writeProject.mock.calls[0][1], 'base64').subarray(2).toString('utf16le'));
+      expect(saved.externalAudioSources.map(source => source.audioSourceId)).toEqual(['audio-B']);
+      second.resolve();
+      await loading;
+      expect(live.map(source => source.audioSourceId)).toEqual(['audio-B']);
+      expect(isProjectDirty()).toBe(false);
+    } finally {
+      second.resolve();
+      await loading;
+    }
   });
 
   it('serializes a newer project behind an in-flight media load and only finalizes the winner', async () => {
@@ -989,5 +1091,71 @@ describe('project load transactions', () => {
     await Promise.all([loadingA, startingNew]);
     expect(mediaMock.reset).not.toHaveBeenCalled();
     expect(State.cues).toEqual([]);
+  });
+
+  it('開新專案準備期間取消時，原專案尚未重連的素材仍可完整存檔', async () => {
+    desk.stat.mockResolvedValue({exists:false});
+    const data=projectData('Offline','C:/media/offline.mov');
+    data.externalAudioSources=[{audioSourceId:'offline-audio',path:'C:/media/offline.wav',duration:20,in:0,out:20,offset:0}];
+    await Project.loadDesktop({path:'C:/projects/offline.subtool',b64:projectB64(data)});
+    expect(Project.unrestoredClips()).toHaveLength(1);
+    expect(Project.pendingMediaRelink()).toBeTruthy();
+    const started=deferred(),release=deferred();
+    const starting=Project.startNewProject(async()=>{started.resolve();await release.promise;return false;});
+    await started.promise;
+    State.cues[0].text='準備期間保留的編輯';History.record('準備期間編輯');
+    release.resolve();expect(await starting).toBe(false);
+    expect(State.cues[0].text).toBe('準備期間保留的編輯');
+    expect(Project.unrestoredClips()).toHaveLength(1);
+    expect(Project.pendingMediaRelink()).toBeTruthy();
+    desk.writeProject=vi.fn(async()=> 'C:/projects/offline.subtool');
+    await Project.save();
+    const saved=JSON.parse(Buffer.from(desk.writeProject.mock.calls[0][1],'base64').subarray(2).toString('utf16le'));
+    expect(saved.clips.map(clip=>clip.path)).toEqual(['C:/media/offline.mov']);
+    expect(saved.externalAudioSources.map(source=>source.path)).toEqual(['C:/media/offline.wav']);
+  });
+
+  it('開新專案確實完成後，不把舊專案的待重連素材帶入新工作區',async()=>{
+    desk.stat.mockResolvedValue({exists:false});
+    await Project.loadDesktop(request('Offline','C:/media/offline.mov'));
+    expect(Project.unrestoredClips()).toHaveLength(1);
+    await Project.startNewProject(()=>{State.cues=[];State.clips=[];return true;});
+    expect(Project.unrestoredClips()).toEqual([]);
+    expect(Project.pendingMediaRelink()).toBeNull();
+  });
+
+  it('開新專案準備工作拋錯時保留原專案待重連資料',async()=>{
+    desk.stat.mockResolvedValue({exists:false});
+    await Project.loadDesktop(request('Offline','C:/media/offline.mov'));
+    await expect(Project.startNewProject(async()=>{throw new Error('初始化失敗');})).rejects.toThrow('初始化失敗');
+    expect(Project.unrestoredClips().map(clip=>clip.path)).toEqual(['C:/media/offline.mov']);
+    expect(Project.pendingMediaRelink()).toBeTruthy();
+  });
+
+  it('開新專案同步觸發較新的開檔時，舊完成不得清除新專案待重連資料',async()=>{
+    desk.stat.mockResolvedValue({exists:false});
+    await Project.loadDesktop(request('Older','C:/media/older.mov'));
+    let newer;
+    await Project.startNewProject(()=>{
+      newer=Project.loadDesktop(request('Newer','C:/media/newer.mov'));
+      return true;
+    });
+    await newer;
+    expect(State.cues[0].text).toBe('Newer');
+    expect(Project.unrestoredClips().map(clip=>clip.path)).toEqual(['C:/media/newer.mov']);
+    expect(Project.pendingMediaRelink()).toBeTruthy();
+  });
+
+  it('開新專案同步觸發較新的新建並取消時，舊完成不得清除原素材',async()=>{
+    desk.stat.mockResolvedValue({exists:false});
+    await Project.loadDesktop(request('Offline','C:/media/offline.mov'));
+    let newer;
+    await Project.startNewProject(()=>{
+      newer=Project.startNewProject(()=>false);
+      return true;
+    });
+    expect(await newer).toBe(false);
+    expect(Project.unrestoredClips().map(clip=>clip.path)).toEqual(['C:/media/offline.mov']);
+    expect(Project.pendingMediaRelink()).toBeTruthy();
   });
 });

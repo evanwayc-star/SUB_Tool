@@ -27,7 +27,7 @@ function signature(spec){
     spec.file?fileIds.get(spec.file):(!spec.path&&!spec.url?spec.sourceId:null)]);
 }
 const inFlight=new Map();
-const preferenceRevisions=new Map();
+const pendingPreferences=new WeakMap();
 let preferenceSequence=0;
 
 function sourcePreferenceKey(spec){
@@ -78,10 +78,23 @@ export async function restoreCachedSourceVocals(source,{signal}={}){
   const resolved=resolveVocalSource(source);
   if(!resolved)return undefined;
   const spec=sourceSpec(resolved),identity=signature(spec);
-  const owns=()=>!signal?.aborted&&signature(sourceSpec(resolveVocalSource(source)||{}))===identity;
+  const owns=()=>!signal?.aborted&&resolveVocalSource(source)===resolved&&signature(sourceSpec(resolved))===identity;
   try{
     const descriptor=await cacheDescriptor(spec,signal);
     if(!owns())return null;
+    // While the selected source is still live, an explicit choice must win
+    // even before its fingerprint and persistent record finish updating.
+    const pending=pendingPreferences.get(resolved);
+    if(pending&&pending.identity===identity&&resolveVocalSource(source)===resolved){
+      const peaks=await vocalWaveformCache.read(descriptor,spec.duration);
+      const latest=pendingPreferences.get(resolved);
+      if(!owns()||resolveVocalSource(source)!==resolved)return null;
+      if(latest&&latest.identity===identity)return latest.enabled?peaks:null;
+      const selected=await vocalWaveformCache.read(descriptor,spec.duration,{selectedOnly:true,preferenceKey:sourcePreferenceKey(spec)});
+      if(!owns()||resolveVocalSource(source)!==resolved)return null;
+      const newer=pendingPreferences.get(resolved);
+      return newer&&newer.identity===identity?(newer.enabled?peaks:null):selected;
+    }
     const peaks=await vocalWaveformCache.read(descriptor,spec.duration,{selectedOnly:true,preferenceKey:sourcePreferenceKey(spec)});
     return owns()?peaks:null;
   }catch(_){return null;}
@@ -92,17 +105,25 @@ export async function rememberSourceVocalSelection(source,enabled){
   const resolved=resolveVocalSource(source);
   if(!resolved)return false;
   const spec=sourceSpec(resolved),identity=signature(spec),revision=++preferenceSequence;
-  const preferenceKey=sourcePreferenceKey(spec),revisionKey=preferenceKey||identity;
-  preferenceRevisions.set(revisionKey,revision);
-  // The explicit choice is durable before any async file or IndexedDB operation.
+  const preferenceKey=sourcePreferenceKey(spec);
+  pendingPreferences.set(resolved,{identity,revision,enabled:!!enabled});
+  // A previous fingerprint cannot prove the file still has the same bytes.
+  // Store only unverified intent until this choice obtains fresh evidence.
   vocalWaveformCache.rememberPreference(preferenceKey,!!enabled);
-  const isCurrent=()=>preferenceRevisions.get(revisionKey)===revision&&signature(sourceSpec(resolveVocalSource(source)||{}))===identity;
+  const isCurrent=()=>pendingPreferences.get(resolved)?.revision===revision&&resolveVocalSource(source)===resolved
+    &&signature(sourceSpec(resolved))===identity;
   try{
     const descriptor=await cacheDescriptor(spec);
     if(!isCurrent())return false;
-    return await vocalWaveformCache.select(descriptor,!!enabled,{isCurrent,order:revision});
+    // select registers the content-addressed order synchronously before its
+    // first await. A slower alias must not overwrite a newer local preference.
+    const selection=vocalWaveformCache.select(descriptor,!!enabled,{isCurrent,order:revision});
+    if(descriptor)vocalWaveformCache.rememberPreference(preferenceKey,!!enabled,descriptor,{order:revision});
+    return await selection;
   }catch(_){return false;}
-  finally{if(preferenceRevisions.get(revisionKey)===revision)preferenceRevisions.delete(revisionKey);}
+  finally{
+    if(pendingPreferences.get(resolved)?.revision===revision)pendingPreferences.delete(resolved);
+  }
 }
 
 function splitPCM(result,duration){
@@ -210,7 +231,7 @@ export async function analyzeSourceVocals(source,{signal,onProgress}={}){
   const resolved=resolveVocalSource(source);
   if(!resolved||resolved.type==='image')throw new Error('找不到可分析的音訊素材');
   const spec=sourceSpec(resolved),identity=signature(spec);
-  const owns=()=>!signal?.aborted&&signature(sourceSpec(resolveVocalSource(source)||{}))===identity;
+  const owns=()=>!signal?.aborted&&resolveVocalSource(source)===resolved&&signature(sourceSpec(resolved))===identity;
   let job=inFlight.get(identity);
   if(!job){
     job={controller:new AbortController(),listeners:new Set(),progress:null,promise:null};

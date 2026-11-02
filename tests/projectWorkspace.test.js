@@ -75,6 +75,41 @@ function fixture({ files = {}, recent = [], writeFile, saveMetadata } = {}) {
 }
 
 describe('project workspace', () => {
+  it('缺少的最近專案保留紀錄，外部程序恢復後同一 token 可重新開啟', async () => {
+    const root=createTempRoot('recent-external'), file=path.join(root,'restored.subtool');
+    let list=[{path:file,at:1}];
+    const workspace=createProjectWorkspace({
+      readFile:fsp.readFile, grantProjectFile:()=>true, grantMediaFile:()=>{},
+      readRecent:()=>list, writeRecent:next=>{list=next;}, stat:fsp.stat,
+    });
+    const [{token,missing}]=await workspace.listRecent();
+    expect(missing).toBe(true);
+    await expect(workspace.openRecent(token)).resolves.toBeNull();
+    expect(list).toEqual([{path:file,at:1}]);
+    const content=bytes({cues:[{text:'由外部程序恢復的專案'}]});
+    execFileSync(process.execPath,['-e',
+      'require("node:fs").writeFileSync(process.argv[1],Buffer.from(process.argv[2],"base64"))',
+      file,content.toString('base64')]);
+    expect(await fsp.readFile(file)).toEqual(content);
+    const reopened=await workspace.openRecent(token);
+    expect(Buffer.from(reopened.b64,'base64')).toEqual(content);
+    expect((await workspace.listRecent())[0].missing).toBe(false);
+  });
+
+  it('缺檔的最近專案仍可由使用者明確清除，舊 token 隨即失效', async () => {
+    const file=path.join(createTempRoot('recent-clear'),'missing.subtool');
+    let list=[{path:file,at:1}];
+    const workspace=createProjectWorkspace({
+      readFile:fsp.readFile, readRecent:()=>list, writeRecent:next=>{list=next;}, stat:fsp.stat,
+    });
+    const [{token}]=await workspace.listRecent();
+    await expect(workspace.openRecent(token)).resolves.toBeNull();
+    expect(list).toHaveLength(1);
+    expect(workspace.clearRecent()).toBe(true);
+    expect(list).toEqual([]);
+    await expect(workspace.openRecent(token)).resolves.toBeNull();
+  });
+
   it.each([{remember:true},{ensureParent:true}])('儲存與備份都以目前版本及電腦名稱作為 JSON 最前兩欄（%j）', async options => {
     const project = { playhead: 12.145, cues: [{text:'字幕'}], media: {}, version: 3,
       'SUB Tool':'舊版本', 'User Name':'另一台電腦' };
@@ -240,6 +275,7 @@ describe('project workspace', () => {
     const writer = createAtomicProjectWriter({ fsModule: {
       ...fs, ...fsp,
       async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
         if (stage === 'open') replace();
         const handle = await fsp.open(...args);
         return {
@@ -264,6 +300,7 @@ describe('project workspace', () => {
     const writer = createAtomicProjectWriter({ createToken: () => 'owned', fsModule: {
       ...fs, ...fsp,
       async open(temporary, ...args) {
+        if (args[0] === 'r') return fsp.open(temporary, ...args);
         const handle = await fsp.open(temporary, ...args);
         let closed = false;
         return {
@@ -304,13 +341,15 @@ describe('project workspace', () => {
     const original = bytes({ cues: [{ text: '原專案' }] });
     fs.writeFileSync(file, original);
     const failure = new Error('disk/SMB write failed');
+    let partial;
     const writer = createAtomicProjectWriter({ fsModule: {
       ...fs, ...fsp,
       async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
         const handle = await fsp.open(...args);
         return {
           async writeFile(contents) {
-            if (stage === 'write') { await handle.writeFile(contents.subarray(0, 3)); throw failure; }
+            if (stage === 'write') { partial = contents.subarray(0, 3); await handle.writeFile(partial); throw failure; }
             await handle.writeFile(contents);
           },
           stat: options => handle.stat(options), sync: () => handle.sync(), close: () => handle.close(),
@@ -322,7 +361,13 @@ describe('project workspace', () => {
     await expect(fx.workspace.writeRendererProject(file, bytes({ cues: [] }).toString('base64'), { remember: true }))
       .rejects.toBe(failure);
     expect(fs.readFileSync(file)).toEqual(original);
-    expect(fs.readdirSync(root)).toEqual(['edit.subtool']);
+    const entries = fs.readdirSync(root);
+    if (stage === 'write') {
+      const temporary = entries.find(name => name.startsWith('edit.subtool.') && name.endsWith('.tmp'));
+      expect(temporary).toBeTruthy();
+      expect(fs.readFileSync(path.join(root, temporary))).toEqual(partial);
+      expect(entries).toHaveLength(2);
+    } else expect(entries).toEqual(['edit.subtool']);
     expect(fx.grants).toEqual([]);
     expect(fx.recent()).toEqual([]);
   });
@@ -336,6 +381,7 @@ describe('project workspace', () => {
     const writer = createAtomicProjectWriter({ fsModule: {
       ...fs, ...fsp,
       async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
         if (++count === 1) { started.resolve(); await first.promise; }
         return fsp.open(...args);
       },
@@ -361,6 +407,7 @@ describe('project workspace', () => {
     const writer = createAtomicProjectWriter({ fsModule: {
       ...fs, ...fsp,
       async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
         if (++opens === 1) { started.resolve(); await gate.promise; }
         return fsp.open(...args);
       },
@@ -376,6 +423,241 @@ describe('project workspace', () => {
     } finally { clearTimeout(timer); gate.resolve(); }
     await Promise.all([earlier, latest]);
     expect(fs.readFileSync(path.join(real, 'edit.subtool'), 'utf8')).toBe('較新專案');
+  });
+
+  it.runIf(process.platform === 'win32').each([false, true])('既有專案的長檔名與 8.3 短檔名並行儲存，短名先寫=%s 時較新內容最後發布', async (shortFirst, context) => {
+    const root = createTempRoot('short-file');
+    const file = path.join(root, 'long-project-document.subtool');
+    fs.writeFileSync(file, '原專案');
+    const short = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
+      + '(New-Object -ComObject Scripting.FileSystemObject).GetFile($env:SUBTOOL_PROJECT_TEST_FILE).ShortPath'], {
+      env: { ...process.env, SUBTOOL_PROJECT_TEST_FILE: file },
+      encoding: 'utf8', windowsHide: true, timeout: 10000,
+    }).trim();
+    if (short.toLowerCase() === file.toLowerCase()) context.skip('此磁碟沒有提供可區分的 8.3 短檔名');
+    expect(realpath(short).toLowerCase()).toBe(realpath(file).toLowerCase());
+    const gate = deferred(), started = deferred();
+    let opens = 0;
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
+        if (++opens === 1) { started.resolve(); await gate.promise; }
+        return fsp.open(...args);
+      },
+    } });
+    const earlier = writer(shortFirst ? short : file, Buffer.from('較舊專案'));
+    await started.promise;
+    const latest = writer(shortFirst ? file : short, Buffer.from('較新專案'));
+    let timer;
+    try {
+      await Promise.race([latest, new Promise(resolve => { timer = setTimeout(resolve, 500); })]);
+    } finally { clearTimeout(timer); gate.resolve(); }
+    await Promise.all([earlier, latest]);
+    expect(fs.readFileSync(file, 'utf8')).toBe('較新專案');
+    expect(fs.readdirSync(root)).toEqual([path.basename(file)]);
+  });
+
+  it('較舊存檔未發布時，較新存檔等待目標解析並依順序保存', async () => {
+    const root = createTempRoot('admission-race');
+    const file = path.join(root, 'project.subtool');
+    fs.writeFileSync(file, '原專案');
+    const firstGate = deferred(), firstStarted = deferred(), secondGate = deferred(), secondStarted = deferred();
+    let opens = 0, realpaths = 0;
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
+        if (++opens === 1) { firstStarted.resolve(); await firstGate.promise; }
+        return fsp.open(...args);
+      },
+      async realpath(current, ...args) {
+        if (current === file && ++realpaths === 2) { secondStarted.resolve(); await secondGate.promise; }
+        return fsp.realpath(current, ...args);
+      },
+    } });
+    const earlier = writer(file, Buffer.from('較舊專案'));
+    await firstStarted.promise;
+    const latest = writer(file, Buffer.from('較新專案'));
+    let timer;
+    try {
+      const started = await Promise.race([secondStarted.promise.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 100); })]);
+      expect(started).toBe(false);
+      expect(fs.readFileSync(file, 'utf8')).toBe('原專案');
+      firstGate.resolve(); await earlier;
+      await secondStarted.promise;
+      expect(fs.readFileSync(file, 'utf8')).toBe('較舊專案');
+    } finally { clearTimeout(timer); firstGate.resolve(); secondGate.resolve(); await Promise.allSettled([earlier, latest]); }
+    await latest;
+    expect(fs.readFileSync(file, 'utf8')).toBe('較新專案');
+    expect(fs.readdirSync(root)).toEqual(['project.subtool']);
+  });
+
+  it('同目標的較新存檔只在舊檔發布後核對目標身分', async () => {
+    const root = createTempRoot('identity-race');
+    const file = path.join(root, 'project.subtool');
+    fs.writeFileSync(file, '原專案');
+    const firstGate = deferred(), firstStarted = deferred(), secondGate = deferred(), secondStarted = deferred();
+    let opens = 0, realpaths = 0, secondChecks = 0;
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
+        if (++opens === 1) { firstStarted.resolve(); await firstGate.promise; }
+        return fsp.open(...args);
+      },
+      async realpath(current, ...args) {
+        const result = await fsp.realpath(current, ...args);
+        if (current === file) realpaths++;
+        return result;
+      },
+      async lstat(current, ...args) {
+        if (current === file && realpaths === 2 && ++secondChecks === 2) {
+          secondStarted.resolve();
+          await secondGate.promise;
+        }
+        return fsp.lstat(current, ...args);
+      },
+    } });
+    const earlier = writer(file, Buffer.from('較舊專案'));
+    await firstStarted.promise;
+    const latest = writer(file, Buffer.from('較新專案'));
+    let timer;
+    try {
+      const started = await Promise.race([secondStarted.promise.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 100); })]);
+      expect(started).toBe(false);
+      expect(fs.readFileSync(file, 'utf8')).toBe('原專案');
+      firstGate.resolve(); await earlier;
+      await secondStarted.promise;
+      expect(fs.readFileSync(file, 'utf8')).toBe('較舊專案');
+    } finally { clearTimeout(timer); firstGate.resolve(); secondGate.resolve(); await Promise.allSettled([earlier, latest]); }
+    await latest;
+    expect(fs.readFileSync(file, 'utf8')).toBe('較新專案');
+    expect(fs.readdirSync(root)).toEqual(['project.subtool']);
+  });
+
+  it('准入解析期間目的專案被外部替換時不覆寫替代檔', async () => {
+    const root = createTempRoot('external-replace');
+    const file = path.join(root, 'project.subtool'), original = path.join(root, 'original.subtool');
+    fs.writeFileSync(file, '原專案');
+    const gate = deferred(), started = deferred();
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async realpath(current, ...args) {
+        if (current === file) { started.resolve(); await gate.promise; }
+        return fsp.realpath(current, ...args);
+      },
+    } });
+    const saving = writer(file, Buffer.from('不得發布的內容'));
+    await started.promise;
+    try {
+      fs.renameSync(file, original);
+      fs.writeFileSync(file, '外部替代檔');
+    } finally { gate.resolve(); }
+    await expect(saving).rejects.toMatchObject({ code: 'UNSAFE_PROJECT_OUTPUT' });
+    expect(fs.readFileSync(original, 'utf8')).toBe('原專案');
+    expect(fs.readFileSync(file, 'utf8')).toBe('外部替代檔');
+  });
+
+  it.each(['created', 'replaced', 'modified', 'removed'])('寫入期間目的檔被外部 %s 時不覆寫新狀態', async change => {
+    const root = createTempRoot('external-during-write');
+    const file = path.join(root, 'project.subtool'), original = path.join(root, 'original.subtool');
+    if (change !== 'created') fs.writeFileSync(file, 'original');
+    const gate = deferred(), started = deferred();
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
+        const handle = await fsp.open(...args);
+        started.resolve();
+        await gate.promise;
+        return handle;
+      },
+    } });
+    const saving = writer(file, Buffer.from('pending project')).then(() => null, error => error);
+    await started.promise;
+    try {
+      if (change === 'created') fs.writeFileSync(file, 'external');
+      if (change === 'replaced') { fs.renameSync(file, original); fs.writeFileSync(file, 'external'); }
+      if (change === 'modified') {
+        const before = fs.statSync(file, { bigint: true });
+        fs.writeFileSync(file, 'modified');
+        const after = fs.statSync(file, { bigint: true });
+        expect([after.dev, after.ino, after.size]).toEqual([before.dev, before.ino, before.size]);
+      }
+      if (change === 'removed') fs.renameSync(file, original);
+    } finally { gate.resolve(); }
+    expect(await saving).toMatchObject({ code: 'PROJECT_DESTINATION_CHANGED' });
+    if (change === 'removed') expect(fs.existsSync(file)).toBe(false);
+    else expect(fs.readFileSync(file, 'utf8')).toBe(change === 'modified' ? 'modified' : 'external');
+    if (change === 'replaced' || change === 'removed') expect(fs.readFileSync(original, 'utf8')).toBe('original');
+    expect(fs.readdirSync(root).sort()).toEqual((change === 'removed' ? ['original.subtool']
+      : change === 'replaced' ? ['original.subtool', 'project.subtool'] : ['project.subtool']).sort());
+  });
+
+  it('同 inode 同大小的目的檔改寫即使時間戳不可區分，仍保留外部專案', async () => {
+    const root = createTempRoot('equal-metadata');
+    const file = path.join(root, 'project.subtool');
+    fs.writeFileSync(file, 'original');
+    const initial = fs.lstatSync(file, { bigint: true });
+    const gate = deferred(), started = deferred();
+    const descriptors = new Set();
+    const freeze = stat => {
+      Object.defineProperties(stat, { mtimeNs: { value: initial.mtimeNs }, ctimeNs: { value: initial.ctimeNs } });
+      return stat;
+    };
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
+        const handle = await fsp.open(...args);
+        started.resolve(); await gate.promise;
+        return handle;
+      },
+      openSync(current, ...args) {
+        const fd = fs.openSync(current, ...args); if (current === file) descriptors.add(fd); return fd;
+      },
+      fstatSync(fd, ...args) { const stat = fs.fstatSync(fd, ...args); return descriptors.has(fd) ? freeze(stat) : stat; },
+      closeSync(fd) { descriptors.delete(fd); return fs.closeSync(fd); },
+      lstatSync(current, ...args) {
+        const stat = fs.lstatSync(current, ...args);
+        if (current !== file) return stat;
+        // Model a filesystem whose timestamps are identical across two writes.
+        // Both file identity and content below still come from the real file.
+        return freeze(stat);
+      },
+    } });
+    const saving = writer(file, Buffer.from('pending project')).then(() => null, error => error);
+    await started.promise;
+    try {
+      fs.writeFileSync(file, 'modified');
+      const changed = fs.lstatSync(file, { bigint: true });
+      expect([changed.dev, changed.ino, changed.size]).toEqual([initial.dev, initial.ino, initial.size]);
+      expect(fs.readFileSync(file, 'utf8')).toBe('modified');
+    } finally { gate.resolve(); }
+    expect(await saving).toMatchObject({ code: 'PROJECT_DESTINATION_CHANGED' });
+    expect(fs.readFileSync(file, 'utf8')).toBe('modified');
+  });
+
+  it('發布失敗後同目標的下一次儲存仍可完成', async () => {
+    const root = createTempRoot('publish-recovery');
+    const file = path.join(root, 'project.subtool');
+    fs.writeFileSync(file, '原專案');
+    const failure = new Error('模擬發布失敗');
+    let attempts = 0;
+    const writer = createAtomicProjectWriter({ fsModule: {
+      ...fs, ...fsp,
+      renameSync(...args) {
+        if (++attempts === 1) throw failure;
+        return fs.renameSync(...args);
+      },
+    } });
+    await expect(writer(file, Buffer.from('失敗內容'))).rejects.toBe(failure);
+    expect(fs.readFileSync(file, 'utf8')).toBe('原專案');
+    await writer(file, Buffer.from('後續內容'));
+    expect(fs.readFileSync(file, 'utf8')).toBe('後續內容');
+    expect(fs.readdirSync(root)).toEqual(['project.subtool']);
   });
 
   it('最後非同步目錄查驗回覆後有變更時，不把備份發布到替換的資料夾', async () => {
@@ -401,6 +683,7 @@ describe('project workspace', () => {
         return result;
       },
       async open(...args) {
+        if (args[1] === 'r') return fsp.open(...args);
         const handle = await fsp.open(...args);
         return {
           stat: options => handle.stat(options), writeFile: data => handle.writeFile(data), sync: () => handle.sync(),
@@ -533,7 +816,7 @@ describe('project workspace', () => {
     ]);
     expect(entries[0].token).not.toBe(entries[1].token);
     await expect(fx.workspace.openRecent(entries[1].token)).resolves.toBeNull();
-    expect(fx.recent().map(item => item.path)).toEqual([present]);
+    expect(fx.recent().map(item => item.path)).toEqual([present, missing]);
     expect(fx.workspace.clearRecent()).toBe(true);
     expect(fx.recent()).toEqual([]);
   });

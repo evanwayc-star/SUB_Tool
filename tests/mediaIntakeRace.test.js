@@ -1,5 +1,9 @@
 ﻿// @vitest-environment jsdom
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
 
 const domMock = vi.hoisted(() => {
   const video = {
@@ -45,6 +49,7 @@ const deskMock = vi.hoisted(() => ({
   waveAudio: vi.fn(),
   cleanupAudio: vi.fn(),
   cancelMediaIntake: vi.fn(async()=>1),
+  releaseStream: vi.fn(async()=>{}),
 }));
 
 vi.mock('../src/dom.js', () => domMock);
@@ -111,6 +116,7 @@ describe('desktop mother-source intake ownership', () => {
     deskMock.waveAudio.mockReset();
     deskMock.cleanupAudio.mockReset();
     deskMock.cancelMediaIntake.mockClear();
+    deskMock.releaseStream.mockClear();
     setStatus.mockClear();
     showToast.mockClear();
     deskMock.ingest.mockImplementation(({ path }) => {
@@ -130,6 +136,62 @@ describe('desktop mother-source intake ownership', () => {
     domMock.video.readyState = 1;
     domMock.video.duration = 12;
     delete window.subtool.streamIngest;
+  });
+
+  it.each(['complete','short'])('舊快取短 PCM 經真 waveform runtime 重建：%s',async mode=>{
+    const require=createRequire(import.meta.url);
+    const {createMediaIntakeRuntime}=require('../electron/media-intake-runtime.js');
+    const {FileAuthority}=require('../electron/file-authority.js');
+    const {createProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
+    const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-short-source-wave-'));
+    const source=path.join(root,'mother.mov'),cacheRoot=path.join(root,'cache'),tempRoot=path.join(root,'tmp');
+    fs.mkdirSync(tempRoot);fs.writeFileSync(source,'source');
+    const runtime=createMediaIntakeRuntime({cacheRoot,tempRoot,allowSidecarCache:false,delay:async()=>{},
+      fileAuthority:new FileAuthority({internalDirectories:[cacheRoot,tempRoot]}),
+      ffmpegExecution:{execute:async (args,options)=>{
+        if(Number.isInteger(options.outputDescriptor))fs.writeSync(options.outputDescriptor,wav(mode==='short'?.25:1));
+        else for(const file of args.filter(value=>/\.(m4a|wav|mp4)$/.test(value)))fs.writeFileSync(file,file.endsWith('.wav')?wav(1):'initial data');
+      }}});
+    const wav=seconds=>{
+      const count=4000*seconds,b=Buffer.alloc(44+count*2);
+      b.write('RIFF',0);b.writeUInt32LE(36+count*2,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);
+      b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(4000,24);b.writeUInt32LE(8000,28);
+      b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(count*2,40);
+      for(let i=0;i<count;i++)b.writeInt16LE(i%2?16384:-16384,44+i*2);return b;
+    };
+    let entry;
+    try{
+      const result=await runtime.ingest({src:source,duration:1,needsProxy:false,audio:[{channels:1}]});
+      const directory=path.dirname(path.dirname(result.wave));
+      const metaFile=path.join(directory,'meta.json'),generation=path.join(path.dirname(result.wave),'cache-meta.json');
+      fs.unlinkSync(generation);const meta=JSON.parse(fs.readFileSync(metaFile,'utf8'));delete meta.artifactSizes;
+      fs.writeFileSync(metaFile,JSON.stringify(meta));fs.writeFileSync(result.wave,wav(.25));
+      const native=await runtime.waveform({src:source,duration:1,start:0,length:1,audio:[{channels:1}]});
+      expect(native.cached).toBe(true);expect(fs.statSync(native.wave).size).toBe(2044);
+      const jobs={prepareWaveform:fn=>fn({owns:()=>true,report:()=>true}),
+        prepareSourceWaveform:vi.fn(opts=>runtime.waveform({src:opts.path,...opts}))};
+      const bridge={fileURL:async file=>file,cleanupAudio:vi.fn(async file=>runtime.cleanupGeneratedFile(file)),mediaSourceKey:async()=>native.sourceKey};
+      const owner=createProvisionalSourceWaveform({jobs,bridge,decode:(bytes,duration)=>Wave.calcSourceWaveform(bytes,duration),
+        read:async file=>{const bytes=fs.readFileSync(file);return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);}});
+      entry=owner.begin({path:source,name:'mother.mov',duration:1,audio:[{channels:1}],owns:()=>true});
+      await entry.finished;
+      expect(jobs.prepareSourceWaveform).toHaveBeenCalledTimes(2);
+      expect(jobs.prepareSourceWaveform.mock.calls[1][0].ignoreCached).toBe(true);
+      if(mode==='short') expect(owner.snapshot()).toBeNull();
+      else{
+        const peaks=owner.snapshot().peaks;
+        expect(peaks).toHaveLength(200);
+        expect(peaks.slice(-20).every(value=>Math.abs(value)>.4)).toBe(true);
+      }
+      expect(fs.readFileSync(result.wave).equals(wav(.25))).toBe(true);
+      expect(bridge.cleanupAudio).toHaveBeenCalledOnce();
+      expect(fs.existsSync(bridge.cleanupAudio.mock.calls[0][0])).toBe(false);
+    }finally{
+      entry?.cancel();
+      await runtime.close();const resolved=fs.realpathSync(root);
+      if(path.dirname(resolved)!==fs.realpathSync(os.tmpdir())||!path.basename(resolved).startsWith('subtool-short-source-wave-'))throw new Error('拒絕清理測試範圍外路徑');
+      fs.rmSync(resolved,{recursive:true,force:true});
+    }
   });
 
   it.each(['native','multichannel'].flatMap(branch=>['reset','grow','error'].map(outcome=>({branch,outcome}))))
@@ -212,6 +274,252 @@ describe('desktop mother-source intake ownership', () => {
 
     expect(State.duration).toBe(120);
     expect(State.clips[0].dur).toBe(120);
+  });
+
+  it.each(['fresh','restore','newer','changed','failure'])('跨機驗證等待期間顯示獨立來源波形，%s 就緒並核對相同證據才交給正式素材',async mode=>{
+    const {getProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
+    const {ProjectRestorePlan}=await import('../src/project-intake-engine.js');
+    const {Seq}=await import('../src/sequence.js');
+    const stream=deferred(),duration=1,key='a'.repeat(16);
+    const pcm=new ArrayBuffer(44+8000),view=new DataView(pcm);
+    for(const [offset,value] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
+      for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i));
+    view.setUint32(4,8036,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);
+    view.setUint32(24,4000,true);view.setUint32(28,8000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,8000,true);
+    for(let i=0;i<4000;i++)view.setInt16(44+i*2,i%2?16384:-16384,true);
+    deskMock.probe.mockResolvedValueOnce({duration,video:{codec:'prores',fps:25},audio:[{channels:1}]});
+    window.subtool.streamIngest=vi.fn(()=>stream.promise);
+    window.subtool.prepareSourceWaveform=vi.fn(async()=>({wave:'C:/cache/independent-wave.wav',sourceKey:key,start:0,duration,temporary:true}));
+    const verify=deferred();
+    window.subtool.mediaSourceKey=vi.fn(()=>mode==='newer'?verify.promise:Promise.resolve(mode==='changed'?'b'.repeat(16):key));
+    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>pcm})));
+    try{
+      const plan=mode==='restore'?new ProjectRestorePlan({mediaRelink:true,clips:[
+        {primary:true,path:'C:/media/A.mov',audioSourceId:'saved-source',in:.2,out:.8,dur:1,offset:3},
+        {path:'C:/media/A.mov',audioSourceId:'saved-source',in:0,out:.5,dur:1,offset:5,reverse:true},
+      ]}):null;
+      const loading=Media.loadDesktopMedia('C:/media/A.mov',plan);
+      await vi.waitFor(()=>expect(getProvisionalSourceWaveform()?.peaks?.some(value=>Math.abs(value)>.4)).toBe(true));
+      expect(State.clips).toEqual([]);expect(window.subtool.streamIngest).toHaveBeenCalledOnce();
+      if(mode==='failure'){
+        stream.reject(new Error('stream failure'));await loading;
+        expect(getProvisionalSourceWaveform()).toBeNull();expect(State.clips).toEqual([]);
+        expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/independent-wave.wav');
+        return;
+      }
+      stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
+      await loading;
+      if(mode==='changed'){
+        await vi.waitFor(()=>expect(getProvisionalSourceWaveform()).toBeNull());
+        expect(State.clips[0].peaks).toBeFalsy();
+        expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce();
+        return;
+      }
+      if(mode==='newer'){
+        await vi.waitFor(()=>expect(window.subtool.mediaSourceKey).toHaveBeenCalledOnce());
+        const newer=Float32Array.from({length:200},(_,i)=>i%2?.9:-.9);
+        Media._commitOriginalWave(State.clips[0],newer,{mixPath:'new-wave'});
+        verify.resolve(key);
+        await vi.waitFor(()=>expect(getProvisionalSourceWaveform()).toBeNull());
+        expect(State.clips[0].peaks).toBe(newer);
+      }
+      await vi.waitFor(()=>expect(State.clips[0]?.peaks?.some(value=>Math.abs(value)>.4)).toBe(true));
+      if(plan){
+        await Media.waitForPendingProjectRestore();expect(State.clips).toHaveLength(2);
+        expect(State.clips[0]).toMatchObject({in:.2,out:.8,offset:3});
+        expect(State.clips[1]).toMatchObject({in:0,out:.5,offset:5,reverse:true});
+        expect(Seq.toSource(5,State.clips[1])).toBeCloseTo(.5);
+        expect(Wave.getSourceWaveform(State.clips[1]).peaks).toBe(State.clips[0].peaks);
+      }
+      expect(getProvisionalSourceWaveform()).toBeNull();expect(window.subtool.mediaSourceKey).toHaveBeenCalledWith('C:/media/A.mov');
+      expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/independent-wave.wav');
+    }finally{
+      stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
+      verify.resolve(key);
+      Media.reset();delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
+    }
+  });
+
+  it('取消 Proxy 時撤銷尚在準備的獨立波形並清理晚到 WAV',async()=>{
+    const {getProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
+    const stream=deferred(),wave=deferred();
+    deskMock.probe.mockResolvedValueOnce({duration:1,video:{codec:'prores',fps:25},audio:[{channels:1}]});
+    window.subtool.streamIngest=vi.fn(()=>stream.promise);
+    window.subtool.prepareSourceWaveform=vi.fn(()=>wave.promise);
+    window.subtool.mediaSourceKey=vi.fn(async()=> 'a'.repeat(16));
+    try{
+      const loading=Media.loadDesktopMedia('C:/media/A.mov');
+      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      await Media.cancelProxyJobs();
+      wave.resolve({wave:'C:/cache/late-wave.wav',sourceKey:'a'.repeat(16),start:0,duration:1,temporary:true});
+      await loading;
+      await vi.waitFor(()=>expect(deskMock.cleanupAudio).toHaveBeenCalledExactlyOnceWith('C:/cache/late-wave.wav'));
+      expect(getProvisionalSourceWaveform()).toBeNull();expect(State.clips).toEqual([]);
+    }finally{
+      stream.resolve({streamUrl:'http://127.0.0.1:8080/old',streamLeaseId:'old',cached:true,channels:[]});
+      wave.resolve(null);Media.reset();delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;
+    }
+  });
+
+  it.each(['late','newer','newer-registry','selected-channel','replaced','changed'])('串流先可播放、首段波形後到時 %s 安全交接且不阻塞播放',async mode=>{
+    const {getProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
+    const stream=deferred(),wave=deferred(),key='a'.repeat(16);
+    const pcm=new ArrayBuffer(44+8000),view=new DataView(pcm);
+    for(const [offset,value] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
+      for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i));
+    view.setUint32(4,8036,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);
+    view.setUint32(24,4000,true);view.setUint32(28,8000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,8000,true);
+    for(let i=0;i<4000;i++)view.setInt16(44+i*2,i%2?16384:-16384,true);
+    deskMock.probe.mockResolvedValueOnce({duration:1,video:{codec:'prores',fps:25},audio:[{channels:1}]});
+    window.subtool.streamIngest=vi.fn(()=>stream.promise);
+    window.subtool.prepareSourceWaveform=vi.fn().mockReturnValueOnce(wave.promise)
+      .mockResolvedValue({wave:'C:/cache/followup-wave.wav',sourceKey:key,start:0,duration:1,temporary:true});
+    window.subtool.mediaSourceKey=vi.fn(async()=>mode==='changed'?'b'.repeat(16):key);
+    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>pcm})));
+    try{
+      const loading=Media.loadDesktopMedia('C:/media/A.mov');
+      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
+      await loading;
+      expect(State.clips).toHaveLength(1); // 首段 WAV 還沒回來，載入不得等待波形。
+      const primary=State.clips[0];
+      const newer=Float32Array.from({length:200},(_,i)=>i%2?.9:-.9);
+      if(mode==='newer')Media._commitOriginalWave(primary,newer,{mixPath:'new-wave'});
+      if(mode==='newer-registry') Wave.setSourceMixPeaks(primary,newer,{mixPath:'new-wave'});
+      if(mode==='selected-channel'){
+        Wave.registerSourceWaveforms(primary,{channels:[{sourceStream:0,sourceChannel:0,peaks:newer}]});
+        Wave.setSourceWaveSelection(primary,'0:0');
+      }
+      if(mode==='replaced')Media.reset();
+      wave.resolve({wave:'C:/cache/late-wave.wav',sourceKey:key,start:0,duration:1,temporary:true});
+      await vi.waitFor(()=>expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/late-wave.wav'));
+      if(mode==='late'||mode==='selected-channel'){
+        await vi.waitFor(()=>expect(primary.peaks?.some(value=>Math.abs(value)>.4)).toBe(true));
+      }else if(mode==='newer') expect(primary.peaks).toBe(newer);
+      else if(mode==='newer-registry') expect(Wave.getSourceWaveform(primary).peaks).toBe(newer);
+      else expect(primary.peaks).toBeFalsy();
+      if(mode==='selected-channel')expect(Wave.getSourceWaveform(primary).peaks).toBe(newer);
+      if(mode==='changed')expect(window.subtool.mediaSourceKey).toHaveBeenCalledWith('C:/media/A.mov');
+      if(mode==='replaced')expect(State.clips).toEqual([]);
+      await vi.waitFor(()=>expect(getProvisionalSourceWaveform()).toBeNull());
+    }finally{
+      stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
+      wave.resolve(null);Media.reset();delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
+    }
+  });
+
+  it('兩分鐘來源首段完成後即交接，第二段仍等待時不阻塞播放或首段波形',async()=>{
+    const stream=deferred(),first=deferred(),later=deferred(),key='a'.repeat(16);
+    const count=4000*60,pcm=new ArrayBuffer(44+count*2),view=new DataView(pcm);
+    for(const [offset,value] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
+      for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i));
+    view.setUint32(4,36+count*2,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);
+    view.setUint32(24,4000,true);view.setUint32(28,8000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,count*2,true);
+    for(let i=0;i<count;i++)view.setInt16(44+i*2,i%2?16384:-16384,true);
+    deskMock.probe.mockResolvedValueOnce({duration:120,video:{codec:'prores',fps:25},audio:[{channels:1}]});
+    window.subtool.streamIngest=vi.fn(()=>stream.promise);
+    let waveRequests=0;
+    window.subtool.prepareSourceWaveform=vi.fn(options=>{
+      if(waveRequests++===0)return first.promise;
+      return later.promise.then(result=>result&&({...result,start:options.start}));
+    });
+    window.subtool.mediaSourceKey=vi.fn(async()=>key);
+    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>pcm})));
+    try{
+      const loading=Media.loadDesktopMedia('C:/media/long.mov');
+      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
+      await loading;
+      const primary=State.clips[0];expect(primary).toBeTruthy();expect(primary.peaks).toBeFalsy();
+      first.resolve({wave:'C:/cache/first.wav',sourceKey:key,start:0,duration:60,temporary:true});
+      await vi.waitFor(()=>expect(primary.peaks?.length).toBe(12000));
+      expect(primary.peaks.some(value=>Math.abs(value)>.4)).toBe(true);
+      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform.mock.calls.length).toBeGreaterThan(1));
+      expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/first.wav');
+    }finally{
+      Media.reset();later.resolve({wave:'C:/cache/later.wav',sourceKey:key,start:60,duration:60,temporary:true});
+      await vi.waitFor(()=>expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/later.wav'));
+      stream.resolve(null);first.resolve(null);delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
+    }
+  });
+
+  it('串流完成先發布完整波形後，等待中的舊優先分段不能讓波形退回首段',async()=>{
+    const stream=deferred(),first=deferred(),later=deferred(),key='a'.repeat(16);
+    const wav=(seconds,amplitude)=>{
+      const count=4000*seconds,buffer=new ArrayBuffer(44+count*2),view=new DataView(buffer);
+      for(const [offset,value] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
+        for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i));
+      view.setUint32(4,36+count*2,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);
+      view.setUint32(24,4000,true);view.setUint32(28,8000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,count*2,true);
+      for(let i=0;i<count;i++)view.setInt16(44+i*2,i%2?amplitude:-amplitude,true);
+      return buffer;
+    };
+    const partial=wav(60,16384),full=wav(120,24576);
+    deskMock.probe.mockResolvedValueOnce({duration:120,video:{codec:'prores',fps:25},audio:[{channels:1}]});
+    window.subtool.streamIngest=vi.fn(()=>stream.promise);
+    let waveRequests=0;
+    window.subtool.prepareSourceWaveform=vi.fn(options=>{
+      if(waveRequests++===0)return first.promise;
+      return later.promise.then(result=>result&&({...result,start:options.start}));
+    });
+    window.subtool.mediaSourceKey=vi.fn(async()=>key);
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>String(url).includes('full-wave')?full:partial})));
+    try{
+      const loading=Media.loadDesktopMedia('C:/media/long.mov');
+      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,
+        cached:false,ingestJobId:'job-1',channels:[],wave:'C:/cache/full-wave.wav'});
+      await loading;const primary=State.clips[0];
+      first.resolve({wave:'C:/cache/first.wav',sourceKey:key,start:0,duration:60,temporary:true});
+      await vi.waitFor(()=>expect(primary.peaks?.length).toBe(12000));
+      await vi.waitFor(()=>expect(Media._sourceWavePreparations.size).toBe(1));
+      const formal=[...Media._sourceWavePreparations.values()][0].promise;
+      window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:{jobId:'job-1'}}));
+      await vi.waitFor(()=>expect(primary.peaks?.length).toBe(24000));
+      const complete=primary.peaks;
+      expect(complete.some(value=>Math.abs(value)>.7)).toBe(true);
+      later.resolve({wave:'C:/cache/old-priority.wav',sourceKey:key,start:0,duration:60,temporary:true});
+      await formal;
+      expect(primary.peaks===complete).toBe(true);
+      expect(Wave.getSourceMixPeaks(primary)===complete).toBe(true);
+    }finally{
+      Media.reset();later.resolve(null);first.resolve(null);stream.resolve(null);
+      delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
+    }
+  });
+
+  it('專案重連串流等 metadata 時失權，釋放自己的 lease 和未交接影片',async()=>{
+    const {ProjectLoadSession}=await import('../src/project-intake-engine.js');
+    const session=new ProjectLoadSession({media:Media}),generation=session.begin();
+    const plan=session.createRestorePlan(generation,{mediaRelink:true,clips:[{primary:true,path:'C:/media/A.mov',dur:12,in:0,out:12,offset:0}]});
+    deskMock.probe.mockResolvedValueOnce({duration:12,video:{codec:'prores',fps:25},audio:[]});
+    window.subtool.streamIngest=vi.fn(async()=>({streamUrl:'http://127.0.0.1:8080/old',streamLeaseId:'old-lease',cached:true,channels:[]}));
+    domMock.video.readyState=0;
+    const loading=session.restoreMedia(generation,{kind:'load',path:'C:/media/A.mov'});
+    await vi.waitFor(()=>expect(typeof domMock.video.onloadedmetadata).toBe('function'));
+    session.begin({preserveMaterial:true});domMock.video.onloadedmetadata();await loading;
+    expect(deskMock.releaseStream).toHaveBeenCalledExactlyOnceWith('old-lease');
+    expect(domMock.video.src).toBe('');expect(State.clips).toEqual([]);
+    expect(plan.needsMediaRelink()).toBe(true);
+  });
+
+  it('舊串流的延遲 metadata 收尾不釋放或卸載已交接的新串流',async()=>{
+    const {ProjectLoadSession}=await import('../src/project-intake-engine.js');
+    const session=new ProjectLoadSession({media:Media}),generation=session.begin();
+    session.createRestorePlan(generation,{mediaRelink:true,clips:[{primary:true,path:'C:/media/A.mov',dur:12,in:0,out:12,offset:0}]});
+    deskMock.probe.mockResolvedValue({duration:12,video:{codec:'prores',fps:25},audio:[]});
+    window.subtool.streamIngest=vi.fn(async({path})=>path.endsWith('A.mov')
+      ?{streamUrl:'http://127.0.0.1:8080/old',streamLeaseId:'old-lease',cached:true,channels:[]}
+      :{streamUrl:'http://127.0.0.1:8080/new',streamLeaseId:'new-lease',cached:true,channels:[]});
+    domMock.video.readyState=0;
+    const old=session.restoreMedia(generation,{kind:'load',path:'C:/media/A.mov'});
+    await vi.waitFor(()=>expect(typeof domMock.video.onloadedmetadata).toBe('function'));
+    const oldMetadata=domMock.video.onloadedmetadata;
+    session.begin({preserveMaterial:true});domMock.video.readyState=1;
+    await Media.loadDesktopMedia('C:/media/B.mov');oldMetadata();await old;
+    expect(deskMock.releaseStream).toHaveBeenCalledExactlyOnceWith('old-lease');
+    expect(domMock.video.src).toBe('http://127.0.0.1:8080/new');
+    expect(State.clips[0]).toMatchObject({path:'C:/media/B.mov'});
   });
 
   it('一般 ingest Proxy 的 metadata 較短時保留母素材片長', async () => {
@@ -345,7 +653,7 @@ describe('desktop mother-source intake ownership', () => {
   });
 
   it.each(['URL','metadata','deferred metadata','stale'])('mpv background audio %s rejection is owned and settled',async failure=>{
-    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12})),
+    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12,sourceSessionId:'background-session'})),
       present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
       quit:vi.fn(async()=>{}),onEvent:vi.fn(),setBounds:vi.fn(async()=>{})};
     window.subtool.mpv=mpv;resetPlayerAdapter(window.subtool);
@@ -450,7 +758,7 @@ describe('desktop mother-source intake ownership', () => {
 
   it('取消背景 Proxy 保留已提交 mpv 的時間回報，reset 後才撤銷該 transport',async()=>{
     const callbacks=[];
-    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12})),
+    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12,sourceSessionId:'mother-session'})),
       pause:vi.fn(async()=>{}),play:vi.fn(async()=>{}),mute:vi.fn(async()=>{}),quit:vi.fn(async()=>{}),
       onEvent:vi.fn(callback=>callbacks.push(callback)),setBounds:vi.fn(async()=>{})};
     window.subtool.mpv=mpv;resetPlayerAdapter(window.subtool);
@@ -460,15 +768,15 @@ describe('desktop mother-source intake ownership', () => {
       await vi.waitFor(()=>expect(pending.has('C:/media/A.mov')).toBe(true));
       expect(callbacks).toHaveLength(1);
       Media.playing=true;
-      callbacks[0]({event:'property-change',name:'time-pos',data:2});
+      callbacks[0]({event:'property-change',name:'time-pos',data:2,sourceSessionId:'mother-session'});
       expect(Media.displayTime()).toBe(2);
       await expect(Media.cancelProxyJobs()).resolves.toBe(true);
-      callbacks[0]({event:'property-change',name:'time-pos',data:3});
+      callbacks[0]({event:'property-change',name:'time-pos',data:3,sourceSessionId:'mother-session'});
       expect(Media.displayTime()).toBe(3);
       expect(State.clips[0].path).toBe('C:/media/A.mov');
       expect(Media.pendingChannels).toEqual([]);
       Media.reset();State.duration=0;
-      callbacks[0]({event:'property-change',name:'duration',data:99});
+      callbacks[0]({event:'property-change',name:'duration',data:99,sourceSessionId:'mother-session'});
       expect(State.duration).toBe(0);
       pending.get('C:/media/A.mov').resolve({proxy:'stale.mp4',channels:[{file:'stale.wav'}]});
       await Promise.resolve();await Promise.resolve();
@@ -608,7 +916,7 @@ describe('desktop mother-source intake ownership', () => {
     let notifyMpv = () => {};
     const mpv = {
       detect: vi.fn(async () => ({ available: true })),
-      launch: vi.fn(async () => ({ duration: 12 })),
+      launch: vi.fn(async () => ({ duration: 12, sourceSessionId: 'mapped-session' })),
       quit: vi.fn(async () => {}),
       onEvent: vi.fn(callback => { notifyMpv = callback; }),
       setBounds: vi.fn(async () => {}),
@@ -625,13 +933,13 @@ describe('desktop mother-source intake ownership', () => {
       await Media.loadDesktopMedia('C:/media/offset-clip.mp4');
       const clip = State.clips[0];
       Object.assign(clip, { in: 1, out: 11, offset: 10 });
-      notifyMpv({ event: 'property-change', name: 'time-pos', data: 2 });
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 2, sourceSessionId: 'mapped-session' });
       expect(Media.displayTime()).toBe(11);
       expect(domMock.$('tcCur').textContent).toBe('00:00:11:00');
       expect(domMock.$('seekBar').value).toBe(11000);
 
       Media._gap = true;
-      notifyMpv({ event: 'property-change', name: 'time-pos', data: 5 });
+      notifyMpv({ event: 'property-change', name: 'time-pos', data: 5, sourceSessionId: 'mapped-session' });
       expect(Media._mpvTime).toBe(2);
     } finally {
       Media.reset();
@@ -645,7 +953,7 @@ describe('desktop mother-source intake ownership', () => {
     let notifyMpv=()=>{};
     const mpv={
       detect:vi.fn(async()=>({available:true})),
-      launch:vi.fn(async()=>({duration:7400})),
+      launch:vi.fn(async()=>({duration:7400,sourceSessionId:'canopus-session'})),
       quit:vi.fn(async()=>{}), onEvent:vi.fn(callback=>{ notifyMpv=callback; }), setBounds:vi.fn(async()=>{}),
       seek:vi.fn(async()=>{}), mute:vi.fn(async()=>{}),
     };
@@ -662,10 +970,14 @@ describe('desktop mother-source intake ownership', () => {
       ...(path===source&&needsProxy?{proxy:'C:/cache/canopus-proxy.mp4'}:{}),
     }));
 
+    const {Seq}=await import('../src/sequence.js');
+    const observedDuration=vi.spyOn(Seq,'observeSourceDuration');
     try{
       await Media.loadDesktopMedia(source);
       expect(State.duration).toBe(7448.441);
-      notifyMpv({event:'property-change',name:'duration',data:7400});
+      observedDuration.mockClear();
+      notifyMpv({event:'property-change',name:'duration',data:7400,sourceSessionId:'canopus-session'});
+      expect(observedDuration).toHaveBeenCalledWith(State.clips[0],7448.441);
       expect(State.duration).toBe(7448.441);
       expect(State.clips[0].dur).toBe(7448.441);
       expect(deskMock.ingest).not.toHaveBeenCalled();
@@ -681,6 +993,7 @@ describe('desktop mother-source intake ownership', () => {
         path:source,needsProxy:true,
       }));
     } finally {
+      observedDuration.mockRestore();
       Media.reset();
       delete window.subtool.mpv;
       resetPlayerAdapter(window.subtool);
@@ -692,12 +1005,17 @@ describe('desktop mother-source intake ownership', () => {
     ['連續滑鼠定位', () => { shuttlePause(); Media.seek(6); Media.seek(5.5); }, 5.52],
   ])('原生倒播轉%s時，播放目標立即更新，呈現等 Proxy 還原母素材', async (action, seek, target) => {
     let notifyMpv = () => {};
+    let sourceSessionId='reverse-mother';
     const restore = deferred();
     const mpv = {
       detect: vi.fn(async () => ({ available: true })),
-      launch: vi.fn(async () => ({ duration: 12 })),
-      loadfile: vi.fn(async path => path === 'C:/media/long-gop.mp4'
-        ? restore.promise : { ok: true, duration: 12 }),
+      launch: vi.fn(async () => ({ duration: 12, sourceSessionId })),
+      loadfile: vi.fn(async path => {
+        const result=await (path === 'C:/media/long-gop.mp4'
+          ? restore.promise : { ok: true, duration: 12, sourceSessionId:'reverse-proxy' });
+        sourceSessionId=result.sourceSessionId;
+        return result;
+      }),
       seek: vi.fn(async () => {}),
       present: vi.fn(async time => ({ backend: 'mpv', presentedSourceTime: time })),
       direction: vi.fn(async () => true),
@@ -706,7 +1024,7 @@ describe('desktop mother-source intake ownership', () => {
       play: vi.fn(async () => {}),
       rate: vi.fn(async () => {}),
       quit: vi.fn(async () => {}),
-      onEvent: vi.fn(callback => { notifyMpv = callback; }),
+      onEvent: vi.fn(callback => { notifyMpv = event=>callback({...event,sourceSessionId}); }),
       setBounds: vi.fn(async () => {}),
     };
     window.subtool.mpv = mpv;
@@ -735,7 +1053,7 @@ describe('desktop mother-source intake ownership', () => {
       expect(mpv.loadfile).toHaveBeenCalledTimes(1);
       expect(mpv.present).not.toHaveBeenCalled();
 
-      restore.resolve({ ok: true, duration: 12 });
+      restore.resolve({ ok: true, duration: 12, sourceSessionId:'reverse-restored' });
       await vi.waitFor(() => expect(mpv.present).toHaveBeenCalledWith(
         target, expect.objectContaining({ tolerance: expect.any(Number) }),
       ));
@@ -743,7 +1061,7 @@ describe('desktop mother-source intake ownership', () => {
       expect(mpv.loadfile).toHaveBeenCalledTimes(1);
       expect(mpv.present).toHaveBeenCalledTimes(1);
     } finally {
-      restore.resolve({ ok: true, duration: 12 });
+      restore.resolve({ ok: true, duration: 12, sourceSessionId:'reverse-restored' });
       jklReset();
       vi.restoreAllMocks();
       Media.reset();
@@ -754,15 +1072,16 @@ describe('desktop mother-source intake ownership', () => {
 
   it('短 GOP Proxy 就緒後倒播切到 Proxy，停止時在同一來源時間切回母素材', async () => {
     let notifyMpv = () => {};
+    let sourceSessionId='mother-session', sourceGeneration=0;
     const mpv = {
       detect: vi.fn(async () => ({ available: true })),
-      launch: vi.fn(async () => ({ duration: 12 })),
-      loadfile: vi.fn(async () => ({ ok: true, duration: 12 })),
+      launch: vi.fn(async () => ({ duration: 12, sourceSessionId })),
+      loadfile: vi.fn(async () => ({ ok: true, duration: 12, sourceSessionId:sourceSessionId=`source-${++sourceGeneration}` })),
       seek: vi.fn(async () => {}),
       direction: vi.fn(async () => true),
       mute: vi.fn(async () => {}),
       quit: vi.fn(async () => {}),
-      onEvent: vi.fn(callback => { notifyMpv = callback; }),
+      onEvent: vi.fn(callback => { notifyMpv = event=>callback({...event,sourceSessionId}); }),
       setBounds: vi.fn(async () => {}),
     };
     window.subtool.mpv = mpv;
@@ -820,7 +1139,7 @@ describe('desktop mother-source intake ownership', () => {
   it('uses mpv preview for a native H.265 MP4 when frame-accurate preview is available', async () => {
     const mpv = {
       detect: vi.fn(async () => ({ available: true })),
-      launch: vi.fn(async () => ({ duration: 12 })),
+      launch: vi.fn(async () => ({ duration: 12, sourceSessionId:'hevc-session' })),
       quit: vi.fn(async () => {}),
       onEvent: vi.fn(),
       setBounds: vi.fn(async () => {}),
@@ -854,8 +1173,8 @@ describe('desktop mother-source intake ownership', () => {
   it('restores normal mpv seeking without shortening a probed clip after source switch', async () => {
     const mpv = {
       detect: vi.fn(async () => ({ available: true })),
-      launch: vi.fn(async () => ({ duration: 12 })),
-      loadfile: vi.fn(async () => ({ ok: true, duration: 8 })),
+      launch: vi.fn(async () => ({ duration: 12, sourceSessionId:'primary-session' })),
+      loadfile: vi.fn(async () => ({ ok: true, duration: 8, sourceSessionId:'following-session' })),
       quit: vi.fn(async () => {}),
       onEvent: vi.fn(),
       setBounds: vi.fn(async () => {}),
@@ -951,6 +1270,22 @@ describe('desktop mother-source intake ownership', () => {
       delete window.subtool.mpv;
       resetPlayerAdapter(window.subtool);
     }
+  });
+
+  it('專案重連的 mpv 啟動等待期間失權，回覆後關閉 native 且不交接主片段',async()=>{
+    const {ProjectLoadSession}=await import('../src/project-intake-engine.js');
+    const session=new ProjectLoadSession({media:Media}),generation=session.begin(),launch=deferred();
+    const plan=session.createRestorePlan(generation,{mediaRelink:true,clips:[{primary:true,path:'C:/media/A.mov',dur:12,in:0,out:12,offset:0}]});
+    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(()=>launch.promise),quit:vi.fn(async()=>{}),onEvent:vi.fn(),setBounds:vi.fn(async()=>{})};
+    window.subtool.mpv=mpv;resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValue({duration:12,video:{codec:'prores',fps:25,width:1920,height:1080},audio:[]});
+    try{
+      const loading=session.restoreMedia(generation,{kind:'load',path:'C:/media/A.mov'});
+      await vi.waitFor(()=>expect(mpv.launch).toHaveBeenCalledOnce());
+      session.begin({preserveMaterial:true});launch.resolve({duration:12});await loading;
+      expect(mpv.quit).toHaveBeenCalledOnce();expect(State.clips).toEqual([]);
+      expect(plan.needsMediaRelink()).toBe(true);expect(session.activePlan.needsMediaRelink()).toBe(true);
+    }finally{Media.reset();delete window.subtool.mpv;resetPlayerAdapter(window.subtool);}
   });
 
   it('serializes overlapping mpv launches and cleans the stale native runtime before B starts', async () => {

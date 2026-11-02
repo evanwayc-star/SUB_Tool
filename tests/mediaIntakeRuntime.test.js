@@ -51,7 +51,7 @@ function clearAfterNextCacheRead(runtime, authority) {
     grant(dir);
     if (pending) {
       pending = false;
-      queueMicrotask(() => runtime.clearAll());
+      queueMicrotask(() => { void runtime.clearAll(); });
     }
   });
 }
@@ -112,6 +112,55 @@ afterEach(() => {
 });
 
 describe('native media intake runtime', () => {
+  it('直播與完整快取串流回傳能與來源波形比較的同一 source-v3 證據',async()=>{
+    const {runtime,source}=repairFixture(async args=>writeIntakeOutputs(args));
+    try{
+      const key=cacheKeyFor(source),request={src:source,duration:1,audio:[]};
+      const live=await runtime.stream(request);
+      expect(live.response.sourceKey).toBe(key);await live.completion;
+      const cached=await runtime.stream(request);
+      expect(cached).toMatchObject({cached:true,sourceKey:key});
+    }finally{await runtime.close();}
+  });
+
+  it('快取命中通知期間同路徑換母素材，不交出舊證據或串流 lease',async()=>{
+    let replace=false,source;
+    const fixture=repairFixture(async args=>writeIntakeOutputs(args),{sendProgress:(_target,event)=>{
+      if(replace&&event.stage==='cache-ready'){fs.renameSync(source,source+'.old');fs.writeFileSync(source,'replacement source');}
+    }});
+    source=fixture.source;
+    try{
+      await fixture.runtime.ingest({src:source,duration:1,needsProxy:true,audio:[]});
+      replace=true;
+      await expect(fixture.runtime.stream({src:source,duration:1,audio:[]})).rejects.toThrow(/母素材.*變更/);
+      expect(fixture.runtime.releaseStream('c-fixed')).toBe(false);
+      expect(fs.readFileSync(source,'utf8')).toBe('replacement source');
+    }finally{await fixture.runtime.close();}
+  });
+
+  it('直播準備就緒的 stat 等待期間換母素材，停止 writer 並拒絕交接',async()=>{
+    let finish,source,replaced=false;
+    const writing=new Promise(resolve=>{finish=resolve;});
+    const kill=vi.fn(()=>finish());
+    const fixture=repairFixture(async(args,_count,options)=>{
+      options.onProcess({kill});writeIntakeOutputs(args);await writing;
+    });
+    source=fixture.source;
+    const fsp=require('node:fs/promises'),original=fsp.stat;
+    const stat=vi.spyOn(fsp,'stat').mockImplementation(async(file,...args)=>{
+      const result=await original(file,...args);
+      if(!replaced && String(file).endsWith('proxy.mp4') && result.size>=131072){
+        replaced=true;fs.renameSync(source,source+'.old');fs.writeFileSync(source,'replacement while waiting');
+      }
+      return result;
+    });
+    try{
+      await expect(fixture.runtime.stream({src:source,duration:1,audio:[]})).rejects.toMatchObject({code:'SOURCE_CHANGED'});
+      expect(replaced).toBe(true);expect(kill).toHaveBeenCalledOnce();
+      expect(fixture.runtime.releaseStream('l-fixed')).toBe(false);
+      expect(fs.readFileSync(source,'utf8')).toBe('replacement while waiting');
+    }finally{finish();stat.mockRestore();await fixture.runtime.close();}
+  });
   it.each(['ingest', 'stream'].flatMap(mode => ['close', 'cancel'].map(action => [mode, action])))
   ('%s 的來源色彩 probe 等待期間 %s 不得啟動 writer 或發布 URL', async (mode, action) => {
     let release, entered, revoked = false;
@@ -477,7 +526,7 @@ describe('native media intake runtime', () => {
     fs.unlinkSync(lost);
     const reopened = fixture.createRuntime();
     try {
-      expect(reopened.cleanOrphans()).toEqual({ removed: 0, bytes: 0 });
+      expect(await reopened.cleanOrphans()).toEqual({ removed: 0, bytes: 0, incomplete: false });
       const work = await reopened[mode](request);
       const repaired = mode === 'stream' ? work.response : work;
       await work.completion;
@@ -875,14 +924,14 @@ describe('native media intake runtime', () => {
     });
     const work = await runtime.stream({ src: source, duration: 1, audio: [] });
     try {
-      expect(runtime.clearAll(source)).toEqual({ bytes: 6 });
+      expect(await runtime.clearAll(source)).toEqual({ bytes: 6, incomplete: true });
       expect(fs.existsSync(old)).toBe(false);
       expect(fs.existsSync(work.response.proxy)).toBe(true);
       finish(); await work.completion;
-      expect(runtime.clearAll(source)).toEqual({ bytes: 0 });
+      expect(await runtime.clearAll(source)).toEqual({ bytes: 0, incomplete: true });
       expect((await getRange(work.response.streamUrl, 'bytes=0-4')).status).toBe(206);
       expect(runtime.releaseStream(work.response.streamLeaseId)).toBe(true);
-      expect(runtime.clearAll(source).bytes).toBeGreaterThanOrEqual(131072);
+      expect((await runtime.clearAll(source)).bytes).toBeGreaterThanOrEqual(131072);
       expect(fs.existsSync(work.response.proxy)).toBe(false);
     } finally { finish(); await work.completion; await runtime.close(); }
   });
@@ -896,13 +945,15 @@ describe('native media intake runtime', () => {
       const first = await runtime.stream({ src: source, duration: 1, audio: [] });
       const second = await runtime.stream({ src: source, duration: 1, audio: [] });
       expect(first.cached).toBe(true);
-      expect(runtime.clearAll(source)).toEqual({ bytes: 0 });
+      expect(await runtime.clearAll(source)).toEqual({ bytes: 0, incomplete: true });
       expect((await getRange(first.streamUrl, 'bytes=0-4')).status).toBe(206);
       expect(runtime.releaseStream(first.streamLeaseId)).toBe(true);
-      expect(runtime.clearAll(source)).toEqual({ bytes: 0 });
+      expect(await runtime.clearAll(source)).toEqual({ bytes: 0, incomplete: true });
       expect((await getRange(second.streamUrl, 'bytes=0-4')).status).toBe(206);
       await runtime.close();
-      expect(runtime.clearAll(source).bytes).toBeGreaterThanOrEqual(131072);
+      expect(await runtime.clearAll(source)).toEqual({ bytes: 0, incomplete: true });
+      await runtime.resume();
+      expect((await runtime.clearAll(source)).bytes).toBeGreaterThanOrEqual(131072);
       expect(fs.existsSync(second.proxy)).toBe(false);
     } finally { await runtime.close(); }
   });
@@ -1224,7 +1275,7 @@ describe('native media intake runtime', () => {
     });
     const work = await runtime.stream({ src: source, duration: 10, audio: [] });
     const proxy = work.response.proxy;
-    expect(runtime.cleanOrphans()).toEqual({ removed: 0, bytes: 0 });
+    expect(await runtime.cleanOrphans()).toEqual({ removed: 0, bytes: 0, incomplete: true });
     expect(fs.existsSync(proxy)).toBe(true);
     finish();
     await work.completion;
@@ -1232,7 +1283,7 @@ describe('native media intake runtime', () => {
     await runtime.close();
   });
 
-  it('cleanOrphans 只刪確定無效的 cache，損毀 meta 必須 fail-safe 保留', () => {
+  it('cleanOrphans 只刪確定無效的 cache，損毀 meta 必須 fail-safe 保留', async () => {
     const root = makeTempRoot();
     const cacheRoot = path.join(root, 'mediacache');
     const tempRoot = path.join(root, 'temp');
@@ -1251,7 +1302,7 @@ describe('native media intake runtime', () => {
     });
 
     expect(runtime.cacheInfo()).toEqual({ root: cacheRoot, folders: 2, bytes: 15 });
-    expect(runtime.cleanOrphans()).toEqual({ removed: 1, bytes: 4 });
+    expect(await runtime.cleanOrphans()).toEqual({ removed: 1, bytes: 4, incomplete: true });
     expect(fs.existsSync(orphan)).toBe(false);
     expect(fs.existsSync(corrupt)).toBe(true);
     expect(runtime.cacheInfo()).toEqual({ root: cacheRoot, folders: 1, bytes: 11 });
@@ -1282,7 +1333,7 @@ describe('native media intake runtime', () => {
     });
     const work = runtime.ingest({ src: source, duration: 10, needsProxy: true, audio: [] });
     const activeProxy = await writing;
-    expect(runtime.cleanOrphans()).toEqual({ removed: 1, bytes: 6 });
+    expect(await runtime.cleanOrphans()).toEqual({ removed: 1, bytes: 6, incomplete: true });
     expect(fs.existsSync(orphan)).toBe(false);
     expect(fs.existsSync(activeProxy)).toBe(true);
     finish();
@@ -1328,22 +1379,21 @@ describe('native media intake runtime', () => {
       tempRoot,
       fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }),
     });
-    untrustedRuntime.clearAll(source);
+    await untrustedRuntime.clearAll(source);
     expect(fs.existsSync(ingested.proxy)).toBe(true);
 
-    const cleared = trustedRuntime.clearAll(source);
+    const cleared = await trustedRuntime.clearAll(source);
     expect(cleared.bytes).toBeGreaterThan(0);
     expect(fs.existsSync(ingested.proxy)).toBe(false);
   });
 
-  it('generated-file cleanup 只刪除 FileAuthority 管理的 cache/temp 檔案', () => {
+  it('generated-file cleanup 只刪除已登記的 temp 檔案，不刪除外部素材', async () => {
     const root = makeTempRoot();
     const cacheRoot = path.join(root, 'mediacache');
     const tempRoot = path.join(root, 'temp');
     const generated = path.join(tempRoot, 'wave.wav');
     const outside = path.join(root, 'mother.wav');
     fs.mkdirSync(tempRoot, { recursive: true });
-    fs.writeFileSync(generated, Buffer.from('generated'));
     fs.writeFileSync(outside, Buffer.from('mother'));
     const forgotten = [];
     const runtime = createMediaIntakeRuntime({
@@ -1353,6 +1403,8 @@ describe('native media intake runtime', () => {
       forgetTemporaryFile: file => forgotten.push(file),
     });
 
+    await runtime.produceTemporaryFile(generated, async file => fs.writeFileSync(file, Buffer.from('generated')));
+
     expect(runtime.cleanupGeneratedFile(outside)).toBe(false);
     expect(runtime.cleanupGeneratedFile(generated)).toBe(true);
     expect(fs.existsSync(outside)).toBe(true);
@@ -1360,7 +1412,7 @@ describe('native media intake runtime', () => {
     expect(forgotten).toEqual([generated]);
   });
 
-  it('preview cache predicate 不會把 cache 外同名的母素材誤判成 Proxy', () => {
+  it('preview cache predicate 不會把 cache 外同名的母素材誤判成 Proxy', async () => {
     const root = makeTempRoot();
     const cacheRoot = path.join(root, 'mediacache');
     const tempRoot = path.join(root, 'temp');

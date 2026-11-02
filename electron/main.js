@@ -22,6 +22,8 @@ const crypto = require('crypto');
 const QueueStore = require('./queue-store');
 const QueueHistory = QueueStore.QueueHistory;
 const { createDeliveryRunner } = require('./delivery-runner');
+const { createDeliveryConsent } = require('./delivery-consent');
+const { createDeliveryPreparation } = require('./delivery-preparation');
 const ExportLease = require('./export-lease');
 const ExportWatchdog = require('./export-watchdog');
 const { FileAuthority } = require('./file-authority');
@@ -29,7 +31,8 @@ const { createLocalResourceServer, registerLocalResourceScheme } = require('./lo
 const { createProjectWorkspace, createAtomicProjectWriter, createBoundProjectReader, authorizeDroppedMediaPath } = require('./project-file-authority-engine');
 const { createSettingsFile } = require('./settings-file');
 const { collectStyleDirectoryFiles } = require('./style-directory-import');
-const { writeDirectoryFiles } = require('./directory-output');
+const { createDirectoryOutputRuntime } = require('./directory-output');
+const { fileCommitCoordinator } = require('./file-commit-coordinator');
 const { createScreenshotOutput } = require('./screenshot-output');
 
 const { createIpcGuards, expectedExportExtension, mergeRendererConfig } = require('./ipc-guards');
@@ -45,6 +48,7 @@ const {
   createSpeechCompressionRuntime,
 } = require('./speech-audio-compressor');
 const { createAudioNormalizationRuntime } = require('./audio-normalization-runtime');
+const { motherSourceFingerprint } = require('./mother-source-evidence');
 const { createVocalWaveformRuntime, validateChunkRequest } = require('./vocal-waveform-runtime');
 const { vocalSourceFingerprint } = require('./vocal-waveform-fingerprint');
 /* 交付規格派生與 renderer 共用同一份（見 shared/README.md）。已入列工作的
@@ -73,14 +77,27 @@ let _isAppQuitting = false;
 let _mainHiddenForQueue = false;
 let _quitReady = false;
 let _quitSequenceStarted = false;
+const directoryOutput = createDirectoryOutputRuntime({ coordinator:fileCommitCoordinator });
 let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null;
 let FFMPEG_DETECTION = null, FFPROBE_DETECTION = null;
 let mediaProbe = null;
 let projectOpenReady = false;
 const IS_TRANSPORT_ACCEPTANCE = process.argv.includes('--subtool-transport-acceptance');
+function prepareApplicationSharedLeaseRoot() {
+  if (!IS_TRANSPORT_ACCEPTANCE) return ExportLease.prepareSharedLeaseRoot(app.getPath('appData'));
+  const explicitProfile = app.commandLine.getSwitchValue('user-data-dir');
+  const profile = app.getPath('userData');
+  const key = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+  if (!explicitProfile || key(explicitProfile) !== key(profile)) {
+    throw new Error('桌面驗收缺少明確隔離的 userData 目錄，無法建立共用鎖');
+  }
+  return ExportLease.prepareAcceptanceSharedLeaseRoot(profile);
+}
 /* 每個主程序獨占暫存根；不同 userData（或尚未取得單例鎖的程序）仍共用 OS temp，
    不能用共同目錄讓同毫秒檔名碰撞，或在退出時清掉另一個程序的中間檔。 */
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool_cache-'));
+// The name alone is not authority: another process can replace this directory.
+const TMP_OWNER = ExportLease.captureOutputDirectory(TMP);
 const tempFiles = new Set();
 let tmpSeq = 0;
 /* proxy、聲道與波形都共用 per-source cache；streamIngest 回傳「可播放」後仍持有
@@ -93,7 +110,7 @@ const mediaWaveformCoordinator = createMediaIngestCoordinator();
    renderer 路徑不會因 fs:fileURL／stat 等查詢被靜默升格；只接受原生對話框、OS 開檔、
    preload 驗證過的拖放 File 與內部快取。專案內已宣告的媒體則只給「那一個檔案」的唯讀能力。 */
 const fileAuthority = new FileAuthority({ internalDirectories: [TMP] });
-const screenshotOutput = createScreenshotOutput({ fileAuthority, tempDir: TMP });
+const screenshotOutput = createScreenshotOutput({ fileAuthority, tempDir: TMP, coordinator: fileCommitCoordinator });
 const localResourceServer = createLocalResourceServer({
   fileAuthority,
   protocolModule: protocol,
@@ -310,9 +327,15 @@ if (!gotTheLock) {
     CACHE = path.join(app.getPath('userData'), 'mediacache');
     fileAuthority.grantInternalDirectory(CACHE);
     EXPORT_QUEUE_DIR = path.join(app.getPath('userData'), 'export-queue');
+    try { SHARED_OUTPUT_LOCK = prepareApplicationSharedLeaseRoot(); }
+    catch (error) { SHARED_OUTPUT_LOCK = null; console.error('[Export watchdog] 無法建立共用輸出鎖目錄', error); }
     fileAuthority.grantQueueLogDirectory(EXPORT_QUEUE_DIR);
-    try { fs.mkdirSync(CACHE, { recursive: true }); } catch (e) {}
-    try { mediaIntakeRuntime.cleanOrphans(); } catch (e) {} // 啟動時自動清除無效快取（例如上次轉檔中斷的孤兒資料夾）
+    try {
+      fs.mkdirSync(CACHE, { recursive: true });
+      if (!mediaIntakeRuntime.registerCleanupRoot(CACHE)) console.error('[Cache] 無法確認清理根目錄身分');
+    } catch (e) { console.error('[Cache] 無法建立清理根目錄', e); }
+    // 孤兒快取驗證可能須讀取大檔；背景執行，關機時由 runtime 等待收尾。
+    void mediaIntakeRuntime.cleanOrphans().catch(() => {});
     let recoveryWarnings = [];
     try {
       const recovery = await ExportWatchdog.recoverExportLeases(EXPORT_QUEUE_DIR);
@@ -348,11 +371,16 @@ app.on('before-quit', (event) => {
         vocalWaveformRuntime.cancelAllAndWait(),
         mediaIngestCoordinator.cancelAllAndWait(),
         mediaWaveformCoordinator.cancelAllAndWait(),
+        directoryOutput.close(),
         QueueManager.prepareForShutdown(),
       ]);
       // execution 確認程序 close 後，快取 owner 還須完成來源核對與 staging 清理。
       await Promise.all([clipAudioCache.waitForIdle(), clipFrameCache.waitForIdle()]);
       await screenshotOutput.close();
+      // 已受理的專案存檔可能仍在寫入或清除暫存檔；先停截圖入口，再排空共用提交。
+      await fileCommitCoordinator.close();
+      // Drain mpv's process and log stream before its owned files are removed.
+      await mpvHost.disposeAndWait?.();
       // Keep active HTTP readers/URLs intact if a fallible cleanup aborts quit.
       await mediaIntakeRuntime.close();
     })
@@ -364,33 +392,62 @@ app.on('before-quit', (event) => {
       /* outcome journal 尚未 durable 時不能「照樣退出」：那會遺失唯一知道 ffmpeg
          已結束的 intent，重啟後把舊 running snapshot 當 queued 重新以 -y 執行。 */
       console.error('[Shutdown] 原生工作或匯出狀態尚未安全結清，已取消退出：', e);
-      await screenshotOutput.resume();
-      mediaProbe?.resume();
-      ffmpegExecution.resume();
-      deliveryCapabilities.resume();
-      speechCompressionRuntime.resume();
-      mediaIngestCoordinator.resume();
-      mediaWaveformCoordinator.resume();
-      vocalWaveformRuntime.resume();
-      await QueueManager.cancelShutdown();
-      _quitSequenceStarted = false;
-      _isAppQuitting = false;
+      const failedResumes = [];
+      const recover = async (label, action) => {
+        try { await action(); }
+        catch (error) {
+          failedResumes.push(`${label}：${error?.message || error}`);
+          console.error(`[Shutdown] ${label}無法恢復：`, error);
+        }
+      };
+      try {
+        await recover('檔案提交', () => fileCommitCoordinator.resume());
+        await recover('截圖', () => screenshotOutput.resume());
+        await recover('播放器', () => mpvHost.resume?.());
+        await recover('媒體串流', () => mediaIntakeRuntime.resume?.());
+        await recover('媒體探測', () => mediaProbe?.resume());
+        await recover('轉檔', () => ffmpegExecution.resume());
+        await recover('交付能力', () => deliveryCapabilities.resume());
+        await recover('辨識壓縮', () => speechCompressionRuntime.resume());
+        await recover('媒體匯入', () => mediaIngestCoordinator.resume());
+        await recover('媒體波形', () => mediaWaveformCoordinator.resume());
+        await recover('人聲波形', () => vocalWaveformRuntime.resume());
+        await recover('字幕與樣式輸出', () => directoryOutput.resume());
+        await recover('匯出佇列', () => QueueManager.cancelShutdown());
+      } finally {
+        _quitSequenceStarted = false;
+        _isAppQuitting = false;
+      }
       const options = {
         type: 'error',
         title: '尚未能安全關閉',
         message: '原生媒體工作尚未結束，或匯出恢復狀態尚未保存，已取消關閉。',
-        detail: `${e.message || e}\n請確認儲存空間或檔案鎖定狀態後，再次嘗試關閉。`,
+        detail: `${e.message || e}${failedResumes.length ? `\n尚未恢復：\n${failedResumes.join('\n')}` : ''}\n請確認儲存空間或檔案鎖定狀態後，再次嘗試關閉。`,
       };
-      const owner = mainWin && !mainWin.isDestroyed() ? mainWin : null;
-      const show = owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options);
-      Promise.resolve(show).catch(() => {});
+      try {
+        const owner = mainWin && !mainWin.isDestroyed() ? mainWin : null;
+        await (owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options));
+      } catch (dialogError) { console.error('[Shutdown] 無法顯示退出失敗訊息：', dialogError); }
     });
 });
 app.on('quit', () => {
   mpvHost.dispose();
   void mediaIntakeRuntime.close();
-  for (const f of tempFiles) { try { fs.unlinkSync(f); } catch (e) {} }
-  try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}
+  const ownsTmp = () => {
+    try { ExportLease.captureOutputAuthority(path.join(TMP, '.quit-owner-check'), TMP_OWNER); return true; }
+    catch (e) { return false; }
+  };
+  if (!ownsTmp()) return;
+  for (const f of tempFiles) {
+    if (!ownsTmp()) return;
+    try {
+      if (mediaIntakeRuntime.isOwnedTemporary(f)) mediaIntakeRuntime.cleanupGeneratedFile(f);
+    } catch (e) {}
+  }
+  if (!ownsTmp()) return;
+  // Unknown entries and replacements have no owner: retain them and only
+  // remove the root when every producer has safely removed its own files.
+  try { fs.rmdirSync(TMP); } catch (e) {}
 });
 
 /* ============ IPC ============ */
@@ -531,7 +588,8 @@ ipcMain.handle('fs:authorizeDroppedFile', (e, p) => {
   });
 });
 ipcMain.handle('fs:reserveScreenshotPath', (e, { directory, suffix } = {}) => screenshotOutput.reserve(directory, suffix));
-ipcMain.handle('fs:releaseScreenshotPath', (e, filePath) => screenshotOutput.release(filePath));
+ipcMain.handle('fs:releaseScreenshotPath', (e, { path: filePath, token } = {}) =>
+  typeof token === 'string' && token ? screenshotOutput.release(filePath, token) : false);
 
 
 
@@ -657,7 +715,7 @@ ipcMain.handle('dialog:saveProject', async (e, { name, b64 }) => {
     const projectRoot = ExportLease.captureOutputDirectory(path.dirname(r.filePath));
     return await projectWorkspace.writeRendererProject(r.filePath, b64, { remember: true, projectRoot });
   }
-  catch (error) { return null; }
+  catch (error) { return error?.code === 'PROJECT_DESTINATION_CHANGED' ? { code: 'PROJECT_DESTINATION_CHANGED' } : null; }
 });
 
 ipcMain.handle('dialog:importSub', async (e, kind) => {
@@ -671,7 +729,8 @@ ipcMain.handle('dialog:exportSub', async (e, { name, b64, ext }) => {
   const r = await dialog.showSaveDialog({ title: '匯出字幕', defaultPath: name, filters: [{ name: (ext || 'txt').toUpperCase(), extensions: [ext || 'txt'] }] });
   if (r.canceled) return null;
   // 單檔與批次共用完整寫入後才發布的交易，失敗不可先截斷使用者的舊字幕。
-  const { written } = writeDirectoryFiles(path.dirname(r.filePath), [{ name: path.basename(r.filePath), b64 }]);
+  const { written, conflicted } = await directoryOutput.write(path.dirname(r.filePath), [{ name: path.basename(r.filePath), b64 }]);
+  if (conflicted) throw new Error('匯出期間目的檔已變更，請重新選擇輸出位置並確認');
   if (written !== 1) throw new Error('無法寫入所選字幕檔案');
   return r.filePath;
 });
@@ -720,6 +779,7 @@ function _findExportTimecodeFont() {
 
 /* ===== 背景匯出佇列與 QueueManager ===== */
 let EXPORT_QUEUE_DIR = null;
+let SHARED_OUTPUT_LOCK = null;
 let queueWin = null;
 let exportRecoveryWarningsShown = false;
 function showExportRecoveryWarnings(warnings) {
@@ -752,6 +812,7 @@ const ffmpegExecution = createFFmpegExecution({
   getFFmpegPath: () => FFMPEG,
   getUserDataDir: () => app.getPath('userData'),
   getQueueDir: () => EXPORT_QUEUE_DIR,
+  getSharedOutputLock: () => SHARED_OUTPUT_LOCK,
   ensureQueueDir: ensureExportQueueDir,
   moduleDir: __dirname,
   isPackaged: () => app.isPackaged,
@@ -802,6 +863,7 @@ const deliveryRunner = createDeliveryRunner({
   },
   queueDir: () => EXPORT_QUEUE_DIR,
   tempDir: TMP,
+  tempRootAuthority: TMP_OWNER,
   mediaProbe: () => mediaProbe,
   runFfmpeg: (args, options) => ffmpegExecution.execute(args, options),
   nativeCapabilities: deliveryCapabilities,
@@ -827,6 +889,7 @@ const deliveryRunner = createDeliveryRunner({
 const mediaIntakeRuntime = createMediaIntakeRuntime({
   cacheRoot: () => CACHE,
   tempRoot: TMP,
+  tempRootAuthority: TMP_OWNER,
   // 真機驗收必須維持母素材唯讀；所有衍生檔只進隔離 profile 的中央 cache。
   allowSidecarCache: !IS_TRANSPORT_ACCEPTANCE,
   fileAuthority,
@@ -844,21 +907,10 @@ const mediaIntakeRuntime = createMediaIntakeRuntime({
 });
 const speechAudioCompressor = createSpeechAudioCompressor({
   createTempPath: tmpPath,
-  writeFile: (file, bytes) => fs.promises.writeFile(file, bytes),
-  readFile: file => fs.promises.readFile(file),
-  removeFile: async file => {
-    try {
-      await fs.promises.unlink(file);
-      tempFiles.delete(file);
-    } catch (error) {
-      if (error?.code === 'ENOENT') {
-        tempFiles.delete(file);
-        return;
-      }
-      // 保留在 tempFiles，讓 app 關閉時再嘗試清除，避免刪除失敗後失去追蹤。
-      throw error;
-    }
-  },
+  produceTemporaryFile: (file, produce) => mediaIntakeRuntime.produceTemporaryFile(file, produce),
+  withTemporaryDescriptor: (file, owner, work) => mediaIntakeRuntime.withTemporaryDescriptor(file, owner, work),
+  assertTemporaryOutput: (file, owner) => mediaIntakeRuntime.assertTemporaryOutput(file, owner),
+  cleanupGeneratedFile: file => mediaIntakeRuntime.cleanupGeneratedFile(file),
   execute: (args, options) => runFF(args, options)
 });
 const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
@@ -871,6 +923,8 @@ const vocalWaveformRuntime = createVocalWaveformRuntime({
 });
 const audioNormalizationRuntime = createAudioNormalizationRuntime({
   createTempPath: tmpPath,
+  produceTemporaryFile: (file, produce) => mediaIntakeRuntime.produceTemporaryFile(file, produce),
+  fingerprintSource: motherSourceFingerprint,
   execute: (args, options) => runFF(args, options),
   probe: (source, options) => {
     if (!mediaProbe) throw new Error('找不到 ffprobe');
@@ -1084,6 +1138,92 @@ ipcMain.handle('queue:retryJob', (e, jobId) => {
   return QueueManager.retryJob(jobId);
 });
 
+ipcMain.handle('queue:retryWithOutputConfirmation', async (e, jobId) => {
+  const fail = message => ({ status: 'failed', message });
+  const job = QueueManager.jobs().find(current => current.id === jobId);
+  if (!job || !isRetryable(job.status) || QueueManager.shuttingDown
+    || !ExportLease.needsDeliveryDestinationConfirmation(job.outputAuthority)) return fail('這份工作不需要或不能重新確認輸出');
+  if (typeof job.outputAuthority?.outPath !== 'string' || !Array.isArray(job.outputAuthority.parents) || !job.outputAuthority.parents.length) {
+    return fail('此舊工作缺少原輸出目錄身分，無法安全重新確認；請從原專案建立新交付。原工作與字幕快照仍保留。');
+  }
+  const win = queueWin, sender = e.sender, frame = e.senderFrame;
+  if (!win || win.isDestroyed() || sender !== win.webContents || sender.isDestroyed() || !frame || sender.mainFrame !== frame) return fail('佇列視窗已變更');
+  const status = job.status, attempt = job.attempt, payload = job.payload;
+  const snapshot = JSON.stringify({ payload, sourcePaths: job.sourcePaths, assRef: job.assRef, authority: job.outputAuthority });
+  let queueLeaseProof = null;
+  try {
+    const queueRoot = ExportLease.captureOutputDirectory(EXPORT_QUEUE_DIR);
+    queueLeaseProof = ExportLease.captureOutputAuthority(path.join(ExportLease.leaseRoot(EXPORT_QUEUE_DIR), '.subtool-queue-proof'), queueRoot);
+  } catch (error) { /* A missing or replaced lease root cannot prove old writers are gone. */ }
+  let navigated = false;
+  const confirmationAbort = new AbortController();
+  const onNavigation = (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { navigated = true; confirmationAbort.abort(); } };
+  const onDestroyed = () => confirmationAbort.abort();
+  sender.on('did-start-navigation', onNavigation);
+  sender.on('destroyed', onDestroyed);
+  const owns = () => !QueueManager.shuttingDown && queueWin === win && !win.isDestroyed()
+    && !navigated && !sender.isDestroyed() && sender.mainFrame === frame && e.senderFrame === frame
+    && QueueManager.jobs().find(current => current.id === jobId) === job
+    && job.status === status && job.attempt === attempt && job.payload === payload
+    && JSON.stringify({ payload: job.payload, sourcePaths: job.sourcePaths, assRef: job.assRef, authority: job.outputAuthority }) === snapshot;
+  try {
+    const extension = expectedExportExtension(payload.format);
+    const selected = await dialog.showSaveDialog(win, { title: '重新確認舊交付的輸出檔案', defaultPath: payload.outPath,
+      filters: [{ name: extension.toUpperCase(), extensions: [extension] }] });
+    if (selected.canceled || !selected.filePath) return { status: 'cancelled', message: '已取消選擇，原工作與字幕快照仍保留' };
+    if (!owns()) return fail('工作或佇列視窗已變更，本次選擇未套用');
+    const target = path.resolve(selected.filePath);
+    if (path.extname(target).toLowerCase() !== `.${extension.toLowerCase()}`) return fail(`請選擇副檔名為 .${extension} 的輸出檔案`);
+    const root = ExportLease.captureOutputDirectory(path.dirname(target));
+    const evidence = await ExportLease.captureDestinationEvidenceAsync(ExportLease.captureOutputAuthority(target, root), {signal:confirmationAbort.signal});
+    if (!owns()) return fail('工作或佇列視窗已變更，本次選擇未套用');
+    if (evidence.destinationEvidence.identity !== null) {
+      const answer = await dialog.showMessageBox(win, { type: 'warning', title: '確認覆寫舊交付的輸出',
+        message: '此舊交付缺少原始覆寫確認。是否覆寫目前選擇的檔案？',
+        detail: target, buttons: ['覆寫並重試', '取消'], defaultId: 1, cancelId: 1, noLink: true });
+      if (answer.response !== 0) return { status: 'cancelled', message: '已取消覆寫，原工作與字幕快照仍保留' };
+    }
+    if (!owns()) return fail('工作或佇列視窗已變更，本次確認未套用');
+    let oldDirectoryUnavailable = false;
+    try { ExportLease.assertOutputAuthority(job.outputAuthority, payload.outPath); }
+    catch (error) { oldDirectoryUnavailable = true; }
+    ExportLease.assertOutputAuthority(evidence, target);
+    await ExportLease.assertDeliveryDestinationEvidenceAsync(evidence, {signal:confirmationAbort.signal});
+    if (!owns()) return fail('工作或佇列視窗已變更，本次確認未套用');
+    if (!queueLeaseProof || !SHARED_OUTPUT_LOCK) return fail('無法確認舊交付的輸出鎖目錄；請先確認原工作是否仍在轉檔並恢復原佇列資料。若無法恢復，請從原專案重新建立交付並選擇新檔名；原工作與字幕快照仍保留。');
+    ExportLease.assertOutputAuthority(queueLeaseProof, queueLeaseProof.requestedPath);
+    ExportLease.assertOutputAuthority(SHARED_OUTPUT_LOCK.sharedAuthority, SHARED_OUTPUT_LOCK.sharedAuthority.requestedPath);
+    if (oldDirectoryUnavailable) {
+      const oldParent = job.outputAuthority?.parents?.at(-1), selectedParent = evidence.parents.at(-1);
+      if (!oldParent || (oldParent.dev === selectedParent.dev && oldParent.ino === selectedParent.ino)) {
+        return fail('原輸出目錄無法確認；請選擇不同的實體資料夾');
+      }
+    }
+    const originalKey = ExportLease.outputKey(job.outputAuthority.outPath);
+    const guardedKeys = new Set([originalKey, ExportLease.outputKey(target)]);
+    const selectedEntry = ExportLease.outputReservationEntry(target);
+    if (selectedEntry) guardedKeys.add(ExportLease.outputKey(selectedEntry));
+    if (!oldDirectoryUnavailable) {
+      const originalEntry = ExportLease.outputReservationEntry(job.outputAuthority.outPath);
+      if (originalEntry) guardedKeys.add(ExportLease.outputKey(originalEntry));
+    }
+    for (const directory of [EXPORT_QUEUE_DIR, SHARED_OUTPUT_LOCK.sharedQueueDir]) {
+      for (const entry of ExportLease.listLeases(directory)) {
+        if (!entry.valid) return fail('無法確認既有輸出鎖；請先檢查佇列中的保留成品');
+        if (entry.owner.jobId === job.id || guardedKeys.has(entry.key) || guardedKeys.has(entry.owner.aliasOf?.key)) {
+          return fail('舊工作仍有輸出鎖或保留成品；請先確認原程序已停止並檢查保留檔案');
+        }
+      }
+    }
+    ExportLease.assertOutputAuthority(queueLeaseProof, queueLeaseProof.requestedPath);
+    ExportLease.assertOutputAuthority(SHARED_OUTPUT_LOCK.sharedAuthority, SHARED_OUTPUT_LOCK.sharedAuthority.requestedPath);
+    if (!owns()) return fail('工作或佇列視窗已變更，本次確認未套用');
+    if (!QueueManager.retryJob(jobId, { confirmedOutput: evidence, oldDirectoryUnavailable })) return fail('無法重新加入佇列；請檢查來源、輸出衝突與保留的輸出鎖');
+    return { status: 'retried', message: '已確認輸出並重新加入佇列' };
+  } catch (error) { return fail(error?.message || '無法確認輸出檔案'); }
+  finally { sender.removeListener('did-start-navigation', onNavigation); sender.removeListener('destroyed', onDestroyed); }
+});
+
 ipcMain.handle('queue:retryWithOutputDirectory', async (e, jobId) => {
   const job = QueueManager.jobs().find(current => current.id === jobId);
   const fail = message => ({ status: 'failed', message });
@@ -1107,7 +1247,7 @@ ipcMain.handle('queue:retryWithOutputDirectory', async (e, jobId) => {
       return fail(`請選擇原輸出資料夾：${directory}；如需其他位置，請建立新的交付工作`);
     }
     fileAuthority.grantDeliveryDirectory(directory);
-    if (!QueueManager.retryJob(jobId)) return fail('無法重試：請檢查來源與保留的輸出鎖；舊鎖無法安全清理時，請以新檔名建立交付工作');
+    if (!QueueManager.retryJob(jobId,{reauthorizedOutput:true})) return fail('無法重試：請檢查來源與保留的輸出鎖；舊鎖無法安全清理時，請以新檔名建立交付工作');
     return { status: 'retried', message: '已重新授權原輸出資料夾並重試' };
   } catch (error) { return fail(error?.message || '無法重新選擇輸出資料夾'); }
 });
@@ -1172,12 +1312,21 @@ function prepareQueueDeliveryUpdate(job, patch) {
   /* 檔名的 _TC 後綴要跟著 TC 開關走（defaultDeliveryName 就是這樣命名的）。
      不同步的話，關掉 TC 之後檔名還叫 …_TC.mp4，交付出去會被誤認。 */
   const stem = oldPath.replace(/\.[^.\\/]*$/, '').replace(/_TC$/, '');
-  const newPath = stem + (spec.timecodeWatermark ? '_TC' : '') + '.' + ext;
+  const derivedPath = stem + (spec.timecodeWatermark ? '_TC' : '') + '.' + ext;
+  // 此介面不提供重新命名。只有大小寫不同的推導結果沿用原路徑，
+  // 不猜測磁碟是否區分大小寫，也不把不同目錄項目當成原授權。
+  const newPath = derivedPath.toLowerCase() === oldPath.toLowerCase() ? oldPath : derivedPath;
 
   /* 先用候選物件跑一次准入檢查，通過才真的改到 job 上——
      失敗時 job 必須維持原狀，不可以留下改到一半的狀態。 */
   const nextPayload = { ...p, format, outPath: newPath, ...spec, audioPlan, canvasW, canvasH };
   const outputAuthority = ExportLease.retargetOutputAuthority(job.outputAuthority, newPath);
+  // 修改格式或 TC 自動衍生的檔名沒有經過交付清單的覆寫確認。
+  // 即使檔案身分可驗證，也不能把它當成使用者同意覆蓋。
+  if (ExportLease.normalizeOutputPath(oldPath) !== ExportLease.normalizeOutputPath(newPath)
+    && outputAuthority.destinationEvidence?.identity !== null) {
+    throw new Error('新輸出檔已存在，請從交付清單重新送出並確認是否覆寫');
+  }
   const candidate = { ...job, payload: nextPayload };
   _admission.assertOutputFormat(candidate);
   _admission.assertOutputAvailable(candidate, job.id); // 排除自己；擋同路徑撞車
@@ -1196,10 +1345,31 @@ ipcMain.handle('queue:openMonitor', () => {
   openQueueWindow();
 });
 
+const deliveryConsent = createDeliveryConsent({ captureOutputAuthority: file => fileAuthority.captureDeliveryOutput(file) });
+const deliveryPreparation = createDeliveryPreparation(deliveryConsent);
+ipcMain.handle('delivery:beginTargetRequest', (e, id) => deliveryPreparation.begin(e.sender, id));
+ipcMain.handle('delivery:prepareTargets', (e, request) => deliveryPreparation.prepare(e.sender, request?.paths, request?.requestId, request?.ticket));
+ipcMain.handle('delivery:cancelTargetRequest', (e, request) => deliveryPreparation.cancel(e.sender, request?.requestId, request?.ticket));
+ipcMain.handle('delivery:finishTargetRequest', (e, request) => deliveryPreparation.finish(e.sender, request?.requestId, request?.ticket));
+ipcMain.handle('delivery:releaseTargets', (e, id) => deliveryConsent.release(e.sender, id));
+
 ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg');
+  const senderScope = deliveryPreparation.senderScope(e.sender);
+  try {
+  const admissionError = error => ['DELIVERY_DESTINATION_CHANGED', 'DELIVERY_DESTINATION_UNVERIFIABLE'].includes(error?.code)
+    ? Object.assign(new Error('輸出檔在確認後變更或無法核對，請重新檢查目的檔並再次送出'), { code: error.code }) : error;
+  const deliveryReceipt = payload?.deliveryReceipt;
+  const deliveryRequestId = payload?.deliveryRequestId;
+  const deliveryRequestTicket = payload?.deliveryRequestTicket;
+  const preparationSignal = deliveryPreparation.signal(e.sender, deliveryRequestId, deliveryRequestTicket,
+    deliveryRequestId == null ? null : deliveryReceipt) || senderScope.signal;
+  preparationSignal?.throwIfAborted();
   payload = prepareDeliveryPayload({ ...payload, format: String(payload?.format || '').trim().toLowerCase() });
   delete payload.outputAuthority;
+  delete payload.deliveryReceipt;
+  delete payload.deliveryRequestId;
+  delete payload.deliveryRequestTicket;
   const preset = getDeliveryFormatPreset(payload?.format);
   if (preset) payload = { ...payload, targetH: preset.height };
   const { assText, format, defaultName, outPath: presetOut } = payload;
@@ -1208,21 +1378,46 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   const isPro = format === 'prores';
   
   let outPath = presetOut || null;
+  let admittedOutput;
   if (!outPath) {
     const r = await dialog.showSaveDialog(mainWin, {
       title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
       filters: [{ name: preset ? `${preset.label} (${preset.kind === 'disc' ? 'ISO' : 'MPEG-TS'})` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
     });
+    preparationSignal?.throwIfAborted();
     if (r.canceled) return null;
     outPath = r.filePath;
     fileAuthority.grantDeliveryFile(outPath);
+    admittedOutput = await ExportLease.captureDestinationEvidenceAsync(fileAuthority.captureDeliveryOutput(outPath), { signal: preparationSignal });
+    preparationSignal?.throwIfAborted();
+    if (e.sender.isDestroyed?.()) throw new Error('交付視窗已關閉，請重新送出');
   }
 
-  // presetOut 只能來自已選取的交付目錄；不允許 renderer 以略過 save dialog 的
-  // payload 取得任意寫檔能力。先驗證再寫 ASS 暫存，失敗不留下半份 queue artifact。
+  // 先驗證來源與輸出能力，再消耗收據；兩者都未授權時保留來源錯誤。
   const authorizationPayload = { ...payload, outPath };
   QueueManager.assertJobCapabilities({ payload: authorizationPayload });
-  await deliveryCapabilities.assertReady(authorizationPayload);
+  if (deliveryReceipt != null && deliveryRequestId == null) throw new Error('交付確認工作已失效，請重新送出');
+  if (presetOut && deliveryReceipt != null) {
+    admittedOutput = deliveryConsent.take(e.sender, deliveryReceipt, outPath);
+  } else if (presetOut) {
+    // 舊版直接指定路徑沒有確認紀錄，只允許尚不存在的目標。
+    admittedOutput = ExportLease.captureDestinationEvidence(fileAuthority.captureDeliveryOutput(outPath));
+    preparationSignal?.throwIfAborted();
+    if (e.sender.isDestroyed?.()) throw new Error('交付視窗已關閉，請重新送出');
+    if (admittedOutput.destinationEvidence.identity !== null)
+      throw new Error('輸出檔已存在，請從交付清單重新送出並確認是否覆寫');
+  }
+
+  // 證據在第一個能力探測等待前凍結；失敗不留下半份 queue artifact。
+  await deliveryCapabilities.assertReady(authorizationPayload, { signal: preparationSignal });
+  preparationSignal?.throwIfAborted();
+  if (e.sender.isDestroyed?.()) throw new Error('交付視窗已關閉，請重新送出');
+  try {
+    ExportLease.assertOutputAuthority(admittedOutput, outPath);
+    await ExportLease.assertDestinationEvidenceAsync(admittedOutput, { signal: preparationSignal });
+    preparationSignal?.throwIfAborted();
+    if (e.sender.isDestroyed?.()) throw new Error('交付視窗已關閉，請重新送出');
+  } catch (error) { throw admissionError(error); }
   // 交付目錄能力只代表「可建立候選檔」；工作通過格式、來源與路徑驗證後，
   // 才給這一個成品 shell reveal 的精確能力。
   fileAuthority.grantDeliveryReveal(outPath);
@@ -1241,15 +1436,17 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   const savedPayload = { ...payload, assText: null, outPath };
   const job = { id: jobId, status: JOB_STATUS.QUEUED, createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
   try {
-    QueueManager.addJob(job);
+    preparationSignal?.throwIfAborted();
+    QueueManager.addJob(job, admittedOutput);
   } catch (error) {
     if (assRef) {
       try { QueueStore.removeAssFile(EXPORT_QUEUE_DIR, assRef); } catch (cleanupError) {}
     }
-    throw error;
+    throw admissionError(error);
   }
   openQueueWindow();
   return jobId;
+  } finally { senderScope.dispose(); }
 });
 
 ipcMain.handle('dialog:importDirectory', async () => {
@@ -1278,10 +1475,11 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
   // 由本 handler 直接寫入即可，不能順便升格成後續影片覆寫權。
   const isDeliveryDirectory = !Array.isArray(files) || files.length === 0;
   if (isDeliveryDirectory) fileAuthority.grantDeliveryDirectory(dir);
-  const { written, blocked } = writeDirectoryFiles(dir, files);
-  if (blocked) console.warn(`[sec] exportDirectory: ${blocked} 個檔案因路徑越界或連結被略過（已寫入 ${written} 個）`);
+  const { written, blocked, conflicted = 0 } = await directoryOutput.write(dir, files);
+  if (blocked > conflicted) console.warn(`[sec] exportDirectory: ${blocked - conflicted} 個檔案因路徑越界或連結被略過（已寫入 ${written} 個）`);
   // renderer 以回傳目錄表示整批完成；無效內容也可能被 writer 略過，不能只查 blocked。
   if (!isDeliveryDirectory && written !== files.length) {
+    if (conflicted) throw new Error(`匯出未完成：已寫入 ${written} 個檔案，略過 ${files.length - written} 個；其中 ${conflicted} 個目的檔在匯出期間變更，請重新確認後重試。`);
     throw new Error(`匯出未完成：已寫入 ${written} 個檔案，略過 ${files.length - written} 個；請檢查檔名、路徑與內容。`);
   }
   return dir;
@@ -1312,33 +1510,47 @@ ipcMain.handle('audio:reverse-clip', (e, request) => {
 
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {
   requireReadablePath('ffmpeg:proxy', src);
-  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('mp4'), async out => {
+  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('mp4'), async (out, owner) => {
     const video = (await mediaProbe.describe(src)).video;
     const args = buildIngestArgs({ src, needsProxy: true, proxyPath: out, encoder: VENC, isStream: false, video });
-    await runFF(args, { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片' });
+    // faststart reopens the output by name and corrupts a seekable fd: output;
+    // this legacy IPC returns only after completion, unlike streamIngest.
+    const faststart = args.lastIndexOf('-movflags');
+    if (faststart >= 0 && args[faststart + 1] === '+faststart') args.splice(faststart, 2);
+    await mediaIntakeRuntime.withTemporaryDescriptor(out, owner, fd =>
+      runFF([...args.slice(0, -1), '-f', 'mp4', 'fd:'],
+        { sender: e.sender, duration, jobId: 'proxy', label: '轉檔預覽影片', outputDescriptor: fd }));
   });
 });
 
 ipcMain.handle('ffmpeg:extractAudio', async (e, { path: src, idx, duration, codec }) => {
   requireReadablePath('ffmpeg:extractAudio', src);
-  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('m4a'), async out => {
+  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('m4a'), async (out, owner) => {
+    const write = (codecArgs, label) => mediaIntakeRuntime.withTemporaryDescriptor(out, owner, fd =>
+      runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', ...codecArgs, '-f', 'ipod', 'fd:'],
+        { sender: e.sender, duration, jobId: 'a' + idx, label, outputDescriptor: fd }), { truncate: true });
     // PCM 無法 copy 進 m4a（一定失敗），直接編 AAC；其餘編碼先試無損 copy，失敗才編 AAC
     if (!/^pcm/i.test(codec || '')) {
       try {
-        await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'copy', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
+        await write(['-c:a', 'copy'], '抽取音軌 ' + (idx + 1));
         return;
-      } catch (err) { /* 退回 AAC */ }
+      } catch (err) {
+        // A failed copy may be followed by AAC only while this job still owns
+        // the reserved entry; do not retry into a replacement file.
+        mediaIntakeRuntime.assertTemporaryOutput(out, owner);
+      }
     }
-    await runFF(['-y', '-i', src, '-map', `0:a:${idx}`, '-vn', '-c:a', 'aac', '-b:a', '128k', out], { sender: e.sender, duration, jobId: 'a' + idx, label: '抽取音軌 ' + (idx + 1) });
+    await write(['-c:a', 'aac', '-b:a', '128k'], '抽取音軌 ' + (idx + 1));
   });
 });
 
 ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
   requireReadablePath('ffmpeg:waveAudio', src);
   const audio = mediaProbe ? (await mediaProbe.describe(src)).audio[0] : null;
-  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('wav'), out =>
-    runFF(['-y', '-i', src, '-map', '0:a:0', '-af', sourceAudioClockFilter(audio), '-ar', '4000', '-c:a', 'pcm_s16le', out],
-      { sender: e.sender, duration, jobId: 'wave', label: '產生波形' }));
+  return mediaIntakeRuntime.produceTemporaryFile(tmpPath('wav'), (out, owner) =>
+    mediaIntakeRuntime.withTemporaryDescriptor(out, owner, fd =>
+      runFF(['-y', '-i', src, '-map', '0:a:0', '-af', sourceAudioClockFilter(audio), '-ar', '4000', '-c:a', 'pcm_s16le', '-f', 'wav', 'fd:'],
+        { sender: e.sender, duration, jobId: 'wave', label: '產生波形', outputDescriptor: fd })));
 });
 
 /* 人聲模型只讀母素材的一小段 PCM；主程序核對原有 read capability，不授權新路徑。 */
@@ -1670,10 +1882,18 @@ ipcMain.handle('ffmpeg:cancelIntake', async (e, request) => {
   return (await completion).reduce((count, value) => count + value, 0);
 });
 
+ipcMain.handle('ffmpeg:sourceKey', async (_e, source) => {
+  if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
+  requireReadablePath('ffmpeg:sourceKey', source);
+  const key = await mediaIntakeRuntime.sourceKey(source);
+  requireReadablePath('ffmpeg:sourceKey', source);
+  return key;
+});
+
 ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
   const owner = mediaIntakeOwner(e, request);
   if (owner.sessionId === undefined) throw new TypeError('波形工作缺少 sessionId/requestId');
-  const { path: src, duration, audio, start, length } = request;
+  const { path: src, duration, audio, start, length, ignoreCached } = request;
   requireReadablePath('ffmpeg:prepareSourceWaveform', src);
   let prepared;
   const cancel = () => { void mediaWaveformCoordinator.cancel(owner); };
@@ -1681,7 +1901,7 @@ ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
   if (e.sender.isDestroyed?.()) cancel();
   try {
     return await mediaWaveformCoordinator.enqueue(async lease => {
-      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length }, mediaIntakeSession(e, lease, owner));
+      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length, ignoreCached }, mediaIntakeSession(e, lease, owner));
       return prepared;
     }, owner);
   } catch (error) {
@@ -1703,10 +1923,10 @@ ipcMain.handle('fs:writeProject', async (e, { path: p, b64 }) => {
     const projectRoot = fileAuthority.captureProjectWriteRoot(p);
     return await projectWorkspace.writeRendererProject(p, b64, { ensureParent: true, projectRoot });
   }
-  catch (err) { return null; }
+  catch (err) { return err?.code === 'PROJECT_DESTINATION_CHANGED' ? { code: 'PROJECT_DESTINATION_CHANGED' } : null; }
 });
-ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64 }) => {
-  try { return await screenshotOutput.write(p, b64); }
+ipcMain.handle('fs:writeScreenshot', async (e, { path: p, b64, token } = {}) => {
+  try { return typeof token === 'string' && token ? await screenshotOutput.write(p, b64, token) : null; }
   catch (err) { console.error('[writeScreenshot] error:', err.message); return null; }
 });
 
@@ -1823,6 +2043,7 @@ const mpvHost = createMpvHost({
   }).path,
   ensureTmp,
   tmpDir: TMP,
+  tempRootAuthority: TMP_OWNER,
   tempFiles,
   guideHtml: MPV_GUIDE_HTML,
   fontsDir: fontsRoot,
@@ -1838,7 +2059,7 @@ ipcMain.handle('mpv:detect', () => {
   const supported = mpvEmbeddingSupported(process.platform);
   const exe = mpvHost.detect();
   console.error('[mpv] detect ->', exe || (supported ? '(not found)' : `(disabled on ${process.platform})`));
-  return { available: !!exe, supported, exe, logPath: path.join(TMP, 'mpv-last.log') };
+  return { available: !!exe, supported, exe, logPath: mpvHost.logPath() };
 });
 
 ipcMain.handle('mpv:launch', async (event, request = {}) => {
@@ -1884,8 +2105,8 @@ ipcMain.handle('mpv:screenshot', (event, filePath) => {
   if (!fileAuthority.canWriteScreenshot(filePath)) throw new Error('未授權的截圖輸出路徑');
   return screenshotOutput.captureNative(mpvHost);
 });
-ipcMain.handle('mpv:play', () => mpvHost.play());
-ipcMain.handle('mpv:pause', () => mpvHost.pause());
+ipcMain.handle('mpv:play', (_event, options) => mpvHost.play(options));
+ipcMain.handle('mpv:pause', (_event, options) => mpvHost.pause(options));
 ipcMain.handle('mpv:direction', (event, value) => mpvHost.direction(value));
 ipcMain.handle('mpv:mute', (event, value) => mpvHost.mute(value));
 ipcMain.handle('mpv:rate', (event, value) => mpvHost.rate(value));

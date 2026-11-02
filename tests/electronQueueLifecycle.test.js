@@ -33,6 +33,61 @@ function processIsRunning(pid) {
   }
 }
 
+// Get-Process.MainWindowTitle can select a visible, untitled Electron window
+// belonging to the same PID. Enumerate actual Windows HWNDs and verify the
+// visible, unowned main window instead of trusting that arbitrary selection.
+function nativeWindowsForProcess(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new TypeError('無效的 Electron PID');
+  const script = `$ProgressPreference='SilentlyContinue'
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public sealed class SubtoolNativeWindow {
+  public long Handle { get; set; }
+  public long Owner { get; set; }
+  public bool Visible { get; set; }
+  public string Title { get; set; }
+}
+public static class SubtoolNativeWindowProbe {
+  private delegate bool EnumProc(IntPtr hwnd, IntPtr data);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr data);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int capacity);
+  public static SubtoolNativeWindow[] Read(uint wanted) {
+    var windows = new List<SubtoolNativeWindow>();
+    EnumWindows((hwnd, ignored) => {
+      uint pid;
+      GetWindowThreadProcessId(hwnd, out pid);
+      if (pid == wanted) {
+        var text = new StringBuilder(2048);
+        GetWindowText(hwnd, text, text.Capacity);
+        windows.Add(new SubtoolNativeWindow { Handle = hwnd.ToInt64(), Owner = GetWindow(hwnd, 4).ToInt64(),
+          Visible = IsWindowVisible(hwnd), Title = text.ToString() });
+      }
+      return true;
+    }, IntPtr.Zero);
+    return windows.ToArray();
+  }
+}
+'@
+ConvertTo-Json -Compress -InputObject @([SubtoolNativeWindowProbe]::Read(${pid}))`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+    { encoding:'utf8', windowsHide:true, stdio:['ignore','pipe','pipe'] });
+  return JSON.parse(output);
+}
+
+function hasNativeMainWindowTitle(windows, title) {
+  return windows.some(window => Number.isSafeInteger(window.Handle) && window.Handle > 0
+    && window.Visible && window.Owner === 0 && window.Title === title);
+}
+
 async function reservePort() {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -259,6 +314,19 @@ describe('Electron 驗收 profile 的有界清理', () => {
   });
 });
 
+test('原生主視窗標題比對排除隱藏、無效與受擁有的視窗', () => {
+  const target = '驗收專案 — SUB TOOL';
+  const fake = [
+    {Handle:1,Owner:0,Visible:true,Title:''},
+    {Handle:2,Owner:1,Visible:true,Title:target},
+    {Handle:3,Owner:0,Visible:false,Title:target},
+    {Handle:0,Owner:0,Visible:true,Title:target},
+  ];
+  expect(hasNativeMainWindowTitle(fake,target)).toBe(false);
+  expect(hasNativeMainWindowTitle([...fake,{Handle:4,Owner:0,Visible:true,Title:target}],target)).toBe(true);
+  expect(hasNativeMainWindowTitle([...fake,{Handle:4,Owner:0,Visible:true,Title:'其他專案'}],target)).toBe(false);
+});
+
 const describeElectron = process.platform === 'win32' ? describe.sequential : describe.skip;
 
 describeElectron('Electron 匯出佇列生命週期', () => {
@@ -279,12 +347,15 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     const identity = await mainClient.evaluate(`({ title: document.title, extraBar: !!document.querySelector('.project-titlebar') })`);
     expect(identity).toEqual({ title: '驗收專案 — SUB TOOL', extraBar: false });
     // 驗收實際 Windows 原生標題，不能只靠 renderer 自己的 document.title。
-    await waitFor(() => {
-      const title = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; (Get-Process -Id ${app.child.pid}).MainWindowTitle`],
-      { encoding: 'utf8', windowsHide: true }).trim();
-      return title === identity.title;
-    }, '原生視窗標題與專案名稱一致');
+    let nativeWindows = [];
+    try {
+      await waitFor(() => {
+        nativeWindows = nativeWindowsForProcess(app.child.pid);
+        return hasNativeMainWindowTitle(nativeWindows, identity.title);
+      }, '原生視窗標題與專案名稱一致');
+    } catch (error) {
+      throw new Error(`${error.message}；同程序原生視窗：${JSON.stringify(nativeWindows)}`, {cause:error});
+    }
     const queueClient = await openQueueMonitor(app, mainClient);
 
     await waitFor(() => queueClient.evaluate('typeof window.queueAPI?.exactFrameRate === "function"'), 'sandbox 佇列 preload 已提供格率規則');
@@ -631,12 +702,15 @@ describeElectron('Electron 匯出佇列生命週期', () => {
     `);
     fs.writeFileSync(parentScript, `
       const { spawnExportWatchdog } = require(${JSON.stringify(path.resolve('electron/export-watchdog.js'))});
-      const { listLeases, captureOutputAuthority, captureOutputDirectory } = require(${JSON.stringify(path.resolve('electron/export-lease.js'))});
+      const { listLeases, captureOutputAuthority, captureOutputDirectory, captureDestinationEvidenceAsync, prepareSharedLeaseRoot } = require(${JSON.stringify(path.resolve('electron/export-lease.js'))});
+      (async () => {
+      const outputAuthority = await captureDestinationEvidenceAsync(captureOutputAuthority(${JSON.stringify(outPath)}, captureOutputDirectory(${JSON.stringify(path.dirname(outPath))})));
       const controller = spawnExportWatchdog({
         ffmpegPath: process.execPath,
         args: ${JSON.stringify([fakeFfmpeg, markerPath, outPath])},
         outPath: ${JSON.stringify(outPath)}, queueDir: ${JSON.stringify(queueDir)}, jobId: 'parent-crash',
-        outputAuthority: captureOutputAuthority(${JSON.stringify(outPath)}, captureOutputDirectory(${JSON.stringify(path.dirname(outPath))})),
+        ...prepareSharedLeaseRoot(${JSON.stringify(profile)}),
+        outputAuthority,
       }, {
         nodePath: ${JSON.stringify(ELECTRON)}, scriptPath: ${JSON.stringify(ownerScript)}, onStderr() {},
       });
@@ -645,6 +719,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
         const { watchdogPid, ffmpegPid, stagePath } = listLeases(${JSON.stringify(queueDir)})[0].owner;
         process.send({ watchdogPid, ffmpegPid, stagePath });
       }).catch(error => process.send({ error: error.message }));
+      })().catch(error => process.send({ error: error.message }));
     `);
     const parent = spawn(process.execPath, [parentScript], {
       windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],

@@ -4,10 +4,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ROOT=process.cwd().replace(/\\/g,'/');
-let State,History,Model,Subtitles,Menus,UI,Media,Project,ProjectModule,Style,Styles;
+let State,History,Model,Subtitles,Menus,UI,Media,Project,ProjectModule,Style,Styles,getPlayerAdapter;
 let recordMediaCommands=false;
 const click=label=>[...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent===label).click();
 const clip=(id,values={})=>({id,name:id,path:'C:/'+id+'.mp4',in:0,out:4,dur:4,offset:0,vtrack:0,...values});
+function observeDuration(duration){
+  // These editor cases exercise the result of an already verified native
+  // session; token ownership itself is tested through the real adapter.
+  const owns=vi.spyOn(getPlayerAdapter(),'ownsNativeSourceSession').mockImplementation(id=>id==='editor-session');
+  try{Media.observeMpvEvent({event:'property-change',name:'duration',data:duration,sourceSessionId:'editor-session'});}
+  finally{owns.mockRestore();}
+}
 async function timeline(){
   const Timeline=await import(ROOT+'/src/timeline-renderer.js');
   const layer=document.getElementById('tlLayer'),scroll=document.getElementById('tlScroll');
@@ -38,6 +45,7 @@ beforeAll(async()=>{
   Menus=await import(ROOT+'/src/menus.js');
   UI=await import(ROOT+'/src/ui.js');
   ({Media}=await import(ROOT+'/src/media.js'));
+  ({getPlayerAdapter}=await import(ROOT+'/src/media-player-adapter.js'));
   ProjectModule=await import(ROOT+'/src/project.js');({Project}=ProjectModule);
   Styles=await import(ROOT+'/src/substyle.js');
   ({StylePanelController:Style}=await import(ROOT+'/src/style-panel-controller.js'));
@@ -59,6 +67,158 @@ beforeEach(async()=>{
 afterAll(()=>{UI.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('editor mutation ownership through public commands',()=>{
+  it.each(['全列表重繪','更新同一列'])('字幕時間草稿在%s時保留並可提交',async kind=>{
+    State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="a"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();
+    input.value='00:00:00:12';input.setSelectionRange(5,8);
+    if(kind==='全列表重繪'){
+      State.cues.push({id:'background',start:0,end:0.5,text:'背景新增',track:0});
+      History.record('背景新增字幕');Subtitles.renderSubList();
+    }else{
+      State.cues[0].text='背景文字';History.record('背景文字');Subtitles.renderSubRow('a');
+    }
+    expect(input.isConnected).toBe(true);
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe('00:00:00:12');
+    expect(input.selectionStart).toBe(5);expect(input.selectionEnd).toBe(8);
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(State.cues.find(c=>c.id==='a').start).toBe(0.48);
+    expect(input.isConnected).toBe(false);
+    History.undo();expect(State.cues.find(c=>c.id==='a').start).toBe(1);
+    History.redo();expect(State.cues.find(c=>c.id==='a').start).toBe(0.48);
+  });
+  it('背景字幕重新排序時不移動正在輸入的列，保留焦點與時間草稿',async()=>{
+    State.selectedIds=['b'];State.selectedId='b';Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="b"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();
+    input.value='00:00:02:12';input.setSelectionRange(3,6);
+    State.cues[0].start=6;State.cues[0].end=7;State.cues.sort((a,b)=>a.start-b.start);
+    History.record('背景移動其他字幕');Subtitles.renderSubList();
+    expect([...document.querySelectorAll('#sublist .sub-row')].map(row=>row.dataset.id)).toEqual(['b','a']);
+    expect(input.isConnected).toBe(true);expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(3);expect(input.selectionEnd).toBe(6);
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(State.cues.find(c=>c.id==='b').start).toBe(2.48);
+  });
+  it('字幕時間輸入期間歷史基準重設，舊草稿不能提交',async()=>{
+    State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="a"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();input.value='00:00:00:12';
+    History.reset();input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(State.cues[0].start).toBe(1);expect(History.stack).toHaveLength(1);
+  });
+  it.each(['全列表重繪','更新同一列'])('時間編輯失權後%s顯示較新內容且不提交舊草稿',async kind=>{
+    State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="a"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();input.value='00:00:00:12';
+    State.cues[0].start=1.5;History.record('背景更新時間');
+    if(kind==='全列表重繪')Subtitles.renderSubList();else Subtitles.renderSubRow('a');
+    expect(input.isConnected).toBe(false);
+    const {secToEncore}=await import(ROOT+'/src/time.js');
+    expect(document.querySelector('.sub-row[data-id="a"] .tin').textContent).toBe(secToEncore(1.5,State.fps,State.dropFrame));
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(State.cues[0].start).toBe(1.5);expect(History.stack).toHaveLength(2);
+  });
+  it.each([{isComposing:true},{keyCode:229}])('字幕時間組字期間重繪保留草稿，一般 Enter 才提交 (%j)',async composition=>{
+    State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="a"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();input.value='00:00:00:12';
+    Subtitles.renderSubList();
+    for(const key of ['Enter','Escape','ArrowUp']){
+      const event=new KeyboardEvent('keydown',{key,...composition,bubbles:true,cancelable:true});
+      input.dispatchEvent(event);expect(event.defaultPrevented).toBe(false);
+      expect(input.isConnected).toBe(true);expect(State.cues[0].start).toBe(1);
+    }
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+    expect(input.isConnected).toBe(false);expect(document.activeElement).not.toBe(input);
+    expect(State.cues[0].start).toBe(0.48);expect(History.stack).toHaveLength(2);
+  });
+  it.each(['保留有效輸入','字幕物件被取代'])('字幕時間剪貼簿讀取期間%s後重繪，結果只作用於原輸入',async mode=>{
+    const previous=Object.getOwnPropertyDescriptor(navigator,'clipboard');let resolve;
+    Object.defineProperty(navigator,'clipboard',{configurable:true,value:{readText:vi.fn(()=>new Promise(done=>{resolve=done;}))}});
+    try{
+      State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+      document.querySelector('.sub-row[data-id="a"] .tin').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+      const input=document.querySelector('.sub-row[data-id="a"] input.tc-edit');expect(input).not.toBeNull();input.select();
+      input.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+      const paste=[...document.querySelectorAll('#ctxmenu .ci')].find(item=>item.textContent==='貼上');expect(paste).toBeTruthy();paste.click();
+      if(mode==='字幕物件被取代')State.cues[0]={...State.cues[0]};
+      Subtitles.renderSubList();
+      if(mode==='保留有效輸入'){
+        expect(input.isConnected).toBe(true);resolve('00:00:00:12');await Promise.resolve();
+        expect(input.value).toBe('00:00:00:12');
+        input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+        expect(input.isConnected).toBe(false);expect(State.cues[0].start).toBe(0.48);
+      }else{
+        expect(input.isConnected).toBe(false);
+        document.querySelector('.sub-row[data-id="a"] .tin').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+        const current=document.querySelector('.sub-row[data-id="a"] input.tc-edit');current.value='00:00:00:08';
+        resolve('00:00:00:12');await Promise.resolve();expect(current.value).toBe('00:00:00:08');
+        current.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+        expect(State.cues[0].start).toBe(0.32);
+      }
+    }finally{if(previous)Object.defineProperty(navigator,'clipboard',previous);else delete navigator.clipboard;Menus.hideCtx();}
+  });
+  it('字幕時間輸入期間的較新時間編輯不會被舊輸入覆蓋',async()=>{
+    State.selectedIds=['a'];State.selectedId='a';
+    Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="a"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+    await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();
+    input.value='+00:00:01:00';
+    const cue=State.cues[0];cue.start=1.5;History.record('背景修改起點');
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(cue.start).toBe(1.5);
+    const {secToEncore}=await import(ROOT+'/src/time.js');
+    expect(document.querySelector('.sub-row[data-id="a"] .tin').textContent).toBe(secToEncore(1.5,State.fps,State.dropFrame));
+    expect(History.stack).toHaveLength(2);
+    History.undo();expect(State.cues.find(item=>item.id==='a').start).toBe(1);
+    History.redo();expect(State.cues.find(item=>item.id==='a').start).toBe(1.5);
+  });
+  it.each(['end','fps','locked'])('字幕時間輸入期間 %s 變更時不提交舊輸入',async changed=>{
+    State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="a"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();
+    input.value='00:00:00:12';
+    if(changed==='end')State.cues[0].end=3;
+    if(changed==='fps')State.fps=24;
+    if(changed==='locked')State.tracks[0].locked=true;
+    History.record('背景修改');
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(State.cues[0].start).toBe(1);expect(History.stack).toHaveLength(2);
+  });
+  it('字幕時間輸入期間變更後按 Escape，顯示較新時間而不恢復舊畫面',async()=>{
+    State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="a"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();
+    State.cues[0].start=1.5;History.record('背景修改');
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    const {secToEncore}=await import(ROOT+'/src/time.js');
+    expect(State.cues[0].start).toBe(1.5);
+    expect(document.querySelector('.sub-row[data-id="a"] .tin').textContent).toBe(secToEncore(1.5,State.fps,State.dropFrame));
+    expect(History.stack).toHaveLength(2);
+  });
+  it('字幕時間輸入可保留同一句文字的獨立背景編輯',async()=>{
+    State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+    const edge=document.querySelector('.sub-row[data-id="a"] .tin');
+    edge.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=edge.querySelector('input.tc-edit');expect(input).not.toBeNull();
+    input.value='00:00:00:12';
+    State.cues[0].text='背景文字';History.record('背景修改文字');
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    expect(State.cues[0]).toMatchObject({start:0.48,text:'背景文字'});
+    History.undo();expect(State.cues.find(item=>item.id==='a')).toMatchObject({start:1,text:'背景文字'});
+    History.undo();expect(State.cues.find(item=>item.id==='a').text).toBe('original');
+  });
   it('subtitle delete confirmation preserves same-ID replacement cue objects after Undo',()=>{
     State.cues[0].text='edited';History.record('edit');
     Subtitles.deleteSelectedWithPrompt();
@@ -86,6 +246,139 @@ describe('editor mutation ownership through public commands',()=>{
     Menus.showClipDuration(c);document.getElementById('cdVal').value='00:00:08:00';
     State.clips.push(clip('background',{offset:3,out:2,dur:2}));click('套用');
     expect(c.offset+c.out).toBeLessThanOrEqual(State.clips.find(c=>c.id==='background').offset);
+  });
+  it('被動來源長度不改專案；主動延長後保存並可 Undo／Redo',async()=>{
+    const {Seq}=await import(ROOT+'/src/sequence.js');
+    const c=clip('observed-duration',{dur:4,out:4});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();Project.establishCleanBaseline();
+    observeDuration(6);
+    expect(c).toMatchObject({dur:4,out:4});expect(Seq.sourceDuration(c)).toBe(6);
+    expect(ProjectModule.isProjectDirty()).toBe(false);
+    Menus.showClipDuration(c);
+    expect(document.getElementById('modalBody').textContent).toContain('00:00:06:00');
+    document.getElementById('cdVal').value='00:00:05:00';click('套用');
+    expect(c).toMatchObject({dur:6,out:5});expect(ProjectModule.isProjectDirty()).toBe(true);
+    History.undo();expect(State.clips[0]).toMatchObject({dur:4,out:4});
+    expect(ProjectModule.isProjectDirty()).toBe(false);expect(Seq.sourceDuration(State.clips[0])).toBe(6);
+    History.redo();expect(State.clips[0]).toMatchObject({dur:6,out:5});expect(ProjectModule.isProjectDirty()).toBe(true);
+  });
+  it('切換來源期間舊播放器長度不會擴大新片段的修剪上限',()=>{
+    const c=clip('new-source',{dur:3,out:3});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();Project.establishCleanBaseline();Media._seqSwitching=true;
+    try{
+      Media._mpvPath='C:/old-source.mp4';observeDuration(100);
+      Menus.showClipDuration(c);
+      expect(document.getElementById('modalBody').textContent).toContain('00:00:03:00');
+      document.getElementById('cdVal').value='00:00:50:00';click('套用');
+      expect(c).toMatchObject({dur:3,out:3});
+      expect(ProjectModule.isProjectDirty()).toBe(false);
+    }finally{Media._seqSwitching=false;Media._mpvPath=null;}
+  });
+  it('被動來源長度不擴大固定畫面的預設片段範圍或持久來源範圍',async()=>{
+    const {clipFreezeTarget,setClipFreeze}=await import(ROOT+'/src/clip-model.js');
+    const c=clip('freeze-observed',{dur:4,in:1,out:3,fps:25});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();Project.establishCleanBaseline();
+    observeDuration(6);
+    expect(clipFreezeTarget(c,20)).toBeLessThan(3);
+    Menus.showClipFreeze(c);expect(document.getElementById('clipFreezeFrame').max).toBe('100');
+    expect(setClipFreeze(c,5,{url:'blob:frame'})).toBe(false);
+    expect(c).toMatchObject({dur:4,in:1,out:3});expect(ProjectModule.isProjectDirty()).toBe(false);
+  });
+  it('使用來源實際長度重設修剪是可撤銷的明確編輯',async()=>{
+    const {Seq}=await import(ROOT+'/src/sequence.js');
+    const {resetClipTrim}=await import(ROOT+'/src/clip-model.js');
+    const c=clip('reset-duration',{dur:4,in:1,out:3});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();Project.establishCleanBaseline();
+    observeDuration(6);
+    expect(ProjectModule.isProjectDirty()).toBe(false);expect(resetClipTrim(c)).toBe(true);
+    expect(c).toMatchObject({dur:6,in:0,out:6});expect(ProjectModule.isProjectDirty()).toBe(true);
+    History.undo();expect(State.clips[0]).toMatchObject({dur:4,in:1,out:3});
+    expect(ProjectModule.isProjectDirty()).toBe(false);expect(Seq.sourceDuration(State.clips[0])).toBe(6);
+    History.redo();expect(State.clips[0]).toMatchObject({dur:6,in:0,out:6});
+  });
+  it('修剪拖曳直到提交才保存更新的來源長度，取消不改專案',async()=>{
+    const {Seq}=await import(ROOT+'/src/sequence.js');
+    const c=clip('duration-drag',{dur:4,out:4});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();Project.establishCleanBaseline();
+    observeDuration(6);
+    await timeline();
+    let edge=document.querySelector('.clip-block[data-clip-id="duration-drag"] .edge.r');
+    expect(edge).not.toBeNull();
+    mouse(edge,'mousedown',320,40);mouse(window,'mousemove',400,40);
+    expect(c.out).toBe(5);expect(c.dur).toBe(4);expect(ProjectModule.isProjectDirty()).toBe(false);
+    window.dispatchEvent(new Event('blur'));
+    expect(c).toMatchObject({dur:4,out:4});expect(ProjectModule.isProjectDirty()).toBe(false);
+    edge=document.querySelector('.clip-block[data-clip-id="duration-drag"] .edge.r');
+    mouse(edge,'mousedown',320,40);mouse(window,'mousemove',400,40);mouse(window,'mouseup',400,40);
+    expect(c).toMatchObject({dur:6,out:5});expect(ProjectModule.isProjectDirty()).toBe(true);
+    History.undo();expect(State.clips[0]).toMatchObject({dur:4,out:4});expect(Seq.sourceDuration(State.clips[0])).toBe(6);
+    expect(ProjectModule.isProjectDirty()).toBe(false);
+    History.redo();expect(State.clips[0]).toMatchObject({dur:6,out:5});
+  });
+  it('修剪預覽期間來源替換，不能把舊來源長度提交到新素材',async()=>{
+    const c=clip('changed-during-trim',{dur:4,out:4});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();Project.establishCleanBaseline();
+    observeDuration(6);await timeline();
+    const edge=document.querySelector('.clip-block[data-clip-id="changed-during-trim"] .edge.r');
+    mouse(edge,'mousedown',320,40);mouse(window,'mousemove',400,40);expect(c.out).toBe(5);
+    c.path='C:/replacement.mov';mouse(window,'mouseup',400,40);
+    expect(c).toMatchObject({path:'C:/replacement.mov',dur:4,out:4});
+    expect(History.stack).toHaveLength(1);
+  });
+  it('同一來源的多個 placement 共用長度證據，來源替換後不繼續沿用',async()=>{
+    const {Seq}=await import(ROOT+'/src/sequence.js');
+    const first=clip('source-a',{path:'C:/same.mov',audioSourceId:'source',offset:0});
+    const second=clip('source-b',{path:'C:/same.mov',audioSourceId:'source',offset:4});
+    const other=clip('other',{path:'C:/other.mov',audioSourceId:'other',vtrack:1});
+    State.clips=[first,second,other];Media.activeClipId=first.id;History.reset();Project.establishCleanBaseline();
+    observeDuration(6);
+    expect(Seq.sourceDuration(first)).toBe(6);expect(Seq.sourceDuration(second)).toBe(6);
+    expect(Seq.sourceDuration(other)).toBe(4);expect(ProjectModule.isProjectDirty()).toBe(false);
+    second.path='C:/replacement.mov';expect(Seq.sourceDuration(second)).toBe(4);
+    second.path='C:/same.mov';expect(Seq.sourceDuration(second)).toBe(4);
+  });
+  it('刪除後 Undo 還原同一來源片段可使用先前觀測長度，跨工作區則撤銷',async()=>{
+    const {Seq}=await import(ROOT+'/src/sequence.js');
+    const c=clip('deleted-source',{dur:4,out:4});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();Project.establishCleanBaseline();
+    observeDuration(6);
+    Seq.remove(c.id);History.record('刪除影片');History.undo();
+    const restored=State.clips[0];expect(restored).not.toBe(c);expect(Seq.sourceDuration(restored)).toBe(6);
+    expect(ProjectModule.isProjectDirty()).toBe(false);
+    Seq.clear();State.clips=[restored];expect(Seq.sourceDuration(restored)).toBe(4);
+  });
+  it('切割的同源片段繼承來源長度，不會在切割時擴大持久化長度',async()=>{
+    const {Seq}=await import(ROOT+'/src/sequence.js');
+    const c=clip('split-source',{dur:4,out:4,audioSourceId:'shared'});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();observeDuration(6);
+    expect(Media.splitClipAt(2)).toBe(true);
+    expect(State.clips).toHaveLength(2);expect(State.clips.map(item=>item.dur)).toEqual([4,4]);
+    expect(State.clips.map(item=>Seq.sourceDuration(item))).toEqual([6,6]);
+  });
+  it('播放中再次儲存與 Undo 還原後仍能以實際長度修剪',async()=>{
+    const {Seq}=await import(ROOT+'/src/sequence.js');
+    const util=await import(ROOT+'/src/util.js');
+    const download=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{});
+    const saved=()=>JSON.parse(Buffer.from(download.mock.calls.at(-1)[0]).subarray(2).toString('utf16le'));
+    const c=clip('save-drag',{dur:4,out:4});State.clips=[c];Media.activeClipId=c.id;
+    History.reset();Project.establishCleanBaseline();
+    try{
+      Media.playing=true;
+      observeDuration(6);
+      await Project.saveAs();
+      expect(saved().clips[0]).toMatchObject({dur:4,out:4});expect(ProjectModule.isProjectDirty()).toBe(false);
+      await timeline();
+      const edge=()=>document.querySelector('.clip-block[data-clip-id="save-drag"] .edge.r');
+      mouse(edge(),'mousedown',320,40);mouse(window,'mousemove',400,40);mouse(window,'mouseup',400,40);
+      expect(c).toMatchObject({dur:6,out:5});
+      History.undo();expect(State.clips[0]).toMatchObject({dur:4,out:4});
+      expect(Seq.sourceDuration(State.clips[0])).toBe(6);expect(ProjectModule.isProjectDirty()).toBe(false);
+      await timeline();
+      mouse(edge(),'mousedown',320,40);mouse(window,'mousemove',400,40);mouse(window,'mouseup',400,40);
+      expect(State.clips[0]).toMatchObject({dur:6,out:5});
+      await Project.save();expect(saved().clips[0]).toMatchObject({dur:6,out:5});
+      expect(ProjectModule.isProjectDirty()).toBe(false);
+    }finally{Media.playing=false;download.mockRestore();}
   });
   it('片段降為半速後同軌後段右移，其他軌不動，且只記一次編輯',async()=>{
     const c=clip('speed',{out:4,dur:4});

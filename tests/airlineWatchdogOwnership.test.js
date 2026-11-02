@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { captureOutputDirectory, captureOutputAuthority, listLeases } = require('../electron/export-lease.js');
+const { captureOutputDirectory, captureOutputAuthority, captureDestinationEvidenceAsync, prepareSharedLeaseRoot, listLeases } = require('../electron/export-lease.js');
 
 function muxFixture() {
   const packet = (pid, payload, pcr = false) => {
@@ -96,7 +96,7 @@ describe('航空 mux 真實檔案與 watchdog 收尾', () => {
       } });
       events.emit('message', { type: 'start', ffmpegPath: 'fake', args: [output], outPath: output,
         outputFormat: 'airline-dmpes', jobId: 'airline-owner', queueDir,
-        outputAuthority: captureOutputAuthority(output, captureOutputDirectory(root)) });
+        ...prepareSharedLeaseRoot(root), outputAuthority: await captureDestinationEvidenceAsync(captureOutputAuthority(output, captureOutputDirectory(root))) });
       let timer;
       try { await Promise.race([disconnected, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('watchdog 未結束')), 5000); })]); }
       finally { clearTimeout(timer); }

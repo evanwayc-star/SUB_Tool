@@ -380,10 +380,12 @@ function registerAudioSource(rawProject,audioSourceId,channels,options={},alloca
   project.sourceMaps[sourceId]={channels:[...byKey.values()].sort((a,b)=>a.sourceStream-b.sourceStream||a.sourceChannel-b.sourceChannel)};
   return normalizeAudioProject(project);
 }
-function ensureAudioSourceMap(audioSourceId,channels,options={}){
+function ensureAudioSourceMap(audioSourceId,channels,options={},onRegistered=null){
   const sourceId=_cleanId(audioSourceId);
   if(!sourceId) return null;
   const project=normalizeStateAudioProject(registerAudioSource(State.audioProject,sourceId,channels,options));
+  // Capture the exact allocation before synchronous listeners can edit it.
+  if(typeof onRegistered==='function' && onRegistered({project,sourceId,channels,options})===false) return null;
   emit('audio:sourceRegistered',{project,sourceId,channels,options});
   return State.audioProject.sourceMaps[sourceId];
 }

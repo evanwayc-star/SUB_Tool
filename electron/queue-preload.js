@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('queueAPI', {
   stopJob: (id) => ipcRenderer.invoke('queue:stopJob', id),
   retryJob: (id) => ipcRenderer.invoke('queue:retryJob', id),
   retryWithOutputDirectory: (id) => ipcRenderer.invoke('queue:retryWithOutputDirectory', id),
+  retryWithOutputConfirmation: (id) => ipcRenderer.invoke('queue:retryWithOutputConfirmation', id),
   clearJob: (id) => ipcRenderer.invoke('queue:clearJob', id),
   clearCompleted: () => ipcRenderer.invoke('queue:clearCompleted'),
   reorderJob: (id, newIndex) => ipcRenderer.invoke('queue:reorderJob', id, newIndex),

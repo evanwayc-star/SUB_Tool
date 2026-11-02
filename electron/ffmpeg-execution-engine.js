@@ -559,6 +559,7 @@ function createFFmpegExecution(options = {}) {
   const getFFmpegPath = options.getFFmpegPath || (() => null);
   const getUserDataDir = options.getUserDataDir || (() => process.cwd());
   const getQueueDir = options.getQueueDir || (() => null);
+  const getSharedOutputLock = options.getSharedOutputLock || (() => null);
   const now = options.now || (() => Date.now());
   const directExecutions = new Set();
   let shuttingDown = false;
@@ -687,6 +688,10 @@ function createFFmpegExecution(options = {}) {
     discAudioPlan,
     discVideoFps,
     outputAuthority,
+    sourcePaths,
+    inputEvidence,
+    inputDescriptor,
+    inputBytes,
     outputDescriptor,
     isCancelled,
   } = {}) {
@@ -696,6 +701,28 @@ function createFFmpegExecution(options = {}) {
         return;
       }
       const isQueueExport = executionKind === 'queued-delivery';
+      let frozenInput;
+      if (inputBytes !== undefined) {
+        const pipeInputs = Array.isArray(args) ? args.filter((arg, index) => arg === '-i' && args[index + 1] === 'pipe:0').length : 0;
+        if (isQueueExport || !Buffer.isBuffer(inputBytes) || !inputBytes.length || inputBytes.length > 20_000_000
+          || inputDescriptor !== undefined || pipeInputs !== 1) {
+          reject(new TypeError('inputBytes 只接受 direct 工作的單一 pipe:0 輸入，最大 20 MB'));
+          return;
+        }
+        // The caller may mutate its Buffer immediately after execute returns.
+        frozenInput = Buffer.from(inputBytes);
+      }
+      if (inputEvidence !== undefined && (!isQueueExport || !Array.isArray(inputEvidence))) {
+        reject(new TypeError('inputEvidence 只接受交付工作建立的證據陣列'));
+        return;
+      }
+      if (inputDescriptor !== undefined && (isQueueExport || !Number.isSafeInteger(inputDescriptor)
+        || inputDescriptor < 3 || !Array.isArray(args)
+        || !args.some((arg, index) => arg === '-i' && args[index + 1] === 'fd:')
+        || inputDescriptor === outputDescriptor)) {
+        reject(new TypeError('inputDescriptor 只接受 direct 工作持有且與輸出不同的有效檔案描述符'));
+        return;
+      }
       if (outputDescriptor !== undefined && (isQueueExport || !Number.isSafeInteger(outputDescriptor)
         || outputDescriptor < 3 || !Array.isArray(args) || args.at(-1) !== 'fd:')) {
         reject(new TypeError('outputDescriptor 只接受 direct 工作持有的有效檔案描述符'));
@@ -706,6 +733,13 @@ function createFFmpegExecution(options = {}) {
         || typeof jobId !== 'string' || !jobId.trim()
         || typeof outPath !== 'string' || !outPath.trim())) {
         reject(new Error('匯出 watchdog 缺少佇列目錄、工作識別或輸出路徑'));
+        return;
+      }
+      const sharedLock = isQueueExport ? getSharedOutputLock() : null;
+      if (isQueueExport && (!sharedLock || typeof sharedLock.sharedQueueDir !== 'string' || !sharedLock.sharedAuthority)) {
+        const error = new Error('共用輸出鎖目錄無法使用，無法開始交付');
+        error.code = 'SHARED_OUTPUT_LOCK_UNAVAILABLE';
+        reject(error);
         return;
       }
       const ffmpegPath = getFFmpegPath();
@@ -843,7 +877,10 @@ function createFFmpegExecution(options = {}) {
           outPath,
           jobId,
           queueDir,
+          ...sharedLock,
           ...(outputAuthority ? { outputAuthority } : {}),
+          ...(sourcePaths ? { sourcePaths } : {}),
+          ...(inputEvidence ? { inputEvidence } : {}),
           ...(outputFormat ? { outputFormat } : {}),
           ...(discAudioPlan ? { discAudioPlan } : {}),
           ...(discVideoFps ? { discVideoFps } : {}),
@@ -872,7 +909,8 @@ function createFFmpegExecution(options = {}) {
       let process;
       try { process = spawnDirect(ffmpegPath, args, {
         ...(cwd ? { cwd } : {}),
-        ...(outputDescriptor !== undefined ? { stdio: ['ignore', outputDescriptor, 'pipe'] } : {}),
+        ...((inputDescriptor !== undefined || frozenInput || outputDescriptor !== undefined)
+          ? { stdio: [frozenInput ? 'pipe' : inputDescriptor ?? 'ignore', outputDescriptor ?? 'pipe', 'pipe'] } : {}),
       }); }
       catch (error) { void finishProcess(1, null, error); return; }
       let processError = null;
@@ -880,10 +918,53 @@ function createFFmpegExecution(options = {}) {
       // A later SIGKILL/shutdown can fail after the initial SIGTERM error.
       // Keep observing this child until close; the first error remains its result.
       process.on('error', error => { processError ||= error; });
-      process.once('close', (code, signal) => { void finishProcess(code, null, processError, signal); });
+      let inputFinished = !frozenInput, inputStopped = false;
+      const stdin = process.stdin;
+      const inputFailure = error => {
+        if (inputStopped) return;
+        inputStopped = true;
+        processError ||= error;
+        try { stdin?.destroy(); } catch (ignored) {}
+        try { if (!process.killed) process.kill(); } catch (ignored) {}
+      };
+      if (frozenInput && stdin) {
+        stdin.on('error', inputFailure);
+        stdin.once('finish', () => { inputFinished = true; });
+        stdin.once('close', () => {
+          if (!inputFinished && !inputStopped) inputFailure(new Error('FFmpeg 輸入管線提前關閉'));
+        });
+      }
+      process.once('close', (code, signal) => {
+        if (!inputFinished) {
+          inputStopped = true;
+          processError ||= new Error('FFmpeg 輸入音訊未完整送達');
+          try { stdin?.destroy(); } catch (ignored) {}
+        }
+        void finishProcess(code, null, processError, signal);
+      });
       // listener 必須先裝好：取消可在 onProcess 内同步 kill，仍須等 close 才settle。
       try { onProcess?.(process); }
       catch (error) { processError = error; try { process.kill(); } catch (ignored) {} }
+      if (frozenInput) {
+        if (!stdin || process.killed || processError || isCancelled?.()) {
+          inputFailure(new Error('FFmpeg 輸入管線無法啟動'));
+        } else {
+          let offset = 0;
+          const pump = () => {
+            if (inputStopped) return;
+            try {
+              while (offset < frozenInput.length) {
+                const next = Math.min(offset + 64 * 1024, frozenInput.length);
+                const writable = stdin.write(frozenInput.subarray(offset, next));
+                offset = next;
+                if (!writable) { stdin.once('drain', pump); return; }
+              }
+              stdin.end();
+            } catch (error) { inputFailure(error); }
+          };
+          pump();
+        }
+      }
     });
   }
 

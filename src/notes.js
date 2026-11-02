@@ -29,10 +29,19 @@ import { Project } from './project.js';
 let _activeNoteId=null;
 let _selectedNoteIds=new Set(); // 多選集合
 let _lastSelectedNoteId=null; // 用於 Shift 多選
+// Rows can survive a list redraw only while their original workspace and note
+// still own an active editor. Retaining that DOM also retains focus and draft.
+const noteRowOwners=new WeakMap();
 function captureNotes(targets=State.notes.slice()){
   const ownsWorkspace=Project.captureWorkspaceOwnership();
-  const history=History.stack;
-  return {targets,current:()=>ownsWorkspace() && History.stack===history && targets.every(note=>State.notes.includes(note))};
+  const ownsHistory=History.captureOwnership();
+  return {targets,current:()=>ownsWorkspace() && ownsHistory() && targets.every(note=>State.notes.includes(note))};
+}
+// Deletion consent covers the contents of the displayed notes, not just their
+// object identity. Unrelated new notes remain outside the captured targets.
+function captureNoteRemoval(owner){
+  const snapshot=JSON.stringify(owner.targets);
+  return ()=>owner.current() && JSON.stringify(owner.targets)===snapshot;
 }
 // DOM 草稿不寫 State。確認前一次核對全部欄位，取消與衝突都保留已提交資料。
 function beginNoteEdit(targets, field){
@@ -115,16 +124,17 @@ function addNote(){
 function clearAllNotes(){
   if(!State.notes.length){ showToast('沒有備註可清除'); return; }
   const owner=captureNotes();
+  const ownsRemoval=captureNoteRemoval(owner);
   // Fix #15：改用 openModal，風格一致且在 Electron 中不會被系統 confirm 截取
   const session=openModal('清除所有備註',
     `<p>確定要清除全部 <b>${State.notes.length}</b> 條備註嗎？</p>`,
     [{label:'取消',act:()=>session.close()},
      {label:'確定清除',primary:true,act:()=>{
-       if(!session.isCurrent() || !owner.current()) return;
+       if(!session.isCurrent()) return;
+       if(!ownsRemoval()){session.close();showToast('備註已變更，請重新確認');return;}
        session.close({committed:true});
        const removed=new Set(owner.targets);
        State.notes=State.notes.filter(note=>!removed.has(note));
-       _selectedNoteIds.clear(); _activeNoteId=null; _lastSelectedNoteId=null;
        renderNotes(); drawRuler();
        recordHistory('清除所有備註');
        showToast('已清除所有備註');
@@ -138,11 +148,27 @@ function renderNotes(){
   if(!validIds.has(_lastSelectedNoteId)) _lastSelectedNoteId=null;
   const el=$('notesList'); if(!el)return;
   if(!State.notes.length){ el.innerHTML='<div class="empty">尚無備註<br>播放到某處 → 點「＋ 新增」</div>'; return; }
-  el.innerHTML='';
+  const focused=document.activeElement;
+  const candidate=focused?.closest?.('.note-item');
+  const candidateOwner=candidate&&el.contains(candidate)?noteRowOwners.get(candidate):null;
+  const editingTime=focused?.classList?.contains('nt-te');
+  const editingText=focused?.classList?.contains('nt-text')&&focused.contentEditable==='true';
+  const kept=(editingTime||editingText)&&candidateOwner?.current()?candidate:null;
+  for(const child of [...el.children]) if(child!==kept) child.remove();
+  let beforeKept=!!kept;
   for(const n of State.notes){
+    if(kept && candidateOwner.note===n){
+      kept.className='note-item'+(n.done?' done':'')+(n.id===_activeNoteId?' nt-active':'')+(_selectedNoteIds.has(n.id)?' nt-selected':'');
+      kept.querySelector('.nt-done-cb').checked=!!n.done;
+      if(!editingTime) kept.querySelector('.nt-time').textContent=secToEncore(n.time,State.fps,State.dropFrame);
+      if(!editingText) kept.querySelector('.nt-text').innerHTML=escapeHTML(n.text);
+      beforeKept=false;
+      continue;
+    }
     const owner=captureNotes([n]);
     const isSel=_selectedNoteIds.has(n.id);
     const row=document.createElement('div');
+    noteRowOwners.set(row,{note:n,current:owner.current});
     row.className='note-item'+(n.done?' done':'')+(n.id===_activeNoteId?' nt-active':'')+(isSel?' nt-selected':'');
     row.dataset.id=n.id;
     row.innerHTML=
@@ -176,7 +202,12 @@ function renderNotes(){
         if(done)return; done=true;
         if(commit){
           const t=parseTimecodeInput(inp.value);
-          if(t!==null && edit.commit(t).changed){ State.notes.sort((a,b)=>a.time-b.time); renderNotes(); drawRuler(); recordHistory('修改備註時間'); return; }
+          if(t!==null && edit.commit(t).changed){
+            // This editor has committed; remove it before redraw so draft
+            // preservation cannot retain an already-finished input.
+            inp.remove();
+            State.notes.sort((a,b)=>a.time-b.time); renderNotes(); drawRuler(); recordHistory('修改備註時間'); return;
+          }
         }
         edit.cancel();inp.remove(); timeEl.textContent=secToEncore(n.time,State.fps,State.dropFrame);
       };
@@ -243,13 +274,14 @@ function renderNotes(){
     });
 
     row.querySelector('.nt-del').onclick=e=>{ e.stopPropagation(); if(owner.current()) removeNotes([n]); };
-    el.appendChild(row);
+    if(beforeKept) el.insertBefore(row,kept); else el.appendChild(row);
   }
 }
 
 /* 備註右鍵選單 */
 function _showNoteCtx(x,y){
   const owner=captureNotes(State.notes.filter(note=>_selectedNoteIds.has(note.id)));
+  const ownsRemoval=captureNoteRemoval(owner);
   const cnt=owner.targets.length;
   const items=[{heading:true,label:`已選 ${cnt} 條備註`}];
   if(cnt>=1){
@@ -269,14 +301,15 @@ function _showNoteCtx(x,y){
   }
   items.push({sep:true});
   items.push({label:'🗑 刪除選取備註',act:()=>{
-    if(!owner.current()) return;
+    if(!ownsRemoval()){showToast('備註已變更，請重新確認');return;}
     // Fix #15：cnt>1 時改用 openModal 取代 confirm()，風格一致
     if(cnt>1){
       const session=openModal(`刪除 ${cnt} 條備註`,
         `<p>確定要刪除選取的 <b>${cnt}</b> 條備註嗎？</p>`,
         [{label:'取消',act:()=>session.close()},
          {label:'確定刪除',primary:true,act:()=>{
-           if(!session.isCurrent() || !owner.current()) return;
+           if(!session.isCurrent()) return;
+           if(!ownsRemoval()){session.close();showToast('備註已變更，請重新確認');return;}
            session.close({committed:true}); removeNotes(owner.targets);
          }}]);
     } else {

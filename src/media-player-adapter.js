@@ -152,8 +152,8 @@ class Html5Transport {
 class MpvTransport {
   constructor(mpv) { this.mpv = mpv; }
   get type() { return 'mpv'; }
-  async play() { return this.mpv?.play?.(); }
-  async pause() { return this.mpv?.pause?.(); }
+  async play(options) { return this.mpv?.play?.(options); }
+  async pause(options) { return this.mpv?.pause?.(options); }
   async seek(time, options) { return this.mpv?.seek?.(time, options); }
   async present(time, options = {}) {
     if (typeof this.mpv?.present !== 'function') throw new Error('mpv presentation acknowledgement is unavailable');
@@ -222,6 +222,138 @@ export function createNativePreviewRuntime({
   let boundsTimer = null;
   let lastBounds = null;
   let generation = 0;
+  let nativeSourceRequest = 0;
+  let nativeSourceSession = null;
+  let nativeSourcePath = null;
+  let nativePlaybackSequence = 0, nativePlaybackIntent = null;
+  let nativeSourcePending = false;
+  let pendingSourceOverflow = false;
+  const pendingSourceEvents = new Map();
+  const MAX_PENDING_SOURCE_SESSIONS = 128;
+  let nativeEventListener = null, attachedEventBridge = null, deferredDuration = null, durationDeliveryScheduled = false;
+  let deferredSourceProperties = {}, sourcePropertiesDeliveryScheduled = false;
+  let deferredEndFile = null, endFileDeliveryScheduled = false;
+  let nativeDisconnectDelivery = null;
+  const revokeNativeSource = () => {
+    nativeSourceRequest += 1;
+    nativeSourceSession = null;
+    nativeSourcePath = null;
+    nativePlaybackIntent = null;
+    nativeSourcePending = false;
+    pendingSourceOverflow = false;
+    pendingSourceEvents.clear();
+    deferredDuration = null;
+    deferredSourceProperties = {};
+    deferredEndFile = null;
+  };
+  function deliverDeferredEndFile() {
+    if (endFileDeliveryScheduled || !deferredEndFile || !nativeEventListener) return;
+    endFileDeliveryScheduled = true;
+    setTimeout(() => {
+      endFileDeliveryScheduled = false;
+      const event = deferredEndFile;
+      if (!event || !nativeEventListener || mode !== 'mpv' || event.sourceSessionId !== nativeSourceSession) return;
+      deferredEndFile = null;
+      nativeEventListener(event);
+    }, 0);
+  }
+  function deliverDeferredDuration() {
+    if (durationDeliveryScheduled || !deferredDuration || !nativeEventListener) return;
+    durationDeliveryScheduled = true;
+    // The caller must first finish applying the accepted loadfile's path and
+    // clip. A newer source or disconnect revokes this delayed delivery.
+    setTimeout(() => {
+      durationDeliveryScheduled = false;
+      const event = deferredDuration;
+      if (!event || !nativeEventListener || mode !== 'mpv' || event.sourceSessionId !== nativeSourceSession) return;
+      deferredDuration = null;
+      nativeEventListener(event);
+    }, 0);
+  }
+  function deliverDeferredSourceProperties() {
+    if(sourcePropertiesDeliveryScheduled||!nativeEventListener||!Object.keys(deferredSourceProperties).length) return;
+    sourcePropertiesDeliveryScheduled=true;
+    setTimeout(()=>{
+      sourcePropertiesDeliveryScheduled=false;
+      if(!nativeEventListener||mode!=='mpv') return;
+      const pending=deferredSourceProperties;deferredSourceProperties={};
+      for(const event of Object.values(pending)){
+        if(event.sourceSessionId===nativeSourceSession
+          &&(event.name!=='pause'||(event.playbackIntentId??null)===nativePlaybackIntent)) nativeEventListener(event);
+      }
+    },0);
+  }
+  function attachNativeEvents() {
+    const source = bridge;
+    if (!source?.onEvent || source === attachedEventBridge) return;
+    attachedEventBridge = source;
+    source.onEvent(event => {
+      if (bridge !== source) return;
+      const duration = event?.event === 'property-change' && event.name === 'duration';
+      const sourceProperty = event?.event === 'property-change' && (event.name === 'time-pos' || event.name === 'pause');
+      const disconnected = event?.event === 'disconnected';
+      const endFile = event?.event === 'end-file';
+      if (!duration && !sourceProperty && !disconnected && !endFile) { nativeEventListener?.(event); return; }
+      const id = event?.sourceSessionId;
+      if (typeof id !== 'string' || !id) return;
+      if(sourceProperty&&event.name==='pause'&&(event.playbackIntentId??null)!==nativePlaybackIntent) return;
+      if (id === nativeSourceSession) {
+        if (disconnected) {
+          const listener = nativeEventListener;
+          revokeNativeSource();
+          const delivery = { event, request: nativeSourceRequest };
+          nativeDisconnectDelivery = delivery;
+          try { listener?.(event); } finally { if (nativeDisconnectDelivery === delivery) nativeDisconnectDelivery = null; }
+        } else if (sourceProperty) {
+          if(deferredSourceProperties[event.name]||!nativeEventListener){
+            deferredSourceProperties[event.name]=event;deliverDeferredSourceProperties();
+          }else nativeEventListener(event);
+        } else if (endFile) {
+          if (deferredEndFile || !nativeEventListener) { deferredEndFile = event; deliverDeferredEndFile(); }
+          else nativeEventListener(event);
+        } else if (deferredDuration || !nativeEventListener) {
+          deferredDuration = event;
+          deliverDeferredDuration();
+        } else nativeEventListener(event);
+        return;
+      }
+      if (!nativeSourcePending) return;
+      let entry = pendingSourceEvents.get(id);
+      if (!entry) {
+        if (pendingSourceEvents.size >= MAX_PENDING_SOURCE_SESSIONS) { pendingSourceOverflow = true; return; }
+        entry = { disconnected: false, duration: null, endFile: null, properties: {} };
+        pendingSourceEvents.set(id, entry);
+      }
+      if (disconnected) entry.disconnected = true;
+      else if (endFile) entry.endFile = event;
+      else if (sourceProperty) entry.properties[event.name]=event;
+      else entry.duration = event;
+    });
+  }
+  function acceptNativeSource(result, request, path) {
+    if (request !== nativeSourceRequest) return false;
+    nativeSourcePending = false;
+    const id = result?.sourceSessionId;
+    const entry = typeof id === 'string' && id ? pendingSourceEvents.get(id) : null;
+    const unsafe = pendingSourceOverflow || !!entry?.disconnected;
+    pendingSourceEvents.clear();
+    pendingSourceOverflow = false;
+    if (unsafe) return false;
+    nativeSourceSession = result?.ok !== false && typeof id === 'string' && id ? id : null;
+    nativeSourcePath = nativeSourceSession && typeof path === 'string' ? path : null;
+    if (nativeSourceSession && entry?.duration) {
+      deferredDuration = entry.duration;
+      deliverDeferredDuration();
+    }
+    if(nativeSourceSession && entry?.properties){
+      deferredSourceProperties=entry.properties;deliverDeferredSourceProperties();
+    }
+    if (nativeSourceSession && entry?.endFile) {
+      deferredEndFile = entry.endFile;
+      deliverDeferredEndFile();
+    }
+    return true;
+  }
   // Native resources exist while launch is pending, before mpv becomes the active transport.
   let nativeRequested = false;
 
@@ -272,6 +404,7 @@ export function createNativePreviewRuntime({
   function selectHtml5(nextVideo = video) {
     activeTransport.cancelPendingSeek?.();
     generation += 1;
+    revokeNativeSource();
     mode = 'html5';
     activeTransport = html5For(nextVideo);
     activeTransport.cancelPendingSeek();
@@ -322,7 +455,11 @@ export function createNativePreviewRuntime({
     async enterMpv({ src, bounds, audio, readBounds, boundsElement } = {}) {
       activeTransport.cancelPendingSeek?.();
       const token = ++generation;
+      revokeNativeSource();
+      const sourceRequest = nativeSourceRequest;
       if (!bridge?.launch) throw new Error('mpv preview bridge is unavailable');
+      attachNativeEvents();
+      nativeSourcePending = true;
       nativeRequested = true;
       let result;
       try {
@@ -338,6 +475,12 @@ export function createNativePreviewRuntime({
         // The operation which superseded this launch owns shutdown/replacement.
         return null;
       }
+      if (sourceRequest !== nativeSourceRequest) return null;
+      if (!acceptNativeSource(result, sourceRequest, src)) {
+        selectHtml5(video);
+        await Promise.resolve(shutdownNative()).catch(() => {});
+        return null;
+      }
       mode = 'mpv';
       activeTransport = new MpvTransport(bridge);
       nativeVisible = true;
@@ -351,7 +494,12 @@ export function createNativePreviewRuntime({
       if (nativeWasActive) await Promise.resolve(shutdownNative()).catch(() => {});
     },
 
-    setMpvBridge(nextBridge) { bridge = nextBridge || null; },
+    setMpvBridge(nextBridge) {
+      const next = nextBridge || null;
+      if (bridge !== next) revokeNativeSource();
+      bridge = next;
+      attachNativeEvents();
+    },
     selectHtml5,
     shutdownNative,
     startBoundsFeeder,
@@ -369,8 +517,16 @@ export function createNativePreviewRuntime({
       return bridge?.setImageGuide ? bridge.setImageGuide(guide || null) : false;
     },
     async clearGuides() { return clearGuides(); },
-    async play() { return activeTransport.play(); },
-    async pause() { return activeTransport.pause(); },
+    async play() {
+      if(mode!=='mpv') return activeTransport.play();
+      nativePlaybackIntent=`${nativeSourceRequest}:${++nativePlaybackSequence}`;
+      return activeTransport.play({intentId:nativePlaybackIntent});
+    },
+    async pause() {
+      if(mode!=='mpv') return activeTransport.pause();
+      nativePlaybackIntent=`${nativeSourceRequest}:${++nativePlaybackSequence}`;
+      return activeTransport.pause({intentId:nativePlaybackIntent});
+    },
     async seek(time, options) { return activeTransport.seek(time, options); },
     async present(time, options) { return activeTransport.present(time, options); },
     async rate(value) { return activeTransport.rate(value); },
@@ -386,7 +542,28 @@ export function createNativePreviewRuntime({
     },
     async loadfile(filePath) {
       if (mode !== 'mpv' || !bridge?.loadfile) return false;
-      return bridge.loadfile(filePath);
+      revokeNativeSource();
+      const sourceRequest = nativeSourceRequest, currentBridge = bridge;
+      nativeSourcePending = true;
+      let result;
+      try {
+        result = await currentBridge.loadfile(filePath);
+      } catch (error) {
+        if (sourceRequest === nativeSourceRequest) revokeNativeSource();
+        throw error;
+      }
+      if (mode === 'mpv' && bridge === currentBridge && sourceRequest === nativeSourceRequest
+        && !acceptNativeSource(result, sourceRequest, filePath)) return { ok: false, duration: 0 };
+      return result;
+    },
+    ownsNativeSourceSession(id) { return mode === 'mpv' && !!nativeSourceSession && id === nativeSourceSession; },
+    ownsNativeSourcePath(path) {
+      return mode === 'mpv' && !!bridge && !!nativeSourceSession && typeof path === 'string' && nativeSourcePath === path;
+    },
+    captureNativeDisconnect(event) {
+      const delivery = nativeDisconnectDelivery;
+      if (!delivery || delivery.event !== event) return () => false;
+      return () => nativeDisconnectDelivery === delivery && nativeSourceRequest === delivery.request && mode === 'mpv';
     },
     async subSet(assText) {
       if (mode !== 'mpv' || !bridge?.subSet) return false;
@@ -405,7 +582,13 @@ export function createNativePreviewRuntime({
       return bridge.setTimecodeWatermark(payload || null);
     },
     async detect() { return bridge?.detect ? bridge.detect() : null; },
-    onEvent(callback) { return bridge?.onEvent?.(callback); },
+    onEvent(callback) {
+      nativeEventListener = callback;
+      attachNativeEvents();
+      deliverDeferredDuration();
+      deliverDeferredSourceProperties();
+      deliverDeferredEndFile();
+    },
     async quit() {
       selectHtml5(video);
       return shutdownNative();
@@ -431,6 +614,7 @@ export function createNativePreviewRuntime({
     },
   };
 
+  attachNativeEvents();
   return runtime;
 }
 

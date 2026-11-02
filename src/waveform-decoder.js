@@ -200,6 +200,7 @@ export const Wave = {
     if(!this.peaks||runtime===Media.activeSource||(!Media.activeSource&&runtime==='video')) this.peaks=peaks;
     return peaks||null;
   },
+  getSourceMixPeaks(source){ return this._sourceState(source,false)?.mix?.peaks || null; },
   clearSourceMixPeaks(source,expected){
     const state=this._sourceState(source,false);
     if(!state||state.mix.peaks!==expected) return false;
@@ -716,6 +717,14 @@ export const Wave = {
     const pk = this.calcFromWav(arrayBuffer);
     if(pk) this.peaks = pk;
     return pk;
+  },
+  // 優先來源波形必須覆蓋宣稱的整段；一般多軌混音仍允許較短音軌補零。
+  calcSourceWaveform(arrayBuffer,duration){
+    const pcm=wavePcm(arrayBuffer);
+    if(!pcm||!Number.isFinite(duration)||duration<=0||!pcm.length) return null;
+    const expected=Math.round(duration*pcm.sampleRate);
+    if(!Number.isSafeInteger(expected)||pcm.length+1<expected) return null;
+    return this.calcFromWav(arrayBuffer,duration);
   },
   /* 純計算版（不改 this.peaks） */
   calcFromWav(arrayBuffer,duration=0,channel=null){

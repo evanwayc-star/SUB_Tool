@@ -33,7 +33,7 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
   const disc = adapters.disc || nativeDisc;
   const airline = adapters.finalizeAirline || finalizeAirlineOutput;
   const modFhd = adapters.finalizeModFhd || finalizeModFhdTransport;
-  const { signal, onOutputStart, onProcess, onProgress, assertOutput, onWorkspacePrepared } = owner;
+  const { signal, onOutputStart, onBeforeProcess, onProcess, onProgress, assertOutput, onWorkspacePrepared } = owner;
   let tempDir;
   let nativeWorkRoot;
   let stage = null;
@@ -78,7 +78,7 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
             };
             assertDiscOutput();
             await disc.finalizeDiscOutput(format, stage.encodedPath, writePath, {
-              signal, audioPlan: discAudioPlan, fps: discVideoFps, onOutputStart, onProcess, assertOutput: assertDiscOutput, nativeWorkRoot,
+              signal, audioPlan: discAudioPlan, fps: discVideoFps, onOutputStart, onBeforeProcess, onProcess, assertOutput: assertDiscOutput, nativeWorkRoot,
               onOutputLink: async evidence => {
                 stage.outputLink = evidence;
                 await onWorkspacePrepared?.(stage);

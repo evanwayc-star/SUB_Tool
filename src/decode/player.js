@@ -273,10 +273,19 @@ export const WCPreview = {
   _imageFor(clip){
     const url=imageSourceUrl(clip);
     let entry=this._images.get(url);
-    if(!entry&&url){
-      const image=new Image();entry={image,state:'loading'};this._images.set(url,entry);
-      image.onload=()=>{if(this._images.get(url)===entry) entry.state=image.naturalWidth>0?'ready':'failed';};
-      image.onerror=()=>{if(this._images.get(url)===entry) entry.state='failed';};
+    if(url&&(!entry||(entry.state==='failed'&&performance.now()>=entry.retryAt))){
+      const attempt=entry?(entry.attempt||0)+1:0;
+      if(entry){entry.image.onload=null;entry.image.onerror=null;entry.image.src='';}
+      const image=new Image();entry={image,state:'loading',attempt,retryAt:Infinity};this._images.set(url,entry);
+      const failed=()=>{
+        if(this._images.get(url)!==entry) return;
+        entry.state='failed';
+        // 與 DOM 圖片尺寸探測相同的退避；由目前作用層的 tick 重試，
+        // 不讓暫時離線的圖片永久失敗，也不保留跨來源／專案的 timer。
+        entry.retryAt=performance.now()+Math.min(30000,1000*2**Math.min(attempt,5));
+      };
+      image.onload=()=>{if(this._images.get(url)===entry){if(image.naturalWidth>0) entry.state='ready';else failed();}};
+      image.onerror=failed;
       setMediaElementSource(image,url);
     }
     return entry;

@@ -37,7 +37,7 @@ export function captureClipEdit(c){
 
 export function clipDurationLimit(c){
   const speed=Number(c.speed)>0?Number(c.speed):1;
-  const available=c.reverse?(+c.out||0):((+c.dur||0)-(+c.in||0));
+  const available=c.reverse?(+c.out||0):(Seq.sourceDuration(c)-(+c.in||0));
   return Math.min(Math.max(0,available/speed),Seq.maxLengthOnTrack(c));
 }
 
@@ -57,6 +57,7 @@ export function setClipDuration(c,seconds){
   const end=Math.min(latest,Math.max(earliest,snapTimeToFrame(c.offset+seconds,State.fps,State.dropFrame)));
   if(c.reverse) c.in=(+c.out||0)-(end-c.offset)*(Number(c.speed)>0?Number(c.speed):1);
   else c.out=(+c.in||0)+(end-c.offset)*(Number(c.speed)>0?Number(c.speed):1);
+  Seq.commitSourceExtent(c);
   Seq.recomputeDuration(); recordHistory('修改持續時間：'+(c.name||''));
   Media.seek(Math.min(Media.displayTime(),State.duration||0)); refreshClipEdit();
   return end-c.offset;
@@ -225,11 +226,12 @@ export function setClipFade(c,fadeIn,fadeOut){
 
 export function resetClipTrim(c){
   if(!clipEditable(c)) return false;
-  const end=c.offset+c.dur/(Number(c.speed)>0?Number(c.speed):1);
+  const duration=Seq.sourceDuration(c);
+  const end=c.offset+duration/(Number(c.speed)>0?Number(c.speed):1);
   if(Seq.trackClips(c.vtrack||0).some(other=>other!==c && other.offset<end-1e-6 && Seq.clipEnd(other)>c.offset+1e-6)){
     showToast('還原完整長度會與相鄰影片重疊，請先移開再重設'); return false;
   }
-  c.in=0; c.out=c.dur;
+  c.in=0; c.out=duration; Seq.commitSourceExtent(c);
   Seq.recomputeDuration(); recordHistory('重設修剪：'+c.name);
   Media.seek(Math.min(Media.displayTime(),State.duration||0)); refreshClipEdit();
   return true;

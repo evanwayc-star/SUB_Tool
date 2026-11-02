@@ -81,6 +81,20 @@ it('同母素材切割的兩個來源共用分離工作，取消一個不取消�
   const peaks=new Float32Array(8000);done(peaks);expect(await b).toBe(peaks);
 });
 
+it('共用分析時同 ID 新物件不能接收舊訂閱，另一個仍有效的來源可完成',async()=>{
+  mocks.state.clips.push({...source,id:'split',audioSourceId:'split-audio',audioSrc:'split-runtime'});
+  let done;
+  mocks.analyze.mockImplementation(()=>new Promise(resolve=>{done=resolve;}));
+  const old=analyzeSourceVocals('audio');
+  const rejected=expect(old).rejects.toMatchObject({name:'AbortError'});
+  const other=analyzeSourceVocals('split-audio');
+  await new Promise(resolve=>setTimeout(resolve,0));
+  expect(mocks.analyze).toHaveBeenCalledTimes(1);
+  mocks.state.clips[0]={...mocks.state.clips[0]};
+  const peaks=new Float32Array(8000);done(peaks);
+  await rejected;expect(await other).toBe(peaks);
+});
+
 it('瀏覽器保留第二 stream 的原音，不把效果音訊或重複 buffer 混入分析',async()=>{
   mocks.desktop.vocalWaveChunk=null;
   mocks.state.clips[0].dur=1;

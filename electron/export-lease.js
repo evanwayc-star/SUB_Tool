@@ -56,6 +56,60 @@ function captureOutputAuthority(outPath, root, io = fs) {
   } catch (error) { throw unsafeOutput(error); }
 }
 
+// The shared reservation lives below the OS-provided per-user appData root,
+// independently of any profile's queueDir. Each existing path segment must be
+// a real directory; recursive mkdir must not follow an untrusted junction.
+function prepareSharedLeaseRoot(appDataDir) {
+  const appRoot = captureOutputDirectory(appDataDir);
+  const applicationDir = path.join(appRoot.path, 'SUB_Tool');
+  const appParentEvidence = captureOutputAuthority(applicationDir, appRoot);
+  assertOutputAuthority(appParentEvidence, applicationDir);
+  try { fs.mkdirSync(applicationDir); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
+  const requestedIdentity = directoryIdentity(applicationDir);
+  // Windows package virtualization may redirect a non-link appData entry to
+  // another physical path. Bind both names to the same directory identity;
+  // subsequent checks re-resolve the requested entry on every operation.
+  const root = captureOutputDirectory(applicationDir);
+  if (requestedIdentity.dev !== root.dev || requestedIdentity.ino !== root.ino) throw unsafeOutput();
+  assertOutputAuthority(appParentEvidence, applicationDir);
+  let current = root.requestedPath;
+  let physicalCurrent = root.path;
+  for (const name of ['shared-output-leases', 'output-leases']) {
+    const candidate = path.join(current, name);
+    const parentEvidence = captureOutputAuthority(candidate, root);
+    assertOutputAuthority(parentEvidence, candidate);
+    try { fs.mkdirSync(candidate); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    const entry = directoryIdentity(candidate);
+    physicalCurrent = path.join(physicalCurrent, name);
+    if (pathKey(fs.realpathSync.native(candidate)) !== pathKey(physicalCurrent)) throw unsafeOutput();
+    const physicalEntry = directoryIdentity(physicalCurrent);
+    if (entry.dev !== physicalEntry.dev || entry.ino !== physicalEntry.ino) throw unsafeOutput();
+    assertOutputAuthority(parentEvidence, candidate);
+    current = candidate;
+  }
+  const sharedQueueDir = path.dirname(current);
+  const sharedAuthority = captureOutputAuthority(path.join(current, '.subtool-root-proof'), root);
+  return { sharedQueueDir, sharedAuthority };
+}
+
+function prepareAcceptanceSharedLeaseRoot(userDataDir) {
+  const profile = captureOutputDirectory(userDataDir);
+  const candidate = path.join(profile.requestedPath, '.subtool-acceptance-shared');
+  const evidence = captureOutputAuthority(candidate, profile);
+  assertOutputAuthority(evidence, candidate);
+  try { fs.mkdirSync(candidate); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
+  const requested = directoryIdentity(candidate);
+  const physical = path.join(profile.path, '.subtool-acceptance-shared');
+  const actual = directoryIdentity(physical);
+  if (requested.dev !== actual.dev || requested.ino !== actual.ino
+    || pathKey(fs.realpathSync.native(candidate)) !== pathKey(physical)) throw unsafeOutput();
+  assertOutputAuthority(evidence, candidate);
+  return prepareSharedLeaseRoot(candidate);
+}
+
 function assertOutputAuthority(authority, outPath, io = fs) {
   try {
     if (authority?.version !== 1 || !Array.isArray(authority.parents) || !authority.parents.length
@@ -74,12 +128,200 @@ function assertOutputAuthority(authority, outPath, io = fs) {
   } catch (error) { throw unsafeOutput(error); }
 }
 
+// Resolve the final directory entry itself (including Windows 8.3 aliases),
+// without using inode equality: distinct hard links remain distinct names.
+// An existing but unresolvable entry must never be treated as absent.
+function existingEntryPath(file, io = fs) {
+  try { io.lstatSync(file); }
+  catch (error) { if (error?.code === 'ENOENT') return null; throw error; }
+  return pathKey(io.realpathSync.native(file));
+}
+
+// Resolve the existing output directory entry without following a final
+// symbolic link. A short symlink spelling is matched against actual entries;
+// ambiguous hard-linked symlinks are rejected rather than conflated.
+function outputReservationEntry(file) {
+  let observed;
+  try { observed = fs.lstatSync(file, { bigint: true }); }
+  catch (error) { if (error?.code === 'ENOENT') return null; throw error; }
+  if (!observed.isSymbolicLink()) return pathKey(fs.realpathSync.native(file));
+  const parent = fs.realpathSync.native(path.dirname(file));
+  const requested = path.basename(file);
+  const fold = name => process.platform === 'win32' ? name.toLowerCase() : name;
+  const directory = fs.opendirSync(parent);
+  let count = 0, exact = null;
+  const matches = [];
+  try {
+    for (let entry; (entry = directory.readSync()) !== null;) {
+      if (++count > 20000) throw new Error('輸出資料夾項目過多，無法核對符號連結');
+      if (fold(entry.name) === fold(requested)) exact = entry.name;
+      if (!entry.isSymbolicLink()) continue;
+      const candidate = fs.lstatSync(path.join(parent, entry.name), { bigint: true });
+      if (candidate.dev === observed.dev && candidate.ino === observed.ino) matches.push(entry.name);
+    }
+  } finally { directory.closeSync(); }
+  const again = fs.lstatSync(file, { bigint: true });
+  if (!again.isSymbolicLink() || again.dev !== observed.dev || again.ino !== observed.ino) throw new Error('輸出連結在檢查期間改變');
+  const name = exact || (matches.length === 1 ? matches[0] : null);
+  if (!name || !matches.includes(name)) throw new Error('無法辨識輸出連結的實際目錄項');
+  return pathKey(path.join(parent, name));
+}
+
+function assertDistinctSourceEntries(sourcePaths, outPath, io = fs) {
+  let output;
+  try { output = existingEntryPath(outPath, io); }
+  catch (cause) { throw leaseError('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認匯出目的檔與母素材的實際路徑', { cause }); }
+  if (output === null) return;
+  for (const source of sourcePaths) {
+    let actual;
+    try { actual = existingEntryPath(source, io); }
+    catch (cause) { throw leaseError('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認匯出目的檔與母素材的實際路徑', { cause }); }
+    if (actual === output) throw leaseError('OUTPUT_OVERWRITES_SOURCE', `匯出不可覆蓋母素材：${outPath}`);
+  }
+}
+
+// Persist the destination's observed identity at queue admission. This is
+// separate from directory authority and does not grant overwrite consent.
+function captureDestinationEvidence(authority, io = fs) {
+  assertOutputAuthority(authority, authority.requestedPath, io);
+  let identity;
+  try {
+    const stat = io.lstatSync(authority.outPath, { bigint: true });
+    identity = ['dev', 'ino', 'mode', 'size', 'mtimeNs', 'ctimeNs'].map(key => String(stat[key]));
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    identity = null;
+  }
+  assertOutputAuthority(authority, authority.requestedPath, io);
+  return { ...authority, destinationEvidence: { version: 1, identity } };
+}
+
+function assertDestinationEvidence(authority, io = fs) {
+  // Existing queued snapshots predate destination evidence; retain their
+  // original behaviour instead of silently manufacturing a new baseline.
+  if (!Object.hasOwn(authority || {}, 'destinationEvidence')) return;
+  const expected = authority.destinationEvidence;
+  if (![1, 2].includes(expected?.version) || (expected.identity !== null &&
+    (!Array.isArray(expected.identity) || expected.identity.length !== 6 ||
+      expected.identity.some((value, index) => typeof value !== 'string' || !(index < 4 ? /^\d+$/ : /^-?\d+$/).test(value))))) {
+    throw leaseError('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認匯出目的檔身分；請新建交付工作並重新選擇檔案');
+  }
+  let actual;
+  try { actual = captureDestinationEvidence(authority, io).destinationEvidence.identity; }
+  catch (error) {
+    throw leaseError('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認匯出目的檔身分；請新建交付工作並重新選擇檔案', { cause: error });
+  }
+  if ((actual === null) !== (expected.identity === null) ||
+    (actual && actual.some((value, index) => value !== expected.identity[index]))) {
+    throw leaseError('DELIVERY_DESTINATION_CHANGED', '輸出檔在排隊期間變更；請新建交付工作並重新選擇檔案');
+  }
+}
+
+// Full-content evidence is deliberately asynchronous: a completed delivery
+// may be many gigabytes and hashing it synchronously would freeze Electron's
+// main process or prevent a watchdog from receiving cancellation.
+async function captureDestinationEvidenceAsync(authority, { signal, io = fs } = {}) {
+  signal?.throwIfAborted();
+  const observed = captureDestinationEvidence(authority, io);
+  const identity = observed.destinationEvidence.identity;
+  if (identity === null) return observed;
+  const changed = () => leaseError('DELIVERY_DESTINATION_CHANGED', '輸出檔在核對期間變更；請重新選擇檔案');
+  const identityOf = stat => ['dev', 'ino', 'mode', 'size', 'mtimeNs', 'ctimeNs'].map(key => String(stat[key]));
+  const matches = stat => stat.isFile() && !stat.isSymbolicLink() &&
+    identityOf(stat).every((value, index) => value === identity[index]);
+  let handle, result;
+  try {
+    const entry = io.lstatSync(authority.outPath, { bigint: true });
+    if (!matches(entry)) throw changed();
+    handle = await io.promises.open(authority.outPath, 'r');
+    signal?.throwIfAborted();
+    if (!matches(await handle.stat({ bigint: true }))) throw changed();
+    const hash = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let total = 0n;
+    for (;;) {
+      signal?.throwIfAborted();
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      signal?.throwIfAborted();
+      if (!bytesRead) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      total += BigInt(bytesRead);
+    }
+    if (total !== BigInt(identity[3]) || !matches(await handle.stat({ bigint: true }))) throw changed();
+    signal?.throwIfAborted();
+    assertOutputAuthority(authority, authority.requestedPath, io);
+    if (!matches(io.lstatSync(authority.outPath, { bigint: true }))) throw changed();
+    result = { ...authority, destinationEvidence: { version: 2, identity, sha256: hash.digest('hex') } };
+  } catch (error) {
+    if (signal?.aborted || error?.code === 'DELIVERY_DESTINATION_CHANGED') throw error;
+    if (error?.code === 'ENOENT' || error?.code === 'ELOOP') throw changed();
+    throw leaseError('DELIVERY_DESTINATION_UNVERIFIABLE', '無法讀取完整輸出檔內容；請重新選擇檔案', { cause: error });
+  } finally {
+    if (handle) await handle.close();
+  }
+  // Closing the handle is asynchronous too: cancellation during close must
+  // not let a completed digest escape as a still-authorized result.
+  signal?.throwIfAborted();
+  return result;
+}
+
+// Only this async check verifies file content. The synchronous check above is
+// retained as a quick metadata guard at synchronous commit boundaries.
+async function assertDestinationEvidenceAsync(authority, { signal, io = fs } = {}) {
+  signal?.throwIfAborted();
+  if (!Object.hasOwn(authority || {}, 'destinationEvidence')) return;
+  const expected = authority.destinationEvidence;
+  assertDestinationEvidence(authority, io);
+  if (expected.version === 1 && expected.identity !== null) {
+    throw leaseError('DELIVERY_DESTINATION_CONFIRMATION_REQUIRED', '舊交付缺少完整的目的檔證據，請重新選擇並確認覆寫');
+  }
+  if (expected.version === 1) return;
+  if (expected.identity === null || typeof expected.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(expected.sha256)) {
+    throw leaseError('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認匯出目的檔內容；請新建交付工作並重新選擇檔案');
+  }
+  let actual;
+  try { actual = await captureDestinationEvidenceAsync(authority, { signal, io }); }
+  catch (error) {
+    if (signal?.aborted || error?.code === 'DELIVERY_DESTINATION_CHANGED') throw error;
+    throw leaseError('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認匯出目的檔內容；請新建交付工作並重新選擇檔案', { cause: error });
+  }
+  signal?.throwIfAborted();
+  if (actual.destinationEvidence.version !== 2 || actual.destinationEvidence.sha256 !== expected.sha256 ||
+    actual.destinationEvidence.identity.some((value, index) => value !== expected.identity[index])) {
+    throw leaseError('DELIVERY_DESTINATION_CHANGED', '輸出檔在排隊期間變更；請新建交付工作並重新選擇檔案');
+  }
+}
+
+async function assertDeliveryDestinationEvidenceAsync(authority, options) {
+  if (!Object.hasOwn(authority || {}, 'destinationEvidence')) {
+    throw leaseError('DELIVERY_DESTINATION_CONFIRMATION_REQUIRED', '舊交付缺少原始覆寫確認，請在佇列重新選擇輸出檔案並確認');
+  }
+  return assertDestinationEvidenceAsync(authority, options);
+}
+
+function assertDeliveryDestinationEvidence(authority) {
+  if (!Object.hasOwn(authority || {}, 'destinationEvidence')) {
+    throw leaseError('DELIVERY_DESTINATION_CONFIRMATION_REQUIRED', '舊交付缺少原始覆寫確認，請在佇列重新選擇輸出檔案並確認');
+  }
+  assertDestinationEvidence(authority);
+}
+
+function needsDeliveryDestinationConfirmation(authority) {
+  const evidence = authority?.destinationEvidence;
+  if (!evidence || typeof evidence !== 'object') return true;
+  if (evidence.version === 1) return evidence.identity !== null;
+  if (evidence.version !== 2 || !Array.isArray(evidence.identity) || evidence.identity.length !== 6 ||
+      evidence.identity.some((value, index) => typeof value !== 'string' || !(index < 4 ? /^\d+$/ : /^-?\d+$/).test(value))) return true;
+  return typeof evidence.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(evidence.sha256);
+}
+
 function retargetOutputAuthority(authority, outPath) {
   assertOutputAuthority(authority, authority?.requestedPath);
   if (pathKey(path.dirname(outPath)) !== pathKey(path.dirname(authority.requestedPath))) throw unsafeOutput();
   const next = { ...authority, requestedPath: path.resolve(outPath),
     outPath: path.join(path.dirname(authority.outPath), path.basename(outPath)) };
-  return assertOutputAuthority(next, outPath);
+  assertOutputAuthority(next, outPath);
+  return pathKey(authority.requestedPath) !== pathKey(outPath) ? captureDestinationEvidence(next) : next;
 }
 
 function requirePath(value, name) {
@@ -255,6 +497,34 @@ function validateOwner(owner, lockPath, expectedOutPath = null) {
   ) {
     throw corruptError(lockPath, 'createdAt is invalid');
   }
+  if (owner.retainedResult != null) {
+    const retained = owner.retainedResult;
+    if (!retained || typeof retained !== 'object' || Array.isArray(retained) || retained.version !== 1
+      || !['DELIVERY_DESTINATION_CHANGED', 'DELIVERY_DESTINATION_UNVERIFIABLE', 'DELIVERY_STAGE_CHANGED', 'PARTIAL_DELETE_UNCERTAIN', 'OUTPUT_OVERWRITES_SOURCE', 'DELIVERY_TEMP_INPUT_CHANGED', 'SHARED_OUTPUT_LOCK_UNAVAILABLE'].includes(retained.code)
+      || owner.outputStarted !== true || !owner.stagePath || !owner.outputAuthority
+      || !owner.stageIdentity || typeof owner.stageIdentity.dev !== 'string' || typeof owner.stageIdentity.ino !== 'string'
+      || !/^\d+$/.test(owner.stageIdentity.dev) || !/^\d+$/.test(owner.stageIdentity.ino)
+      || retained.stageIdentity?.dev !== owner.stageIdentity.dev || retained.stageIdentity?.ino !== owner.stageIdentity.ino) {
+      throw corruptError(lockPath, 'retainedResult is invalid or not bound to the original stage');
+    }
+  }
+  if (owner.aliasOf != null) {
+    const alias = owner.aliasOf;
+    if (!alias || alias.version !== 1 || typeof alias.outPath !== 'string'
+      || pathKey(alias.outPath) !== alias.outPath || !/^[a-f0-9]{64}$/.test(alias.key)
+      || crypto.createHash('sha256').update(alias.outPath, 'utf8').digest('hex') !== alias.key
+      || (!alias.queueDir && alias.key === crypto.createHash('sha256').update(pathKey(owner.outPath), 'utf8').digest('hex'))
+      || (alias.queueDir != null && (typeof alias.queueDir !== 'string' || !path.isAbsolute(alias.queueDir)
+        || typeof alias.stagePath !== 'string' || alias.stagePath !== stagePathForCanonical(alias.outPath, owner.token)
+        || !alias.outputAuthority || typeof alias.outputAuthority !== 'object'
+        || !alias.queueAuthority || typeof alias.queueAuthority !== 'object'))
+      || owner.outputStarted !== false || owner.stagePath || owner.retainedResult) {
+      throw corruptError(lockPath, 'aliasOf is invalid');
+    }
+  }
+  if (owner.writerSpawnPending != null && typeof owner.writerSpawnPending !== 'boolean') {
+    throw corruptError(lockPath, 'writerSpawnPending is invalid');
+  }
   return owner;
 }
 
@@ -297,6 +567,7 @@ function acquireLease({
   outputStarted,
   stagePath,
   outputAuthority,
+  aliasOf,
 } = {}) {
   if (outputStarted != null && typeof outputStarted !== 'boolean') {
     throw leaseError('INVALID_LEASE_ARGUMENT', 'outputStarted must be a boolean');
@@ -320,7 +591,9 @@ function acquireLease({
     ...(outputStarted == null ? {} : { outputStarted }),
     ...(stagePath == null ? {} : { stagePath }),
     ...(outputAuthority == null ? {} : { outputAuthority }),
+    ...(aliasOf == null ? {} : { aliasOf }),
   };
+  validateOwner(owner, lockPath, normalizedOutPath);
 
   fs.mkdirSync(root, { recursive: true });
   if (fs.existsSync(lockPath)) throw busyError(lockPath, normalizedOutPath);
@@ -382,6 +655,14 @@ function updateLease(options = {}) {
   if (Object.hasOwn(options, 'workspaceAlias')) owner.workspaceAlias = options.workspaceAlias;
   if (Object.hasOwn(options, 'discWorkspace')) owner.discWorkspace = options.discWorkspace;
   if (Object.hasOwn(options, 'discWorkspacePending')) owner.discWorkspacePending = options.discWorkspacePending;
+  if (Object.hasOwn(options, 'writerSpawnPending')) {
+    if (typeof options.writerSpawnPending !== 'boolean') throw leaseError('INVALID_LEASE_ARGUMENT', 'writerSpawnPending must be a boolean');
+    owner.writerSpawnPending = options.writerSpawnPending;
+  }
+  if (Object.hasOwn(options, 'retainedResult')) {
+    owner.retainedResult = options.retainedResult;
+    validateOwner(owner, location.lockPath, location.outPath);
+  }
 
   const ownerPath = path.join(location.lockPath, 'owner.json');
   const tempPath = path.join(
@@ -555,7 +836,10 @@ function listLeases(queueDirOrOptions) {
     ? queueDirOrOptions.queueDir
     : queueDirOrOptions;
   const root = leaseRoot(queueDir);
-  if (!fs.existsSync(root)) return [];
+  let rootStat;
+  try { rootStat = fs.lstatSync(root); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw leaseError('LEASE_ROOT_UNVERIFIABLE', '無法確認匯出鎖目錄');
 
   const entries = fs.readdirSync(root, { withFileTypes: true })
     .filter(entry => entry.name.endsWith('.lock'))
@@ -597,8 +881,19 @@ function listLeases(queueDirOrOptions) {
 
 module.exports = {
   assertOutputAuthority,
+  assertDistinctSourceEntries,
+  outputReservationEntry,
+  assertDestinationEvidence,
+  assertDeliveryDestinationEvidence,
+  assertDestinationEvidenceAsync,
+  assertDeliveryDestinationEvidenceAsync,
+  captureDestinationEvidence,
+  captureDestinationEvidenceAsync,
+  needsDeliveryDestinationConfirmation,
   captureOutputAuthority,
   captureOutputDirectory,
+  prepareSharedLeaseRoot,
+  prepareAcceptanceSharedLeaseRoot,
   retargetOutputAuthority,
   acquireLease,
   leaseRoot,

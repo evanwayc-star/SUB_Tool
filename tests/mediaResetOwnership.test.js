@@ -141,12 +141,194 @@ describe('reset-scoped media ownership', () => {
   });
 
   it('反轉片段的JKL倒帶改用來源正播，停止後還原片段來源倒播',async()=>{
-    const bridge={launch:vi.fn().mockResolvedValue({ok:true}),direction:vi.fn().mockResolvedValue(true),mute:vi.fn().mockResolvedValue()};
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'reverse-source'}),direction:vi.fn().mockResolvedValue(true),mute:vi.fn().mockResolvedValue()};
     desktopMock.mpv=bridge;const adapter=resetPlayerAdapter(desktopMock,domMock.video);await adapter.enterMpv({src:'A.mov'});
+    expect(adapter.ownsNativeSourcePath('A.mov')).toBe(true);
     const clip={id:'reverse',path:'A.mov',in:0,out:10,dur:10,offset:0,reverse:true};State.clips=[clip];Media.activeClipId=clip.id;Media._gap=false;
     await expect(Media.setPlaybackDirection('backward')).resolves.toBe(true);
     expect(bridge.direction).toHaveBeenLastCalledWith('forward');
     await Media.setPlaybackDirection('forward');expect(bridge.direction).toHaveBeenLastCalledWith('backward');
+  });
+
+  it('切換來源期間的舊 duration 不能擴大新片段；loadfile 完成後採用新來源長度',async()=>{
+    const {Seq}=await import('../src/sequence.js');
+    const gate=deferred();
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'old-session'}),loadfile:vi.fn(()=>gate.promise),
+      mute:vi.fn().mockResolvedValue(),direction:vi.fn().mockResolvedValue(true),
+      rate:vi.fn().mockResolvedValue(),seek:vi.fn().mockResolvedValue(true),pause:vi.fn().mockResolvedValue()};
+    desktopMock.mpv=bridge;
+    const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    await runtime.enterMpv({src:'C:/old.mov'});
+    const old={id:'old-duration',path:'C:/old.mov',dur:100,in:0,out:100,offset:0,vtrack:0,audioSourceId:'old'};
+    const next={id:'new-duration',path:'C:/new.mov',dur:3,in:0,out:3,offset:100,vtrack:0,audioSourceId:'new'};
+    State.clips=[old,next];State.videoTracks=[{visible:true}];Media.activeClipId=old.id;Media._gap=false;Media._mpvPath=old.path;
+    const switching=Media._ensureClip(next,0,false);
+    try{
+      await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalledWith(next.path));
+      expect(Media.activeClipId).toBe(next.id);
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:100,sourceSessionId:'old-session'});
+      expect(Seq.sourceDuration(next)).toBe(3);
+      gate.resolve({ok:true,duration:5,sourceSessionId:'new-session'});await switching;
+      expect(Seq.sourceDuration(next)).toBe(5);
+      expect(next).toMatchObject({dur:3,out:3});
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:6,sourceSessionId:'new-session'});
+      expect(Seq.sourceDuration(next)).toBe(6);
+    }finally{gate.resolve({ok:false});await switching;runtime.stopBoundsFeeder();Media.reset();}
+  });
+
+  it('切換期間片段遭替換，舊來源事件與舊 loadfile 回覆都不能授予新片長度',async()=>{
+    const {Seq}=await import('../src/sequence.js');
+    const gate=deferred();
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'old-session'}),loadfile:vi.fn(()=>gate.promise),
+      mute:vi.fn().mockResolvedValue(),direction:vi.fn().mockResolvedValue(true),
+      rate:vi.fn().mockResolvedValue(),seek:vi.fn().mockResolvedValue(true),pause:vi.fn().mockResolvedValue()};
+    desktopMock.mpv=bridge;
+    const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    await runtime.enterMpv({src:'C:/old.mov'});
+    const old={id:'old-replace',path:'C:/old.mov',dur:100,in:0,out:100,offset:0,vtrack:0,audioSourceId:'old'};
+    const next={id:'replace',path:'C:/next.mov',dur:3,in:0,out:3,offset:100,vtrack:0,audioSourceId:'next'};
+    const replacement={...next,path:'C:/replacement.mov',audioSourceId:'replacement'};
+    State.clips=[old,next];State.videoTracks=[{visible:true}];Media.activeClipId=old.id;Media._gap=false;Media._mpvPath=old.path;
+    const switching=Media._ensureClip(next,0,false);
+    try{
+      await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalledWith(next.path));
+      State.clips=[old,replacement];
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:100,sourceSessionId:'old-session'});
+      expect(Seq.sourceDuration(replacement)).toBe(3);
+      gate.resolve({ok:true,duration:90,sourceSessionId:'new-session'});await switching;
+      expect(Seq.sourceDuration(replacement)).toBe(3);
+      expect(replacement).toMatchObject({dur:3,out:3});
+    }finally{gate.resolve({ok:false});await switching;runtime.stopBoundsFeeder();Media.reset();}
+  });
+
+  it('同一來源不同片段切換期間，仍接收該來源的有效 duration',async()=>{
+    const {Seq}=await import('../src/sequence.js');
+    const gate=deferred();
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'shared-session'}),loadfile:vi.fn(),
+      mute:vi.fn().mockResolvedValue(),direction:vi.fn(()=>gate.promise),
+      rate:vi.fn().mockResolvedValue(),seek:vi.fn().mockResolvedValue(true),pause:vi.fn().mockResolvedValue()};
+    desktopMock.mpv=bridge;
+    const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    await runtime.enterMpv({src:'C:/shared.mov'});
+    const first={id:'shared-a',path:'C:/shared.mov',dur:3,in:0,out:3,offset:0,vtrack:0,audioSourceId:'a'};
+    const next={id:'shared-b',path:'C:/shared.mov',dur:3,in:0,out:3,offset:3,vtrack:0,audioSourceId:'b'};
+    State.clips=[first,next];State.videoTracks=[{visible:true}];Media.activeClipId=first.id;Media._gap=false;Media._mpvPath=first.path;
+    const switching=Media._ensureClip(next,0,false);
+    try{
+      await vi.waitFor(()=>expect(bridge.direction).toHaveBeenCalled());
+      expect(bridge.loadfile).not.toHaveBeenCalled();
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:5,sourceSessionId:'shared-session'});
+      expect(Seq.sourceDuration(next)).toBe(5);
+      expect(next).toMatchObject({dur:3,out:3});
+      gate.resolve(true);await switching;
+    }finally{gate.resolve(true);await switching;runtime.stopBoundsFeeder();Media.reset();}
+  });
+
+  it('真實換片期間新 session 唯一長度早於載入回覆，仍交接給目前片段',async()=>{
+    const {Seq}=await import('../src/sequence.js');
+    const loadGate=deferred(),directionGate=deferred();let deliver;
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'old-session'}),
+      loadfile:vi.fn(()=>loadGate.promise),onEvent:vi.fn(callback=>{deliver=callback;}),
+      mute:vi.fn().mockResolvedValue(),direction:vi.fn(()=>directionGate.promise),
+      rate:vi.fn().mockResolvedValue(),seek:vi.fn().mockResolvedValue(true),pause:vi.fn().mockResolvedValue()};
+    desktopMock.mpv=bridge;const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    await runtime.enterMpv({src:'C:/old.mov'});runtime.onEvent(event=>Media.observeMpvEvent(event));
+    const old={id:'early-old',path:'C:/old.mov',dur:100,in:0,out:100,offset:0,vtrack:0,audioSourceId:'old'};
+    const next={id:'early-new',path:'C:/new.mov',dur:3,in:0,out:3,offset:100,vtrack:0,audioSourceId:'new'};
+    State.clips=[old,next];State.videoTracks=[{visible:true}];Media.activeClipId=old.id;Media._gap=false;Media._mpvPath=old.path;
+    const switching=Media._ensureClip(next,0,false);
+    try{
+      await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalled());
+      deliver({event:'property-change',name:'duration',data:100,sourceSessionId:'old-session'});
+      deliver({event:'property-change',name:'duration',data:10,sourceSessionId:'new-session'});
+      loadGate.resolve({ok:true,duration:5,sourceSessionId:'new-session'});
+      await vi.waitFor(()=>expect(bridge.direction).toHaveBeenCalled());
+      await vi.waitFor(()=>expect(Seq.sourceDuration(next)).toBe(10));
+      expect(next).toMatchObject({dur:3,out:3});
+    }finally{loadGate.resolve({ok:false});directionGate.resolve(true);await switching;runtime.stopBoundsFeeder();Media.reset();}
+  });
+
+  it.each(['完成','實際呈現','替換片段','同素材另一片段','進入間隙','切回 Proxy','重新載入來源','新轉場','失敗'])('還原母素材等待畫格：%s 後只把唯一長度交給原 owner',async outcome=>{
+    const {Seq}=await import('../src/sequence.js');
+    const loadGate=deferred(),seekGate=deferred();let deliver;
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'proxy-session'}),
+      loadfile:vi.fn(()=>loadGate.promise),onEvent:vi.fn(callback=>{deliver=callback;}),
+      mute:vi.fn().mockResolvedValue(),direction:vi.fn().mockResolvedValue(true),rate:vi.fn().mockResolvedValue(),
+      seek:vi.fn(()=>seekGate.promise),pause:vi.fn().mockResolvedValue()};
+    desktopMock.mpv=bridge;const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    const received=vi.fn(event=>Media.observeMpvEvent(event));
+    await runtime.enterMpv({src:'C:/proxy.mov'});runtime.onEvent(received);
+    const clip={id:'transition-mother',path:'C:/mother.mov',dur:3,in:0,out:3,offset:0,vtrack:0,audioSourceId:'mother'};
+    State.clips=[clip];State.videoTracks=[{visible:true}];Media.activeClipId=clip.id;Media._gap=false;
+    Media._mpvPath='C:/proxy.mov';Media._reverseProxyActive=true;Media._reverseProxySourcePath=clip.path;
+    const switching=Media._switchReverseShuttleSource(clip.path,false,{});
+    try{
+      await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalled());
+      deliver({event:'property-change',name:'duration',data:10,sourceSessionId:'mother-session'});
+      loadGate.resolve({ok:true,duration:3,sourceSessionId:'mother-session'});
+      await vi.waitFor(()=>expect(bridge.seek).toHaveBeenCalled());
+      expect(Media.mpvSourceTransitionPending()).toBe(true);
+      await vi.waitFor(()=>expect(received).toHaveBeenCalledWith(expect.objectContaining({name:'duration',data:10})));
+      expect(Seq.sourceDuration(clip)).toBe(3);
+      if(outcome==='替換片段')State.clips=[{...clip}];
+      if(outcome==='同素材另一片段'){
+        const next={...clip,id:'another-placement'};State.clips.push(next);Media.activeClipId=next.id;
+      }
+      if(outcome==='進入間隙')Media._gap=true;
+      if(outcome==='切回 Proxy')Media._reverseProxyActive=true;
+      if(outcome==='重新載入來源'){
+        bridge.loadfile.mockResolvedValueOnce({ok:true,sourceSessionId:'new-mother-session'});
+        await runtime.loadfile(clip.path);
+      }
+      if(outcome==='新轉場')Media._ensureMpvSourceTransition().begin();
+      if(outcome==='失敗')seekGate.resolve(false);else seekGate.resolve(true);
+      await switching;
+      if(outcome==='實際呈現')Media._ensureMpvSourceTransition().presented(0);
+      else if(outcome!=='失敗')Media.acceptMpvSourceTime(0);
+      expect(Seq.sourceDuration(clip)).toBe(['完成','實際呈現'].includes(outcome)?10:3);
+      if(outcome==='替換片段')expect(Seq.sourceDuration(State.clips[0])).toBe(3);
+    }finally{loadGate.resolve({ok:false});seekGate.resolve(true);await switching;runtime.stopBoundsFeeder();Media.reset();}
+  });
+
+  it('載入新來源後才送到的舊 session duration 不得擴大新片段',async()=>{
+    const {Seq}=await import('../src/sequence.js');
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'old-session'}),
+      loadfile:vi.fn().mockResolvedValue({ok:true,duration:5,sourceSessionId:'new-session'}),
+      mute:vi.fn().mockResolvedValue(),direction:vi.fn().mockResolvedValue(true),
+      rate:vi.fn().mockResolvedValue(),seek:vi.fn().mockResolvedValue(true),pause:vi.fn().mockResolvedValue()};
+    desktopMock.mpv=bridge;const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    await runtime.enterMpv({src:'C:/old.mov'});
+    const old={id:'session-old',path:'C:/old.mov',dur:100,in:0,out:100,offset:0,vtrack:0,audioSourceId:'old'};
+    const next={id:'session-new',path:'C:/new.mov',dur:3,in:0,out:3,offset:100,vtrack:0,audioSourceId:'new'};
+    State.clips=[old,next];State.videoTracks=[{visible:true}];Media.activeClipId=old.id;Media._gap=false;Media._mpvPath=old.path;
+    try{
+      await Media._ensureClip(next,0,false);
+      expect(Seq.sourceDuration(next)).toBe(5);
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:100,sourceSessionId:'old-session'});
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:100});
+      expect(Seq.sourceDuration(next)).toBe(5);
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:6,sourceSessionId:'new-session'});
+      expect(Seq.sourceDuration(next)).toBe(6);
+    }finally{runtime.stopBoundsFeeder();Media.reset();}
+  });
+
+  it('同一路徑重新載入後拒絕舊 session duration、接受新 session',async()=>{
+    const {Seq}=await import('../src/sequence.js');
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'first-session'}),
+      loadfile:vi.fn().mockResolvedValue({ok:true,duration:3,sourceSessionId:'second-session'}),
+      mute:vi.fn().mockResolvedValue(),direction:vi.fn().mockResolvedValue(true),
+      rate:vi.fn().mockResolvedValue(),seek:vi.fn().mockResolvedValue(true),pause:vi.fn().mockResolvedValue()};
+    desktopMock.mpv=bridge;const runtime=resetPlayerAdapter(desktopMock,domMock.video);
+    await runtime.enterMpv({src:'C:/same.mov'});
+    const clip={id:'same-reload',path:'C:/same.mov',dur:3,in:0,out:3,offset:0,vtrack:0,audioSourceId:'source'};
+    State.clips=[clip];State.videoTracks=[{visible:true}];Media.activeClipId=clip.id;Media._gap=false;Media._mpvPath=clip.path;
+    try{
+      await runtime.loadfile(clip.path);
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:100,sourceSessionId:'first-session'});
+      expect(Seq.sourceDuration(clip)).toBe(3);
+      Media.observeMpvEvent({event:'property-change',name:'duration',data:5,sourceSessionId:'second-session'});
+      expect(Seq.sourceDuration(clip)).toBe(5);
+    }finally{runtime.stopBoundsFeeder();Media.reset();}
   });
 
   it('FFmpeg下載失敗後可重新嘗試，同時呼叫共用一個下載',async()=>{
@@ -265,6 +447,28 @@ describe('reset-scoped media ownership', () => {
     }finally{
       gate.resolve({channels:[]});await work;vi.unstubAllGlobals();
       delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
+    }
+  });
+
+  it.each(['complete','short'])('正式來源波形遇短快取時重建：%s',async mode=>{
+    resetAudioProject();Media.ensureCtx();
+    const source={id:'short-cache',name:'A.mov',path:'C:/A.mov',dur:1,in:0,out:1,offset:0,vtrack:0,
+      audioSrc:'clip:short-cache',audioSourceId:'short-cache'};State.clips=[source];
+    desktopMock.prepareSourceWaveform=vi.fn().mockResolvedValueOnce({wave:'cached.wav',cached:true,start:0,duration:1,sourceKey:'same'})
+      .mockResolvedValueOnce({wave:'fresh.wav',temporary:true,start:0,duration:1,sourceKey:'same'});
+    desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);
+    desktopMock.fileURL.mockImplementation(file=>Promise.resolve(file));
+    vi.stubGlobal('fetch',vi.fn(async file=>({arrayBuffer:async()=>readyWave(file==='cached.wav'||mode==='short'?.25:1)})));
+    const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    try{
+      expect(await Media._prepareSourceWaveform(source,source.path,[{channels:1}],1)).toBe(mode==='complete');
+      expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(2);
+      expect(desktopMock.prepareSourceWaveform.mock.calls[1][0]).toMatchObject({ignoreCached:true,start:0});
+      expect(desktopMock.cleanupAudio).toHaveBeenCalledExactlyOnceWith('fresh.wav');
+      if(mode==='complete') expect(source.peaks.slice(-20).every(value=>Math.abs(value)>.4)).toBe(true);
+      else expect(source.peaks).toBeFalsy();
+    }finally{
+      warn.mockRestore();vi.unstubAllGlobals();delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
     }
   });
 
@@ -502,23 +706,27 @@ describe('reset-scoped media ownership', () => {
   });
   it.each(['loadfile','mute','direction'])('reset 撤銷倒放 %s 之後的 continuation，不污染下一個來源',async stage=>{
     const gate=deferred();
-    const bridge={launch:vi.fn().mockResolvedValue({ok:true}),quit:vi.fn().mockResolvedValue(),
-      loadfile:vi.fn(()=>stage==='loadfile'?gate.promise:Promise.resolve({ok:true})),
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'old-session'}),quit:vi.fn().mockResolvedValue(),
+      loadfile:vi.fn(()=>stage==='loadfile'?gate.promise:Promise.resolve({ok:true,sourceSessionId:'proxy-session'})),
       mute:vi.fn(()=>stage==='mute'?gate.promise:Promise.resolve()),
       direction:vi.fn(()=>stage==='direction'?gate.promise:Promise.resolve(true)),seek:vi.fn().mockResolvedValue(true),
     };
     desktopMock.mpv=bridge;
     const runtime=resetPlayerAdapter(desktopMock,domMock.video);
     await runtime.enterMpv({src:'old.mov'});
+    expect(runtime.ownsNativeSourcePath('old.mov')).toBe(true);
     State.clips=[{id:'old',path:'old.mov',in:0,out:5,dur:5,offset:0,primary:true}];
     Media.activeClipId='old';Media._gap=false;
     Media._reverseProxyPath='proxy.mov';Media._reverseProxySourcePath='old.mov';
     Media._mpvPath='old.mov';
     const switching=Media.setPlaybackDirection('backward');
     await vi.waitFor(()=>expect(bridge[stage]).toHaveBeenCalled());
+    if(stage==='loadfile')expect(runtime.ownsNativeSourcePath('old.mov')).toBe(false);
+    if(stage==='mute')expect(runtime.ownsNativeSourcePath('old.mov')).toBe(true);
+    if(stage==='direction')expect(runtime.ownsNativeSourcePath('proxy.mov')).toBe(true);
     Media.reset();
     Media._mpvPath='new.mov';
-    gate.resolve({ok:true});
+    gate.resolve({ok:true,sourceSessionId:'proxy-session'});
     await expect(switching).resolves.toBe(false);
     expect(Media._mpvPath).toBe('new.mov');
     expect(Media._nativeReverse).toBe(false);
@@ -552,13 +760,14 @@ describe('reset-scoped media ownership', () => {
   });
   it('倒放Proxy尚在load時切回正放，先等load完成再恢復母素材',async()=>{
     const gate=deferred();
-    const bridge={launch:vi.fn().mockResolvedValue({ok:true}),quit:vi.fn().mockResolvedValue(),
-      loadfile:vi.fn().mockReturnValueOnce(gate.promise).mockResolvedValue({ok:true}),
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'mother-session'}),quit:vi.fn().mockResolvedValue(),
+      loadfile:vi.fn().mockReturnValueOnce(gate.promise).mockResolvedValue({ok:true,sourceSessionId:'mother-reloaded'}),
       mute:vi.fn().mockResolvedValue(),direction:vi.fn().mockResolvedValue(true),seek:vi.fn().mockResolvedValue(true),
     };
     desktopMock.mpv=bridge;
     const runtime=resetPlayerAdapter(desktopMock,domMock.video);
     await runtime.enterMpv({src:'mother.mov'});
+    expect(runtime.ownsNativeSourcePath('mother.mov')).toBe(true);
     State.clips=[{id:'v',path:'mother.mov',in:0,out:5,dur:5,offset:0,primary:true}];
     Media.activeClipId='v';Media._gap=false;
     Media._reverseProxyPath='proxy.mov';Media._reverseProxySourcePath='mother.mov';
@@ -566,12 +775,13 @@ describe('reset-scoped media ownership', () => {
     await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalledWith('proxy.mov'));
     const forward=Media.setPlaybackDirection('forward');
     expect(bridge.direction).not.toHaveBeenCalled();
-    gate.resolve({ok:true});
+    gate.resolve({ok:true,sourceSessionId:'proxy-session'});
     await expect(reverse).resolves.toBe(false);
     await expect(forward).resolves.toBe(true);
     expect(bridge.loadfile.mock.calls.map(([path])=>path)).toEqual(['proxy.mov','mother.mov']);
     expect(bridge.direction).toHaveBeenCalledExactlyOnceWith('forward');
     expect(Media._nativeReverse).toBe(false);expect(Media._mpvPath).toBe('mother.mov');
+    expect(runtime.ownsNativeSourcePath('mother.mov')).toBe(true);
   });
   beforeAll(async () => {
     window.subtool = desktopMock;

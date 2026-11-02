@@ -15,6 +15,54 @@ function setup(){
 }
 
 describe('renderer media intake ownership',()=>{
+  it.each(['ingest','prepareSourceWaveform','prepareWaveform'])('%s 開始通知時同步換專案，不得再啟動已失權工作',async method=>{
+    let jobs,shouldReset=true,serial=0;
+    const action=vi.fn(()=>new Promise(()=>{}));
+    const bridge={ingest:vi.fn(()=>new Promise(()=>{})),prepareSourceWaveform:vi.fn(()=>new Promise(()=>{})),
+      cancelMediaIntake:vi.fn(async()=>1)};
+    jobs=createMediaIntakeJobs({bridge,id:()=>`launch-${++serial}`,changed:snapshot=>{
+      if(shouldReset&&snapshot.count===1){shouldReset=false;void jobs.reset();}
+    }});
+    const result=method==='prepareWaveform'?jobs.prepareWaveform(action):jobs[method]({path:'old.mxf'});
+    await expect(result).rejects.toMatchObject({name:'AbortError'});
+    if(method==='prepareWaveform') expect(action).not.toHaveBeenCalled();
+    else expect(bridge[method]).not.toHaveBeenCalled();
+    expect(jobs.snapshot().count).toBe(0);
+  });
+
+  it('本機波形進度通知同步換專案時，回報失權並停止後續工作',async()=>{
+    let jobs,control,serial=0,resetOnReport=false;
+    jobs=createMediaIntakeJobs({bridge:{},id:()=>`report-${++serial}`,changed:state=>{
+      if(resetOnReport&&state.jobs[0]?.progress?.label==='讀取波形'){
+        resetOnReport=false;void jobs.reset();
+      }
+    }});
+    const work=jobs.prepareWaveform(value=>{control=value;return new Promise(()=>{});});
+    const rejected=expect(work).rejects.toMatchObject({name:'AbortError'});
+    resetOnReport=true;
+    expect(control.report({label:'讀取波形',pct:10})).toBe(false);
+    expect(control.owns()).toBe(false);
+    await rejected;
+  });
+  it.each(['ingest','prepareSourceWaveform'])('%s 回覆交接通知時同步換專案，不可交出過期結果',async method=>{
+    let jobs,request,shouldReset=false,serial=0;
+    const pending=deferred(),bridge={
+      [method]:vi.fn(options=>{request=options;return pending.promise;}),
+      cleanupAudio:vi.fn(async()=>{}),cancelMediaIntake:vi.fn(async()=>1),
+    };
+    jobs=createMediaIntakeJobs({bridge,id:()=>`reentrant-${++serial}`,changed:snapshot=>{
+      if(shouldReset&&snapshot.count===0){shouldReset=false;void jobs.reset();}
+    }});
+    const result=jobs[method]({path:'old.mxf'});
+    const rejected=expect(result).rejects.toMatchObject({name:'AbortError'});
+    shouldReset=true;
+    pending.resolve(method==='prepareSourceWaveform'?{wave:'old.wav',temporary:true}:{cached:true});
+    await rejected;
+    await Promise.resolve();await Promise.resolve();
+    expect(bridge.cancelMediaIntake).toHaveBeenCalledWith({sessionId:request.sessionId});
+    expect(bridge.cleanupAudio.mock.calls).toEqual(method==='prepareSourceWaveform'?[['old.wav']]:[]);
+    expect(jobs.snapshot().count).toBe(0);
+  });
   it('cancels the old project and admits a fresh job before native cleanup finishes',async()=>{
     const {jobs,bridge,pending}=setup(), barrier=deferred();
     bridge.cancelMediaIntake.mockReturnValue(barrier.promise);
@@ -72,6 +120,23 @@ describe('renderer media intake ownership',()=>{
     const cached=jobs.streamIngest({path:'cached'});
     pending[1].resolve({cached:true,streamUrl:'url'});await cached;
     expect(jobs.snapshot().count).toBe(0);
+  });
+
+  it.each(['ingest','streamIngest','prepareSourceWaveform'])('%s 終態先於 IPC 回覆時，換專案仍須立即撤銷等待中的交接',async method=>{
+    const {jobs,bridge,pending}=setup();
+    const work=jobs[method]({path:'old.mxf',needsProxy:true});
+    const options=bridge[method].mock.calls[0][0];
+    let outcome='pending';
+    const settled=work.then(()=>{outcome='resolved';},error=>{outcome=error.name;});
+    expect(jobs.progress({...options,stage:method==='prepareSourceWaveform'?'source-waveform':'transcoding',done:true,outcome:'success'})).toBe(true);
+    expect(jobs.snapshot().count).toBe(0);
+    await jobs.reset();
+    for(let i=0;i<4;i++) await Promise.resolve();
+    expect(outcome).toBe('AbortError');
+    pending[0].resolve(method==='prepareSourceWaveform'?{wave:'old.wav',temporary:true}:{cached:false});
+    await settled;
+    for(let i=0;i<3;i++) await Promise.resolve();
+    expect(bridge.cleanupAudio.mock.calls).toEqual(method==='prepareSourceWaveform'?[['old.wav']]:[]);
   });
 
   it('does not cancel unrelated native work when there were no requests in this session',async()=>{

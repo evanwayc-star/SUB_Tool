@@ -516,12 +516,12 @@ class AudioPipelineManager {
    * @param {number} fallbackCount channels 為空時的聲道數推測值
    * @param {object} options 來源登錄意圖；copyFromSourceId 在各自的草稿／基準繼承配線
    */
-  registerSource(clip, channels, fallbackCount = 0, options = {}) {
+  registerSource(clip, channels, fallbackCount = 0, options = {}, onRegistered = null) {
     if (!clip) return [];
     const sourceId = clip.audioSourceId || clip.audioSrc || null;
     if (!sourceId) return [];
     const descriptors = sourceChannelDescriptors(channels, fallbackCount);
-    ensureAudioSourceMap(sourceId, descriptors, options);
+    ensureAudioSourceMap(sourceId, descriptors, options, onRegistered);
     return descriptors;
   }
 

@@ -251,13 +251,14 @@ it.each(['cold','previous-gap','previous-html-gap','previous-mpv','new-project']
    expect(getComputedStyle(element).visibility).toBe('hidden');
   }
   if(previous==='previous-mpv'){
-   window.subtool.mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({ok:true,duration:12})),
+   window.subtool.mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({ok:true,duration:12,sourceSessionId:'previous-mpv-session'})),
     onEvent:vi.fn(),quit:vi.fn(async()=>{}),setBounds:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),
     present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),mute:vi.fn(async()=>{})};
    window.subtool.ingest=vi.fn(async()=>({channels:[]}));
    window.subtool.probe.mockResolvedValueOnce({duration:12,video:{codec:'h264',fps:30,width:64,height:48},audio:[]});
    await Media.loadDesktopMedia('C:/previous.mp4');
    expect(Media.mpvMode).toBe(true);expect(getComputedStyle(element).display).toBe('none');
+   expect(adapter.getPlayerAdapter().ownsNativeSourcePath('C:/previous.mp4')).toBe(true);
   }
   window.subtool.probe.mockResolvedValueOnce({duration:12,
    video:{codec:'vp9',fps:30,width:64,height:48,presentationTimestampOffset:-.5},audio:[]});

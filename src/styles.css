@@ -881,7 +881,13 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .statusbar .dot.ok{background:var(--green);box-shadow:0 0 8px rgba(16,185,129,.7)}
 .statusbar .dot.err{background:var(--red);box-shadow:0 0 8px rgba(239,68,68,.7)}
 .statusbar .dot.busy{background:var(--accent);box-shadow:0 0 8px rgba(245,158,11,.7);animation:pulse 1s infinite}
-#stMsg{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;color:#cbd5e1}
+.status-primary{display:flex;align-items:center;min-width:0;flex:1 1 0%}
+.statusbar>.spacer{flex:0 0 auto}
+.status-primary button,.status-primary .dot{flex:none}
+#stMsg{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;color:#cbd5e1}
+#stMsg.status-pair{display:flex}
+#stMsg .status-pair-item{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#stMsg .status-pair-separator{flex:none}
 #stMedia{opacity:0.85;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:"JetBrains Mono","Cascadia Mono",monospace;font-size:11px}
 #stEngine{display:inline-flex;align-items:center;padding:2px 7px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:5px;font-family:"JetBrains Mono","Cascadia Mono",monospace;font-size:11px;color:#cbd5e1}
 @keyframes pulse{50%{opacity:.35}}

@@ -24,6 +24,17 @@ import { sourceTime, timelineTime } from './sequence-time.js';
 let _clipSeq = 1;
 const EPS = 1e-6;
 const vt = c => c.vtrack || 0;
+// Presenter metadata is evidence about the source, not an edit to a clip.
+// Bind it to the live object and source identity; it never enters History or
+// the saved project until the user explicitly extends the clip.
+const sourceDurations = new WeakMap();
+// A deleted placement can be recreated by History. Only the explicit restore
+// path can reattach this evidence; arbitrary same-id objects cannot claim it.
+const sourceDurationsForUndo = new Map();
+const MAX_DURATION_UNDO_EVIDENCE = 4096;
+let sourceDurationEpoch = 0;
+const sourceLocator = c => audioMotherPath(c)||c?.web?.url||null;
+const sourceIdentity = c => JSON.stringify([audioMotherPath(c)||null, c?.path ? null : c?.web?.url||null, c?.audioSourceId||null]);
 
 /* 插入先計算整條同軌的連鎖位移；任何一段受鎖保護，就不可套用部分計畫。
    gesture 與換軌 command 共用同一個准入，避免 caller 各自猜需要移動的鄰片。 */
@@ -119,12 +130,13 @@ const Seq = {
       ...(c.fadeSourceLength!=null?{fadeSourceOffset:c.fadeSourceOffset||0,fadeSourceLength:c.fadeSourceLength}:{}),
     };
   },
-  restoreMetadata(c,s){
+  restoreMetadata(c,s,{restoreDuration=false}={}){
     restoreAudioLimiterState(c,s);
     const metadata=this.persistentMetadata(s);
     if(fixedFrameTime(c)!==fixedFrameTime(s)) delete c.freezeWeb;
     if(fixedFrameTime(s)!=null) c.freezeTime=fixedFrameTime(s);
     else { delete c.freezeTime; delete c.freezeWeb; }
+    if(restoreDuration) c.dur=metadata.dur;
     for(const key of ['in','out','offset','vtrack','fadeIn','fadeOut','scale','posX','posY','locked','muted','mpvExactSeek','mpvSeekOffset','audioDetached','speed','reverse']) c[key]=metadata[key];
     for(const key of ['fadeSourceOffset','fadeSourceLength','height']){
       if(s[key]!=null) c[key]=s[key]; else delete c[key];
@@ -163,8 +175,48 @@ const Seq = {
     if(i >= 0) State.clips.splice(i, 1);
     this.recomputeDuration();
   },
-  clear(){ State.clips.length = 0; },
+  clear(){ State.clips.length = 0; sourceDurationsForUndo.clear(); sourceDurationEpoch++; },
   sort(){ State.clips.sort((a, b) => (vt(a) - vt(b)) || (a.offset - b.offset)); },
+  observeSourceDuration(c,dur){
+    dur=Number(dur);
+    if(!c||!State.clips.includes(c)||!Number.isFinite(dur)||dur<=0) return;
+    const identity=sourceIdentity(c);
+    for(const target of State.clips){
+      if(target!==c&&(!sourceLocator(c)||sourceIdentity(target)!==identity)) continue;
+      const previous=sourceDurations.get(target);
+      const known=previous?.identity===identity&&previous.epoch===sourceDurationEpoch?previous.duration:0;
+      const evidence={identity,epoch:sourceDurationEpoch,duration:Math.max(known,Number(target.dur)||0,dur)};
+      sourceDurations.set(target,evidence);
+      if(target.id&&sourceLocator(target)) {
+        sourceDurationsForUndo.delete(target.id);
+        sourceDurationsForUndo.set(target.id,evidence);
+        while(sourceDurationsForUndo.size>MAX_DURATION_UNDO_EVIDENCE)
+          sourceDurationsForUndo.delete(sourceDurationsForUndo.keys().next().value);
+      }
+    }
+  },
+  sourceDuration(c){
+    if(!c)return 0;
+    const observed=sourceDurations.get(c);
+    const valid=observed?.identity===sourceIdentity(c)&&observed.epoch===sourceDurationEpoch;
+    if(observed&&!valid){
+      sourceDurations.delete(c);
+      if(c.id&&sourceDurationsForUndo.get(c.id)===observed) sourceDurationsForUndo.delete(c.id);
+    }
+    return Math.max(0,Number(c.dur)||0,valid?observed.duration:0);
+  },
+  captureSourceOwnership(c){
+    const identity=sourceIdentity(c), epoch=sourceDurationEpoch;
+    return ()=>!!c&&State.clips.includes(c)&&sourceDurationEpoch===epoch&&sourceIdentity(c)===identity;
+  },
+  inheritSourceDuration(source,target){
+    const current=sourceDurations.get(source);
+    if(!current||current.epoch!==sourceDurationEpoch||current.identity!==sourceIdentity(source)||!sourceLocator(source)||sourceLocator(source)!==sourceLocator(target)) return;
+    this.observeSourceDuration(target,current.duration);
+  },
+  commitSourceExtent(c){
+    if(c&&Number(c.out)>Number(c.dur)) c.dur=this.sourceDuration(c);
+  },
   /* 來源實際長度更新（mpv/元素回報比 probe 準時）：未修剪過的 out 跟著延伸 */
   updateSourceDur(c, dur){
     dur = Number(dur);
@@ -269,12 +321,15 @@ const Seq = {
     for(const s of list){
       const ex = old.get(s.id);
       if(ex){
-        this.restoreMetadata(ex,s);
+        this.restoreMetadata(ex,s,{restoreDuration:true});
         State.clips.push(ex);
       }
       else{
         const k = s.path || (s.web && s.web.url);
-        State.clips.push({ ...s, vtrack: s.vtrack || 0, web: s.web ? { url: s.web.url } : null, peaks: (k && peaksBySrc.get(k)) || null });
+        const restored={ ...s, vtrack: s.vtrack || 0, web: s.web ? { url: s.web.url } : null, peaks: (k && peaksBySrc.get(k)) || null };
+        const evidence=sourceDurationsForUndo.get(s.id);
+        if(evidence?.identity===sourceIdentity(restored)) sourceDurations.set(restored,evidence);
+        State.clips.push(restored);
       }
     }
     this.sort(); this.compact(); this.recomputeDuration();

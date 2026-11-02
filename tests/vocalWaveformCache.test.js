@@ -180,11 +180,11 @@ it('同步顯示意圖在立即重開仍優先於尚未更新的IDB，但不能�
   const storage = preferencesStorage();
   const { cache, records } = memoryCache({ localStorage: storage });
   await cache.write(descriptor(), 1, peaks()); await cache.select(descriptor(), true);
-  cache.rememberPreference('mother-key', false);
+  cache.rememberPreference('mother-key', false, descriptor());
   const reopened = memoryCache({ localStorage: storage }, records).cache;
   expect(await reopened.read(descriptor(), 1, { selectedOnly: true, preferenceKey: 'mother-key' })).toBeNull();
   expect(await reopened.read(descriptor(), 1, { selectedOnly: true, preferenceKey: 'other-source' })).toHaveLength(200);
-  reopened.rememberPreference('mother-key', true);
+  reopened.rememberPreference('mother-key', true, descriptor());
   new Float32Array([...records.values()][0].bytes)[0] = -.125;
   expect(await reopened.read(descriptor(), 1, { selectedOnly: true, preferenceKey: 'mother-key' })).toBeNull();
 });

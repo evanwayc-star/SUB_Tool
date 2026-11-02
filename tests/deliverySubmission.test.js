@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createDeliveryList } from '../src/delivery-list.js';
-import { createDeliverySubmission, freezeExportSubmission } from '../src/delivery-submission.js';
+import { createDeliverySubmission, freezeExportSubmission, formatOverwriteConfirmation } from '../src/delivery-submission.js';
 
 function deferred() {
   let resolve;
@@ -22,23 +22,96 @@ function setup(names = ['A.mp4', 'B.mp4', 'C.mp4']) {
   const list = createDeliveryList({ projectTag: 'program', fps: 25, canvasW: 1920, canvasH: 1080 });
   for (let i = 1; i < names.length; i++) list.add();
   names.forEach((name, index) => { list.setName(index, name); list.setOutDir(index, 'D:/交付'); });
-  let modalCurrent = true, workspaceCurrent = true;
+  let modalCurrent = true, workspaceCurrent = true, invalidation = null;
   const changes = [];
-  const desktop = { listDir: vi.fn(async () => []), exportVideo: vi.fn(async job => 'job-' + job.defaultName) };
+  const desktop = { listDir: vi.fn(async () => []), exportVideo: vi.fn(async job => 'job-' + job.defaultName),
+    beginDeliveryTargetRequest:vi.fn(async()=> 'request-ticket') };
   const confirmOverwrite = vi.fn(async () => true);
   const submission = createDeliverySubmission({
     list, initialProject: project, readProject: () => project,
     isCurrent: () => modalCurrent && workspaceCurrent,
+    subscribeInvalidation: callback => { invalidation = callback; return () => { invalidation = null; }; },
     desktop, confirmOverwrite,
     onChanged: change => changes.push(change),
   });
   return {
     project, list, desktop, submission, confirmOverwrite, changes,
-    invalidate(kind) { if (kind === 'modal') modalCurrent = false; else workspaceCurrent = false; },
+    invalidate(kind) { if (kind === 'modal') modalCurrent = false; else { workspaceCurrent = false; invalidation?.(); } },
   };
 }
 
 describe('delivery submission lifecycle through its production interface', () => {
+  it.each(['modal','workspace'])('等待大檔目標確認時 %s 失權立即取消主程序雜湊', async kind => {
+    const s=setup(['A.mp4']), gate=deferred();
+    s.desktop.prepareDeliveryTargets=vi.fn(()=>gate.promise);
+    s.desktop.cancelDeliveryTargetRequest=vi.fn(async()=>true);
+    s.desktop.finishDeliveryTargetRequest=vi.fn(async()=>true);
+    s.desktop.releaseDeliveryTargets=vi.fn(async()=>true);
+    const pending=s.submission.submit();
+    await vi.waitFor(()=>expect(s.desktop.prepareDeliveryTargets).toHaveBeenCalledOnce());
+    const [paths,id,ticket]=s.desktop.prepareDeliveryTargets.mock.calls[0];
+    expect(paths).toEqual(['D:/交付/A.mp4']);expect(id).toMatch(/^delivery-/);
+    expect(ticket).toBe('request-ticket');
+    s.invalidate(kind);if(kind==='modal')s.submission.cancel();
+    expect(s.desktop.cancelDeliveryTargetRequest).toHaveBeenCalledWith(id,ticket);
+    expect(s.desktop.exportVideo).not.toHaveBeenCalled();
+    gate.resolve({id:'late-receipt',existing:[]});
+    await expect(pending).resolves.toMatchObject({status:'cancelled',accepted:0});
+    expect(s.desktop.releaseDeliveryTargets).toHaveBeenCalledWith('late-receipt');
+    expect(s.desktop.finishDeliveryTargetRequest).toHaveBeenCalledWith(id,ticket);
+    expect(s.list.count()).toBe(1);
+  });
+  it.each(['modal','workspace'])('等待 main 建立 ticket 時 %s 失權，拿到 ticket 後只結束不開始讀檔',async kind=>{
+    const s=setup(['A.mp4']),gate=deferred();
+    s.desktop.beginDeliveryTargetRequest=vi.fn(()=>gate.promise);
+    s.desktop.prepareDeliveryTargets=vi.fn();s.desktop.cancelDeliveryTargetRequest=vi.fn();
+    s.desktop.finishDeliveryTargetRequest=vi.fn(async()=>true);
+    const pending=s.submission.submit();
+    await vi.waitFor(()=>expect(s.desktop.beginDeliveryTargetRequest).toHaveBeenCalledOnce());
+    const id=s.desktop.beginDeliveryTargetRequest.mock.calls[0][0];
+    s.invalidate(kind);if(kind==='modal')s.submission.cancel();
+    expect(s.desktop.cancelDeliveryTargetRequest).not.toHaveBeenCalled();
+    gate.resolve('late-ticket');
+    await expect(pending).resolves.toMatchObject({status:'cancelled',accepted:0});
+    expect(s.desktop.prepareDeliveryTargets).not.toHaveBeenCalled();
+    expect(s.desktop.finishDeliveryTargetRequest).toHaveBeenCalledWith(id,'late-ticket');
+    expect(s.desktop.exportVideo).not.toHaveBeenCalled();
+  });
+  it('批次確認取消與部分送出後都釋放 main receipt，不清除未完成列',async()=>{
+    const cancelled=setup(['A.mp4']);
+    cancelled.desktop.prepareDeliveryTargets=vi.fn(async()=>({id:'cancel-token',existing:['D:/交付/A.mp4']}));
+    cancelled.desktop.releaseDeliveryTargets=vi.fn();cancelled.confirmOverwrite.mockResolvedValue(false);
+    await expect(cancelled.submission.submit()).resolves.toMatchObject({status:'cancelled',accepted:0});
+    expect(cancelled.desktop.releaseDeliveryTargets).toHaveBeenCalledWith('cancel-token');
+    expect(cancelled.desktop.exportVideo).not.toHaveBeenCalled();expect(cancelled.list.count()).toBe(1);
+    const partial=setup(['A.mp4','B.mp4']);
+    partial.desktop.prepareDeliveryTargets=vi.fn(async()=>({id:'partial-token',existing:[]}));
+    partial.desktop.releaseDeliveryTargets=vi.fn();
+    partial.desktop.exportVideo.mockResolvedValueOnce('job-A').mockRejectedValueOnce(new Error('changed'));
+    await expect(partial.submission.submit()).resolves.toMatchObject({status:'failed',accepted:1});
+    expect(partial.desktop.exportVideo.mock.calls.map(([job])=>job.deliveryReceipt)).toEqual(['partial-token','partial-token']);
+    expect(partial.desktop.releaseDeliveryTargets).toHaveBeenCalledWith('partial-token');
+    expect(partial.list.rows().map(row=>row.customName)).toEqual(['B.mp4']);
+  });
+  it('主程序預檢顯示新出現的檔案時，即使目錄列表較早說不存在也要重新確認',async()=>{
+    const s=setup(['A.mp4']);s.desktop.listDir.mockResolvedValue([]);
+    s.desktop.prepareDeliveryTargets=vi.fn(async()=>({id:'target',existing:['D:/交付/A.mp4']}));
+    s.desktop.releaseDeliveryTargets=vi.fn();s.confirmOverwrite.mockResolvedValue(false);
+    await expect(s.submission.submit()).resolves.toMatchObject({status:'cancelled',accepted:0});
+    expect(s.confirmOverwrite).toHaveBeenCalledWith(['D:/交付/A.mp4']);
+    expect(s.desktop.exportVideo).not.toHaveBeenCalled();expect(s.list.count()).toBe(1);
+  });
+  it('不同資料夾的同名目的檔在覆寫確認時顯示兩個完整路徑',async()=>{
+    const s=setup(['same.mp4','same.mp4']);
+    s.list.setOutDir(0,'D:/第一份');s.list.setOutDir(1,'D:/第二份');
+    s.desktop.prepareDeliveryTargets=vi.fn(async()=>({id:'targets',existing:['D:/第一份/same.mp4','D:/第二份/same.mp4']}));
+    s.desktop.releaseDeliveryTargets=vi.fn();s.confirmOverwrite.mockResolvedValue(false);
+    await expect(s.submission.submit()).resolves.toMatchObject({status:'cancelled',accepted:0});
+    expect(s.confirmOverwrite).toHaveBeenCalledWith(['D:/第一份/same.mp4','D:/第二份/same.mp4']);
+    expect(formatOverwriteConfirmation(s.confirmOverwrite.mock.calls[0][0])).toBe(
+      '硬碟上已存在同名檔案：\nD:/第一份/same.mp4\nD:/第二份/same.mp4\n\n確定要直接覆蓋並繼續匯出嗎？');
+    expect(s.desktop.exportVideo).not.toHaveBeenCalled();expect(s.list.count()).toBe(2);
+  });
   it('凍結專案與列，再進行目錄 I/O；後續編輯不改已送出的字幕、時間碼或固定畫格', async () => {
     const s = setup(['A.mp4']);
     const gate = deferred();
@@ -178,7 +251,7 @@ describe('delivery submission lifecycle through its production interface', () =>
     s.desktop.listDir.mockResolvedValue([{ name: 'flight.mpg' }, { name: 'flight.aac' }, { name: 'flight.manzanita.cfg' }]);
     s.confirmOverwrite.mockResolvedValue(false);
     await expect(s.submission.submit()).resolves.toEqual({ status: 'cancelled', accepted: 0 });
-    expect(s.confirmOverwrite).toHaveBeenCalledWith(['flight.mpg']);
+    expect(s.confirmOverwrite).toHaveBeenCalledWith(['D:/交付/flight.mpg']);
     expect(s.submission.state().warning.message).toContain('flight.mpg');
     expect(s.submission.state().warning.message).not.toContain('flight.aac');
     expect(s.desktop.exportVideo).not.toHaveBeenCalled();

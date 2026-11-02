@@ -34,7 +34,10 @@ function progressText(data,requestId){
 }
 
 export function bindMediaIntakeView(cancel){
-  const render=state=>{
+  // Nested synchronous notifications can make the event's snapshot stale;
+  // always render the intake owner's current state at delivery time.
+  const render=()=>{
+    const state=MediaIntakeJobs.snapshot();
     const button=$('stProxyCancelBtn');
     if(button){
       button.style.display=state.count?'inline-block':'none';
@@ -51,12 +54,23 @@ export function bindMediaIntakeView(cancel){
       ||jobs.findLast(active)||jobs.findLast(job=>job.progress)||jobs[0];
     if(visible){
       const data=visible.progress||{stage:'cache-check',label:visible.proxy?'檢查 Proxy 與音訊快取':'檢查音訊快取',pct:null};
-      const extra=state.count>1?`（另有 ${state.count-1} 項背景工作）`:'';
-      setMediaIntakeStatus(progressText(data,visible.requestId)+extra);
+      const other=(['waveform','source-waveform'].includes(data.stage)&&!visible.proxy)
+        ? jobs.findLast(job=>job!==visible&&job.proxy&&active(job)) : null;
+      const extra=state.count>(other?2:1)?`（另有 ${state.count-(other?2:1)} 項背景工作）`:'';
+      if(other){
+        const percent=pct=>typeof pct==='number'&&Number.isFinite(pct)?`${Math.floor(Math.max(0,Math.min(100,pct)))}% `:'';
+        const stage=other.progress.stage;
+        const label=stage==='source-verification'?'驗證母素材':stage==='cache-check'?'檢查快取':
+          stage==='transcoding'&&String(other.progress.label||'').includes('Proxy')?'Proxy 轉檔':
+            stage==='transcoding'?'音訊分析':other.progress.label||'處理中';
+        const parts=[percent(data.pct)+'波形','｜',percent(other.progress.pct)+label+extra];
+        const detail=progressText(data,visible.requestId)+'；'+progressText(other.progress,other.requestId)+extra;
+        setMediaIntakeStatus(parts.join(''),'busy',detail,parts);
+      }else setMediaIntakeStatus(progressText(data,visible.requestId)+extra);
     }else setMediaIntakeStatus(null);
   };
   on('media:intakeJobs',render);
-  render(MediaIntakeJobs.snapshot());
+  render();
   const button=$('stProxyCancelBtn');
   if(button) button.onclick=()=>{
     if(!MediaIntakeJobs.snapshot().count) return;

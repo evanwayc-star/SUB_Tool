@@ -1,6 +1,7 @@
 /* ==============================================================================
    SUB Tool — Recognition-only speech audio compression
    ============================================================================== */
+const fs = require('fs');
 const MAX_SPEECH_WAV_BYTES = 20_000_000;
 const SPEECH_COMPRESSION_REQUEST_ID = /^speech-[A-Za-z0-9_-]{1,96}$/;
 
@@ -31,50 +32,67 @@ function inspectMono16kPcmWav(value) {
     bytes.readUInt16LE(34) === 16 &&
     bytes.toString('ascii', 36, 40) === 'data';
   const dataBytes = bytes.readUInt32LE(40);
-  if (!validHeader || dataBytes !== bytes.length - 44) {
+  if (!validHeader || dataBytes !== bytes.length - 44 || dataBytes === 0 || dataBytes % 2 !== 0) {
     throw new Error('辨識壓縮只接受 16 kHz mono PCM16 WAV');
   }
   return { bytes, duration: dataBytes / 32_000 };
 }
 
+// Positional reads start at zero even when the child advanced the shared fd.
+async function readDescriptorBytes(fd) {
+  const stat = await new Promise((resolve, reject) => fs.fstat(fd, (error, value) => error ? reject(error) : resolve(value)));
+  if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size <= 0 || stat.size > MAX_SPEECH_WAV_BYTES)
+    throw new Error('ffmpeg 沒有產生有效大小的辨識用 MP3');
+  const bytes = Buffer.allocUnsafe(stat.size);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const count = await new Promise((resolve, reject) => fs.read(fd, bytes, offset, bytes.length - offset, offset,
+      (error, read) => error ? reject(error) : resolve(read)));
+    if (!count) throw new Error('辨識用 MP3 讀取不完整');
+    offset += count;
+  }
+  return bytes;
+}
+
 function createSpeechAudioCompressor({
   createTempPath,
-  writeFile,
-  readFile,
-  removeFile,
+  produceTemporaryFile,
+  withTemporaryDescriptor,
+  assertTemporaryOutput,
+  cleanupGeneratedFile,
+  readDescriptor = readDescriptorBytes,
   execute
 } = {}) {
-  if ([createTempPath, writeFile, readFile, removeFile, execute].some(fn => typeof fn !== 'function')) {
+  if ([createTempPath, produceTemporaryFile, withTemporaryDescriptor, assertTemporaryOutput,
+    cleanupGeneratedFile, readDescriptor, execute].some(fn => typeof fn !== 'function')) {
     throw new TypeError('語音壓縮器缺少必要 adapter');
   }
 
   return {
     async compress(wavBytes, { onProcess = null } = {}) {
       const inspected = inspectMono16kPcmWav(wavBytes);
-      const inputPath = createTempPath('wav');
+      const inputBytes = Buffer.from(inspected.bytes);
       const outputPath = createTempPath('mp3');
+      let output;
       try {
-        await writeFile(inputPath, inspected.bytes);
-        await execute([
-          '-y',
-          '-hide_banner',
-          '-loglevel', 'error',
-          '-i', inputPath,
-          '-map', '0:a:0',
-          '-vn',
-          '-ac', '1',
-          '-ar', '16000',
-          '-c:a', 'libmp3lame',
-          '-b:a', '64k',
-          '-map_metadata', '-1',
-          outputPath
-        ], {
-          duration: inspected.duration,
-          jobId: 'speech-compress',
-          label: '準備辨識用 MP3',
-          ...(typeof onProcess === 'function' ? { onProcess } : {})
+        await produceTemporaryFile(outputPath, async (target, outputOwner) => {
+          await withTemporaryDescriptor(target, outputOwner, async outputDescriptor => {
+            await execute([
+              '-y', '-hide_banner', '-loglevel', 'error',
+              '-f', 'wav', '-i', 'pipe:0', '-map', '0:a:0', '-vn',
+              '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k',
+              '-map_metadata', '-1', '-f', 'mp3', 'fd:'
+            ], {
+              executionKind: 'direct', inputBytes, outputDescriptor,
+              duration: inspected.duration,
+              jobId: 'speech-compress',
+              label: '準備辨識用 MP3',
+              ...(typeof onProcess === 'function' ? { onProcess } : {})
+            });
+            assertTemporaryOutput(target, outputOwner);
+            output = toBuffer(await readDescriptor(outputDescriptor));
+          });
         });
-        const output = toBuffer(await readFile(outputPath));
         if (!output?.length) throw new Error('ffmpeg 沒有產生辨識用 MP3');
         return {
           b64: output.toString('base64'),
@@ -83,10 +101,7 @@ function createSpeechAudioCompressor({
           size: output.length
         };
       } finally {
-        await Promise.allSettled([
-          Promise.resolve(removeFile(inputPath)),
-          Promise.resolve(removeFile(outputPath))
-        ]);
+        await Promise.allSettled([Promise.resolve().then(() => cleanupGeneratedFile(outputPath))]);
       }
     }
   };

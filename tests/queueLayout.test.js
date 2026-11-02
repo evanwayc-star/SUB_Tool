@@ -18,6 +18,7 @@ async function openQueueWindow(jobs) {
     stopJob: vi.fn().mockResolvedValue(),
     retryJob: vi.fn().mockResolvedValue(true),
     retryWithOutputDirectory: vi.fn().mockResolvedValue({ status: 'retried' }),
+    retryWithOutputConfirmation: vi.fn().mockResolvedValue({ status: 'retried' }),
     clearJob: vi.fn().mockResolvedValue(),
     clearCompleted: vi.fn().mockResolvedValue(),
     reorderJob: vi.fn().mockResolvedValue(),
@@ -59,6 +60,85 @@ describe('佇列原輸出目錄重新授權', () => {
     await vi.waitFor(() => expect(queueAPI.getAll).toHaveBeenCalledTimes(calls + 1));
     await Promise.resolve();
   };
+
+  it('sandbox 重新確認輸出只傳工作 id', async () => {
+    let api;
+    const invoke = vi.fn().mockResolvedValue({ status: 'cancelled' });
+    vm.runInNewContext(readFileSync(new URL('../electron/queue-preload.js', import.meta.url), 'utf8'), {
+      require: () => ({ contextBridge: { exposeInMainWorld: (_key, value) => { api = value; } }, ipcRenderer: { invoke } }),
+    });
+    await api.retryWithOutputConfirmation('legacy', 'C:/untrusted.mp4');
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('queue:retryWithOutputConfirmation', 'legacy');
+  });
+
+  it.each(['failed', 'stopped', 'queued', 'running', 'done', 'missing-source'])('只有缺少目的地證據的 failed/stopped 工作顯示確認按鈕：%s', async status => {
+    const { document } = await openQueueWindow([
+      { ...legacy, id: 'old', status },
+      { ...legacy, id: 'confirmed', status, outputAuthority: { destinationEvidence: { version:1, identity:null } } },
+    ]);
+    expect(!!document.querySelector('[data-job-id="old"] [data-action="retry-confirm-output"]'))
+      .toBe(status === 'failed' || status === 'stopped');
+    expect(document.querySelector('[data-job-id="confirmed"] [data-action="retry-confirm-output"]')).toBeNull();
+  });
+
+  it('舊版既有目的檔及損壞證據須重新確認，完整證據與原本不存在的目的檔可沿用', async () => {
+    const identity = ['1','2','3','4','5','6'];
+    const rows = [
+      ['old-existing',{version:1,identity}],
+      ['invalid',{version:2,identity,sha256:'invalid'}],
+      ['current',{version:2,identity,sha256:'a'.repeat(64)}],
+      ['absent',{version:1,identity:null}],
+    ].map(([id,destinationEvidence]) => ({...legacy,id,outputAuthority:{destinationEvidence}}));
+    const {document} = await openQueueWindow(rows);
+    for (const id of ['old-existing','invalid'])
+      expect(document.querySelector(`[data-job-id="${id}"] [data-action="retry-confirm-output"]`)).not.toBeNull();
+    for (const id of ['current','absent'])
+      expect(document.querySelector(`[data-job-id="${id}"] [data-action="retry-confirm-output"]`)).toBeNull();
+  });
+
+  it.each(['cancelled', 'failed'])('確認輸出 %s 後以純文字顯示結果並重新啟用按鈕', async status => {
+    const { document, queueAPI } = await openQueueWindow([legacy]);
+    const message = '結果 <img id="retry-confirm-injected">';
+    queueAPI.retryWithOutputConfirmation.mockResolvedValue({ status, message });
+    document.querySelector('[data-action="retry-confirm-output"]').click();
+    await vi.waitFor(() => expect(feedback(document)).toBe(message));
+    expect(document.getElementById('retry-confirm-injected')).toBeNull();
+    expect(document.querySelector('[data-action="retry-confirm-output"]').disabled).toBe(false);
+    expect(queueAPI.retryWithOutputConfirmation).toHaveBeenCalledExactlyOnceWith('legacy');
+  });
+
+  it('重新確認成功後更新工作狀態', async () => {
+    const { document, queueAPI } = await openQueueWindow([legacy]);
+    queueAPI.getAll.mockResolvedValue({ jobs: [{ ...legacy, attempt: 2, status: 'queued' }], concurrency: 1 });
+    document.querySelector('[data-action="retry-confirm-output"]').click();
+    await vi.waitFor(() => expect(document.querySelector('[data-job-id="legacy"]').dataset.status).toBe('queued'));
+    expect(queueAPI.retryWithOutputConfirmation).toHaveBeenCalledExactlyOnceWith('legacy');
+  });
+
+  it('視窗關閉後遲到的確認結果不再觸發重新載入或變更介面', async () => {
+    const { document, queueAPI } = await openQueueWindow([legacy]);
+    let finish;
+    queueAPI.retryWithOutputConfirmation.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    document.querySelector('[data-action="retry-confirm-output"]').click();
+    const count = queueAPI.getAll.mock.calls.length;
+    document.defaultView.dispatchEvent(new document.defaultView.Event('pagehide'));
+    finish({ status: 'retried' });
+    await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+    expect(queueAPI.getAll).toHaveBeenCalledTimes(count);
+    expect(feedback(document)).toContain('請重新確認');
+  });
+
+  it('重新繪製後目的地證據已改變時，舊確認結果不可作用於新工作', async () => {
+    const { document, queueAPI } = await openQueueWindow([legacy]);
+    let finish;
+    queueAPI.retryWithOutputConfirmation.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    document.querySelector('[data-action="retry-confirm-output"]').click();
+    await update(queueAPI, [{ ...legacy, outputAuthority: { destinationEvidence: { version:1, identity:null } } }]);
+    finish({ status: 'failed', message: '已過期的錯誤' });
+    await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+    expect(feedback(document)).toBe('');
+    expect(document.querySelector('[data-action="retry-confirm-output"]')).toBeNull();
+  });
 
   it('sandbox bridge 只傳工作身分，不接受 renderer 指定替代輸出路徑', async () => {
     let api;

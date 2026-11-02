@@ -16,7 +16,7 @@ import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
-import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission, exportSourceError } from './delivery-submission.js';
+import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission, exportSourceError, formatOverwriteConfirmation } from './delivery-submission.js';
 import { escapeHTML, encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
@@ -532,13 +532,14 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         setTimeout(() => { if (ownsWorkspace()) DESK.openQueueMonitor(); }, 150);
       }
     }}
-  ], { width: 'min(920px,96vw)' });
+  ], { width: 'min(920px,96vw)', onDismiss: () => submission.cancel(), onReplaced: () => submission.cancel() });
 
   const submission = createDeliverySubmission({
     list, initialProject: data, readProject: _captureExportDraft,
     isCurrent: () => session.isCurrent() && ownsWorkspace(),
+    subscribeInvalidation: listener => Project.onWorkspaceInvalidated(listener),
     desktop: DESK,
-    confirmOverwrite: names => confirm(`硬碟上已存在同名檔案：\n${names.join(', ')}\n\n確定要直接覆蓋並繼續匯出嗎？`),
+    confirmOverwrite: paths => confirm(formatOverwriteConfirmation(paths)),
     onChanged: ({ busy, warning, accepted }) => {
       const button = $('evSubmitBtn');
       if (button) {

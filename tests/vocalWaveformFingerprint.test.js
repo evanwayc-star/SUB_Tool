@@ -17,6 +17,10 @@ it('preload只能送有效路徑，main指紋IPC只读既有capability而不授�
   });
   expect(() => api.vocalWaveFingerprint('../bad\0file')).toThrow(); expect(() => api.vocalWaveFingerprint(null)).toThrow();
   await api.vocalWaveFingerprint('mother.wav'); expect(invoke).toHaveBeenCalledWith('audio:vocal-wave-fingerprint', 'mother.wav');
+  expect(typeof api.audioSourceFingerprint).toBe('function');
+  expect(() => api.audioSourceFingerprint('../bad\0file')).toThrow(); expect(() => api.audioSourceFingerprint(null)).toThrow();
+  expect(await api.audioSourceFingerprint('mother.wav')).toBe('a'.repeat(64));
+  expect(invoke).toHaveBeenLastCalledWith('audio:vocal-wave-fingerprint', 'mother.wav');
   const main = await fs.readFile('electron/main.js', 'utf8');
   const ast = parse(main, { ecmaVersion: 'latest', sourceType: 'script' });
   const registration = ast.body.find(node => node.expression?.callee?.object?.name === 'ipcMain'

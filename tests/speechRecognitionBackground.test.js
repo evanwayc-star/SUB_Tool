@@ -68,6 +68,21 @@ function renderModalFromMock() {
 }
 
 describe('語音辨識背景執行與進度視窗切換', () => {
+  it.each(['dismiss','replace','cancel'])('失敗後以 %s 關閉設定視窗會清除該工作通知',async mode=>{
+    const errorLog=vi.spyOn(console,'error').mockImplementation(()=>{});
+    try{
+      engineMocks.transcribeAudioStream.mockRejectedValueOnce(new Error('辨識失敗'));
+      openSpeechRecognitionDialog();renderModalFromMock();
+      const options=uiMocks.openModal.mock.calls.at(-1)[3];
+      const buttons=uiMocks.openModal.mock.calls.at(-1)[2];
+      await buttons.find(button=>button.primary).act();
+      expect(getAsrSession()?.progress.status).toBe('failed');
+      if(mode==='dismiss') options.onDismiss();
+      else if(mode==='replace') options.onReplaced();
+      else buttons.find(button=>button.label==='取消').act();
+      expect(getAsrSession()).toBeNull();
+    }finally{errorLog.mockRestore();}
+  });
   it('切換素材後，摘要與實際接受的辨識範圍、字幕位置使用同一來源',async()=>{
     State.fps=25;State.dropFrame=false;
     const first={id:'first',name:'first.wav',in:0,out:2,dur:2,offset:0,audioBuffer:{duration:2}};

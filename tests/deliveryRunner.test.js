@@ -6,11 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const { createDeliveryRunner } = require('../electron/delivery-runner.js');
+const { assertDeliveryInputEvidence } = require('../electron/delivery-temporary-input.js');
 const { createExportQueue } = require('../electron/export-queue.js');
 const QueueStore = require('../electron/queue-store.js');
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 const { spawnExportWatchdog } = require('../electron/export-watchdog.js');
-const { acquireLease, releaseLease, listLeases, stageOutputPath, captureOutputAuthority, captureOutputDirectory } = require('../electron/export-lease.js');
+const { acquireLease, releaseLease, listLeases, stageOutputPath, captureOutputAuthority, captureOutputDirectory, captureDestinationEvidence, captureDestinationEvidenceAsync, prepareSharedLeaseRoot } = require('../electron/export-lease.js');
 const nativeFs = require('node:fs');
 
 const tempRoots = [];
@@ -68,7 +69,13 @@ function make(overrides = {}) {
   });
   const publicRunner = { run(job) {
     job.payload.outPath = path.join(root, path.posix.basename(job.payload.outPath));
-    job.outputAuthority = captureOutputAuthority(job.payload.outPath, captureOutputDirectory(root));
+    job.outputAuthority = captureDestinationEvidence(captureOutputAuthority(job.payload.outPath, captureOutputDirectory(root)));
+    if (job.outputAuthority.destinationEvidence.identity !== null) {
+      return captureDestinationEvidenceAsync(job.outputAuthority).then(authority => {
+        job.outputAuthority = authority;
+        return runner.run(job);
+      });
+    }
     return runner.run(job);
   } };
   return { runner: publicRunner, queue, queueDir, tempDir, sent, active, runFfmpeg };
@@ -93,6 +100,168 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it.each(['ass', 'timecode-font'])('交付期間 %s 暫存路徑被替換時，finally 不可刪除外來檔', async extension => {
+    let setup, file;
+    const runFfmpeg = vi.fn(async (_args, options) => {
+      file = options.inputEvidence.find(entry => entry.path.endsWith('.' + extension)).path;
+      nativeFs.renameSync(file, file + '.original');
+      writeFileSync(file, 'foreign bytes');
+      return { maps: [] };
+    });
+    const fontRoot = mkdtempSync(path.join(tmpdir(), 'subtool-delivery-font-')); tempRoots.push(fontRoot);
+    const font = path.join(fontRoot, 'source.ttf'); writeFileSync(font, 'font bytes');
+    setup = make({ runFfmpeg, fonts: { timecodeFile: () => font } });
+    mkdirSync(setup.queueDir, { recursive: true });
+    writeFileSync(path.join(setup.queueDir, 'snapshot.ass'), '[Script Info]\nTitle: source');
+    const job = videoJob({ assRef: 'snapshot.ass' });
+    job.payload.timecodeWatermark = { start: '01:00:00:00' };
+    await setup.runner.run(job);
+    expect(readFileSync(file, 'utf8')).toBe('foreign bytes');
+    expect(readFileSync(file + '.original', 'utf8')).toContain(extension === 'ass' ? 'Title: source' : 'font bytes');
+  });
+
+  it('probe 期間字幕暫存檔被替換時拒絕啟動 ffmpeg 並保留外來內容', async () => {
+    let setup, foreign;
+    const runFfmpeg = vi.fn();
+    setup = make({ runFfmpeg, mediaProbe: () => ({ hasAudio: async () => {
+      foreign = path.join(setup.tempDir, readdirSync(setup.tempDir).find(name => name.endsWith('.ass')));
+      nativeFs.renameSync(foreign, foreign + '.original'); writeFileSync(foreign, 'foreign content');
+      return false;
+    }, audioBitrates: async () => [] }) });
+    mkdirSync(setup.queueDir, { recursive: true });
+    writeFileSync(path.join(setup.queueDir, 'snapshot.ass'), '[Script Info]\nTitle: source');
+    await setup.runner.run(videoJob({ assRef: 'snapshot.ass' }));
+    expect(runFfmpeg).not.toHaveBeenCalled();
+    expect(readFileSync(foreign, 'utf8')).toBe('foreign content');
+    expect(setup.sent.some(item => item.payload.errorMsg?.includes('交付暫存輸入已變更'))).toBe(true);
+  });
+
+  it('交付中原 inode 內容遭改寫時，證據驗證失敗且保留變更後的檔案', async () => {
+    let setup, file;
+    const runFfmpeg = vi.fn(async (_args, options) => {
+      file = options.inputEvidence[0].path;
+      writeFileSync(file, 'altered content');
+      assertDeliveryInputEvidence(options.inputEvidence);
+      return { maps: [] };
+    });
+    setup = make({ runFfmpeg });
+    mkdirSync(setup.queueDir, { recursive: true });
+    writeFileSync(path.join(setup.queueDir, 'snapshot.ass'), '[Script Info]\nTitle: source');
+    await setup.runner.run(videoJob({ assRef: 'snapshot.ass' }));
+    expect(readFileSync(file, 'utf8')).toBe('altered content');
+    expect(setup.sent.some(item => item.payload.errorMsg?.includes('交付暫存輸入已變更'))).toBe(true);
+  });
+
+  it('交付執行時保留字幕與字型，同工作重試使用新 owner，完成後清理兩者', async () => {
+    let setup, release, started;
+    const gate = new Promise(resolve => { release = resolve; });
+    const seen = [];
+    const runFfmpeg = vi.fn(async (_args, options) => {
+      seen.push(options.inputEvidence.map(entry => entry.path));
+      for (const file of seen.at(-1)) expect(existsSync(file)).toBe(true);
+      if (seen.length === 1) { started(); await gate; }
+      return { maps: [] };
+    });
+    const waitForStart = new Promise(resolve => { started = resolve; });
+    const fontRoot = mkdtempSync(path.join(tmpdir(), 'subtool-delivery-font-')); tempRoots.push(fontRoot);
+    const font = path.join(fontRoot, 'source.ttf'); writeFileSync(font, 'font bytes');
+    setup = make({ runFfmpeg, fonts: { timecodeFile: () => font } });
+    mkdirSync(setup.queueDir, { recursive: true });
+    writeFileSync(path.join(setup.queueDir, 'snapshot.ass'), '[Script Info]\nTitle: source');
+    const job = videoJob({ assRef: 'snapshot.ass' });
+    job.payload.timecodeWatermark = { start: '01:00:00:00' };
+    const first = setup.runner.run(job);
+    await Promise.race([waitForStart, first]);
+    expect(runFfmpeg, JSON.stringify(setup.sent)).toHaveBeenCalledOnce();
+    expect(seen[0]).toHaveLength(2);
+    for (const file of seen[0]) expect(existsSync(file)).toBe(true);
+    release(); await first;
+    for (const file of seen[0]) expect(existsSync(file)).toBe(false);
+    const retry = videoJob({ assRef: 'snapshot.ass' });
+    retry.payload.timecodeWatermark = { start: '01:00:00:00' };
+    await setup.runner.run(retry);
+    expect(seen[1]).toHaveLength(2);
+    expect(seen[1].some(file => seen[0].includes(file))).toBe(false);
+    for (const file of seen[1]) expect(existsSync(file)).toBe(false);
+  });
+  it('不 probe 圖片音訊，但 watchdog 保護圖片與舊佇列的所有母素材',async()=>{
+    const hasAudio=vi.fn(async()=>false),f=make({mediaProbe:()=>({hasAudio,audioBitrates:async()=>[]})});
+    const job=videoJob();
+    const image=path.resolve('D:/source/still.png'),oldSource=path.resolve('D:/source/legacy.wav');
+    job.payload.clips.push({path:image,type:'image',vtrack:0,in:0,out:10,offset:0,natW:1280,natH:720});
+    job.sourcePaths=[oldSource];
+    await f.runner.run(job);
+    expect(hasAudio).not.toHaveBeenCalledWith(image,expect.anything());
+    expect(f.runFfmpeg).toHaveBeenCalledWith(expect.any(Array),expect.objectContaining({
+      sourcePaths:expect.arrayContaining([image,oldSource,path.normalize('D:/source/master.mxf')]),
+    }));
+  });
+
+  it('圖片素材在編碼期間指向既有目的檔時，真 watchdog 留住原檔與成品',async context=>{
+    let f,watchdogResult,stage;
+    const runFfmpeg=vi.fn(async(_args,options)=>{
+      const root=path.dirname(f.tempDir),outPath=options.outPath;
+      const script=path.join(root,'fake-encoder.cjs'),gate=path.join(root,'finish-gate');
+      writeFileSync(script,`const fs=require('fs');fs.writeFileSync(process.argv.at(-1),'encoded output');const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)}))clearInterval(t)},10);`);
+      const controller=spawnExportWatchdog({ffmpegPath:process.execPath,args:[script,outPath],cwd:root,outPath,
+        outputAuthority:options.outputAuthority,sourcePaths:options.sourcePaths,jobId:options.jobId,queueDir:f.queueDir,
+        ...prepareSharedLeaseRoot(root)});
+      const exited=new Promise(resolve=>controller.child.once('exit',resolve));
+      controller.ready.catch(()=>{});controller.completion.catch(()=>{});
+      try{
+        await controller.ready;
+        await vi.waitFor(()=>{
+          stage=listLeases(f.queueDir)[0]?.owner?.stagePath;
+          expect(stage&&readFileSync(stage,'utf8')).toBe('encoded output');
+        },{timeout:5000});
+        nativeFs.unlinkSync(image);nativeFs.symlinkSync(outPath,image,'file');
+        writeFileSync(gate,'finish');
+        watchdogResult=await controller.completion;
+        await exited;
+      }finally{ controller.stop('test-cleanup'); }
+      return {maps:[]};
+    });
+    f=make({runFfmpeg});
+    const root=path.dirname(f.tempDir),image=path.join(root,'original.png'),outPath=path.join(root,'delivery.mp4');
+    writeFileSync(image,'original image');writeFileSync(outPath,'original delivery');
+    const link=path.join(root,'link-check');
+    try{nativeFs.symlinkSync(outPath,link,'file');nativeFs.unlinkSync(link);}
+    catch(error){if(['EPERM','EACCES','ENOSYS'].includes(error.code))context.skip('環境不支援檔案符號連結');throw error;}
+    const job=videoJob();job.payload.clips=[{path:image,type:'image',vtrack:0,in:0,out:10,offset:0,natW:1280,natH:720}];
+    await f.runner.run(job);
+    expect(watchdogResult,JSON.stringify(f.sent)).toMatchObject({ok:false,cleanup:{reason:'artifact-commit-failed',retainedLease:true}});
+    expect(readFileSync(outPath,'utf8')).toBe('original delivery');
+    expect(readFileSync(image,'utf8')).toBe('original delivery');
+    expect(readFileSync(stage,'utf8')).toBe('encoded output');
+    expect(listLeases(f.queueDir)[0].owner.retainedResult.code).toBe('OUTPUT_OVERWRITES_SOURCE');
+  },10000);
+
+  it('圖片與目的檔為不同硬連結項目時，真 watchdog 可交付且保留母素材內容',async()=>{
+    let f,watchdogResult;
+    const runFfmpeg=vi.fn(async(_args,options)=>{
+      const root=path.dirname(f.tempDir),outPath=options.outPath,script=path.join(root,'fake-encoder.cjs');
+      writeFileSync(script,"require('fs').writeFileSync(process.argv.at(-1),'encoded output');");
+      const controller=spawnExportWatchdog({ffmpegPath:process.execPath,args:[script,outPath],cwd:root,outPath,
+        outputAuthority:options.outputAuthority,sourcePaths:options.sourcePaths,jobId:options.jobId,queueDir:f.queueDir,
+        ...prepareSharedLeaseRoot(root)});
+      const exited=new Promise(resolve=>controller.child.once('exit',resolve));
+      controller.ready.catch(()=>{});controller.completion.catch(()=>{});
+      try{await controller.ready;watchdogResult=await controller.completion;await exited;}
+      finally{controller.stop('test-cleanup');}
+      return {maps:[]};
+    });
+    f=make({runFfmpeg});
+    const root=path.dirname(f.tempDir),image=path.join(root,'original.png'),outPath=path.join(root,'delivery.mp4');
+    writeFileSync(image,'original image');nativeFs.linkSync(image,outPath);
+    expect(nativeFs.statSync(image).ino).toBe(nativeFs.statSync(outPath).ino);
+    const job=videoJob();job.payload.clips=[{path:image,type:'image',vtrack:0,in:0,out:10,offset:0,natW:1280,natH:720}];
+    await f.runner.run(job);
+    expect(watchdogResult).toMatchObject({ok:true});
+    expect(readFileSync(image,'utf8')).toBe('original image');
+    expect(readFileSync(outPath,'utf8')).toBe('encoded output');
+    expect(listLeases(f.queueDir)).toEqual([]);
+  },10000);
+
   it('佇列失敗後重試同一 frozen 工作會再核對 native 能力，修復前不啟動母素材 probe', async () => {
     const root = mkdtempSync(path.join(tmpdir(), 'subtool-delivery-capability-retry-')); tempRoots.push(root);
     const queueDir = path.join(root, 'queue'), tempDir = path.join(root, 'work');
@@ -160,6 +329,7 @@ describe('delivery runner public interface', () => {
     const hasAudio = vi.fn();
     const setup = make({ nativeCapabilities: { assertReady }, mediaProbe: () => ({ hasAudio }) });
     const pending = setup.runner.run(videoJob());
+    await vi.waitFor(() => expect(assertReady).toHaveBeenCalledOnce());
     setup.active.get('delivery-1').stop(reason);
     await pending;
     expect(signal.aborted).toBe(true);
@@ -317,6 +487,7 @@ describe('delivery runner public interface', () => {
       return rmdir(file, ...args);
     });
     const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg', getQueueDir: () => queueDir,
+      getSharedOutputLock: () => prepareSharedLeaseRoot(root),
       spawnWatchdog(config, handlers) {
         // 控制 watchdog 的跨程序通知時機；stage、commit 與 lease 收尾仍操作真實檔案。
         const completion = Promise.resolve().then(() => {
@@ -414,7 +585,7 @@ describe('delivery runner public interface', () => {
       encoder: { bitrateArgs: () => ['-c:v', 'libx264'] }, runFfmpeg,
     });
     const job = videoJob({ status: 'queued', createdAt: Date.now() }); job.payload.outPath = outPath;
-    queue.addJob(job); await ready;
+    queue.addJob(job, await captureDestinationEvidenceAsync(captureOutputAuthority(outPath, captureOutputDirectory(root)))); await ready;
     await queue.prepareForShutdown();
     expect(queue.get(job.id)).toMatchObject({ status: 'failed', errorMsg: expect.stringContaining('鎖已保留') });
     expect(QueueStore.loadTerminalOutcomes(queueDir)).toMatchObject([{ id: job.id, status: 'failed' }]);
@@ -448,6 +619,7 @@ describe('delivery runner public interface', () => {
       captureOutputAuthority: file => captureOutputAuthority(file, captureOutputDirectory(root)),
     });
     const execution = createFFmpegExecution({ getFFmpegPath: () => process.execPath, getQueueDir: () => queueDir,
+      getSharedOutputLock: () => prepareSharedLeaseRoot(root),
       spawnWatchdog(config, handlers) {
         return spawnExportWatchdog(config, { ...handlers, scriptPath: adapter, onMessage(message) {
           messages.push(message);
@@ -466,7 +638,7 @@ describe('delivery runner public interface', () => {
     });
     const job = videoJob({ status: 'queued', createdAt: Date.now() });
     Object.assign(job.payload, { format: 'dvd-iso', outPath, width: 720, height: 576 });
-    queue.addJob(job);
+    queue.addJob(job, await captureDestinationEvidenceAsync(captureOutputAuthority(outPath, captureOutputDirectory(root))));
     await vi.waitFor(() => { expect(runFfmpeg).toHaveBeenCalledOnce(); expect(queue.activeJob(job.id)).toBeNull(); });
     if (shutdown) await shutdown;
     expect(messages).toContainEqual(expect.objectContaining({ type: 'error', code: 'EIO', message: 'owner update failed' }));
@@ -539,10 +711,11 @@ describe('delivery runner public interface', () => {
     const job = videoJob();
     await setup.runner.run(job);
 
-    expect(setup.queue.assertJobCapabilities).toHaveBeenCalledOnce();
+    // Recheck after async probing, immediately before starting the writer.
+    expect(setup.queue.assertJobCapabilities).toHaveBeenCalledTimes(4);
     expect(setup.runFfmpeg).toHaveBeenCalledWith(
       expect.arrayContaining(['-c:v', 'libx264', job.payload.outPath]),
-      expect.objectContaining({ jobId: 'delivery-1', cwd: setup.tempDir }),
+      expect.objectContaining({ jobId: 'delivery-1', cwd: setup.tempDir, sourcePaths: [path.normalize('D:/source/master.mxf')] }),
     );
     expect(setup.queue.registerActiveJob).toHaveBeenCalledOnce();
     expect(setup.queue.clearActiveJob).toHaveBeenCalledWith('delivery-1');

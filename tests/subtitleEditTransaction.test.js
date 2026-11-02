@@ -544,6 +544,64 @@ describe('拆分字幕 UI adapters', () => {
     }
   });
 
+  it('拆分後下一幀開始編輯前，較新的字幕修改不會被舊文字覆蓋', async () => {
+    const frameCallbacks = [];
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    try {
+      State.tracks[0].locked = false;
+      Subtitles.renderSubList();
+      const field = document.querySelector('.sub-row[data-id="target"] .txt');
+      field.dispatchEvent(new MouseEvent('dblclick', { bubbles:true, cancelable:true }));
+      await Promise.resolve(); await Promise.resolve();
+      placeCursor(field, 2);
+      renderListSynchronously = true;
+      field.dispatchEvent(new KeyboardEvent('keydown', { key:'Enter', ctrlKey:true, bubbles:true, cancelable:true }));
+      const newCue = State.cues.find(cue => cue.id !== 'target');
+      SubtitleModel.editCue({ cueId:newCue.id, operation:'text', value:'後來的字幕' });
+      Subtitles.renderSubList();
+      frameCallbacks.splice(0).forEach(callback => callback(0));
+      const newField = document.querySelector(`.sub-row[data-id="${newCue.id}"] .txt`);
+      newField.dispatchEvent(new FocusEvent('focusout', { bubbles:true }));
+      expect(newCue.text).toBe('後來的字幕');
+      expect(newField.innerText).toBe('後來的字幕');
+      expect(History.stack.map(entry => entry.label)).toEqual(['初始', '拆分字幕', '編輯字幕文字 - 對白 - 第2句']);
+    } finally {
+      renderListSynchronously = false;
+      rafSpy.mockRestore();
+    }
+  });
+
+  it('拆分後使用者先切換焦點，舊的下一幀不能搶回焦點', async () => {
+    const frameCallbacks = [];
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    const other = document.createElement('button');
+    document.body.append(other);
+    try {
+      State.tracks[0].locked = false;
+      Subtitles.renderSubList();
+      const field = document.querySelector('.sub-row[data-id="target"] .txt');
+      field.dispatchEvent(new MouseEvent('dblclick', { bubbles:true, cancelable:true }));
+      await Promise.resolve(); await Promise.resolve();
+      placeCursor(field, 2);
+      renderListSynchronously = true;
+      field.dispatchEvent(new KeyboardEvent('keydown', { key:'Enter', ctrlKey:true, bubbles:true, cancelable:true }));
+      other.focus();
+      frameCallbacks.splice(0).forEach(callback => callback(0));
+      expect(document.activeElement).toBe(other);
+      expect(History.stack.map(entry => entry.label)).toEqual(['初始', '拆分字幕']);
+    } finally {
+      other.remove();
+      renderListSynchronously = false;
+      rafSpy.mockRestore();
+    }
+  });
+
   it('修改字幕 modal 拆分後接續編輯新句，文字提交與 Undo 仍由列表交易處理', async () => {
     State.tracks[0].locked = false;
     await StylePanelController.openCueEditModal(State.cues[0]);

@@ -108,6 +108,9 @@ function shutdownHandler(vocalRuntime, overrides = {}) {
     QueueManager: { prepareForShutdown: vi.fn().mockResolvedValue(), cancelShutdown: vi.fn().mockResolvedValue(true) },
     mediaIntakeRuntime: { close: vi.fn().mockResolvedValue() },
     screenshotOutput: { close: vi.fn().mockResolvedValue(), resume: vi.fn().mockResolvedValue(true) },
+    directoryOutput: { close: vi.fn().mockResolvedValue(), resume: vi.fn().mockResolvedValue(true) },
+    fileCommitCoordinator: { close: vi.fn().mockResolvedValue(), resume: vi.fn().mockResolvedValue(true) },
+    mpvHost: { disposeAndWait: vi.fn().mockResolvedValue(true), resume: vi.fn() },
     mainWin: null, dialog: { showMessageBox: vi.fn().mockResolvedValue() },
     console: { error: vi.fn() }, Promise, ...overrides,
   };
@@ -415,6 +418,7 @@ describe('人聲模型的受限母素材 PCM 邊界', () => {
     const { handler, context } = shutdownHandler(vocalRuntime);
     handler({ preventDefault: vi.fn() });
     await vi.waitFor(() => expect(vocalRuntime.resume).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(context._quitSequenceStarted).toBe(false));
     expect(context.app.quit).not.toHaveBeenCalled();
     expect(context.mediaIntakeRuntime.close).not.toHaveBeenCalled();
     expect(context.dialog.showMessageBox).toHaveBeenCalledOnce();
@@ -503,7 +507,7 @@ describe('人聲模型的受限母素材 PCM 邊界', () => {
       const freshShot = await handlers.get('fs:reserveScreenshotPath')(event, { directory });
       expect(freshShot).not.toBeNull();
       const shotBytes = Buffer.from('fresh captured frame bytes');
-      await expect(handlers.get('fs:writeScreenshot')(event, { path: freshShot.path, b64: shotBytes.toString('base64') })).resolves.toBe(freshShot.path);
+      await expect(handlers.get('fs:writeScreenshot')(event, { path: freshShot.path, token: freshShot.token, b64: shotBytes.toString('base64') })).resolves.toBe(freshShot.path);
       expect(fs.readFileSync(freshShot.path)).toEqual(shotBytes);
       await expect(handlers.get('ffmpeg:ingest')(event, { ...input, queue: true })).resolves.toMatchObject({ cached: true });
       const freshStream = await handlers.get('ffmpeg:streamIngest')(event, input);

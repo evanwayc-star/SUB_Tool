@@ -107,9 +107,15 @@ export class ProjectMediaRestoration {
     };
     const existing = new Set(list().map(source => source?.audioSourceId).filter(Boolean).map(String));
     const unresolved = [];
+    // 成功交接後，runtime 與 History 即為該來源的 owner。其餘來源可能還要
+    // 等待 I/O；在那之前先移出 pending，避免使用者刪除後存檔又被舊原文補回。
+    const handOff = source => {
+      plan.replaceExternalAudioSources(plan.pendingExternalAudioSources()
+        .filter(item => item?.audioSourceId !== source.audioSourceId));
+    };
     for (const source of pending) {
       if (!owns()) return false;
-      if (existing.has(source.audioSourceId)) continue;
+      if (existing.has(source.audioSourceId)) { handOff(source); continue; }
       if (!source.path) { unresolved.push(source); continue; }
       let exists = true;
       if (this.stat) {
@@ -125,7 +131,7 @@ export class ProjectMediaRestoration {
           if (asset && this.media.externalAudioSources?.includes(asset)) this.media.removeExternalAudio?.(asset.id, { record: false });
           return false;
         }
-        if (asset) existing.add(source.audioSourceId);
+        if (asset) { existing.add(source.audioSourceId); handOff(source); }
         else unresolved.push(source);
       } catch (error) {
         if (!owns()) return false;

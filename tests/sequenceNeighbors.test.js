@@ -128,6 +128,12 @@ describe('maxLengthOnTrack（可以多長）由同一份事實導出', () => {
 });
 
 describe('來源長度回報不破壞同軌不重疊', () => {
+  it('重連只套用片段幾何不覆蓋新 probe 來源長度，History 則還原當時長度', () => {
+    const current={...clip({id:'restore',out:4}),dur:6};
+    const saved={...current,dur:4,out:4};
+    Seq.restoreMetadata(current,saved);expect(current.dur).toBe(6);
+    Seq.restoreMetadata(current,saved,{restoreDuration:true});expect(current.dur).toBe(4);
+  });
   it('較長的實測片長不會蓋住緊貼的右鄰', () => {
     const first = { ...clip({ id: 'first', out: 10 }), dur: 10 };
     const next = { ...clip({ id: 'next', out: 10, offset: 10 }), dur: 10 };

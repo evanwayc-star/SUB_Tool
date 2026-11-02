@@ -8,7 +8,8 @@ const path = require('path');
 const QueueStore = require('./queue-store');
 const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
 const { buildDeliveryArgv } = require('./export-plan');
-const { assertOutputAuthority } = require('./export-lease');
+const { assertOutputAuthority, assertDeliveryDestinationEvidence, assertDeliveryDestinationEvidenceAsync } = require('./export-lease');
+const { createDeliveryTemporaryInputs, assertDeliveryInputEvidence } = require('./delivery-temporary-input');
 
 function failureProgress({ stopped = false, shutdown = false, error = null } = {}) {
   const partialCleanup = error?.code === 'PARTIAL_CLEANUP_FAILED'
@@ -73,6 +74,7 @@ function createDeliveryRunner(options = {}) {
 
     queue.assertJobCapabilities(job);
     assertOutputAuthority(job.outputAuthority, outPath);
+    assertDeliveryDestinationEvidence(job.outputAuthority);
 
     let assText = null;
     if (job.assRef) {
@@ -90,6 +92,7 @@ function createDeliveryRunner(options = {}) {
 
     let assName = null;
     let timecodeFontName = null;
+    const temporaryInputs = createDeliveryTemporaryInputs({ tempDir, rootAuthority: options.tempRootAuthority });
     const abort = new AbortController();
     let finish;
     const active = {
@@ -126,12 +129,15 @@ function createDeliveryRunner(options = {}) {
     };
     try {
       checkCancelled();
+      await assertDeliveryDestinationEvidenceAsync(job.outputAuthority, { signal: abort.signal });
+      checkCancelled();
+      queue.assertJobCapabilities(job);
+      assertOutputAuthority(job.outputAuthority, outPath);
       await nativeCapabilities.assertReady(payload, { signal: abort.signal });
       checkCancelled();
       fs.mkdirSync(tempDir, { recursive: true });
       if (assText && assText.trim()) {
-        assName = QueueStore.burnAssFileName(jobId);
-        fs.writeFileSync(path.join(tempDir, assName), assText, 'utf8');
+        assName = temporaryInputs.create('ass', Buffer.from(assText, 'utf8'));
       }
       if (!isWav && rawTimecodeWatermark) {
         const fontFile = fonts.timecodeFile?.();
@@ -139,29 +145,31 @@ function createDeliveryRunner(options = {}) {
           // FreeType's fontfile opens via the Windows ANSI code page. Keep the
           // supplied face, but pass an ASCII filename relative to ffmpeg's cwd;
           // this also works when the user profile/temp directory is Unicode.
-          timecodeFontName = QueueStore.burnAssFileName(jobId) + '.timecode-font';
-          fs.copyFileSync(fontFile, path.join(tempDir, timecodeFontName));
+          timecodeFontName = temporaryInputs.create('timecode-font', fs.readFileSync(fontFile));
         }
       }
 
       const probe = mediaProbe();
-      const sourcePaths = QueueStore.collectSourcePaths({
+      // Probe 只需要影片和音訊來源，但 watchdog 在發佈前必須保護所有
+      // 母素材（包含圖片和舊佇列持有的路徑），與 admission 同一集合。
+      const sourcePaths = QueueStore.mergeSourcePaths(payload, job.sourcePaths);
+      const probeSourcePaths = QueueStore.collectSourcePaths({
         clips: (clips || []).filter(clip => clip.type !== 'image'), audioPlan: rawAudioPlan,
       });
-      const audioPresence = new Map(await settleProbes(sourcePaths
+      const audioPresence = new Map(await settleProbes(probeSourcePaths
         .map(async sourcePath => [sourceKey(sourcePath), await probe.hasAudio(sourcePath, { signal: abort.signal })])));
       checkCancelled();
       const sourceStartOffsets = new Map();
       const sourceClocks = new Map();
       if (probe.describe) {
-        await settleProbes(sourcePaths.map(async sourcePath => {
+        await settleProbes(probeSourcePaths.map(async sourcePath => {
           const media = await probe.describe(sourcePath, { signal: abort.signal });
           sourceClocks.set(sourceKey(sourcePath), media.video || media.audio?.[0] || null);
         }));
       }
       checkCancelled();
       if (probe.audioVideoStartOffsets) {
-        await settleProbes(sourcePaths.filter(sourcePath => audioPresence.get(sourceKey(sourcePath)))
+        await settleProbes(probeSourcePaths.filter(sourcePath => audioPresence.get(sourceKey(sourcePath)))
           .map(async sourcePath => sourceStartOffsets.set(sourceKey(sourcePath),
             await probe.audioVideoStartOffsets(sourcePath, { signal: abort.signal }))));
       }
@@ -183,12 +191,23 @@ function createDeliveryRunner(options = {}) {
       });
       const { args, label, duration: plannedDuration, kbps, audioBitrates } = plan;
       const startedAt = now();
+      // Probe is asynchronous: sources may have acquired a different alias
+      // while it was running, so revalidate before starting the writer.
+      queue.assertJobCapabilities(job);
       assertOutputAuthority(job.outputAuthority, outPath);
+      assertDeliveryDestinationEvidence(job.outputAuthority);
+      await assertDeliveryDestinationEvidenceAsync(job.outputAuthority, { signal: abort.signal });
+      checkCancelled();
+      queue.assertJobCapabilities(job);
+      assertOutputAuthority(job.outputAuthority, outPath);
+      assertDeliveryDestinationEvidence(job.outputAuthority);
+      const inputEvidence = temporaryInputs.evidence();
+      assertDeliveryInputEvidence(inputEvidence);
 
       if (isWav) {
         await runFfmpeg(args, {
           executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, outPath,
-          outputAuthority: job.outputAuthority,
+          outputAuthority: job.outputAuthority, sourcePaths, inputEvidence,
           onProgress: sendProgress,
           onProcess: ownController,
         });
@@ -205,7 +224,7 @@ function createDeliveryRunner(options = {}) {
       let usedEncoder = plan.plannedEncoder;
       const result = await runFfmpeg(args, {
         executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
-        outputAuthority: job.outputAuthority,
+        outputAuthority: job.outputAuthority, sourcePaths, inputEvidence,
         outputFormat: format,
         ...(isDisc ? { discAudioPlan: plan.discAudioPlan, discVideoFps: plan.discVideoFps } : {}),
         onProgress: sendProgress,
@@ -244,9 +263,7 @@ function createDeliveryRunner(options = {}) {
       });
       if (progress) sendProgress({ jobId, ...progress });
     } finally {
-      for (const file of [assName, timecodeFontName]) {
-        if (file) try { fs.unlinkSync(path.join(tempDir, file)); } catch (error) {}
-      }
+      temporaryInputs.cleanup();
       queue.clearActiveJob(jobId);
       finish();
     }

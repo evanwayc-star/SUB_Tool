@@ -795,7 +795,7 @@ export function showClipDuration(c){
   const current=()=>session.isCurrent() && owns();
   const isImg = c.type === 'image';
   const cur = Seq.len(c);
-  const maxBySource = Math.max(0.001, (c.reverse?(+c.out||0):((+c.dur||0)-(+c.in||0)))/(Number(c.speed)>0?Number(c.speed):1));
+  const maxBySource = Math.max(0.001, (c.reverse?(+c.out||0):(Seq.sourceDuration(c)-(+c.in||0)))/(Number(c.speed)>0?Number(c.speed):1));
   const maxByNeighbor = Seq.maxLengthOnTrack(c);
   const maxLen = Math.min(maxBySource, maxByNeighbor);
   const limitNote = maxByNeighbor < maxBySource

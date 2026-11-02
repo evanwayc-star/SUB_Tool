@@ -401,9 +401,24 @@ export function openHardLimiterDialog(audioSource) {
   // 非同步呼叫後台 FFmpeg 進行精準聲量量測 (ITU-R BS.1770)
   const duration = audioSource?.duration || audioSource?.asset?.duration || 0;
   if (DESK?.analyzeAudioLoudness && filePath) {
+    const ownsAnalysis = () => {
+      // A closed modal keeps its old DOM connected; neither that DOM nor a
+      // replacement source with the same ID owns this measurement anymore.
+      if (!session.isCurrent() || !analysisPanel?.isConnected) return false;
+      const sourceStillCurrent = Media.audioEffects.targets(audioSource).some(candidate =>
+        sourcePaths.has(candidate) && sourcePaths.get(candidate) === audioMotherPath(candidate));
+      if (sourceStillCurrent) return true;
+      const tagEl = analysisPanel.querySelector('#hlAnalysisStatus');
+      if (tagEl) {
+        tagEl.textContent = '來源已變更，請重新開啟';
+        tagEl.style.color = '#fbbf24';
+        tagEl.style.borderColor = 'rgba(234,179,8,0.35)';
+        tagEl.style.background = 'rgba(234,179,8,0.1)';
+      }
+      return false;
+    };
     DESK.analyzeAudioLoudness(filePath, duration).then(res => {
-      // A later modal replaces modalBody; its identical IDs must not receive this source's result.
-      if (!res || !analysisPanel?.isConnected) return;
+      if (!res || !ownsAnalysis()) return;
       const maxEl = analysisPanel.querySelector('#hlAnalyzedMax');
       const meanEl = analysisPanel.querySelector('#hlAnalyzedMean');
       const minEl = analysisPanel.querySelector('#hlAnalyzedMin');
@@ -421,7 +436,7 @@ export function openHardLimiterDialog(audioSource) {
         tagEl.style.background = 'rgba(52,211,153,0.1)';
       }
     }).catch(err => {
-      if (!analysisPanel?.isConnected) return;
+      if (!ownsAnalysis()) return;
       const tagEl=analysisPanel.querySelector('#hlAnalysisStatus');
       if(tagEl){
         tagEl.textContent=initialAnalysis?'量測失敗（保留快速預覽）':'量測失敗';

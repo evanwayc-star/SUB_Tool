@@ -53,6 +53,81 @@ afterEach(() => {
 });
 
 describe('settings.json 的同步寫入交易', () => {
+  it('設定暫存檔被替換時不發布替代內容，也不刪除替代檔', () => {
+    let stage, descriptor, swapped=false;
+    const injected = { ...fs,
+      openSync(file, ...args) {
+        const fd = fs.openSync(file, ...args);
+        if (typeof file === 'string' && file.endsWith('.tmp')) { stage=file; descriptor=fd; }
+        return fd;
+      },
+      closeSync(fd) {
+        fs.closeSync(fd);
+        if (fd === descriptor && !swapped) {
+          swapped=true; fs.renameSync(stage, stage+'.original'); fs.writeFileSync(stage, '外部資料');
+        }
+      },
+    };
+    const { filePath, settings } = fixture('{"safeFrame":true}', injected);
+    expect(() => settings.update(current => ({...current,safeFrame:false}))).toThrow();
+    expect(fs.readFileSync(filePath, 'utf8')).toBe('{"safeFrame":true}');
+    expect(fs.readFileSync(stage, 'utf8')).toBe('外部資料');
+  });
+
+  it('設定發布後同名暫存路徑被他人建立，不可在收尾時刪除', () => {
+    let stage;
+    const injected = { ...fs, renameSync(from, to) {
+      fs.renameSync(from, to); stage=from; fs.writeFileSync(from, '另一項工作');
+    } };
+    const { filePath, settings } = fixture('{"safeFrame":true}', injected);
+    expect(settings.update(current => ({...current,safeFrame:false}))).toEqual({safeFrame:false});
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({safeFrame:false});
+    expect(fs.readFileSync(stage, 'utf8')).toBe('另一項工作');
+  });
+
+  it('設定交易期間目的檔被修改，保留較新的內容並回報衝突', () => {
+    let changed=false, settingsPath;
+    const injected = { ...fs, writeFileSync(target, content, ...args) {
+      const result=fs.writeFileSync(target, content, ...args);
+      if (typeof target === 'number' && !changed) {
+        changed=true; fs.writeFileSync(settingsPath, '{"newer":true}');
+      }
+      return result;
+    } };
+    const { filePath, settings } = fixture('{"safeFrame":true}', injected); settingsPath=filePath;
+    expect(() => settings.update(current => ({...current,safeFrame:false}))).toThrow();
+    expect(fs.readFileSync(filePath, 'utf8')).toBe('{"newer":true}');
+  });
+
+  it.each(['stage','destination'])('即使 %s 的檔案資訊看起來相同，也要核對實際內容', kind => {
+    let stage, descriptor, changed=false, filePath, frozen;
+    const injected = { ...fs,
+      openSync(file, ...args) {
+        const fd=fs.openSync(file, ...args);
+        if (typeof file === 'string' && file.endsWith('.tmp')) { stage=file; descriptor=fd; }
+        return fd;
+      },
+      closeSync(fd) {
+        if (fd === descriptor && !changed) {
+          const target=kind === 'stage' ? stage : filePath;
+          frozen=fs.lstatSync(target, {bigint:true});
+          const bytes=fs.readFileSync(target);
+          fs.writeFileSync(target, Buffer.alloc(bytes.length, 0x58));
+          changed=true;
+        }
+        return fs.closeSync(fd);
+      },
+      lstatSync(file, ...args) {
+        if (changed && file === (kind === 'stage' ? stage : filePath)) return frozen;
+        return fs.lstatSync(file, ...args);
+      },
+    };
+    const fixtureResult=fixture('{"safeFrame":true}', injected); filePath=fixtureResult.filePath;
+    expect(() => fixtureResult.settings.update(current=>({...current,safeFrame:false}))).toThrow();
+    const target=kind === 'stage' ? stage : filePath;
+    expect(fs.readFileSync(target)).toEqual(Buffer.alloc(Number(frozen.size), 0x58));
+  });
+
   it('最近專案暫時讀取失敗不能當空清單覆寫，之後開啟可重新加入', async () => {
     const previous = [{ path: path.resolve('previous.subtool'), name: 'previous', at: 1 }];
     let reads = 0, faults = 0;
@@ -96,34 +171,35 @@ describe('settings.json 的同步寫入交易', () => {
     expect(helpers.lastDir('media')).toBe(root);
   });
 
-  it('移除不存在的最近專案前讀取失敗，保留完整清單供之後重試', async () => {
-    let reads = 0, faults = 0, armed = false;
-    const injected = { ...fs, readFileSync(...args) {
-      if (armed && ++reads === 2) {
+  it('開啟缺檔的最近專案及讀取設定失敗都不改寫原清單', async () => {
+    let reads=0, faults=0, writes=0, armed=false;
+    const injected={...fs,readFileSync(...args) {
+      if (armed && ++reads === 1) {
         faults++;
-        throw Object.assign(new Error('settings temporarily locked'), { code: 'EACCES' });
+        throw Object.assign(new Error('settings temporarily locked'),{code:'EACCES'});
       }
       return fs.readFileSync(...args);
-    } };
-    const { root, filePath, settings } = fixture(null, injected);
-    const previous = ['missing', 'kept'].map(name => ({ path: path.join(root, `${name}.subtool`), name, at: 1 }));
-    fs.writeFileSync(filePath, JSON.stringify({ recentProjects: previous }));
-    fs.writeFileSync(previous[1].path, JSON.stringify({ cues: [] }));
-    const helpers = settingsConsumers(settings);
-    const workspace = createProjectWorkspace({
-      readFile: value => fs.promises.readFile(value),
-      stat: value => fs.promises.stat(value),
-      readRecent: helpers.loadRecentProjects,
-      writeRecent: helpers.saveRecentProjects,
+    }};
+    const {root,filePath,settings}=fixture(null,injected);
+    const previous=['missing','kept'].map(name=>({path:path.join(root,`${name}.subtool`),name,at:1}));
+    fs.writeFileSync(filePath,JSON.stringify({recentProjects:previous}));
+    fs.writeFileSync(previous[1].path,JSON.stringify({cues:[]}));
+    const helpers=settingsConsumers(settings);
+    const workspace=createProjectWorkspace({
+      readFile:value=>fs.promises.readFile(value), stat:value=>fs.promises.stat(value),
+      readRecent:helpers.loadRecentProjects,
+      writeRecent:next=>{writes++;return helpers.saveRecentProjects(next);},
     });
-    const [missing] = await workspace.listRecent();
-    armed = true;
+    const [missing]=await workspace.listRecent();
+    armed=true;
     await expect(workspace.openRecent(missing.token)).resolves.toBeNull();
     expect(faults).toBe(1);
+    expect(writes).toBe(0);
+    expect(JSON.parse(fs.readFileSync(filePath,'utf8')).recentProjects).toEqual(previous);
+    armed=false;
+    await expect(workspace.openRecent(missing.token)).resolves.toBeNull();
+    expect(writes).toBe(0);
     expect(settings.read().recentProjects).toEqual(previous);
-    armed = false;
-    await workspace.openRecent(missing.token);
-    expect(settings.read().recentProjects).toEqual([previous[1]]);
   });
 
   it('記住新對話框目錄時從實際設定合併，保留暫時讀不到的其他種類', () => {

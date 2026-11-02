@@ -181,9 +181,11 @@ export function effectiveSubtitleLineSpacing(st){
    與垂直幾何；實際水平寬度仍由 libass 以正式輸出字型決定。 */
 export function subtitleBackgroundCssMetrics(st, ratio=1){
   const r = ratio || 1;
-  const fontSize = Math.max(12, Math.round(st.fontSize * 0.75 * r));
-  const padY = Number((0.20 * fontSize).toFixed(1));
-  const padX = Number((0.50 * fontSize).toFixed(1));
+  // 預覽縮放必須與 ASS 依畫面高度縮放一致。CSS 可保留小數；固定像素下限或
+  // 縮放後取整會讓小字與底框在縮小預覽時停止縮放，改變它們佔畫面的比例。
+  const fontSize = st.fontSize * 0.75 * r;
+  const padY = 0.20 * fontSize;
+  const padX = 0.50 * fontSize;
   return {
     fontSize,
     lineHeight: fontSize * effectiveSubtitleLineSpacing(st),
@@ -218,8 +220,8 @@ export function styleToCss(st, ratio){
   if(st.vertical) css += `writing-mode:vertical-lr;text-orientation:upright;`;
   if(st.angle) css += `transform:rotate(${st.angle}deg);transform-origin:${originOf(st)};`;
   if(st.bgBox){
-    const pad = bgMetrics.padY.toFixed(1);
-    const padH = bgMetrics.padX.toFixed(1);
+    const pad = bgMetrics.padY;
+    const padH = bgMetrics.padX;
     css += `background:${hexToRgba(st.bgColor, st.bgAlpha)};padding:${pad}px ${padH}px;margin:-${pad}px -${padH}px;border-radius:0;`+
            `display:inline-block;text-align:inherit;`;
     if(st.shadow > 0){

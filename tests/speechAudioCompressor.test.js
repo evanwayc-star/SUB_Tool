@@ -26,27 +26,32 @@ function createMono16kWav(durationSeconds = 1) {
   return buffer;
 }
 
-function createHarness({ fail = false } = {}) {
+function createHarness({ fail = false, readOutput = null } = {}) {
   const files = new Map();
-  let sequence = 0;
+  const descriptors=new Map();
+  let sequence = 0, nextDescriptor = 3;
   const removeFile = vi.fn(async file => { files.delete(file); });
   const execute = vi.fn(async (args, options) => {
     if (fail) throw new Error('ffmpeg failed');
-    files.set(args.at(-1), Buffer.from('small-mp3'));
+    files.set(descriptors.get(options.outputDescriptor), Buffer.from('small-mp3'));
     return options;
   });
   const compressor = createSpeechAudioCompressor({
     createTempPath: ext => `C:/temp/speech-${sequence++}.${ext}`,
-    writeFile: async (file, bytes) => { files.set(file, Buffer.from(bytes)); },
-    readFile: async file => files.get(file),
-    removeFile,
+    produceTemporaryFile:async(file,produce)=>{files.set(file,Buffer.alloc(0));await produce(file,{file});return file;},
+    withTemporaryDescriptor:async(file,_owner,work)=>{const fd=nextDescriptor++;descriptors.set(fd,file);try{return await work(fd);}finally{descriptors.delete(fd);}},
+    assertTemporaryOutput:(file,owner)=>{if(owner.file!==file||!files.has(file))throw new Error('暫存失權');},
+    cleanupGeneratedFile:removeFile,
+    writeDescriptor:async(fd,bytes)=>{files.set(descriptors.get(fd),Buffer.from(bytes));},
+    readDescriptor:async fd=>readOutput?readOutput():files.get(descriptors.get(fd)),
+    readInputDescriptor:async fd=>files.get(descriptors.get(fd)),
     execute
   });
   return { compressor, execute, removeFile };
 }
 
 describe('辨識專用 MP3 暫存壓縮', () => {
-  it('只接受 16kHz mono PCM WAV，轉成 64kbps MP3 並在回傳後清除兩個暫存檔', async () => {
+  it('只接受 16kHz mono PCM WAV，轉成 64kbps MP3 並在回傳後清除輸出暫存檔', async () => {
     const { compressor, execute, removeFile } = createHarness();
 
     const result = await compressor.compress(createMono16kWav(1));
@@ -62,7 +67,7 @@ describe('辨識專用 MP3 暫存壓縮', () => {
       '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k'
     ]));
     expect(options).toEqual(expect.objectContaining({ duration: 1 }));
-    expect(removeFile).toHaveBeenCalledTimes(2);
+    expect(removeFile).toHaveBeenCalledTimes(1);
   });
 
   it('拒絕把任意 renderer bytes 當成可轉檔素材', async () => {
@@ -75,11 +80,20 @@ describe('辨識專用 MP3 暫存壓縮', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('ffmpeg 失敗時也會清除輸入與輸出暫存檔', async () => {
+  it.each(['empty','incomplete'])('拒絕 %s 的 PCM16 WAV',async kind=>{
+    const {compressor,execute}=createHarness();
+    const empty=createMono16kWav(0);
+    const incomplete=Buffer.concat([empty,Buffer.from([0x7f])]);
+    incomplete.writeUInt32LE(incomplete.length-8,4);incomplete.writeUInt32LE(1,40);
+    await expect(compressor.compress(kind==='empty'?empty:incomplete)).rejects.toThrow(/PCM16 WAV/);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('ffmpeg 失敗時也會清除輸出暫存檔', async () => {
     const { compressor, removeFile } = createHarness({ fail: true });
 
     await expect(compressor.compress(createMono16kWav(1))).rejects.toThrow(/ffmpeg failed/);
-    expect(removeFile).toHaveBeenCalledTimes(2);
+    expect(removeFile).toHaveBeenCalledTimes(1);
   });
 
   it('取消 requestId 會終止正在壓縮的 ffmpeg，並在 Promise 收斂後移除工作', async () => {
@@ -150,14 +164,8 @@ describe('辨識專用 MP3 暫存壓縮', () => {
     let releaseRead, beginRead;
     const readGate = new Promise(resolve => { releaseRead = resolve; });
     const reading = new Promise(resolve => { beginRead = resolve; });
-    const removeFile = vi.fn().mockResolvedValue(undefined);
-    const runtime = createSpeechCompressionRuntime({ compressor: createSpeechAudioCompressor({
-      createTempPath: extension => `speech-cancel-output.${extension}`,
-      writeFile: vi.fn().mockResolvedValue(undefined),
-      execute: vi.fn().mockResolvedValue(undefined),
-      readFile: async () => { beginRead(); await readGate; return Buffer.from('encoded mp3'); },
-      removeFile,
-    }) });
+    const {compressor,removeFile}=createHarness({readOutput:async()=>{beginRead();await readGate;return Buffer.from('encoded mp3');}});
+    const runtime = createSpeechCompressionRuntime({ compressor });
     const outcome = runtime.compress(createMono16kWav(), 'speech-during-read');
     await reading;
     expect(runtime.cancel('speech-during-read')).toBe(true);
@@ -166,7 +174,7 @@ describe('辨識專用 MP3 暫存壓縮', () => {
     releaseRead();
 
     await expect(outcome).rejects.toMatchObject({ name: 'AbortError' });
-    expect(removeFile).toHaveBeenCalledTimes(2);
+    expect(removeFile).toHaveBeenCalledTimes(1);
     expect(runtime.activeCount()).toBe(0);
   });
 

@@ -114,6 +114,8 @@ export function buildSubtitleImportPlan(parsed, { fps, target = 'new' } = {}) {
 export class ProjectRestorePlan {
   #clips;
   #handedOffClips = new Set();
+  #legacyHandoffs = [];
+  #baselineRevision = null;
   #externalAudioSources;
   #playhead;
   #mediaRelink;
@@ -139,10 +141,28 @@ export class ProjectRestorePlan {
   // 管理，存檔不能再加入原文，否則分割或刪除後會把原 placement 補回。
   // 以原 record 身分交接，不能依 path 去重，因同一檔可有多個合法剪接片段。
   materializeClip(saved, clip) {
-    if(this.#clips.includes(saved)&&clip?.id){
+    if(this.owns()&&this.#clips.includes(saved)&&clip?.id){
       this.#handedOffClips.add(saved);
+      if(!saved.audioSourceId&&!saved.audioSrc&&clip.audioSourceId&&!this.#legacyHandoffs.some(item=>item.clip===clip)){
+        this.#legacyHandoffs.push({saved:structuredClone(saved),clip,sourceId:clip.audioSourceId,evidence:null});
+      }
     }
   }
+  captureLegacySource(detail) {
+    if(!this.owns()||!detail?.sourceId) return;
+    for(const handoff of this.#legacyHandoffs){
+      if(handoff.sourceId===detail.sourceId&&!handoff.evidence){
+        handoff.evidence=structuredClone({channels:detail.channels,options:detail.options,allocation:detail.project});
+      }
+    }
+  }
+  legacyHandoffs() {
+    return this.owns()?this.#legacyHandoffs.map(({saved,clip,sourceId,evidence})=>({
+      saved:structuredClone(saved),clip,sourceId,evidence:structuredClone(evidence),
+    })):[];
+  }
+  setBaselineRevision(revision) { if(this.owns()) this.#baselineRevision=revision; }
+  baselineRevision() { return this.#baselineRevision; }
   pendingClipsForSave() {
     return this.#clips.filter(clip=>!this.#handedOffClips.has(clip));
   }

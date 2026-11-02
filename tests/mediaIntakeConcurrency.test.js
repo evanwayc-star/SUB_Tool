@@ -188,9 +188,9 @@ describe('media intake shared cache publication', () => {
       return originalStat(file, ...args);
     });
     let cleaned;
-    try { cleaned = runtime.cleanOrphans(); }
+    try { cleaned = await runtime.cleanOrphans(); }
     finally { stat.mockRestore(); }
-    expect(cleaned).toEqual({ removed: 0, bytes: 0 });
+    expect(cleaned).toEqual({ removed: 0, bytes: 0, incomplete: true });
     expect(fs.readFileSync(metaPath)).toEqual(metadata);
     for (const artifact of artifacts) expect(fs.readFileSync(artifact).equals(bytes)).toBe(true);
   });

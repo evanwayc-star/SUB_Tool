@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { createExportArtifact, isDiscOutput } = require('./export-artifact');
+const { assertDeliveryInputEvidence } = require('./delivery-temporary-input');
 const {
   acquireLease,
   updateLease,
@@ -14,6 +15,14 @@ const {
   listLeases,
   stagePathForCanonical,
   assertOutputAuthority,
+  captureOutputDirectory,
+  captureOutputAuthority,
+  assertDistinctSourceEntries,
+  assertDeliveryDestinationEvidenceAsync,
+  normalizeOutputPath,
+  outputKey,
+  outputReservationEntry,
+  leaseRoot,
   prepareNativeWorkspace,
 } = require('./export-lease');
 
@@ -46,6 +55,56 @@ function assertStageIdentity(file, expected) {
   const current = fileIdentity(fs.lstatSync(file, { bigint: true }));
   if (current.dev !== expected.dev || current.ino !== expected.ino) {
     throw errorWithCode('UNSAFE_DELIVERY_STAGE', '匯出暫存成品已被替換，檔案與輸出鎖已保留');
+  }
+}
+
+// Detect ordinary in-place changes while destination hashing yields. This is
+// metadata evidence, not a content fingerprint or an OS-level write lock:
+// same-metadata writes and changes between the final check and rename remain
+// possible and require a native handle-based commit to exclude completely.
+function stageStatMetadata(stat) {
+  return ['dev', 'ino', 'mode', 'size', 'mtimeNs', 'ctimeNs'].map(key => String(stat[key]));
+}
+
+function stageMetadata(file, expected) {
+  try {
+    const stat = fs.lstatSync(file, { bigint: true });
+    const identity = fileIdentity(stat);
+    if (identity.dev !== expected.dev || identity.ino !== expected.ino) throw new Error('stage identity changed');
+    return stageStatMetadata(stat);
+  } catch (error) {
+    throw errorWithCode('DELIVERY_STAGE_CHANGED', '無法確認匯出暫存成品是否變更；成品與輸出鎖已保留', error);
+  }
+}
+
+function assertStageMetadata(file, expected, before) {
+  const after = stageMetadata(file, expected);
+  if (after.some((value, index) => value !== before[index])) {
+    throw errorWithCode('DELIVERY_STAGE_CHANGED', '匯出暫存成品在核對期間變更；成品與輸出鎖已保留');
+  }
+}
+
+// A destination that changes after this writer starts belongs to a later
+// operation; keep that state and do not publish this older job over it.
+function destinationIdentity(file) {
+  try {
+    const stat = fs.lstatSync(file, { bigint: true });
+    return ['dev', 'ino', 'mode', 'size', 'mtimeNs', 'ctimeNs'].map(key => String(stat[key]));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function assertDestinationIdentity(file, expected) {
+  let current;
+  try { current = destinationIdentity(file); }
+  catch (error) {
+    throw errorWithCode('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認輸出檔是否變更；已保留暫存成品及輸出鎖', error);
+  }
+  if ((current === null) !== (expected === null)
+    || (current && current.some((value, index) => value !== expected[index]))) {
+    throw errorWithCode('DELIVERY_DESTINATION_CHANGED', '輸出檔在匯出期間變更；已保留新內容、暫存成品及輸出鎖');
   }
 }
 
@@ -86,6 +145,16 @@ function validateConfig(config) {
   }
   if (config.stagePath != null) {
     throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出暫存路徑只能由 watchdog 建立');
+  }
+  if (config.sourcePaths != null && (!Array.isArray(config.sourcePaths) || config.sourcePaths.some(file => typeof file !== 'string' || !file.trim()))) {
+    throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog 來源路徑必須是字串陣列');
+  }
+  if (config.inputEvidence != null && !Array.isArray(config.inputEvidence)) {
+    throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog 暫存輸入證據必須是陣列');
+  }
+  if (typeof config.sharedQueueDir !== 'string' || !path.isAbsolute(config.sharedQueueDir)
+    || !config.sharedAuthority || typeof config.sharedAuthority !== 'object') {
+    throw errorWithCode('INVALID_WATCHDOG_CONFIG', '匯出 watchdog 缺少可信共用輸出鎖目錄');
   }
 }
 
@@ -295,7 +364,23 @@ async function deletePartialFile(outPath, options = {}) {
       return { removed: true, missing: false, attempts: attempt };
     } catch (error) {
       if (error.code === 'ENOENT') {
-        return { removed: false, missing: true, attempts: attempt };
+        // ENOENT can also mean the authorized parent disappeared after the
+        // previous check. Only treat the stage as absent if the same parent
+        // is still present; otherwise keep both the stage owner and lease.
+        try {
+          options.assertDirectory?.();
+          return { removed: false, missing: true, attempts: attempt };
+        } catch (directoryError) { error = directoryError; }
+      }
+      // A failed authority check or unlink leaves the stage uncertain. A later
+      // retry cannot prove the bytes stayed unchanged, even if inode and
+      // timestamps appear identical. Retain the stage and its lease instead.
+      if (options.assertOutput) {
+        const original = serializeError(error);
+        const uncertain = errorWithCode('PARTIAL_DELETE_UNCERTAIN',
+          `無法安全確認或清理暫存檔（${original.code}：${original.message}），檔案與輸出鎖已保留`, error);
+        return { removed:false, missing:false, attempts:attempt,
+          error:{...serializeError(uncertain),cause:original} };
       }
       lastError = error;
       if (attempt < attempts) await delay(retryMs * attempt);
@@ -318,20 +403,38 @@ async function startWatchdogRuntime(config, options = {}) {
   // Re-resolving a selected alias after it changes would also change its lease key.
   config = { ...config, outPath: outputAuthority.outPath };
   const assertDirectory = () => assertOutputAuthority(outputAuthority, config.outPath);
+  const assertSharedDirectory = () => {
+    try {
+      assertOutputAuthority(config.sharedAuthority, config.sharedAuthority.requestedPath);
+      const expected = path.join(leaseRoot(config.sharedQueueDir), '.subtool-root-proof');
+      if (normalizeOutputPath(expected) !== normalizeOutputPath(config.sharedAuthority.outPath)) throw new Error('共用鎖目錄不相符');
+    } catch (error) { throw errorWithCode('SHARED_OUTPUT_LOCK_UNAVAILABLE', '無法確認共用輸出鎖目錄；交付未啟動', error); }
+  };
 
   const token = crypto.randomBytes(32).toString('hex');
   const pipeName = makePipeName();
   const stagePath = stagePathForCanonical(config.outPath, token);
   let stageIdentity = null;
+  let stageReservationMetadata = null;
+  let destinationBefore = null;
   let nativeWorkspace = null;
   const assertOutput = () => {
     assertDirectory();
+    assertSharedDirectory();
     nativeWorkspace?.assertCurrent();
     if (stageIdentity) assertStageIdentity(stagePath, stageIdentity);
+  };
+  const assertReservedStage = () => {
+    if (!stageReservationMetadata) return;
+    if (BigInt(stageReservationMetadata[3]) !== 0n)
+      throw errorWithCode('DELIVERY_STAGE_CHANGED', '匯出暫存預留檔不是空檔；成品與輸出鎖已保留');
+    assertStageMetadata(stagePath, stageIdentity, stageReservationMetadata);
   };
   let artifactTempDir = null;
   let leasesAcquired = false;
   let leaseKey = null;
+  let aliasLease = null;
+  let sharedLease = null;
   let starting = true;
   let child = null;
   let childClosed = false;
@@ -341,6 +444,13 @@ async function startWatchdogRuntime(config, options = {}) {
   let finalizing = null;
   let finalResult = null;
   const finalizerAbort = new AbortController();
+  const recordWriter = (writerSpawnPending, ffmpegPid) => {
+    const update = { token, writerSpawnPending, ...(ffmpegPid == null ? {} : { ffmpegPid }) };
+    assertSharedDirectory();
+    updateLease({ ...update, queueDir: config.sharedQueueDir, outPath: sharedLease.outPath, leaseKey: sharedLease.key });
+    updateLease({ ...update, queueDir: config.queueDir, outPath: config.outPath, leaseKey });
+    if (aliasLease) updateLease({ ...update, queueDir: config.queueDir, outPath: aliasLease.outPath, leaseKey: aliasLease.key });
+  };
   const artifact = createExportArtifact({ ...config, stagePath }, {
     signal: finalizerAbort.signal,
     assertOutput,
@@ -350,14 +460,26 @@ async function startWatchdogRuntime(config, options = {}) {
       assertOutput();
       if (!stageIdentity) {
         const fd = fs.openSync(stagePath, 'wx');
-        try { stageIdentity = fileIdentity(fs.fstatSync(fd, { bigint: true })); }
+        try {
+          const stat = fs.fstatSync(fd, { bigint: true });
+          stageIdentity = fileIdentity(stat);
+          stageReservationMetadata = stageStatMetadata(stat);
+        }
         finally { fs.closeSync(fd); }
       }
       if (leasesAcquired) updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey, outputStarted: true, stageIdentity });
+      assertReservedStage();
     },
-    onProcess: childProcess => updateLease({
-      queueDir: config.queueDir, outPath: config.outPath, token, leaseKey, ffmpegPid: childProcess.pid,
-    }),
+    onBeforeProcess: () => {
+      recordWriter(true);
+      assertReservedStage();
+    },
+    onProcess: childProcess => {
+      // The native writer now owns the file; its subsequent changes are not
+      // evidence that the original empty reservation was externally modified.
+      stageReservationMetadata = null;
+      recordWriter(false, childProcess.pid);
+    },
     onProgress: progress => sendIpc({ type: 'progress', progress }),
   }, options.artifactAdapters);
   let resolveDone;
@@ -366,9 +488,23 @@ async function startWatchdogRuntime(config, options = {}) {
   });
 
   const releaseOutputs = async () => {
-    if (!leasesAcquired) return undefined;
+    if (!leasesAcquired && !aliasLease && !sharedLease) return undefined;
     try {
-      return await Promise.resolve(releaseLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey }));
+      let result;
+      if (leasesAcquired) {
+        result = await Promise.resolve(releaseLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey }));
+        leasesAcquired = false;
+      }
+      if (aliasLease) {
+        await Promise.resolve(releaseLease({ queueDir: config.queueDir, outPath: aliasLease.outPath, token, leaseKey: aliasLease.key }));
+        aliasLease = null;
+      }
+      if (sharedLease) {
+        assertSharedDirectory();
+        await Promise.resolve(releaseLease({ queueDir: config.sharedQueueDir, outPath: sharedLease.outPath, token, leaseKey: sharedLease.key }));
+        sharedLease = null;
+      }
+      return result;
     } catch (error) {
       return { error: serializeError(error), retainedLease: true };
     }
@@ -385,20 +521,36 @@ async function startWatchdogRuntime(config, options = {}) {
       const stageCleanupError = artifactResult.cleanupError ? serializeError(artifactResult.cleanupError) : null;
       let outputCommitted = false;
       if (!cleanupReason && !childError && code === 0 && !finalizerAbort.signal.aborted) {
+        let stageBefore = null;
         try {
           assertOutput();
-          const stageInfo = fs.lstatSync(stagePath);
-          if (!stageInfo.isFile() || stageInfo.size <= 0) {
+          stageBefore = stageMetadata(stagePath, stageIdentity);
+          if (BigInt(stageBefore[3]) <= 0n) {
             throw errorWithCode('INVALID_DELIVERY_STAGE', '匯出暫存成品缺少有效檔案內容');
           }
           finalizerAbort.signal.throwIfAborted();
+          assertDestinationIdentity(config.outPath, destinationBefore);
+          await assertDeliveryDestinationEvidenceAsync(outputAuthority, { signal: finalizerAbort.signal });
+          finalizerAbort.signal.throwIfAborted();
+          assertOutput();
+          assertDestinationIdentity(config.outPath, destinationBefore);
+          assertDistinctSourceEntries(config.sourcePaths || [], config.outPath);
+          assertDeliveryInputEvidence(config.inputEvidence || []);
+          assertStageMetadata(stagePath, stageIdentity, stageBefore);
           // Both paths are in the same output directory. After FFmpeg and any
           // format-specific checks succeed, this rename is the commit point.
           fs.renameSync(stagePath, config.outPath);
           outputCommitted = true;
         } catch (error) {
-          childError = error;
-          cleanupReason = 'artifact-commit-failed';
+          // Cancellation during destination hashing must not delete a stage
+          // whose ownership became uncertain while the operation was paused.
+          if (stageBefore) {
+            try { assertStageMetadata(stagePath, stageIdentity, stageBefore); }
+            catch (stageError) { error = stageError; }
+          }
+          if (error?.code === 'DELIVERY_STAGE_CHANGED') { childError = error; cleanupReason = 'artifact-commit-failed'; }
+          else if (finalizerAbort.signal.aborted) cleanupReason ||= 'stop';
+          else { childError = error; cleanupReason = 'artifact-commit-failed'; }
         }
       }
       const needsCleanup = !outputCommitted;
@@ -406,22 +558,56 @@ async function startWatchdogRuntime(config, options = {}) {
       let release = null;
 
       if (needsCleanup) {
+        // If startup was cancelled or failed before any writer was admitted,
+        // never remove a reservation that was filled while we were waiting.
+        if (stageReservationMetadata) {
+          try { assertReservedStage(); }
+          catch (stageError) { childError = stageError; cleanupReason = 'artifact-commit-failed'; }
+        }
         // A failed mux handle close can leave a writer alive. Preserve the
         // stage as well as the lease until recovery can safely inspect it.
-        const deletion = ['AIRLINE_TEMP_HANDLE_CLOSE_FAILED', 'OUTPUT_HANDLE_CLOSE_FAILED'].includes(stageCleanupError?.code)
+        const destinationUncertain = !!stageIdentity && (childError?.code === 'DELIVERY_STAGE_CHANGED'
+          || (cleanupReason === 'artifact-commit-failed'
+            && ['DELIVERY_DESTINATION_CHANGED', 'DELIVERY_DESTINATION_UNVERIFIABLE', 'OUTPUT_OVERWRITES_SOURCE', 'DELIVERY_TEMP_INPUT_CHANGED', 'SHARED_OUTPUT_LOCK_UNAVAILABLE'].includes(childError?.code)));
+        let retentionRecordError = null;
+        if (destinationUncertain) {
+          if (childError.code === 'OUTPUT_OVERWRITES_SOURCE') {
+            childError.message = `母素材目前指向輸出路徑，為避免覆蓋母素材，暫存成品 ${stagePath} 及輸出鎖已保留`;
+          } else if (childError.code === 'DELIVERY_TEMP_INPUT_CHANGED') {
+            childError.message = `交付字幕或字型暫存資料已變更，暫存成品 ${stagePath} 及輸出鎖已保留`;
+          }
+          try {
+            // Persist only inside this token-owned lease and bind the receipt to
+            // the exact stage; an arbitrary sidecar file grants no retention.
+            updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey, outputStarted:true, stageIdentity,
+              retainedResult: { version: 1, code: childError.code, stageIdentity } });
+          } catch (error) {
+            retentionRecordError = serializeError(error);
+            childError.message += `；無法保存保留紀錄，重新啟動前請先備份暫存成品：${stagePath}`;
+          }
+        }
+        const deletion = destinationUncertain || ['AIRLINE_TEMP_HANDLE_CLOSE_FAILED', 'OUTPUT_HANDLE_CLOSE_FAILED'].includes(stageCleanupError?.code)
           ? { removed: false, missing: false, untouched: true }
           : leasesAcquired
           ? stageIdentity
-            ? { outPath: config.outPath, stagePath, ...await deletePartialFile(stagePath, { ...options, assertOutput }) }
+            ? { outPath: config.outPath, stagePath, ...await deletePartialFile(stagePath, { ...options, assertOutput, assertDirectory }) }
             : { removed: false, missing: false, untouched: true }
           : { removed: false, missing: false, untouched: true };
-        const failed = (!deletion.removed && !deletion.missing && !deletion.untouched ? deletion : null) || stageCleanupError;
+        if (deletion.error?.code === 'PARTIAL_DELETE_UNCERTAIN') {
+          try {
+            updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey, outputStarted:true, stageIdentity,
+              retainedResult:{ version:1, code:'PARTIAL_DELETE_UNCERTAIN', stageIdentity } });
+          } catch (error) { retentionRecordError = serializeError(error); }
+        }
+        const failed = (!deletion.removed && !deletion.missing && !deletion.untouched ? deletion : null) || stageCleanupError
+          || (destinationUncertain ? serializeError(childError) : null);
         cleanup = {
           reason: cleanupReason || (childError ? 'ffmpeg-error' : 'ffmpeg-nonzero'),
           ...deletion,
           released: false,
           retainedLease: false,
           ...(stageCleanupError ? { stageCleanupError } : {}),
+          ...(retentionRecordError ? { retentionRecordError } : {}),
         };
 
         if (!failed) {
@@ -434,12 +620,14 @@ async function startWatchdogRuntime(config, options = {}) {
           cleanup.retainedLease = true;
         }
         sendIpc({ type: 'cleanup', jobId: config.jobId, ...cleanup });
-        if (failed) {
+        if (failed && !destinationUncertain) {
           sendIpc({
             type: 'error',
             jobId: config.jobId,
             code: 'PARTIAL_CLEANUP_FAILED',
-            message: stageCleanupError?.message || deletion.error?.message || '匯出半成品刪除失敗，輸出鎖已保留',
+            message: (stageCleanupError?.message || deletion.error?.message || '匯出半成品刪除失敗，輸出鎖已保留')
+              + (childError ? `；原始錯誤：${childError.message || childError}` : '')
+              + (retentionRecordError ? `；無法保存保留紀錄（${retentionRecordError.message}），重新啟動前請先備份暫存成品：${stagePath}` : ''),
           });
         } else if (cleanup.releaseError) {
           sendIpc({
@@ -540,6 +728,47 @@ async function startWatchdogRuntime(config, options = {}) {
 
   try {
     await control.listenPromise;
+    assertDirectory();
+    let reservationEntry;
+    try { reservationEntry = outputReservationEntry(config.outPath); }
+    catch (error) { throw errorWithCode('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認輸出檔案的實際目錄項', error); }
+    assertSharedDirectory();
+    const primaryOutPath = normalizeOutputPath(config.outPath);
+    const sharedOutPath = reservationEntry || primaryOutPath;
+    const sharedKey = outputKey(sharedOutPath);
+    fs.mkdirSync(config.queueDir, { recursive: true });
+    const queueRoot = captureOutputDirectory(config.queueDir);
+    fs.mkdirSync(leaseRoot(config.queueDir), { recursive: true });
+    const queueAuthority = captureOutputAuthority(path.join(leaseRoot(config.queueDir), '.subtool-queue-proof'), queueRoot);
+    assertOutputAuthority(queueAuthority, queueAuthority.requestedPath);
+    const acquireShared = () => acquireLease({ queueDir: config.sharedQueueDir, outPath: sharedOutPath,
+      jobId: config.jobId, token, watchdogPid: process.pid, pipeName, outputStarted: false,
+      aliasOf: { version: 1, queueDir: path.resolve(config.queueDir), outPath: primaryOutPath,
+        key: outputKey(primaryOutPath), stagePath, outputAuthority, queueAuthority } });
+    try { sharedLease = acquireShared(); }
+    catch (error) {
+      if (error.code !== 'OUTPUT_BUSY') throw error;
+      // A disk record never grants authority to recover or stop another profile.
+      const previous = listLeases(config.sharedQueueDir).find(entry => entry.key === sharedKey);
+      const owner = previous?.valid && previous.owner;
+      if (!owner?.aliasOf?.queueDir || !Number.isInteger(owner.watchdogPid) || owner.watchdogPid <= 0
+        || processMayBeRunning(owner.watchdogPid) || processMayBeRunning(owner.ffmpegPid)) throw error;
+      assertSharedDirectory();
+      const recovery = await recoverExportLeases(config.sharedQueueDir, { onlyLeaseKey: sharedKey, pipeAttempts: 1, assertLeaseDirectory: assertSharedDirectory });
+      if (recovery.warnings.length) throw errorWithCode('OUTPUT_BUSY', `此輸出仍被保留：${recovery.warnings[0].message}`);
+      assertSharedDirectory();
+      sharedLease = acquireShared();
+    }
+    sharedLease.outPath = sharedOutPath;
+    // Keep the old primary key and stage path stable. A second reservation on
+    // the canonical existing entry makes new long/8.3 aliases mutually exclusive.
+    if (reservationEntry && outputKey(reservationEntry) !== outputKey(config.outPath)) {
+      const primaryOutPath = normalizeOutputPath(config.outPath);
+      aliasLease = acquireLease({ queueDir: config.queueDir, outPath: reservationEntry,
+        jobId: config.jobId, token, watchdogPid: process.pid, pipeName, outputStarted: false,
+        aliasOf: { version: 1, outPath: primaryOutPath, key: outputKey(primaryOutPath) } });
+      aliasLease.outPath = reservationEntry;
+    }
     const lease = await Promise.resolve(acquireLease({
       queueDir: config.queueDir, outPath: config.outPath, jobId: config.jobId,
       token, watchdogPid: process.pid, pipeName,
@@ -548,6 +777,21 @@ async function startWatchdogRuntime(config, options = {}) {
     leasesAcquired = true;
     leaseKey = lease.key;
     artifactTempDir = lease.lockPath;
+    assertDirectory();
+    let currentEntry;
+    try { currentEntry = outputReservationEntry(config.outPath); }
+    catch (error) { throw errorWithCode('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認輸出檔案的實際目錄項', error); }
+    if (currentEntry !== reservationEntry) throw errorWithCode('DELIVERY_DESTINATION_UNVERIFIABLE', '輸出目錄項在取得輸出鎖期間變更');
+    // Older watchdogs did not acquire the canonical alias reservation. Detect
+    // their existing locks without granting authority to their current paths.
+    for (const other of listLeases(config.queueDir)) {
+      if (!other.valid) throw errorWithCode('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認既有輸出鎖，請先檢查佇列');
+      if (other.owner.token === token || !reservationEntry) continue;
+      let otherEntry;
+      try { otherEntry = outputReservationEntry(other.owner.outPath); }
+      catch (error) { throw errorWithCode('DELIVERY_DESTINATION_UNVERIFIABLE', '無法確認既有輸出鎖的目錄項', error); }
+      if (otherEntry === reservationEntry) throw errorWithCode('OUTPUT_BUSY', '同一個輸出檔案已被其他交付使用');
+    }
     if (isDiscOutput(config.outputFormat)) {
       updateLease({ queueDir: config.queueDir, outPath: config.outPath, token, leaseKey, discWorkspacePending: true });
     }
@@ -582,18 +826,34 @@ async function startWatchdogRuntime(config, options = {}) {
   }
 
   try {
+    assertDirectory();
+    await assertDeliveryDestinationEvidenceAsync(outputAuthority, { signal: finalizerAbort.signal });
+    finalizerAbort.signal.throwIfAborted();
+    assertDistinctSourceEntries(config.sourcePaths || [], config.outPath);
+    assertDeliveryInputEvidence(config.inputEvidence || []);
+    destinationBefore = destinationIdentity(config.outPath);
     const args = await artifact.prepare({ tempDir: artifactTempDir, nativeWorkRoot: nativeWorkspace?.path });
     assertOutput();
+    assertDestinationIdentity(config.outPath, destinationBefore);
+    await assertDeliveryDestinationEvidenceAsync(outputAuthority, { signal: finalizerAbort.signal });
+    finalizerAbort.signal.throwIfAborted();
+    assertOutput();
+    assertDestinationIdentity(config.outPath, destinationBefore);
+    assertDistinctSourceEntries(config.sourcePaths || [], config.outPath);
+    assertDeliveryInputEvidence(config.inputEvidence || []);
     starting = false;
     if (cleanupReason) {
       void finalize(null, null);
       return { done, requestCleanup, close, pipeName, token };
     }
+    recordWriter(true);
+    assertReservedStage();
     child = spawn(config.ffmpegPath, args, {
       cwd: config.cwd || undefined,
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
+    if (Number.isInteger(child.pid) && child.pid > 0) stageReservationMetadata = null;
   } catch (error) {
     starting = false;
     cleanupReason ||= 'ffmpeg-spawn-failed';
@@ -641,11 +901,7 @@ async function startWatchdogRuntime(config, options = {}) {
   }
 
   try {
-    await Promise.resolve(updateLease({
-      queueDir: config.queueDir, outPath: config.outPath, token,
-      leaseKey,
-      watchdogPid: process.pid, ffmpegPid: child.pid, pipeName,
-    }));
+    recordWriter(false, child.pid);
   } catch (error) {
     cleanupReason = 'lease-update-failed';
     sendIpc({
@@ -754,6 +1010,10 @@ async function recoverExportLeases(queueDir, options = {}) {
 
   try {
     entries = await Promise.resolve(listLeases(queueDir));
+    if (options.onlyLeaseKey) entries = entries.filter(entry => entry.key === options.onlyLeaseKey);
+    // A stale alias reservation follows its primary lease; handle the primary
+    // first so retained completed work keeps both names protected.
+    entries.sort((left, right) => Number(!!left?.owner?.aliasOf) - Number(!!right?.owner?.aliasOf));
   } catch (error) {
     return {
       recovered,
@@ -775,7 +1035,47 @@ async function recoverExportLeases(queueDir, options = {}) {
       continue;
     }
 
+    try { fs.lstatSync(entry.lockPath); }
+    catch (error) {
+      if (error.code === 'ENOENT') continue;
+      warnings.push({ code: error.code || 'LEASE_SCAN_FAILED', key: entry.key, message: error.message });
+      continue;
+    }
+
     const owner = entry.owner;
+    if (owner.retainedResult) {
+      try {
+        assertOutputAuthority(owner.outputAuthority, owner.outPath);
+        assertStageIdentity(owner.stagePath, owner.stageIdentity);
+        const reason = owner.retainedResult.code === 'OUTPUT_OVERWRITES_SOURCE'
+          ? '偵測到母素材指向輸出路徑，為避免覆蓋母素材'
+          : owner.retainedResult.code === 'PARTIAL_DELETE_UNCERTAIN'
+            ? '上次無法安全確認或清理暫存檔'
+          : owner.retainedResult.code === 'DELIVERY_STAGE_CHANGED'
+            ? '偵測到暫存成品曾變更或無法確認'
+          : owner.retainedResult.code === 'DELIVERY_TEMP_INPUT_CHANGED'
+            ? '偵測到交付字幕或字型暫存資料曾變更'
+            : '輸出檔曾變更或無法確認';
+        const stageLabel = owner.retainedResult.code === 'PARTIAL_DELETE_UNCERTAIN' ? '暫存檔' : '已完成的暫存成品';
+        warnings.push({ code: owner.retainedResult.code, key: entry.key, outPath: owner.outPath,
+          message: `${reason}；${stageLabel} ${path.basename(owner.stagePath)} 及輸出鎖持續保留，請檢查後改用新檔名` });
+        continue;
+      } catch (error) {
+        // A missing stage no longer needs preservation; ordinary recovery may
+        // release the lease. Any other uncertainty remains fail-closed.
+        if (error.code !== 'ENOENT') {
+          warnings.push({ code: error.code || 'RETAINED_OUTPUT_UNVERIFIABLE', key: entry.key, outPath: owner.outPath,
+            message: '無法確認保留成品的目錄或身分；暫存檔與輸出鎖已保留' });
+          continue;
+        }
+        try { assertOutputAuthority(owner.outputAuthority, owner.outPath); }
+        catch (directoryError) {
+          warnings.push({ code: directoryError.code || 'RETAINED_OUTPUT_UNVERIFIABLE', key: entry.key, outPath: owner.outPath,
+            message: '無法確認保留成品的目錄；暫存檔與輸出鎖已保留' });
+          continue;
+        }
+      }
+    }
     let liveResponse = null;
     let missingPipe = !owner?.pipeName;
     let lastPipeError = null;
@@ -847,41 +1147,101 @@ async function recoverExportLeases(queueDir, options = {}) {
         message: '匯出程序仍可能執行中，暫存檔與輸出鎖已保留' });
       continue;
     }
+    if (owner.writerSpawnPending) {
+      warnings.push({ code: 'WRITER_START_UNCERTAIN', key: entry.key, outPath: owner.outPath,
+        message: '匯出程序啟動時中斷，無法確認背景寫入程序是否仍在執行；暫存檔及輸出鎖已保留，請先確認程序已停止並檢查成品' });
+      continue;
+    }
+    if (owner.aliasOf) {
+      let primary;
+      try {
+        const primaryDir = owner.aliasOf.queueDir || queueDir;
+        if (owner.aliasOf.queueDir) {
+          const expected = path.join(leaseRoot(primaryDir), '.subtool-queue-proof');
+          assertOutputAuthority(owner.aliasOf.queueAuthority, expected);
+          if (outputKey(expected) !== outputKey(owner.aliasOf.queueAuthority.outPath)) throw new Error('佇列目錄身分不相符');
+        }
+        primary = listLeases(primaryDir).find(candidate => candidate.key === owner.aliasOf.key);
+        if (owner.aliasOf.queueDir) assertOutputAuthority(owner.aliasOf.queueAuthority, owner.aliasOf.queueAuthority.requestedPath);
+      }
+      catch (error) {
+        warnings.push({ code: error.code || 'LEASE_SCAN_FAILED', key: entry.key, outPath: owner.outPath,
+          message: '無法確認別名鎖對應的原始輸出鎖，已保留' });
+        continue;
+      }
+      if (primary) {
+        warnings.push({ code: 'ALIAS_PRIMARY_RETAINED', key: entry.key, outPath: owner.outPath,
+          message: '原始輸出鎖尚未釋放，別名鎖一併保留' });
+        continue;
+      }
+      if (owner.aliasOf.queueDir) {
+        try {
+          assertOutputAuthority(owner.aliasOf.outputAuthority, owner.aliasOf.outPath);
+          try {
+            fs.lstatSync(owner.aliasOf.stagePath);
+            warnings.push({ code: 'ALIAS_STAGE_RETAINED', key: entry.key, outPath: owner.outPath,
+              message: `原輸出鎖已不存在，但暫存成品 ${path.basename(owner.aliasOf.stagePath)} 仍在；別名鎖已保留` });
+            continue;
+          } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          assertOutputAuthority(owner.aliasOf.outputAuthority, owner.aliasOf.outPath);
+          assertOutputAuthority(owner.aliasOf.queueAuthority, owner.aliasOf.queueAuthority.requestedPath);
+        } catch (error) {
+          warnings.push({ code: error.code || 'DELIVERY_DESTINATION_UNVERIFIABLE', key: entry.key, outPath: owner.outPath,
+            message: '無法確認原始輸出目錄或暫存成品，別名鎖已保留' });
+          continue;
+        }
+      }
+    }
     // Without historical identities, recovery cannot grant the current same-name
     // directory or file. A proven reservation that never wrote owns no file.
     let unusedReservation = owner.outputStarted === false && !owner.stagePath;
     if (owner.outputStarted === false && owner.stagePath && owner.outputAuthority && !owner.stageIdentity) {
       try {
         assertOutputAuthority(owner.outputAuthority, owner.outPath);
-        try { fs.lstatSync(owner.stagePath); } catch (error) { if (error.code === 'ENOENT') unusedReservation = true; }
+        try { fs.lstatSync(owner.stagePath); } catch (error) {
+          if (error.code === 'ENOENT') {
+            assertOutputAuthority(owner.outputAuthority, owner.outPath);
+            unusedReservation = true;
+          }
+        }
       } catch {}
     }
-    if (!unusedReservation && (!owner.outputAuthority || (owner.stagePath && !owner.stageIdentity))) {
+    // A parent-directory authorization does not identify the output file.
+    // Older or damaged owners without a staged file cannot prove that the
+    // current destination is theirs, even if outputStarted is true.
+    if (!unusedReservation && (!owner.outputAuthority || !owner.stagePath || !owner.stageIdentity)) {
       warnings.push({ code: 'OUTPUT_AUTHORITY_MISSING', key: entry.key, outPath: owner.outPath,
-        message: '舊交付鎖缺少原目錄身分；已保留半成品與鎖，請檢查後改用新的交付檔名' });
+        message: '舊交付鎖缺少原目錄或暫存成品身分；已保留既有輸出、暫存檔與鎖，請檢查後改用新的交付檔名' });
       continue;
     }
     const guardedOptions = owner.outputAuthority
-      ? { ...options, assertOutput: () => {
+      ? { ...options, assertDirectory: () => assertOutputAuthority(owner.outputAuthority, owner.outPath), assertOutput: () => {
         assertOutputAuthority(owner.outputAuthority, owner.outPath);
         if (owner.stageIdentity) assertStageIdentity(owner.stagePath, owner.stageIdentity);
       } } : options;
-    const deletion = unusedReservation ? { removed: false, missing: false, untouched: true } : owner.stagePath
-      ? await deletePartialFile(owner.stagePath, guardedOptions)
-      : owner.outputStarted === false
-        ? { removed: false, missing: false, untouched: true }
-        : await deletePartialFile(owner.outPath, guardedOptions);
+    const deletion = unusedReservation ? { removed: false, missing: false, untouched: true }
+      : await deletePartialFile(owner.stagePath, guardedOptions);
     if (!deletion.removed && !deletion.missing && !deletion.untouched) {
+      let retentionRecordError = null;
+      if (deletion.error?.code === 'PARTIAL_DELETE_UNCERTAIN') {
+        try {
+          updateLease({ queueDir, outPath:owner.outPath, token:owner.token, leaseKey:entry.key,
+            outputStarted:true, stageIdentity:owner.stageIdentity,
+            retainedResult:{ version:1, code:'PARTIAL_DELETE_UNCERTAIN', stageIdentity:owner.stageIdentity } });
+        } catch (error) { retentionRecordError = serializeError(error); }
+      }
       warnings.push({
         code: 'PARTIAL_CLEANUP_FAILED',
         key: entry.key,
         outPath: owner.outPath,
-        message: deletion.error?.message || '無法刪除匯出半成品，鎖已保留',
+        message: (deletion.error?.message || '無法刪除匯出半成品，鎖已保留')
+          + (retentionRecordError ? `；無法保存保留紀錄（${retentionRecordError.message}），重新啟動前請先備份暫存成品：${owner.stagePath}` : ''),
       });
       continue;
     }
 
     try {
+      options.assertLeaseDirectory?.();
       await Promise.resolve(releaseLease({
         queueDir,
         outPath: owner.outPath,

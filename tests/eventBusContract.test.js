@@ -86,14 +86,14 @@ describe('事件匯流排：不可留下半條邊', () => {
     expect(orphan, `這些訂閱永遠不會被觸發：\n${orphan.join('\n')}`).toEqual([]);
   });
 
-  it('同一個事件不可被重複訂閱；來源註冊只准入兩個明確 owner', () => {
+  it('同一個事件不可被重複訂閱；來源註冊只准入三個明確 owner', () => {
     /* events.js 的 on() 是 push、不去重，所以重複訂閱＝handler 跑兩遍。
        app.js 曾把 on('render:trackStyle', renderTrackStyle) 註冊兩次，
        於是每次選取變更都把整個樣式面板（含 preset 的 <optgroup> DOM）重建兩遍。 */
-    // 同一次來源註冊同時更新配線草稿與專案復原快照，兩者是不同 owner。
+    // 同一次來源註冊更新配線草稿與復原快照，並排程音訊效果重建。
     // 只准入這個有文件記錄的精確分派；額外或重複的訂閱仍應失敗。
     const sourceOwners=(subscribed.get('audio:sourceRegistered')||[]).map(site=>site.replace(/:\d+$/,'')).sort();
-    expect(sourceOwners).toEqual(['audio-routing.js','history.js']);
+    expect(sourceOwners).toEqual(['audio-routing.js','history.js','media.js']);
     const dupes = [...subscribed.entries()]
       .filter(([name, sites]) => name!=='audio:sourceRegistered'&&sites.length > 1)
       .map(([name, sites]) => `${name}  ←  ${sites.join(', ')}`);

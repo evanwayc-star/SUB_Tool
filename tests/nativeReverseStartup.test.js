@@ -34,10 +34,20 @@ beforeEach(async()=>{
   clip=Seq.add({id:'mother',name:'mother.mov',path:'C:/mother.mov',primary:true,dur:6,in:0,out:6,offset:0,vtrack:0,
     reverse:true,speed:2,audioSrc:'video',audioSourceId:'mother-source'});
   Media.activeClipId=clip.id;ensureAudioSourceMap(clip.audioSourceId,[{sourceStream:0,sourceChannel:0}]);
-  bridge={launch:vi.fn(async()=>({ok:true})),loadfile:vi.fn(async()=>({ok:true})),
+  bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'initial-proxy'})),loadfile:vi.fn(async()=>({ok:true})),
     present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
     pause:vi.fn(async()=>null),play:vi.fn(async()=>null),direction:vi.fn(async()=>true),rate:vi.fn(async()=>null),mute:vi.fn(async()=>null)};
-  runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/proxy.mp4'});
+  // Test-controlled deferred loads still need the unique source session that
+  // the real host attaches after every successful reload, including same-path reloads.
+  let generation=0;
+  const nativeBridge=new Proxy(bridge,{get(target,key){
+    if(key==='loadfile')return async(...args)=>{
+      const result=await target.loadfile(...args);
+      return result?.ok===true?{...result,sourceSessionId:`reload-${++generation}`}:result;
+    };
+    return Reflect.get(target,key);
+  }});
+  runtime=activateMpvTransport({mpv:nativeBridge});await runtime.enterMpv({src:'C:/proxy.mp4'});
   Media._mpvPath='C:/proxy.mp4';Media._reverseProxyPath='C:/proxy.mp4';Media._reverseProxySourcePath=clip.path;Media._reverseProxyActive=true;
   Media.setRate(1);
   const tr={kind:'element',source:'video',audioSourceId:clip.audioSourceId,sourceStream:0,sourceChannel:0,

@@ -36,6 +36,21 @@ it.skipIf(process.platform!=='win32'||!existsSync(ELECTRON)||!existsSync(FFMPEG)
     client=new CdpClient(target.webSocketDebuggerUrl);await client.connect();
     await waitFor(()=>client.evaluate(`Boolean(document.querySelector('#imageLayer img')?.complete
       &&document.querySelector('#imageLayer img')?.naturalWidth)`),'實際圖片元素',10000);
+    // The image also exists at 3s while the upper video is active, and can be
+    // hidden behind a compositor canvas. Image decode alone does not prove that
+    // project restoration has presented the intended image-only frame at 0s.
+    await waitFor(()=>client.evaluate(`(() => {
+      const {Media,State}=window.SUB||{},image=document.querySelector('#imageLayer img');
+      if(!Media||!State||!image||!image.complete||!image.naturalWidth) return false;
+      const style=getComputedStyle(image),wrap=image.closest('.img-wrap');
+      const bounds=image.getBoundingClientRect();
+      return Media.inGap()&&!Media.presentationPending()&&!Media.playing
+        &&Media.presentedTime()===0&&Math.abs(Media.displayTime())<1e-9
+        &&State.clips.some(clip=>clip.type==='image'&&clip.offset===0)
+        &&State.clips.some(clip=>clip.primary===true&&clip.type!=='image'&&clip.offset===3)
+        &&style.display!=='none'&&style.visibility==='visible'
+        &&wrap&&Number(getComputedStyle(wrap).opacity)>0&&bounds.width>0&&bounds.height>0;
+    })()`),'專案已呈現時間軸零秒的可見圖片',10000);
     const preview=await client.evaluate(`(() => {
       const image=document.querySelector('#imageLayer img');
       const canvas=document.createElement('canvas');canvas.width=16;canvas.height=16;

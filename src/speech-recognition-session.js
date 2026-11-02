@@ -152,20 +152,23 @@ function makeSnapshot(run) {
 }
 
 function publish(run = activeRun) {
-  currentSnapshot = makeSnapshot(run);
+  const snapshot = makeSnapshot(run);
+  currentSnapshot = snapshot;
   for (const listener of listeners) {
+    if (activeRun !== run || currentSnapshot !== snapshot) break;
     try {
-      listener(currentSnapshot);
+      listener(snapshot);
     } catch (error) {
       console.error('[ASR Session] Listener error:', error);
     }
   }
-  return currentSnapshot;
+  return snapshot;
 }
 
 function publishCleared() {
   currentSnapshot = null;
   for (const listener of listeners) {
+    if (activeRun || currentSnapshot !== null) break;
     try {
       listener(null);
     } catch (error) {
@@ -341,6 +344,7 @@ async function executeAsrWork(run, adapters) {
       });
       setStatus(run.id, extractMessage);
 
+      throwIfInactive(run);
       const audioBuffer = await adapters.extractAudio(clip, {
         signal: run.controller.signal,
         recognitionSelection: run.spec.recognitionSelection
@@ -359,6 +363,7 @@ async function executeAsrWork(run, adapters) {
           message: '本機 AI 正在推論…'
         });
         setStatus(run.id, `[${index + 1}/${run.spec.clips.length}] 本機 AI 正在推論…`);
+        throwIfInactive(run);
         evidenceSegments = await adapters.transcribe({
           clip,
           audioBuffer,
@@ -385,6 +390,7 @@ async function executeAsrWork(run, adapters) {
           message: '聲音分析完成，正在逐行匹配文字稿時間…'
         });
         setStatus(run.id, '聲音分析完成，正在逐行匹配文字稿時間…');
+        throwIfInactive(run);
         const resolved = await adapters.resolveAlignment?.({
           taskMode: run.spec.taskMode,
           transcript: run.spec.transcript,
@@ -495,13 +501,10 @@ export function onAsrSessionChange(listener) {
 
 /** 建立工作 identity；只供完整 startAsrWork 入口使用。 */
 function startAsrSession(initData = {}) {
-  if (activeRun && !activeRun.controller.signal.aborted && !TERMINAL_STATUSES.has(activeRun.progress.status)) {
-    activeRun.cancelReason = 'replaced';
-    activeRun.controller.abort();
-  }
+  const previous = activeRun;
   const controller = initData.controller || new AbortController();
   const spec = freezeWorkSpec(initData);
-  activeRun = {
+  const run = {
     id: `asr-${Date.now()}-${nextId++}`,
     controller,
     spec,
@@ -529,13 +532,17 @@ function startAsrSession(initData = {}) {
     cancelReason: null,
     startTime: Date.now()
   };
-  return publish(activeRun);
+  activeRun = run;
+  if (previous && !previous.controller.signal.aborted && !TERMINAL_STATUSES.has(previous.progress.status)) {
+    previous.cancelReason = 'replaced';
+    previous.controller.abort();
+  }
+  return { run, snapshot: activeRun === run ? publish(run) : makeSnapshot(run) };
 }
 
 /** 啟動完整辨識工作；module 擁有 orchestration、取消與 exactly-once commit。 */
 export function startAsrWork(initData = {}, adapters = {}) {
-  const snapshot = startAsrSession(initData);
-  const run = activeRun;
+  const { run, snapshot } = startAsrSession(initData);
   let released=false;
   const releaseResources=()=>{
     if(released)return;
@@ -555,7 +562,9 @@ export function startAsrWork(initData = {}, adapters = {}) {
 
 export function setAsrSessionDialogOpen(dialogOpen, expectedId = null) {
   if (!activeRun || (expectedId && activeRun.id !== expectedId)) return false;
-  activeRun.dialogOpen = !!dialogOpen;
+  const requested = !!dialogOpen;
+  if (activeRun.dialogOpen === requested) return true;
+  activeRun.dialogOpen = requested;
   publish(activeRun);
   return true;
 }
@@ -563,8 +572,11 @@ export function setAsrSessionDialogOpen(dialogOpen, expectedId = null) {
 export function cancelActiveAsrSession(expectedId = null) {
   if (!activeRun || (expectedId && activeRun.id !== expectedId)) return null;
   const run = activeRun;
+  if (TERMINAL_STATUSES.has(run.progress.status)) {
+    return currentSnapshot?.id === run.id && currentSnapshot.progress.status === run.progress.status
+      ? currentSnapshot : makeSnapshot(run);
+  }
   run.cancelReason = 'cancelled';
-  if (!run.controller.signal.aborted) run.controller.abort();
   run.progress = {
     ...run.progress,
     status: 'cancelled',
@@ -572,19 +584,27 @@ export function cancelActiveAsrSession(expectedId = null) {
     message: '辨識已取消'
   };
   run.statusText = '辨識已取消';
-  const cancelled = publish(run);
-  activeRun = null;
-  publishCleared();
+  if (!run.controller.signal.aborted) run.controller.abort();
+  const cancelled = activeRun === run ? publish(run) : makeSnapshot(run);
+  if (activeRun === run) {
+    activeRun = null;
+    publishCleared();
+  }
   return cancelled;
 }
 
 export function clearAsrSession(expectedId = null) {
   if (expectedId && activeRun?.id !== expectedId) return false;
-  if (activeRun && !activeRun.controller.signal.aborted && !TERMINAL_STATUSES.has(activeRun.progress.status)) {
-    activeRun.cancelReason = 'cancelled';
-    activeRun.controller.abort();
+  const run = activeRun;
+  // 空狀態的清除是冪等操作；訂閱者同步重入時不能重複發布空快照。
+  if (!run && currentSnapshot === null) return true;
+  if (run && !run.controller.signal.aborted && !TERMINAL_STATUSES.has(run.progress.status)) {
+    run.cancelReason = 'cancelled';
+    run.controller.abort();
   }
-  activeRun = null;
-  publishCleared();
+  if (activeRun === run) {
+    activeRun = null;
+    publishCleared();
+  }
   return true;
 }

@@ -3,6 +3,9 @@ import { composeDeliveryAudioPlan } from './export-job-engine.js';
 import { renderASS } from './formats.js';
 import { secToEncore } from './time.js';
 
+let nextDeliveryRequest = 0;
+const deliveryRequestId = () => `delivery-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${++nextDeliveryRequest}`}`;
+
 /* A delivery submission owns the whole asynchronous attempt. The dialog edits
    the existing DeliveryList, but never implements snapshot, conflict, receipt
    or ACK ordering. Directory/queue effects are the desktop adapter; tests use
@@ -19,6 +22,10 @@ export function freezeExportSubmission(snapshot, {
     ...snapshot, cues, tracks, backgroundLayouts, fps, dropFrame, mediaName,
     canvasW, canvasH, audioProject, defaultAudioLayout, hasCustomRange,
   });
+}
+
+export function formatOverwriteConfirmation(paths) {
+  return `硬碟上已存在同名檔案：\n${paths.join('\n')}\n\n確定要直接覆蓋並繼續匯出嗎？`;
 }
 
 export function exportSourceError(project) {
@@ -88,7 +95,7 @@ function buildExportJobs(submission, list) {
 
 export function createDeliverySubmission({
   list, initialProject, readProject, isCurrent,
-  desktop, confirmOverwrite, onChanged = () => {},
+  desktop, confirmOverwrite, onChanged = () => {}, subscribeInvalidation = null,
 }) {
   if (!list || typeof list.captureSubmissionRows !== 'function') throw new TypeError('交付提交缺少清單');
   if (typeof readProject !== 'function' || typeof isCurrent !== 'function') throw new TypeError('交付提交缺少專案 adapter');
@@ -100,6 +107,16 @@ export function createDeliverySubmission({
   let busy = false;
   let warning = null;
   let conflictGeneration = 0;
+  let cancelled = false;
+  let activeRequest = null;
+
+  function cancel() {
+    if (cancelled) return;
+    cancelled = true;
+    if (activeRequest?.ticket && typeof desktop.cancelDeliveryTargetRequest === 'function') {
+      try { Promise.resolve(desktop.cancelDeliveryTargetRequest(activeRequest.id,activeRequest.ticket)).catch(() => {}); } catch (_) {}
+    }
+  }
 
   const state = () => ({ busy, warning: warning ? structuredClone(warning) : null });
   const publish = accepted => {
@@ -122,14 +139,14 @@ export function createDeliverySubmission({
     if (blocking) return blocking;
     // Freeze paths before the first directory read, even for a live preview.
     const paths = candidate.outPaths();
-    const names = [];
-    for (const { dir, name } of paths) {
+    const names = [], outputPaths = [];
+    for (const { dir, name, path } of paths) {
       if (!dir) continue;
       try {
         const files = await desktop.listDir(dir);
         if (!owns()) return null;
         const existing = files.map(file => (typeof file === 'string' ? file : file.name).toLowerCase());
-        if (existing.includes(name.toLowerCase())) names.push(name);
+        if (existing.includes(name.toLowerCase())) { names.push(name); outputPaths.push(path); }
       } catch {
         if (!owns()) return null;
         return {
@@ -139,7 +156,7 @@ export function createDeliverySubmission({
       }
     }
     return names.length ? {
-      kind: 'overwrite', names,
+      kind: 'overwrite', names, paths: outputPaths,
       message: `警告：硬碟上已存在同名檔案 (${names.join(', ')})，匯出將會直接覆蓋。`,
     } : null;
   }
@@ -164,13 +181,19 @@ export function createDeliverySubmission({
   }
 
   async function submit() {
-    if (!isCurrent()) return { status: 'cancelled', accepted: 0 };
+    if (cancelled || !isCurrent()) return { status: 'cancelled', accepted: 0 };
     if (busy) return { status: 'busy', accepted: 0 };
     busy = true;
     const generation = ++conflictGeneration;
     let accepted = 0;
+    let targetReceipt = null;
+    let requestId = null;
+    let requestTicket = null;
+    const owns = () => !cancelled && isCurrent();
+    let unsubscribe = () => {};
     publish();
     try {
+      if (typeof subscribeInvalidation === 'function') unsubscribe = subscribeInvalidation(cancel) || unsubscribe;
       // No I/O may precede capture of both the project and original row receipt.
       const source = readProject();
       const project = source ? structuredClone(source) : null;
@@ -184,36 +207,63 @@ export function createDeliverySubmission({
         reason = '匯出素材在交付清單開啟後已變更，請重新開啟清單確認交付格式。';
       } else if (!receipt.rows.length) reason = '清單不能為空';
       if (reason) return { status: 'invalid', reason, accepted };
-      if (!isCurrent()) return { status: 'cancelled', accepted };
+      if (!owns()) return { status: 'cancelled', accepted };
       const candidate = frozenList(project, receipt.rows);
-      const issue = await conflicts(candidate, isCurrent);
-      if (!isCurrent()) return { status: 'cancelled', accepted };
+      let issue = await conflicts(candidate, owns);
+      if (!owns()) return { status: 'cancelled', accepted };
+      if (issue?.kind === 'blocking') {
+        setWarning(issue, generation);
+        return { status: 'invalid', reason: issue.submitMessage || issue.message, accepted };
+      }
+      if (typeof desktop.prepareDeliveryTargets === 'function') {
+        if (typeof desktop.beginDeliveryTargetRequest !== 'function') throw new Error('無法建立交付確認工作，請重新啟動程式');
+        requestId = deliveryRequestId();
+        activeRequest = { id:requestId, ticket:null };
+        requestTicket = await desktop.beginDeliveryTargetRequest(requestId);
+        if (typeof requestTicket !== 'string' || !requestTicket) throw new Error('無法建立交付確認工作');
+        activeRequest.ticket = requestTicket;
+        if (!owns()) return { status:'cancelled', accepted };
+        targetReceipt = await desktop.prepareDeliveryTargets(candidate.outPaths().map(item => item.path), requestId, requestTicket);
+        if (!targetReceipt || typeof targetReceipt.id !== 'string' || !Array.isArray(targetReceipt.existing)) throw new Error('無法確認交付目標，請重新送出');
+        if (!owns()) return { status: 'cancelled', accepted };
+        const names = targetReceipt.existing.map(file => String(file).replaceAll('\\','/').split('/').pop());
+        issue = names.length ? { kind:'overwrite', names, paths: targetReceipt.existing.slice(),
+          message:`警告：硬碟上已存在同名檔案 (${names.join(', ')})，匯出將會直接覆蓋。` } : null;
+      }
       setWarning(issue, generation);
-      if (issue?.kind === 'blocking') return { status: 'invalid', reason: issue.submitMessage || issue.message, accepted };
       if (issue?.kind === 'overwrite') {
-        const approved = await confirmOverwrite(issue.names.slice());
-        if (!approved || !isCurrent()) return { status: 'cancelled', accepted };
+        const approved = await confirmOverwrite(issue.paths.slice());
+        if (!approved || !owns()) return { status: 'cancelled', accepted };
       }
       const jobs = buildExportJobs(project, candidate);
       for (let index = 0; index < jobs.length; index++) {
-        if (!isCurrent()) return { status: 'cancelled', accepted };
+        if (!owns()) return { status: 'cancelled', accepted };
         if (!receipt.matches(index)) continue;
         const job = jobs[index];
-        const jobId = await desktop.exportVideo(job);
+        const jobId = await desktop.exportVideo(targetReceipt ? { ...job, deliveryReceipt: targetReceipt.id, deliveryRequestId: requestId, deliveryRequestTicket:requestTicket } : job);
         if (!jobId) return { status: 'cancelled', accepted };
         accepted++;
-        if (!isCurrent()) return { status: 'cancelled', accepted };
+        if (!owns()) return { status: 'cancelled', accepted };
         receipt.removeAccepted(index);
         publish({ jobId, name: job.defaultName });
       }
       return { status: 'submitted', accepted, complete: list.count() === 0 };
     } catch (error) {
+      if (!owns()) return { status: 'cancelled', accepted };
       return { status: 'failed', accepted, error };
     } finally {
+      unsubscribe();
+      if (targetReceipt?.id && typeof desktop.releaseDeliveryTargets === 'function') {
+        try { await desktop.releaseDeliveryTargets(targetReceipt.id); } catch (_) { /* 視窗關閉時由 main 清理。 */ }
+      }
+      if (requestId && requestTicket && typeof desktop.finishDeliveryTargetRequest === 'function') {
+        try { await desktop.finishDeliveryTargetRequest(requestId,requestTicket); } catch (_) { /* sender 銷毀時由 main 清理。 */ }
+      }
+      if (activeRequest?.id === requestId && activeRequest?.ticket === requestTicket) activeRequest = null;
       busy = false;
       publish();
     }
   }
 
-  return Object.freeze({ state, previewConflicts, invalidatePreview, submit });
+  return Object.freeze({ state, previewConflicts, invalidatePreview, submit, cancel });
 }

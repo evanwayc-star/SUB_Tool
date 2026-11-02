@@ -31,6 +31,7 @@ let audioPreview = null;
 const editPreviews = new Set();
 let historyEpoch = 0;
 let projectRestore = null;
+let externalAudioSnapshot = () => State.externalAudioState || [];
 function cancelPreviews(){
   audioPreview?.cancel?.();
   for(const preview of [...editPreviews]) preview.cancel?.();
@@ -86,6 +87,10 @@ function audioProjectForSnapshot(){
 }
 const History = {
   stack:[], hi:-1, max:120,
+  // Project 持有尚未重新連結的來源；History 與存檔必須取同一份純資料。
+  setExternalAudioSnapshotProvider(provider){
+    externalAudioSnapshot=typeof provider==='function'?provider:()=>State.externalAudioState||[];
+  },
   // 即時手勢可改 State 供預覽；背景紀錄只投影被手勢擁有的欄位，保留其他已提交編輯。
   // 結束函式必須在本次 commit 的 record 之前呼叫；reset/restore 會撤銷所有舊擁有者。
   beginPreview(targets, owns=()=>true, cancel=null){
@@ -129,7 +134,10 @@ const History = {
       audioProject:normalizeAudioProject(audioProjectForSnapshot()),externalAudioState,
       fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clips}), {clipGeo:'clips'});
   },
-  snap(){ const {clips,...snapshot}=this.committedSnapshot(); return {...snapshot,clipGeo:clips}; },
+  snap(){ const {clips,...snapshot}=this.committedSnapshot({externalAudioState:externalAudioSnapshot()}); return {...snapshot,clipGeo:clips}; },
+  // Undo/redo and reset replace the editing context; an unrelated new record
+  // may truncate redo by replacing the array without replacing that context.
+  captureOwnership(){ const epoch=historyEpoch; return ()=>epoch===historyEpoch; },
   reset(){
     // 切換基準前先讓原 owner 取消自己的欄位及 runtime；媒體 completion 不呼叫 reset。
     cancelPreviews();
@@ -173,6 +181,16 @@ const History = {
       entry.snap.clipGeo=merged;
     }
     renderHistory();
+  },
+  // A legacy browser project can acquire its first source ID only after the
+  // user relinks its original clip. Replaying that source registration against
+  // each history entry preserves that entry's own routing edits and bus IDs.
+  rebaseRestoredSource(clipId,sourceId,{channels,options={},allocation=null}={}){
+    if(!clipId||!sourceId) return;
+    for(const entry of this.stack){
+      if(!entry.snap.clipGeo?.some(clip=>clip.id===clipId&&clip.audioSourceId===sourceId)) continue;
+      entry.snap.audioProject=registerAudioSource(entry.snap.audioProject,sourceId,channels,options,allocation);
+    }
   },
   record(label){
     const newSnap = this.snap();
@@ -232,12 +250,13 @@ const History = {
   restore(i){
     if(i<0||i>=this.stack.length)return;
     historyEpoch++;
-    audioPreview=null;
-    editPreviews.clear();
-    State.presetEdit=null;
     const d=structuredClone(this.stack[i].snap);
-    // 必須在任何 State mutation 前保存位置；音訊或 duration 還原也可能改變 tlTime。
+    // 必須在取消預覽或任何 State mutation 前保存位置；取消也可能改變 duration。
     emit('media:sequenceWillRestore');
+    // 復原前結束手勢與配線的 runtime，不能只丟棄快照投影；否則指標
+    // 擷取、拖曳狀態或尚在等待呈現的工作會繼續作用於已取代的資料。
+    cancelPreviews();
+    State.presetEdit=null;
     State.cues=d.cues; State.tracks=d.tracks; State.notes=d.notes||[]; syncTrackCount();
     State.videoTracks = (Array.isArray(d.videoTracks)&&d.videoTracks.length) ? d.videoTracks : [{name:'視訊軌 1',visible:true,locked:false}];
     State.audioProject=normalizeAudioProject(d.audioProject);

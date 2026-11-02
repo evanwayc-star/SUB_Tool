@@ -492,8 +492,11 @@ describe('公開 sequence placement 到實際音訊節點',()=>{
     Seq.moveToTrack(right,1);right.offset=0;Seq.resolveOverlaps(right);Seq.recomputeDuration();await Media.requestPresentation(2);
     Media.startElementSources(7,2);expect(video.muted).toBe(true);
     expect(elements.filter(element=>!element.paused).map(element=>element.currentTime)).toEqual([2,7]);
-    const mute=vi.fn(async()=>{}),runtime=activateMpvTransport({mpv:{launch:async()=>({ok:true}),pause:async()=>{},mute}});
-    await runtime.enterMpv({src:'source.mp4'});Media.syncMuteState();expect(mute).toHaveBeenLastCalledWith(true);
+    const mute=vi.fn(async()=>{}),runtime=activateMpvTransport({mpv:{launch:async()=>({ok:true,sourceSessionId:'overlap-source'}),pause:async()=>{},mute}});
+    await runtime.enterMpv({src:'source.mp4'});
+    expect(runtime.ownsNativeSourcePath('source.mp4')).toBe(true);
+    expect(runtime.ownsNativeSourceSession('overlap-source')).toBe(true);
+    Media.syncMuteState();expect(mute).toHaveBeenLastCalledWith(true);
   });
   it('in-page波形驗收比較實际播放來源窗口，無法由來源0錯寫騙過',()=>{
     const clip=primary();track('element');clip.offset=20;Media.playing=true;video.currentTime=5;Wave.initLive();

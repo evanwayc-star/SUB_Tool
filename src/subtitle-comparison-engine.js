@@ -199,9 +199,11 @@ export function createSubtitleCompareSession({
   let revision = 0;
   let currentSnapshot = null;
   let selection = null;
+  let currentPlan = null;
 
   function payload() {
     const plan = buildPlan(currentSnapshot, selection || {}, { revision });
+    currentPlan = plan;
     selection = plan.selection ? { ...plan.selection, checks: { ...plan.checks } } : null;
     return { revision, plan };
   }
@@ -232,6 +234,7 @@ export function createSubtitleCompareSession({
     isOpen = false;
     currentSnapshot = null;
     selection = null;
+    currentPlan = null;
     bridge.close();
     return true;
   }
@@ -253,6 +256,10 @@ export function createSubtitleCompareSession({
 
     if (command.type === 'seek') {
       if (!cueExists(command.cueId)) return failed('unknown-cue');
+      // 選軌也會改變顯示列，但不遞增 revision，讓同一批快速選取仍可連續送出。
+      // 因此除了快照 revision，操作還須核對目前計畫中的列與配對。
+      if (!currentPlan?.rows.some(row => row.left?.id === command.cueId || row.right?.id === command.cueId))
+        return failed('stale-row');
       return onSeek({ cueId: command.cueId, revision }) === false
         ? failed('seek-rejected')
         : { accepted: true, revision };
@@ -260,6 +267,10 @@ export function createSubtitleCompareSession({
 
     if (command.type === 'match-style') {
       if (!cueExists(command.targetCueId) || !cueExists(command.sourceCueId)) return failed('unknown-cue');
+      if (!currentPlan?.rows.some(row =>
+        (row.left?.id === command.targetCueId && row.right?.id === command.sourceCueId)
+        || (row.right?.id === command.targetCueId && row.left?.id === command.sourceCueId)))
+        return failed('stale-pair');
       return onMatchStyle({ targetCueId: command.targetCueId, sourceCueId: command.sourceCueId, revision }) === false
         ? failed('match-style-rejected')
         : { accepted: true, revision };

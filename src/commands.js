@@ -296,7 +296,7 @@ async function captureAndSaveScreenshot(withTimecode){
   const { setStatus }=await import('./ui.js');
   if(!State.duration&&!State.mediaPath){showToast('尚未載入影音');return;}
   const dir=screenshotDir({projectDir:getProjectDir(),mediaPath:State.mediaPath});
-  let fullPath='';
+  let fullPath='', reservationToken='';
   try{
     const {capturePreviewFrame}=await import('./video-renderer.js');
     const snapshot=await capturePreviewFrame({
@@ -308,8 +308,8 @@ async function captureAndSaveScreenshot(withTimecode){
     let name=fallbackScreenshotName(snapshot.time,suffix);
     if(dir&&IS_DESKTOP&&DESK?.reserveScreenshotPath){
       const reserved=await DESK.reserveScreenshotPath(dir,suffix);
-      if(!reserved?.path) throw new Error('無法保留截圖檔名');
-      fullPath=reserved.path;name=reserved.name;
+      if(!reserved?.path || !reserved.token) throw new Error('無法保留截圖檔名');
+      fullPath=reserved.path;name=reserved.name;reservationToken=reserved.token;
     }
     const canvas=snapshot.canvas;
     if(withTimecode){
@@ -328,7 +328,7 @@ async function captureAndSaveScreenshot(withTimecode){
         reader.onloadend=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('無法讀取截圖'));
         reader.readAsDataURL(blob);
       });
-      if(!await DESK.writeScreenshot(fullPath,b64)) throw new Error('截圖儲存失敗');
+      if(!await DESK.writeScreenshot(fullPath,b64,reservationToken)) throw new Error('截圖儲存失敗');
     }else{
       const url=URL.createObjectURL(blob);
       try{const anchor=document.createElement('a');anchor.href=url;anchor.download=name;anchor.click();}
@@ -340,6 +340,6 @@ async function captureAndSaveScreenshot(withTimecode){
   }catch(error){
     console.error('[screenshot]',error);showToast('截圖失敗：'+(error.message||String(error)));
   }finally{
-    if(fullPath) await DESK?.releaseScreenshotPath?.(fullPath).catch(()=>{});
+    if(fullPath) await DESK?.releaseScreenshotPath?.(fullPath,reservationToken).catch(()=>{});
   }
 }

@@ -102,6 +102,75 @@ describe('WebCodecs public preview frame admission',()=>{
     expect(render.height).toBe(0);
   });
 
+  it('混合疊層圖片暫時讀取失敗後，播放或跳轉仍依退避時間重試並恢復完整畫面',async()=>{
+    const images=[];
+    let now=0,available=false;
+    vi.spyOn(performance,'now').mockImplementation(()=>now);
+    vi.stubGlobal('Image',class {
+      constructor(){this.naturalWidth=640;this.naturalHeight=360;images.push(this);}
+      set src(value){this.value=value;if(value)queueMicrotask(()=>available?this.onload?.():this.onerror?.());}
+      get src(){return this.value;}
+    });
+    fixture.clips.splice(0,fixture.clips.length,
+      {id:'image',type:'image',web:{url:'blob:recovering-still'},in:0,out:20,offset:100,vtrack:0},
+      {id:'video',web:{url:'a.mp4'},in:0,out:20,offset:100,vtrack:1});
+    await loadFirstFrame();
+    expect(fixture.publish.drawImage).not.toHaveBeenCalled();
+    expect(fixture.takeover).toBe(false);
+    expect(images).toHaveLength(1);
+
+    for(const time of [103.04,104,103,105]){
+      fixture.time=time;now=999;await loadFirstFrame();
+    }
+    expect(images).toHaveLength(1);
+    expect(fixture.publish.drawImage).not.toHaveBeenCalled();
+
+    now=1000;await loadFirstFrame();
+    expect(images).toHaveLength(2);
+    expect(fixture.publish.drawImage).not.toHaveBeenCalled();
+    available=true;now=2999;
+    for(let frame=0;frame<30;frame++) await loadFirstFrame();
+    expect(images).toHaveLength(2);
+    now=3000;await loadFirstFrame();
+    expect(images).toHaveLength(3);
+    expect(fixture.publish.drawImage).toHaveBeenCalled();
+    expect(fixture.ctx.drawImage.mock.calls.some(([source])=>source===images[2])).toBe(true);
+    expect(fixture.takeover).toBe(true);
+    expect(fixture.snapshot).toMatchObject({imagesComposited:true,imageIds:['image']});
+  });
+
+  it.each(['replace','remove','unload'])('圖片重試等待期間 %s，釋放舊載體且不接受其遲到回覆',async action=>{
+    const images=[];
+    let now=0,available=false;
+    vi.spyOn(performance,'now').mockImplementation(()=>now);
+    vi.stubGlobal('Image',class {
+      constructor(){this.naturalWidth=640;this.naturalHeight=360;images.push(this);}
+      set src(value){this.value=value;if(value)queueMicrotask(()=>available?this.onload?.():this.onerror?.());}
+      get src(){return this.value;}
+    });
+    const imageClip={id:'image',type:'image',web:{url:'blob:old-still'},in:0,out:20,offset:100,vtrack:0};
+    fixture.clips.splice(0,fixture.clips.length,imageClip,
+      {id:'video',web:{url:'a.mp4'},in:0,out:20,offset:100,vtrack:1});
+    await loadFirstFrame();
+    const lateError=images[0].onerror,lateLoad=images[0].onload;
+    available=true;now=500;
+    if(action==='replace')imageClip.web={url:'blob:new-still'};
+    if(action==='remove')fixture.clips.shift();
+    if(action==='unload')fixture.sequenceOn=false;
+    await loadFirstFrame();
+    expect(images[0].src).toBe('');
+    expect(images[0].onload).toBeNull();expect(images[0].onerror).toBeNull();
+    lateError();lateLoad();
+    now=30000;await loadFirstFrame();
+    expect(images).toHaveLength(action==='replace'?2:1);
+    if(action==='replace'){
+      expect(images[1].src).toBe('blob:new-still');
+      expect(fixture.publish.drawImage).toHaveBeenCalled();
+      expect(fixture.ctx.drawImage.mock.calls.some(([source])=>source===images[1])).toBe(true);
+    }
+    expect(WCPreview._images.has('blob:old-still')).toBe(false);
+  });
+
   it('整檔 payload 仍由同 URL 健康層共用，所有層終止失敗後不再持有舊 cache',async()=>{
     const decoders=[],HealthyDecoder=globalThis.VideoDecoder;
     class Decoder extends HealthyDecoder{

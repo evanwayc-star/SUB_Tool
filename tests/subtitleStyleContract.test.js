@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest';
 import {
   STYLE_DEFAULTS, styleToCss, styleToAssStyleLine, hexToAssColor, ASS_PLAY_RES,
   assJoinLines, assJoinVertical, cueAssTags, effectiveSubtitleLineSpacing,
-  subtitleBackgroundGap, verticalAssCols,
+  subtitleBackgroundGap, subtitleBackgroundCssMetrics, verticalAssCols,
 } from '../src/substyle.js';
 
 const style = (over = {}) => ({ ...STYLE_DEFAULTS, ...over });
@@ -52,7 +52,7 @@ function cssProp(css, prop) {
 const MATRIX = [
   { label: '預設', over: {} },
   { label: '大字級', over: { fontSize: 96 } },
-  { label: '極小字級（CSS 有下限 12px）', over: { fontSize: 8 } },
+  { label: '舊專案的極小字級仍按畫面比例呈現', over: { fontSize: 8 } },
   { label: '非白字色', over: { color: '#ffee00' } },
   { label: '不粗體', over: { bold: false } },
   { label: '斜體', over: { italic: true } },
@@ -81,8 +81,8 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
       /* 字級是三路一致最容易靜默壞掉的一項：libass 把 Fontsize 當 pt，
          CSS 是 px，96dpi 下 1pt = 4/3 px，所以預覽要乘 0.75 才同構。
          這個係數若被改掉，畫面看起來仍然「有字」，但匯出字級會整個不同。 */
-      it('字級：CSS px = round(ASS Fontsize × 0.75)，下限 12px', () => {
-        const expected = Math.max(12, Math.round(Number(ass.Fontsize) * 0.75));
+      it('字級：CSS px = ASS Fontsize × 0.75，不加入固定預覽像素下限', () => {
+        const expected = Number(ass.Fontsize) * 0.75;
         expect(cssProp(css, 'font-size')).toBe(`${expected}px`);
       });
 
@@ -139,11 +139,10 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
           expect(cssProp(css, 'background')).toBeNull();
           expect(Number(ass.Outline)).toBe(st.outline);
           if (st.outline > 0) {
-            const fs = Math.max(12, Math.round(st.fontSize * 0.75));
             expect(cssProp(css, '-webkit-text-stroke'))
               .toBe(`${(st.outline * 2).toFixed(1)}px ${st.outlineColor}`);
             expect(ass.OutlineColour).toBe(hexToAssColor(st.outlineColor));
-            expect(fs).toBeGreaterThan(0);
+            expect(parseFloat(cssProp(css,'font-size'))).toBeGreaterThan(0);
           } else {
             expect(cssProp(css, '-webkit-text-stroke')).toBeNull();
           }
@@ -187,9 +186,35 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
     const fontsizeAt = () => assFields(st).Fontsize;
     const before = fontsizeAt();
     expect(cssProp(styleToCss(st, 1), 'font-size')).toBe('45px');
-    expect(cssProp(styleToCss(st, 0.5), 'font-size')).toBe('23px');
+    expect(cssProp(styleToCss(st, 0.5), 'font-size')).toBe('22.5px');
     expect(fontsizeAt()).toBe(before);
     expect(Number(before)).toBe(60);
+  });
+
+  it.each([
+    { fontSize:10, cssFont:7.5, padX:3.75, padY:1.5 },
+    { fontSize:40, cssFont:30, padX:15, padY:6 },
+    { fontSize:60, cssFont:45, padX:22.5, padY:9 },
+    { fontSize:81, cssFont:60.75, padX:30.375, padY:12.15 },
+    { fontSize:300, cssFont:225, padX:112.5, padY:45 },
+  ])('字級 $fontSize 的文字與底框隨畫面高度等比縮小，不設固定預覽像素下限', ({fontSize,cssFont,padX,padY}) => {
+    const st=style({fontSize,bgBox:true,outline:0,shadow:0,lineSpacing:2});
+    for(const ratio of [1,0.5,0.25,0.125]){
+      const metrics=subtitleBackgroundCssMetrics(st,ratio);
+      expect(metrics.fontSize).toBeCloseTo(cssFont*ratio,8);
+      expect(metrics.lineHeight).toBeCloseTo(cssFont*2*ratio,8);
+      expect(metrics.padX).toBeCloseTo(padX*ratio,8);
+      expect(metrics.padY).toBeCloseTo(padY*ratio,8);
+      const css=styleToCss(st,ratio);
+      expect(parseFloat(cssProp(css,'font-size'))).toBeCloseTo(cssFont*ratio,8);
+      const padding=cssProp(css,'padding').split(' ').map(parseFloat);
+      const margin=cssProp(css,'margin').split(' ').map(parseFloat);
+      expect(padding[0]).toBeCloseTo(padY*ratio,8);
+      expect(padding[1]).toBeCloseTo(padX*ratio,8);
+      expect(margin[0]).toBeCloseTo(-padY*ratio,8);
+      expect(margin[1]).toBeCloseTo(-padX*ratio,8);
+    }
+    expect(Number(assFields(st).Fontsize)).toBe(fontSize);
   });
 
   it('ASS Style 行的欄位數固定為 23（欄位錯位會讓 libass 整行忽略）', () => {

@@ -5,6 +5,7 @@
 
 'use strict';
 
+const fs = require('node:fs');
 const {
   normalizeLimiterOptions,
   normalizeAudioLimiterSpec,
@@ -29,11 +30,26 @@ function createAudioNormalizationRuntime({
   createTempPath,
   execute,
   removeFile,
+  produceTemporaryFile = null,
+  fingerprintSource = null,
   probe = null,
 } = {}) {
   if (typeof createTempPath !== 'function' || typeof execute !== 'function') {
     throw new TypeError('音訊平衡化 runtime 缺少必要 adapter');
   }
+  const sourceChanged = cause => Object.assign(new Error('母素材在音訊處理期間變更或無法核對', { cause }),
+    { code: 'AUDIO_SOURCE_CHANGED' });
+  const captureSource = async src => {
+    if (!fingerprintSource) return null;
+    try {
+      const value = await fingerprintSource(src);
+      if (typeof value !== 'string' || !value) throw new Error('母素材證據無效');
+      return value;
+    } catch (error) { throw sourceChanged(error); }
+  };
+  const verifySource = async (src, expected) => {
+    if (expected !== null && await captureSource(src) !== expected) throw sourceChanged();
+  };
 
   return {
     /**
@@ -44,6 +60,7 @@ function createAudioNormalizationRuntime({
         throw new TypeError('缺少有效的來源音訊路徑');
       }
 
+      const sourceEvidence = fingerprintSource ? await captureSource(src) : null;
       let stderr = '';
       await execute([
           '-hide_banner',
@@ -59,6 +76,7 @@ function createAudioNormalizationRuntime({
             stderr += chunk;
           },
       });
+      if (sourceEvidence !== null) await verifySource(src, sourceEvidence);
       const report = parseVolumeAnalysis(stderr);
       if (!report) throw new Error('音訊量測未產生有效的聲量資料');
       return report;
@@ -70,26 +88,49 @@ function createAudioNormalizationRuntime({
       }
 
       const options = normalizeLimiterOptions(rawOptions);
-      const outWav = createTempPath('wav');
-
       const sourceStream = rawOptions.sourceStream ?? 0;
       if (!Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream > 255) throw new TypeError('無效的來源音訊串流');
       const check = () => { if (signal?.aborted) { const error = new Error('音訊工作已取消'); error.name = 'AbortError'; throw error; } };
+      // Do not register an output name for a request that can never start.
+      check();
+      const outWav = createTempPath('wav');
+      let ownedOutput = null;
+      let sourceEvidence = null;
+      const unsafe = () => Object.assign(new Error('音訊暫存輸出檔案身分已變更'), { code: 'UNSAFE_NORMALIZATION_OUTPUT' });
+      const verifyOutput = () => {
+        if (!ownedOutput) return;
+        let current, opened;
+        try { current = fs.lstatSync(outWav, { bigint: true }); opened = fs.fstatSync(ownedOutput.fd, { bigint: true }); }
+        catch (_) { throw unsafe(); }
+        if (!current.isFile() || current.isSymbolicLink() || !opened.isFile()
+          || current.dev !== ownedOutput.owner.dev || current.ino !== ownedOutput.owner.ino
+          || opened.dev !== ownedOutput.owner.dev || opened.ino !== ownedOutput.owner.ino) throw unsafe();
+      };
       const run = async (args, executionOptions) => {
         check();
+        if (sourceEvidence !== null) { await verifySource(src, sourceEvidence); check(); }
+        verifyOutput();
         let child;
         const abort = () => child?.kill?.();
         signal?.addEventListener('abort', abort, { once: true });
         try {
-          const result = await execute(args, { ...executionOptions, onProcess: process => { child = process; if (signal?.aborted) abort(); } });
+          const writesOutput = ownedOutput && args.at(-1) === outWav;
+          const actualArgs = writesOutput ? [...args.slice(0, -1), '-f', 'wav', 'fd:'] : args;
+          const result = await execute(actualArgs, { ...executionOptions,
+            ...(writesOutput ? { outputDescriptor: ownedOutput.fd } : {}),
+            onProcess: process => { child = process; if (signal?.aborted) abort(); } });
           check();
+          if (sourceEvidence !== null) { await verifySource(src, sourceEvidence); check(); }
+          verifyOutput();
           return result;
         } finally { signal?.removeEventListener('abort', abort); }
       };
-      try {
+      const perform = async () => { try {
         check();
+        if (fingerprintSource) { sourceEvidence = await captureSource(src); check(); }
         const media = typeof probe === 'function' ? await probe(src, { signal }) : null;
         check();
+        if (sourceEvidence !== null) { await verifySource(src, sourceEvidence); check(); }
         // WAV 沒有母素材的容器時間戳；先完成母素材整段的聲量處理，再把
         // 輸出歸回影片來源第零秒，供原有片段 in/out 與 processed 預覽使用。
         // 已對齊的 processed WAV 探測值為零，不會重複移動原點。
@@ -132,6 +173,7 @@ function createAudioNormalizationRuntime({
             pass1Succeeded = true;
           } catch (err) {
             check();
+            if (['UNSAFE_NORMALIZATION_OUTPUT', 'AUDIO_SOURCE_CHANGED'].includes(err?.code)) throw err;
             // 若 Pass 1 執行失敗，記錄警告並嘗試單遍處理
             console.warn('[audio-norm] Pass 1 分析失敗，退回單遍模式：', err);
           }
@@ -165,10 +207,6 @@ function createAudioNormalizationRuntime({
               },
             });
 
-            if (typeof onProgress === 'function') {
-              onProgress({ pct: 100, stage: 'done', label: '完成' });
-            }
-
             return {
               outputPath: outWav,
               isSilence: true,
@@ -199,10 +237,6 @@ function createAudioNormalizationRuntime({
               }
             },
           });
-
-          if (typeof onProgress === 'function') {
-            onProgress({ pct: 100, stage: 'done', label: '完成' });
-          }
 
           return {
             outputPath: outWav,
@@ -235,10 +269,6 @@ function createAudioNormalizationRuntime({
           },
         });
 
-        if (typeof onProgress === 'function') {
-          onProgress({ pct: 100, stage: 'done', label: '完成' });
-        }
-
         return {
           outputPath: outWav,
           isSilence: false,
@@ -246,10 +276,31 @@ function createAudioNormalizationRuntime({
           options,
         };
       } catch (error) {
-        if (typeof removeFile === 'function') { try { await removeFile(outWav); } catch (_) {} }
+        if (!produceTemporaryFile && typeof removeFile === 'function') { try { await removeFile(outWav); } catch (_) {} }
         check();
         throw error;
-      }
+      } };
+      let result;
+      if (!produceTemporaryFile) result = await perform();
+      else await produceTemporaryFile(outWav, async (_file, owner) => {
+        let fd;
+        try {
+          const before = fs.lstatSync(outWav, { bigint: true });
+          if (!owner || !before.isFile() || before.isSymbolicLink()
+            || before.dev !== owner.dev || before.ino !== owner.ino) throw unsafe();
+          fd = fs.openSync(outWav, 'r+');
+          ownedOutput = { fd, owner };
+          verifyOutput();
+          result = await perform();
+          check();
+          verifyOutput();
+        } finally {
+          ownedOutput = null;
+          if (fd !== undefined) fs.closeSync(fd);
+        }
+      });
+      if (typeof onProgress === 'function') onProgress({ pct: 100, stage: 'done', label: '完成' });
+      return result;
     },
   };
 }

@@ -303,7 +303,7 @@ export function createMediaPresentationSession(options = {}) {
     if (timeline.hasSequence?.()) {
       clip = timeline.clipAt?.(targetTime) || null;
       if (!clip) {
-        timeline.enterGap?.(targetTime);
+        timeline.enterGap?.(targetTime,{signal,owns:isLatestRequest});
         const committed = commitIfLatest(targetTime);
         return { presentedTime: committed, source: 'synthetic' };
       }
@@ -581,10 +581,13 @@ export class PlaybackSyncEngine {
   seqTick() {
     const { clock, sequence, audio, actions } = this.port;
     if (!clock.isPlaying() || clock.isSwitching() || clock.presenterMoving() === false) return;
+    const ownsTarget = clock.captureOwnership?.() || (() => true);
+    const current = () => ownsTarget() && clock.isPlaying() && !clock.isSwitching() && clock.presenterMoving() !== false;
 
     if (sequence.audioOnly()) {
       const time = clock.timelineTime();
       this._syncExternalElementActivity(time);
+      if (!current()) return;
       if (time >= Math.max(0, sequence.duration()) - 0.02) {
         actions.pause();
         actions.seek(sequence.duration());
@@ -594,18 +597,24 @@ export class PlaybackSyncEngine {
     if (!sequence.enabled()) return;
 
     const time = clock.timelineTime();
-    if (!sequence.inGap() && !sequence.activeClip() && !sequence.clipAt(time)) this._enterGap(time);
-    this._syncExternalElementActivity(time);
+    if (!sequence.inGap() && !sequence.activeClip() && !sequence.clipAt(time)) this._enterGap(time, current);
+    if (!current()) return;
 
     const videoClips = sequence.videoClips();
     const onlyClip = videoClips[0];
     if (videoClips.length === 1 && onlyClip && !sequence.inGap()
       && onlyClip.offset === 0 && onlyClip.in === 0
       && !onlyClip.reverse && !(Number(onlyClip.speed)>0&&Number(onlyClip.speed)!==1)
-      && Math.abs(onlyClip.out - onlyClip.dur) < 0.05
-      && sequence.activeClipId() === onlyClip.id) return;
+      // 容器捨入只容許 ULP 等級誤差，不能把實際裁掉的一格當成完整片段。
+      && Math.abs(onlyClip.out - onlyClip.dur) <= Number.EPSILON * Math.max(1, Math.abs(onlyClip.dur)) * 4
+      && sequence.activeClipId() === onlyClip.id) {
+      this._syncExternalElementActivity(time);
+      return;
+    }
 
     if (sequence.inGap()) {
+      this._syncExternalElementActivity(time);
+      if (!current()) return;
       const hit = sequence.clipAt(time);
       if (hit) {
         actions.ensureClip(hit, sequence.sourceTime(time, hit), true);
@@ -617,58 +626,65 @@ export class PlaybackSyncEngine {
 
     const clip = sequence.activeClip();
     if (!clip) {
+      this._syncExternalElementActivity(time);
+      if (!current()) return;
       const hit = sequence.clipAt(time);
       if (hit) actions.ensureClip(hit, sequence.sourceTime(time, hit), true);
-      else this._enterGap(time);
+      else this._enterGap(time, current);
       return;
     }
 
-    const overlapKey = sequence.clipsAt(time)
-      .filter(item => item.type !== 'image')
-      .map(item => item.id)
-      .join('|');
+    const end = sequence.clipEnd(clip);
+    if (time >= end - 0.02) {
+      if (!this._continueAtEnd(clip, current)) {
+        actions.pause();
+        if (ownsTarget()) actions.seek(end);
+      }
+      return;
+    }
+
+    const overlapKey = this.overlapKeyAt(time);
     if (overlapKey !== actions.overlapKey()) {
       actions.setOverlapKey(overlapKey);
       actions.applyClipAudio(clip, time);
+      if (!current() || sequence.activeClip() !== clip) return;
       actions.startElementSources(clock.sourceTime(), time);
+      if (!current() || sequence.activeClip() !== clip) return;
       actions.stopBufferSources();
+      if (!current() || sequence.activeClip() !== clip) return;
       if (audio.tracks().some(track => track.kind === 'buffer' && !track._srcHidden)) {
         actions.startBufferSources(clock.sourceTime());
       }
-    }
-
-    const end = sequence.clipEnd(clip);
-    if (time < end - 0.02) return;
-    const next = sequence.clipAt(end + 0.001);
-    if (next) actions.ensureClip(next, sequence.sourceTime(end, next), true);
-    else if (sequence.nextAfter(end)) this._enterGap(end);
-    else if (sequence.duration() > end + 0.001) {
-      this._enterGap(end);
-      actions.startElementSources(end, end);
     } else {
-      actions.pause();
-      actions.seek(end);
+      // 同一個 tick 可能同時跨過外音與影片疊合邊界；後者會啟動
+      // 全部 element，不能先按舊配線啟動外音再對同一批聲音重定位。
+      this._syncExternalElementActivity(time);
     }
+    if (!current() || sequence.activeClip() !== clip) return;
+
   }
 
   seqContinueAtEnd() {
-    const { clock, sequence, actions } = this.port;
+    const { clock, sequence } = this.port;
     if (!sequence.enabled() || !clock.isPlaying() || clock.isSwitching()) return false;
     const clip = sequence.activeClip();
     if (!clip) return false;
+    const ownsTarget = clock.captureOwnership?.() || (() => true);
+    const current = () => ownsTarget() && clock.isPlaying() && !clock.isSwitching();
+    return this._continueAtEnd(clip, current);
+  }
+
+  _continueAtEnd(clip, current) {
+    const { sequence, actions } = this.port;
     const end = sequence.clipEnd(clip);
     const next = sequence.clipAt(end + 0.001);
     if (next) {
       actions.ensureClip(next, sequence.sourceTime(end, next), true);
       return true;
     }
-    if (sequence.nextAfter(end)) {
-      this._enterGap(end);
-      return true;
-    }
-    if (sequence.duration() > end + 0.001) {
-      this._enterGap(end);
-      actions.startElementSources(end, end);
+    if (sequence.nextAfter(end) || sequence.duration() > end + 0.001) {
+      this._enterGap(end, current);
+      if (current()) actions.startElementSources(end, end);
       return true;
     }
     return false;
@@ -678,13 +694,27 @@ export class PlaybackSyncEngine {
     this._externalActivityKey = null;
   }
 
-  _enterGap(time) {
-    this.port.actions.enterGap(time);
-    this.invalidateExternalActivity();
+  // 同一呈現位置的作用中影片集合，是起播與後續 tick 共用的音訊活動證據。
+  overlapKeyAt(time) {
+    return this.port.sequence.clipsAt(time)
+      .filter(item => item.type !== 'image')
+      .map(item => item.id)
+      .join('|');
   }
 
-  _syncExternalElementActivity(time) {
-    const { clock, audio, actions } = this.port;
+  // 起播端已依同一時間軸位置啟動外音；記下該狀態，避免下一 tick
+  // 把剛開始播放的元素再次定位。之後邊界或配線變動仍由 tick 偵測。
+  markExternalActivity(time) {
+    this._externalActivityKey = this._externalActivity(time).join('|');
+  }
+
+  _enterGap(time, owns = () => true) {
+    this.port.actions.enterGap(time, owns);
+    if (owns()) this.invalidateExternalActivity();
+  }
+
+  _externalActivity(time) {
+    const { audio } = this.port;
     const active = [];
     for (const track of audio.tracks()) {
       if (track.kind !== 'element' || !track.el) continue;
@@ -692,6 +722,12 @@ export class PlaybackSyncEngine {
       if (!source.startsWith('ext-')) continue;
       active.push(`${source}:${!track._srcHidden && audio.externalSourceTime(source, time) != null ? '1' : '0'}`);
     }
+    return active;
+  }
+
+  _syncExternalElementActivity(time) {
+    const { clock, actions } = this.port;
+    const active = this._externalActivity(time);
     const key = active.join('|');
     if (!active.length && this._externalActivityKey == null) {
       this._externalActivityKey = key;

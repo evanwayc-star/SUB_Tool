@@ -203,6 +203,30 @@ describe('最近開啟選單', () => {
     expect(projectRows()[0].textContent).toContain('C.subtool');
   });
 
+  it('開啟失敗時提示保留清單，檔案恢復後可使用相同項目重試', async () => {
+    openRecentProject.mockResolvedValueOnce(null).mockResolvedValueOnce({path:'D:/proj/B.subtool',b64:'YQ=='});
+    initRecentProjects();
+    await vi.waitFor(()=>expect(projectRows()).toHaveLength(2));
+    projectRows()[1].click();
+    await vi.waitFor(()=>expect(ui.showToast).toHaveBeenCalledWith(expect.stringContaining('確認檔案或儲存裝置後重試')));
+    await vi.waitFor(()=>expect(projectRows()).toHaveLength(2));
+    projectRows()[1].click();
+    const {Project}=await import('../src/project.js');
+    await vi.waitFor(()=>expect(Project.loadDesktop).toHaveBeenCalledWith({path:'D:/proj/B.subtool',b64:'YQ=='}));
+    expect(openRecentProject.mock.calls).toEqual([['recent-b'],['recent-b']]);
+  });
+
+  it('取消未儲存變更確認時不顯示開檔錯誤', async () => {
+    const {confirmDiscardUnsaved}=await import('../src/project.js');
+    confirmDiscardUnsaved.mockResolvedValueOnce(false);
+    initRecentProjects();
+    await vi.waitFor(()=>expect(projectRows()).toHaveLength(2));
+    projectRows()[1].click();
+    await vi.waitFor(()=>expect(confirmDiscardUnsaved).toHaveBeenCalled());
+    expect(openRecentProject).not.toHaveBeenCalled();
+    expect(ui.showToast).not.toHaveBeenCalled();
+  });
+
   it('檔案已不在的那筆標灰但仍可點', async () => {
     initRecentProjects();
     await vi.waitFor(() => expect(projectRows()).toHaveLength(2));

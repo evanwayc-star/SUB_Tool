@@ -5,7 +5,7 @@ import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn(), layoutTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn(), getNotesGeneralFileData: vi.fn(), getNotesEdiusFileData: vi.fn() }));
 
-let Project, Media, State, History, showExportVideoDialog, closeModal, desk;
+let Project, Media, State, History, showExportVideoDialog, openModal, closeModal, desk;
 const b64 = data => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(JSON.stringify(data), 'utf16le')]).toString('base64');
 const image = (name, offset, vtrack = 0) => ({
   id: name, name, path: `C:/source/${name}.png`, type: 'image',
@@ -31,7 +31,7 @@ beforeAll(async () => {
   ({ Project } = await import('../src/project.js'));
   ({ History } = await import('../src/history.js'));
   ({ showExportVideoDialog } = await import('../src/subio.js'));
-  ({ closeModal } = await import('../src/ui.js'));
+  ({ openModal, closeModal } = await import('../src/ui.js'));
 });
 beforeEach(() => {
   document.getElementById('modalBody').innerHTML = '';
@@ -59,6 +59,54 @@ async function submitDelivery() {
   directory.value = 'C:/delivery'; directory.dispatchEvent(new Event('input', { bubbles: true }));
   document.getElementById('evSubmitBtn').click();
 }
+
+it.each(['關閉','取代','切換工作區'])('真實交付視窗在目標驗證期間%s時立即取消請求',async action=>{
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  desk.beginDeliveryTargetRequest=vi.fn(async()=> 'modal-ticket');
+  desk.prepareDeliveryTargets=vi.fn(()=>gate);
+  desk.cancelDeliveryTargetRequest=vi.fn(async()=>true);
+  desk.finishDeliveryTargetRequest=vi.fn(async()=>true);
+  desk.releaseDeliveryTargets=vi.fn(async()=>true);
+  try{
+    await Project.loadDesktop({b64:b64({...projectData(),exportOut:5})});
+    await showExportVideoDialog();await submitDelivery();
+    await vi.waitFor(()=>expect(desk.prepareDeliveryTargets).toHaveBeenCalledOnce());
+    const requestId=desk.prepareDeliveryTargets.mock.calls[0][1];
+    if(action==='關閉')closeModal();
+    else if(action==='取代')openModal('另一個視窗','',[]);
+    else void Project.startNewProject(async()=>false);
+    expect(desk.cancelDeliveryTargetRequest).toHaveBeenCalledWith(requestId,'modal-ticket');
+    expect(desk.exportVideo).not.toHaveBeenCalled();
+    release({id:'late-receipt',existing:[]});
+    await vi.waitFor(()=>expect(desk.finishDeliveryTargetRequest).toHaveBeenCalledWith(requestId,'modal-ticket'));
+    expect(desk.releaseDeliveryTargets).toHaveBeenCalledWith('late-receipt');
+    expect(desk.exportVideo).not.toHaveBeenCalled();
+  }finally{
+    release({id:'late-receipt',existing:[]});
+    delete desk.beginDeliveryTargetRequest;delete desk.prepareDeliveryTargets;delete desk.cancelDeliveryTargetRequest;
+    delete desk.finishDeliveryTargetRequest;delete desk.releaseDeliveryTargets;
+  }
+});
+
+it('真實交付視窗在等待 ticket 時關閉，延遲回覆只結束請求不開始目的檔讀取',async()=>{
+  let release;const gate=new Promise(resolve=>{release=resolve;});
+  desk.beginDeliveryTargetRequest=vi.fn(()=>gate);desk.prepareDeliveryTargets=vi.fn();
+  desk.cancelDeliveryTargetRequest=vi.fn();desk.finishDeliveryTargetRequest=vi.fn(async()=>true);
+  try{
+    await Project.loadDesktop({b64:b64({...projectData(),exportOut:5})});
+    await showExportVideoDialog();await submitDelivery();
+    await vi.waitFor(()=>expect(desk.beginDeliveryTargetRequest).toHaveBeenCalledOnce());
+    const id=desk.beginDeliveryTargetRequest.mock.calls[0][0];
+    closeModal();release('delayed-ticket');
+    await vi.waitFor(()=>expect(desk.finishDeliveryTargetRequest).toHaveBeenCalledWith(id,'delayed-ticket'));
+    expect(desk.prepareDeliveryTargets).not.toHaveBeenCalled();
+    expect(desk.exportVideo).not.toHaveBeenCalled();
+  }finally{
+    release('delayed-ticket');delete desk.beginDeliveryTargetRequest;delete desk.prepareDeliveryTargets;
+    delete desk.cancelDeliveryTargetRequest;delete desk.finishDeliveryTargetRequest;
+  }
+});
 
 it.each(['range', 'hidden'])('未復原圖片不影響所選交付（%s）時，可送出正確內容與時長', async mode => {
   const data = projectData();

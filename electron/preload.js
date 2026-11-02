@@ -10,6 +10,10 @@ const isProjectFilePath = filePath => typeof filePath === 'string' && /\.(subtoo
 const MAX_SPEECH_WAV_BYTES = 20_000_000;
 const isSpeechCompressionRequestId = value => typeof value === 'string' && /^speech-[A-Za-z0-9_-]{1,96}$/.test(value);
 const isVocalWaveRequestId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
+const audioSourceFingerprint = source => {
+  if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
+  return ipcRenderer.invoke('audio:vocal-wave-fingerprint', source);
+};
 
 contextBridge.exposeInMainWorld('subtool', {
   isDesktop: true,
@@ -53,6 +57,11 @@ contextBridge.exposeInMainWorld('subtool', {
   importDirectory: () => ipcRenderer.invoke('dialog:importDirectory'),
   importFont:   () => ipcRenderer.invoke('dialog:importFont'),
   exportVideo:  (opts) => ipcRenderer.invoke('ffmpeg:exportVideo', opts),
+  beginDeliveryTargetRequest: requestId => ipcRenderer.invoke('delivery:beginTargetRequest', requestId),
+  prepareDeliveryTargets: (paths, requestId, ticket) => ipcRenderer.invoke('delivery:prepareTargets', { paths, requestId, ticket }),
+  cancelDeliveryTargetRequest: (requestId, ticket) => ipcRenderer.invoke('delivery:cancelTargetRequest', { requestId, ticket }),
+  finishDeliveryTargetRequest: (requestId, ticket) => ipcRenderer.invoke('delivery:finishTargetRequest', { requestId, ticket }),
+  releaseDeliveryTargets: id => ipcRenderer.invoke('delivery:releaseTargets', id),
   stopExport:   (jobId) => ipcRenderer.invoke('ffmpeg:stopExport', jobId),
   openQueueMonitor: () => ipcRenderer.invoke('queue:openMonitor'),
   probe:        (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffprobe', p); },
@@ -76,10 +85,8 @@ contextBridge.exposeInMainWorld('subtool', {
   },
   extractAudio: (p, idx, duration, codec) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:extractAudio', { path: p, idx, duration, codec }); },
   waveAudio:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:waveAudio', { path: p, duration }); },
-  vocalWaveFingerprint: (source) => {
-    if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
-    return ipcRenderer.invoke('audio:vocal-wave-fingerprint', source);
-  },
+  vocalWaveFingerprint: audioSourceFingerprint,
+  audioSourceFingerprint,
   vocalWaveChunk: (request) => {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少人聲波形片段參數');
     const { path, start, duration, requestId, sourceStream = 0, sourceChannel = null } = request;
@@ -125,6 +132,10 @@ contextBridge.exposeInMainWorld('subtool', {
   },
   ingest:       (opts) => ipcRenderer.invoke('ffmpeg:ingest', opts),
   streamIngest: (opts) => ipcRenderer.invoke('ffmpeg:streamIngest', opts),
+  mediaSourceKey: source => {
+    if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
+    return ipcRenderer.invoke('ffmpeg:sourceKey', source);
+  },
   prepareSourceWaveform: (opts) => ipcRenderer.invoke('ffmpeg:prepareSourceWaveform', opts),
   cancelMediaIntake: (opts) => ipcRenderer.invoke('ffmpeg:cancelIntake', opts),
   releaseStream: (streamLeaseId) => ipcRenderer.invoke('ffmpeg:releaseStream', streamLeaseId),
@@ -133,9 +144,9 @@ contextBridge.exposeInMainWorld('subtool', {
     if(typeof directory!=='string') throw new TypeError('directory must be a string');
     return ipcRenderer.invoke('fs:reserveScreenshotPath', { directory, suffix });
   },
-  releaseScreenshotPath: (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:releaseScreenshotPath', p); },
+  releaseScreenshotPath: (p, token) => { if(typeof p!=='string'||typeof token!=='string') throw new TypeError('path and token must be strings'); return ipcRenderer.invoke('fs:releaseScreenshotPath', { path:p, token }); },
   writeProject: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeProject', { path: p, b64 }); },
-  writeScreenshot: (p, b64) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:writeScreenshot', { path: p, b64 }); },
+  writeScreenshot: (p, b64, token) => { if(typeof p!=='string'||typeof token!=='string') throw new TypeError('path and token must be strings'); return ipcRenderer.invoke('fs:writeScreenshot', { path: p, b64, token }); },
   openPath:     (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('app:openPath', p); },
   openExternal: (url) => { if(typeof url!=='string') throw new TypeError('url must be a string'); return ipcRenderer.invoke('app:openExternal', url); },
   cacheInfo:    () => ipcRenderer.invoke('cache:info'),
@@ -176,8 +187,8 @@ contextBridge.exposeInMainWorld('subtool', {
     cancelPresent: () => ipcRenderer.invoke('mpv:cancelPresent'),
     loadfile:  (p)     => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('mpv:loadfile', p); },
     screenshot:(p)     => ipcRenderer.invoke('mpv:screenshot', p),
-    play:      ()      => ipcRenderer.invoke('mpv:play'),
-    pause:     ()      => ipcRenderer.invoke('mpv:pause'),
+    play:      (options) => ipcRenderer.invoke('mpv:play', options),
+    pause:     (options) => ipcRenderer.invoke('mpv:pause', options),
     direction: (v)     => ipcRenderer.invoke('mpv:direction', v),
     mute:      (v)     => ipcRenderer.invoke('mpv:mute', v),
     rate:      (r)     => ipcRenderer.invoke('mpv:rate', r),

@@ -39,6 +39,119 @@ describe('desktop player adapter guide contract', () => {
   });
 });
 
+describe('原生來源 session 歸屬',()=>{
+  it('重載期間撤銷舊 session，僅最新完成的同路徑工作取得資格',async()=>{
+    let finishFirst,finishSecond;
+    const first=new Promise(resolve=>{finishFirst=resolve;}),second=new Promise(resolve=>{finishSecond=resolve;});
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'initial'}),
+      loadfile:vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second)};
+    const runtime=resetPlayerAdapter({mpv:bridge});
+    await runtime.enterMpv({src:'C:/same.mov'});
+    expect(runtime.ownsNativeSourceSession('initial')).toBe(true);
+    const old=runtime.loadfile('C:/same.mov');
+    expect(runtime.ownsNativeSourceSession('initial')).toBe(false);
+    const latest=runtime.loadfile('C:/same.mov');
+    finishSecond({ok:true,sourceSessionId:'newest'});await latest;
+    expect(runtime.ownsNativeSourceSession('newest')).toBe(true);
+    finishFirst({ok:true,sourceSessionId:'stale'});await old;
+    expect(runtime.ownsNativeSourceSession('stale')).toBe(false);
+    expect(runtime.ownsNativeSourceSession('newest')).toBe(true);
+    await runtime.enterHtml5();
+    expect(runtime.ownsNativeSourceSession('newest')).toBe(false);
+  });
+
+  it('舊播放器遲到的 disconnected 不撤銷新 session；目前播放器結束立即撤銷',async()=>{
+    let deliver;
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'old'}),
+      loadfile:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'new'}),
+      onEvent:vi.fn(callback=>{deliver=callback;})};
+    const runtime=resetPlayerAdapter({mpv:bridge});const observed=vi.fn();
+    await runtime.enterMpv({src:'C:/same.mov'});runtime.onEvent(observed);
+    await runtime.loadfile('C:/same.mov');
+    deliver({event:'disconnected',sourceSessionId:'old'});
+    expect(runtime.ownsNativeSourceSession('new')).toBe(true);
+    deliver({event:'disconnected',sourceSessionId:'new'});
+    expect(runtime.ownsNativeSourceSession('new')).toBe(false);
+    expect(observed).toHaveBeenCalledTimes(1);
+    expect(observed).toHaveBeenCalledWith({event:'disconnected',sourceSessionId:'new'});
+  });
+
+  it('失連 owner 僅限經驗證事件的同步回呼，重入換來源立即撤銷',async()=>{
+    let deliver,owner;
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'source'}),onEvent:vi.fn(callback=>{deliver=callback;})};
+    const runtime=resetPlayerAdapter({mpv:bridge});await runtime.enterMpv({src:'C:/source.mov'});
+    const disconnected={event:'disconnected',sourceSessionId:'source'};
+    expect(runtime.captureNativeDisconnect(disconnected)()).toBe(false);
+    runtime.onEvent(event=>{
+      owner=runtime.captureNativeDisconnect(event);
+      expect(owner()).toBe(true);
+      expect(runtime.captureNativeDisconnect({...event})()).toBe(false);
+      runtime.selectHtml5();
+      expect(owner()).toBe(false);
+    });
+    deliver(disconnected);
+    expect(owner()).toBe(false);
+    expect(runtime.captureNativeDisconnect(disconnected)()).toBe(false);
+  });
+
+  it('loadfile 回覆前收到的新 session 長度只在身分確認後交接，舊事件不採用',async()=>{
+    let deliver,finish;
+    const loading=new Promise(resolve=>{finish=resolve;});
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'old'}),
+      loadfile:vi.fn(()=>loading),onEvent:vi.fn(callback=>{deliver=callback;})};
+    const runtime=resetPlayerAdapter({mpv:bridge});const received=vi.fn();
+    await runtime.enterMpv({src:'C:/old.mov'});runtime.onEvent(received);
+    const changing=runtime.loadfile('C:/new.mov');
+    deliver({event:'property-change',name:'duration',data:100,sourceSessionId:'old'});
+    deliver({event:'property-change',name:'duration',data:10,sourceSessionId:'new'});
+    expect(received).not.toHaveBeenCalled();
+    finish({ok:true,duration:5,sourceSessionId:'new'});await changing;
+    await vi.waitFor(()=>expect(received).toHaveBeenCalledExactlyOnceWith({event:'property-change',name:'duration',data:10,sourceSessionId:'new'}));
+  });
+
+  it.each(['new','old'])('loadfile 回覆前 %s session 失連，只拒絕真正斷線的新來源',async disconnected=>{
+    let deliver,finish;
+    const loading=new Promise(resolve=>{finish=resolve;});
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'old'}),
+      loadfile:vi.fn(()=>loading),onEvent:vi.fn(callback=>{deliver=callback;})};
+    const runtime=resetPlayerAdapter({mpv:bridge});
+    await runtime.enterMpv({src:'C:/old.mov'});runtime.onEvent(()=>{});
+    const changing=runtime.loadfile('C:/new.mov');
+    deliver({event:'disconnected',sourceSessionId:disconnected});
+    finish({ok:true,duration:5,sourceSessionId:'new'});
+    const result=await changing;
+    expect(runtime.ownsNativeSourceSession('new')).toBe(disconnected==='old');
+    if(disconnected==='new')expect(result?.ok).toBe(false);
+    else expect(result?.ok).toBe(true);
+  });
+
+  it('launch 尚未回覆前已註冊事件，失連後不得接受排隊的成功回覆',async()=>{
+    let deliver,finish;
+    const launching=new Promise(resolve=>{finish=resolve;});
+    const bridge={launch:vi.fn(()=>launching),onEvent:vi.fn(callback=>{deliver=callback;})};
+    const runtime=resetPlayerAdapter({mpv:bridge});
+    const starting=runtime.enterMpv({src:'C:/source.mov'});
+    expect(deliver).toBeTypeOf('function');
+    deliver({event:'disconnected',sourceSessionId:'source'});
+    finish({ok:true,duration:5,sourceSessionId:'source'});
+    expect(await starting).toBeNull();
+    expect(runtime.ownsNativeSourceSession('source')).toBe(false);
+  });
+
+  it('首次 launch 的合法新長度即使早於業務訂閱，確認並訂閱後仍會交接',async()=>{
+    let deliver,finish;
+    const launching=new Promise(resolve=>{finish=resolve;});
+    const bridge={launch:vi.fn(()=>launching),onEvent:vi.fn(callback=>{deliver=callback;})};
+    const runtime=resetPlayerAdapter({mpv:bridge});
+    const starting=runtime.enterMpv({src:'C:/source.mov'});
+    expect(deliver).toBeTypeOf('function');
+    deliver({event:'property-change',name:'duration',data:10,sourceSessionId:'source'});
+    finish({ok:true,duration:5,sourceSessionId:'source'});await starting;
+    const received=vi.fn();runtime.onEvent(received);
+    await vi.waitFor(()=>expect(received).toHaveBeenCalledExactlyOnceWith({event:'property-change',name:'duration',data:10,sourceSessionId:'source'}));
+  });
+});
+
 describe('active transport', () => {
   it.each([true,false])('detached frame presentation waits for the real source frame and retains ownership=%s',async retained=>{
     let rawTime=0,owns=true;
@@ -370,10 +483,12 @@ describe('active transport', () => {
   it('mpv present 交由 native bridge 回報實際 video PTS', async () => {
     const present = vi.fn().mockResolvedValue({ backend: 'mpv', presentedSourceTime: 11.96 });
     const runtime = resetPlayerAdapter({ mpv: {
-      launch: vi.fn().mockResolvedValue({ ok: true }),
+      launch: vi.fn().mockResolvedValue({ ok: true, sourceSessionId: 'native-present-source' }),
       present,
     } });
     await runtime.enterMpv({ src: 'D:/media/a.mxf' });
+    expect(runtime.ownsNativeSourcePath('D:/media/a.mxf')).toBe(true);
+    expect(runtime.ownsNativeSourceSession('native-present-source')).toBe(true);
 
     await expect(runtime.present(12, { exact: true, tolerance: 0.05 })).resolves.toEqual({
       backend: 'mpv', presentedSourceTime: 11.96,

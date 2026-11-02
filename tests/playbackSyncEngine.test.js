@@ -142,7 +142,7 @@ describe('PlaybackSyncEngine', () => {
     expect(audioElement.paused).toBe(false);
   });
 
-  it('clip 結束後進入後續 gap，下一 tick 會重啟外部音訊', () => {
+  it('clip 結束後進入後續 gap 只起播外音一次，下一 tick 不重複定位', () => {
     const first = { id: 'first', type: 'video', in: 0, out: 2, dur: 2, offset: 0 };
     const later = { id: 'later', type: 'video', in: 0, out: 2, dur: 2, offset: 10 };
     const events = [];
@@ -168,14 +168,15 @@ describe('PlaybackSyncEngine', () => {
       audio: { externalSourceTime: () => 1 },
       actions: {
         enterGap: () => { harness.state.gap = true; audioElement.pause(); },
-        startElementSources: () => audioElement.play(),
+        startElementSources: (_source, time) => { audioElement.play(); harness.engine.markExternalActivity(time); },
       },
     });
 
     harness.engine.seqTick();
+    expect(events).toEqual(['pause', 'play']);
     harness.engine.seqTick();
 
-    expect(events).toEqual(['play', 'pause', 'play']);
+    expect(events).toEqual(['pause', 'play']);
     expect(audioElement.paused).toBe(false);
   });
 

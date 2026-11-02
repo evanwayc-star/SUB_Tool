@@ -16,20 +16,83 @@
 
 const MPV_TIMECODE_RE = /^\d{1,6}:[0-5]\d:[0-5]\d[:;]\d{2,3}$/;
 const { StringDecoder } = require('node:string_decoder');
+const { randomBytes } = require('node:crypto');
+const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 const { sourceClockTime, playerClockTime } = require('../shared/media-source-clock.cjs');
+
+function createMpvTemporaryFiles(fs, path, tmpDir, ensureTmp, rootAuthority) {
+  const records = new Set();
+  let root = rootAuthority || null;
+  function check(record, fd) {
+    assertOutputAuthority(record.authority, record.file, fs);
+    const entry = fs.lstatSync(record.file, { bigint: true });
+    const opened = fd == null ? entry : fs.fstatSync(fd, { bigint: true });
+    if (!entry.isFile() || entry.isSymbolicLink() || !opened.isFile()
+      || entry.dev !== record.dev || entry.ino !== record.ino
+      || opened.dev !== record.dev || opened.ino !== record.ino) throw new Error('mpv 暫存檔身分已變更');
+  }
+  function create(extension) {
+    ensureTmp?.();
+    root ||= captureOutputDirectory(tmpDir, fs);
+    const file = path.join(tmpDir, 'subtool-mpv-' + randomBytes(16).toString('hex') + '.' + extension);
+    const authority = captureOutputAuthority(file, root, fs);
+    const fd = fs.openSync(file, 'wx+');
+    let record;
+    try {
+      const stat = fs.fstatSync(fd, { bigint: true });
+      record = { file, authority, dev: stat.dev, ino: stat.ino, busy: false };
+      records.add(record);
+      check(record, fd);
+    } finally { fs.closeSync(fd); }
+    return record;
+  }
+  function write(record, content) {
+    check(record);
+    const fd = fs.openSync(record.file, 'r+');
+    try { check(record, fd); fs.ftruncateSync(fd, 0); fs.writeFileSync(fd, content, 'utf8'); check(record, fd); }
+    finally { fs.closeSync(fd); }
+  }
+  function stream(record) {
+    check(record);
+    const fd = fs.openSync(record.file, 'r+');
+    try {
+      check(record, fd);
+      const result = fs.createWriteStream(record.file, { fd, autoClose: true });
+      record.busy = true;
+      result.once('close', () => { record.busy = false; });
+      return result;
+    } catch (error) { fs.closeSync(fd); throw error; }
+  }
+  function remove(record) {
+    if (!record || record.busy || !records.has(record)) return false;
+    try { check(record); fs.unlinkSync(record.file); records.delete(record); return true; }
+    catch (error) {
+      if (error.code === 'ENOENT') { records.delete(record); return true; }
+      return false;
+    }
+  }
+  function cleanup() { for (const record of records) remove(record); return records.size === 0; }
+  function owns(record) { try { check(record); return true; } catch (error) { return false; } }
+  return { create, write, stream, remove, cleanup, owns };
+}
 
 function createMpvHost(deps) {
   const {
     BrowserWindow, spawn, createConnection, fs, path, url, allowInternalDocument,
-    getMainWindow, supported, findExecutable, ensureTmp, tmpDir, tempFiles,
+    getMainWindow, supported, findExecutable, ensureTmp, tmpDir, tempRootAuthority,
     guideHtml, fontsDir, onEvent, describeSource, log = () => {},
     now = () => Date.now(), delay = ms => new Promise(resolve => setTimeout(resolve, ms)),
     setTimer = setTimeout, clearTimer = clearTimeout,
   } = deps;
+  const temporaryFiles = deps.temporaryFiles || createMpvTemporaryFiles(fs, path, tmpDir, ensureTmp, tempRootAuthority);
 
   let executable = null;
+  let disposed = false;
+  let resumeWhenIdle = false;
+  let draining = 0;
   let proc = null;
   let processLog = null;
+  let lastLogFile = null;
   let client = null;
   let requestId = 0;
   const callbacks = new Map();
@@ -37,9 +100,12 @@ function createMpvHost(deps) {
   let pendingFileLoad = null;
   let fileLoadSession = null;
   let fileLoadPhase = null;
+  let nextSourceObserverId = 10;
+  const sourceObserverSessions = new Set();
   // mpv 由 --pause 啟動。暫停中的 seek 會更新 time-pos／畫格，卻不保證在
   // unpause 前送 playback-restart；播放中的 seek 則仍要等 restart 才能視為呈現完成。
   let playerPaused = true;
+  let playbackCommandGeneration = 0;
   let directionGeneration = 0;
   let sourceAudioGraph = '';
   let buffer = '';
@@ -48,6 +114,15 @@ function createMpvHost(deps) {
   const playerTime = time => Math.max(0, playerClockTime(time, sourceClock));
   const sourceTime = time => sourceClockTime(time, sourceClock);
   const sourceDuration = time => Math.max(0, sourceTime(time)) || 0;
+  // ffprobe already reports duration from video source zero; unlike mpv's
+  // player-clock duration it must not be converted through sourceClock again.
+  const readySourceDuration = (duration, info) => {
+    if (typeof duration === 'number' && Number.isFinite(duration) && duration > 0) {
+      const observed = sourceDuration(duration);
+      if (Number.isFinite(observed) && observed > 0) return observed;
+    }
+    return typeof info?.duration === 'number' && Number.isFinite(info.duration) && info.duration > 0 ? info.duration : 0;
+  };
 
   let hostWin = null;
   let guideWin = null;
@@ -59,7 +134,31 @@ function createMpvHost(deps) {
   let timecodeWatermark = '';
   let timecodeWatermarkRect = null;
   let subFile = null;
+  let subOwner = null;
+  let guideOwner = null;
   let subAdded = false;
+  const liveChildren = new Set();
+  const liveLogs = new Set();
+  const retiredFiles = new Set();
+
+  function resumeIfIdle() {
+    if (!resumeWhenIdle || draining || liveChildren.size || liveLogs.size) return false;
+    disposed = false;
+    resumeWhenIdle = false;
+    return true;
+  }
+
+  function resume() {
+    resumeWhenIdle = true;
+    return resumeIfIdle();
+  }
+
+  function cleanRetiredFiles() {
+    if (liveChildren.size) return;
+    for (const owner of retiredFiles) {
+      if (temporaryFiles.remove(owner)) retiredFiles.delete(owner);
+    }
+  }
 
   const alive = win => !!(win && !win.isDestroyed());
   const mainWindow = () => {
@@ -187,8 +286,107 @@ function createMpvHost(deps) {
     if (!waiter || waiter.session !== session || session !== fileLoadSession) return;
     const entryId = receipt?.playlist_entry_id;
     if (!Number.isSafeInteger(entryId) || entryId < 0) return settleFileLoad(false);
+    session.entryId = entryId;
     waiter.entryId = entryId;
     maybeFinishFileLoad(waiter);
+  }
+
+  function releaseSourceObservers(session) {
+    const observers=session?.observers;
+    if (!observers) return;
+    session.observers=null;
+    sourceObserverSessions.delete(session);
+    if (session.client!==client || session.generation!==generation) return;
+    for (const id of Object.values(observers)) void send(['unobserve_property',id]).catch(()=>{});
+  }
+
+  async function installSourceObservers(session) {
+    const owns=()=>session===fileLoadSession&&session.client===client&&session.generation===generation;
+    if (!owns()) return false;
+    const observers={ 'time-pos':nextSourceObserverId++, pause:nextSourceObserverId++ };
+    session.observers=observers;
+    sourceObserverSessions.add(session);
+    session.observersReady=false;
+    session.pendingObserverEvents={};
+    try {
+      for (const [name,id] of Object.entries(observers)) {
+        await send(['observe_property',id,name],true,{requireSuccess:true});
+        if (!owns()) { releaseSourceObservers(session); return false; }
+      }
+      session.observersReady=true;
+      return true;
+    } catch (error) {
+      releaseSourceObservers(session);
+      throw error;
+    }
+  }
+
+  function publishSourceProperty(session,message) {
+    const event={...message,sourceSessionId:session.sourceSessionId};
+    if(event.name==='time-pos'&&session.awaitingPositioning) event.beforeSourcePositioning=true;
+    if(event.name==='time-pos'&&typeof event.data==='number') event.data=sourceTime(event.data);
+    if(!event.beforeSourcePositioning) observePresentationEvent(event);
+    sendEvent(event);
+  }
+
+  function refreshPauseForSession(session) {
+    const current=()=>session===fileLoadSession&&!session.loading&&session.observersReady
+      &&session.client===client&&session.generation===generation;
+    if(!current()) return;
+    if(session.pauseQuery){session.pauseAgain=true;return;}
+    const intent=session.playbackIntentId??null;
+    const commandGeneration=playbackCommandGeneration;
+    session.pauseQuery=true;
+    void send(['get_property','pause'],true,{requireSuccess:true}).then(value=>{
+      if(!current()||commandGeneration!==playbackCommandGeneration
+        ||intent!==(session.playbackIntentId??null)||typeof value!=='boolean') return;
+      playerPaused=value;
+      sendEvent({event:'property-change',name:'pause',data:value,sourceSessionId:session.sourceSessionId,playbackIntentId:intent});
+    }).catch(()=>{}).finally(()=>{
+      session.pauseQuery=false;
+      if(session.pauseAgain){session.pauseAgain=false;if(current())refreshPauseForSession(session);}
+    });
+  }
+
+  function publishPendingSourceProperties(session) {
+    const pending=session.pendingObserverEvents;
+    session.pendingObserverEvents={};
+    if(pending?.pause) refreshPauseForSession(session);
+    if(pending?.['time-pos']) publishSourceProperty(session,pending['time-pos']);
+  }
+
+  // mpv property notifications carry no source identity. A late notification
+  // is only a reason to query the *currently confirmed* source; its payload is
+  // never used as evidence. Bind the query and reply to the same load session
+  // and playlist entry, including when the same path is loaded again.
+  function refreshDurationForSession(session) {
+    if (session && session === fileLoadSession && session.loading
+      && session.client === client && session.generation === generation) {
+      // The initial get_property may already be in flight. Re-query after the
+      // matched load completes so its older snapshot cannot hide this update.
+      session.durationAgain = true;
+      return;
+    }
+    const phase = fileLoadPhase;
+    const current = () => !!session && session === fileLoadSession && !session.loading
+      && session.client === client && session.generation === generation
+      && phase === fileLoadPhase && phase?.loaded && !phase.ended && phase.entryId === session.entryId;
+    if (!current()) return;
+    if (session.durationQuery) { session.durationAgain = true; return; }
+    session.durationQuery = true;
+    void send(['get_property', 'duration'], true, { requireSuccess: true }).then(raw => {
+      if (!current() || typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return;
+      const duration = sourceDuration(raw);
+      if (Number.isFinite(duration) && duration > 0) {
+        sendEvent({ event: 'property-change', name: 'duration', data: duration, sourceSessionId: session.sourceSessionId });
+      }
+    }).catch(() => {}).finally(() => {
+      session.durationQuery = false;
+      if (session.durationAgain) {
+        session.durationAgain = false;
+        if (current()) refreshDurationForSession(session);
+      }
+    });
   }
 
   function maybeFinishFileLoad(waiter) {
@@ -241,6 +439,7 @@ function createMpvHost(deps) {
       }
     }
     if (!request.commandAcknowledged || request.presentedSourceTime == null) return;
+    if (!request.waitForFrame && !request.confirmedAfterAck) return;
     if (!playerPaused && !request.restarted) return;
     settlePresentation(request, {
       backend: 'mpv',
@@ -255,21 +454,23 @@ function createMpvHost(deps) {
     }
     const request = pendingPresentation;
     if (!request) return;
-    if (message.event === 'property-change' && message.name === 'time-pos') {
+    if (message.event === 'property-change' && message.name === 'time-pos' && request.commandAcknowledged) {
       const presented = typeof message.data === 'number' ? message.data : NaN;
       if (Number.isFinite(presented) && presentationMatches(request,presented)) {
         request.presentedSourceTime = presented;
       }
-    } else if (message.event === 'playback-restart') {
+    } else if (message.event === 'playback-restart' && request.commandAcknowledged) {
       request.restarted = true;
     }
     maybeFinishPresentation(request);
   }
 
   function detachClient({ destroy = true, emitDisconnected = false } = {}) {
+    playbackCommandGeneration++;
     directionGeneration++;
     sourceAudioGraph = '';
     const current = client;
+    const sourceSessionId = fileLoadSession?.sourceSessionId;
     client = null;
     buffer = '';
     playerPaused = true;
@@ -277,10 +478,11 @@ function createMpvHost(deps) {
     cancelPresent();
     settleFileLoad(false);
     fileLoadSession = null;
+    sourceObserverSessions.clear();
     fileLoadPhase = null;
     sourceClock = null;
     if (destroy && current) { try { current.destroy(); } catch (error) {} }
-    if (emitDisconnected) sendEvent({ event: 'disconnected' });
+    if (emitDisconnected) sendEvent({ event: 'disconnected', ...(sourceSessionId ? { sourceSessionId } : {}) });
   }
 
   function destroyWindows() {
@@ -305,9 +507,17 @@ function createMpvHost(deps) {
 
   function openProcessLog() {
     let stream;
-    try { stream = fs.createWriteStream(path.join(tmpDir, 'mpv-last.log')); }
+    let fileOwner;
+    try { fileOwner = temporaryFiles.create('log'); stream = temporaryFiles.stream(fileOwner); }
     catch (error) { log('[mpv] 無法建立記錄：', error.message); }
-    if (!stream) return null;
+    if (!stream) { temporaryFiles.remove(fileOwner); return null; }
+    const previousLog = lastLogFile;
+    lastLogFile = fileOwner;
+    temporaryFiles.remove(previousLog);
+    stream.once('close', () => { if (lastLogFile !== fileOwner) temporaryFiles.remove(fileOwner); });
+    const closed = new Promise(resolve => stream.once('close', resolve));
+    liveLogs.add(closed);
+    void closed.then(() => { liveLogs.delete(closed); resumeIfIdle(); });
     const owner = { stream, source: null, closed: false };
     // WriteStream open/write failures are asynchronous. Diagnostic I/O must
     // never become an unhandled error that takes down the native player host.
@@ -334,6 +544,35 @@ function createMpvHost(deps) {
     stopProcess();
     closeProcessLog();
     destroyWindows();
+    temporaryFiles.remove(guideOwner);
+    if (subOwner) retiredFiles.add(subOwner);
+    guideOwner = null;
+    subOwner = null;
+    cleanRetiredFiles();
+  }
+
+  async function disposeAndWait() {
+    disposed = true;
+    resumeWhenIdle = false;
+    draining++;
+    try {
+      quit();
+      const pending = [...liveChildren, ...liveLogs];
+      if (pending.length) {
+        let timer;
+        const timedOut = await Promise.race([
+          Promise.all(pending).then(() => false),
+          new Promise(resolve => { timer = setTimeout(() => resolve(true), 2000); }),
+        ]);
+        clearTimeout(timer);
+        if (timedOut) { log('[mpv] 等待程序或記錄關閉逾時，保留尚未安全回收的暫存檔'); return false; }
+      }
+      cleanRetiredFiles();
+      const removed = temporaryFiles.cleanup?.() ?? true;
+      lastLogFile = null;
+      if (!removed) log('[mpv] 部分暫存檔已變更或無法移除，保留原狀');
+      return liveChildren.size === 0 && liveLogs.size === 0 && retiredFiles.size === 0 && removed;
+    } finally { draining--; resumeIfIdle(); }
   }
 
   function detect() {
@@ -343,7 +582,7 @@ function createMpvHost(deps) {
     return executable;
   }
 
-  function send(command, wantReply = false, { requireSuccess = false } = {}) {
+  function send(command, wantReply = false, { requireSuccess = false, onSuccess = null } = {}) {
     if (!client) return requireSuccess ? Promise.reject(new Error('mpv 尚未連線')) : Promise.resolve(null);
     return new Promise((resolve, reject) => {
       const id = ++requestId;
@@ -355,7 +594,7 @@ function createMpvHost(deps) {
           if (requireSuccess) callback.reject(new Error('mpv 命令逾時'));
           else callback.resolve(null);
         }, 5000);
-        callbacks.set(id, { resolve, reject, requireSuccess, timer });
+        callbacks.set(id, { resolve, reject, requireSuccess, onSuccess, timer });
       } else {
         resolve(null);
       }
@@ -394,6 +633,7 @@ function createMpvHost(deps) {
       knownFrame:frameStart!=null&&Number.isFinite(Number(frameStart))&&frameDuration>0
         &&frameTarget>=Number(frameStart)-1e-9&&frameTarget<Number(frameStart)+frameDuration-1e-9,
       commandAcknowledged: false,
+      confirmedAfterAck: false,
       waitForFrame,
       frameReady: false,
       readingFrame: false,
@@ -402,13 +642,18 @@ function createMpvHost(deps) {
       resolve: null,
     };
     const promise = new Promise(resolve => { request.resolve = resolve; });
+    const session=fileLoadSession;
+    const positioningGeneration=session?(session.positioningGeneration=(session.positioningGeneration||0)+1):0;
     pendingPresentation = request;
     const command = exact
       ? ['seek', playerTime(targetTime), 'absolute+exact']
       : ['set_property', 'time-pos', playerTime(targetTime)];
-    send(command, true, { requireSuccess: true }).then(async () => {
+    send(command, true, { requireSuccess: true, onSuccess:()=>{
       if (request !== pendingPresentation) return;
       request.commandAcknowledged = true;
+      if(session===fileLoadSession&&session?.positioningGeneration===positioningGeneration) session.awaitingPositioning=false;
+    } }).then(async () => {
+      if (request !== pendingPresentation) return;
       maybeFinishPresentation(request);
       if (request.waitForFrame) return;
       if (request !== pendingPresentation) return;
@@ -416,10 +661,11 @@ function createMpvHost(deps) {
       // property-change。向播放器讀回實際 time-pos，避免這種有效定位占住 session。
       const raw = await send(['get_property', 'time-pos'], true, { requireSuccess: true });
       const observed = typeof raw === 'number' ? sourceTime(raw) : raw;
-      if (request !== pendingPresentation || !Number.isFinite(observed)) return;
-      if (presentationMatches(request,observed)) {
+      if (request !== pendingPresentation) return;
+      request.confirmedAfterAck = true;
+      if (Number.isFinite(observed) && presentationMatches(request,observed)) {
         request.presentedSourceTime = observed;
-      }
+      } else request.presentedSourceTime = null;
       maybeFinishPresentation(request);
     }).catch(() => settlePresentation(request));
     return promise.then(result => {
@@ -493,7 +739,10 @@ function createMpvHost(deps) {
             clearTimer(callback.timer);
             if (callback.requireSuccess && message.error !== 'success') {
               callback.reject(new Error('mpv 命令失敗：' + (message.error || '無效的命令回覆')));
-            } else callback.resolve(message.data ?? null);
+            } else {
+              callback.onSuccess?.();
+              callback.resolve(message.data ?? null);
+            }
           } else if (message.event === 'start-file') {
             fileLoadPhase = { entryId: message.playlist_entry_id, loaded: false, restarted: false, ended: false };
           } else if (message.event === 'file-loaded') {
@@ -508,9 +757,30 @@ function createMpvHost(deps) {
               fileLoadPhase.ended = true;
               maybeFinishFileLoad(pendingFileLoad);
             }
+            if (message.event === 'property-change' && message.name === 'duration') {
+              refreshDurationForSession(fileLoadSession);
+              continue;
+            }
+            if (message.event === 'property-change' && (message.name === 'time-pos' || message.name === 'pause')) {
+              const session=fileLoadSession;
+              if(!session||session.client!==client||session.generation!==generation
+                ||session.observers?.[message.name]!==message.id) continue;
+              if(session.loading||!session.observersReady) session.pendingObserverEvents[message.name]=message;
+              else if(message.name==='pause') refreshPauseForSession(session);
+              else publishSourceProperty(session,message);
+              continue;
+            }
             if (message.event === 'property-change' && typeof message.data === 'number') {
               if (message.name === 'time-pos') message.data = sourceTime(message.data);
-              else if (message.name === 'duration') message.data = sourceDuration(message.data);
+            }
+            if (message.event === 'end-file') {
+              const session = fileLoadSession;
+              // A replaced entry may finish after the new entry has started.
+              // Only the loadfile ACK's entry can identify this source, even
+              // when two successive loads use exactly the same path.
+              if (!session || session.client !== client || session.generation !== generation
+                || session.entryId == null || message.playlist_entry_id !== session.entryId) continue;
+              message.sourceSessionId = session.sourceSessionId;
             }
             observePresentationEvent(message);
             sendEvent(message);
@@ -594,14 +864,15 @@ function createMpvHost(deps) {
   }
 
   async function loadGuideDocument() {
-    ensureTmp?.();
-    const guidePath = path.join(tmpDir, 'mpv-guide.html');
-    fs.writeFileSync(guidePath, guideHtml, 'utf8');
+    guideOwner = temporaryFiles.create('html');
+    temporaryFiles.write(guideOwner, guideHtml);
+    const guidePath = guideOwner.file;
     allowInternalDocument?.(guidePath);
     await guideWin.loadURL(url.pathToFileURL(guidePath).href);
   }
 
   async function launch({ src, bounds, audio } = {}) {
+    if (disposed) throw new Error('mpv 宿主已關閉');
     if (!supported?.()) throw new Error('目前 macOS 版不啟用 Windows 專用的 mpv 嵌入');
     if (typeof src !== 'string' || !src) throw new Error('mpv：來源路徑無效');
     quit();
@@ -658,6 +929,9 @@ function createMpvHost(deps) {
       }
       const spawned = spawn(exe, args, { detached: false, stdio: ['ignore', 'ignore', logOwner ? 'pipe' : 'ignore'] });
       proc = spawned;
+      const childClosed = new Promise(resolve => spawned.once('close', resolve));
+      liveChildren.add(childClosed);
+      void childClosed.then(() => { liveChildren.delete(childClosed); cleanRetiredFiles(); resumeIfIdle(); });
       if (logOwner && spawned.stderr) {
         logOwner.source = spawned.stderr;
         spawned.stderr.pipe(logOwner.stream);
@@ -680,13 +954,11 @@ function createMpvHost(deps) {
       });
       await connectPipe(pipeName, token);
       if (token !== generation) throw new Error('mpv 啟動已被新的媒體取代');
-      client.write(JSON.stringify({ command: ['observe_property', 1, 'time-pos'] }) + '\n');
-      client.write(JSON.stringify({ command: ['observe_property', 2, 'pause'] }) + '\n');
       client.write(JSON.stringify({ command: ['observe_property', 3, 'duration'] }) + '\n');
       // Load only after attaching the pipe: CLI playback could finish its initial
       // file-loaded/restart before a client connects. --pause stays in force, and
       // the first load preserves the launch's multi-aid graph (unlike loadFile).
-      startupSession = { client, generation: token, path: src, loading: true };
+      startupSession = { client, generation: token, path: src, loading: true, awaitingPositioning:false, sourceSessionId: randomBytes(16).toString('hex') };
       fileLoadSession = startupSession;
       const ready = waitForFileLoad(startupSession, { firstFrame: true });
       const receipt = await send(['loadfile', src, 'replace'], true, { requireSuccess: true });
@@ -694,10 +966,13 @@ function createMpvHost(deps) {
       const loaded = await ready;
       if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
       if (!loaded) throw new Error('mpv 初始畫格未在期限內就緒');
+      if (!await installSourceObservers(startupSession)) throw new Error('mpv 啟動已被新的媒體取代');
       const duration = await send(['get_property', 'duration'], true);
       if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
       startupSession.loading = false;
-      return { ok: true, duration: typeof duration === 'number' ? sourceDuration(duration) : 0 };
+      publishPendingSourceProperties(startupSession);
+      if (startupSession.durationAgain) { startupSession.durationAgain = false; refreshDurationForSession(startupSession); }
+      return { ok: true, duration: readySourceDuration(duration, info), sourceSessionId: startupSession.sourceSessionId };
     } catch (error) {
       if (token === generation && (!startupSession || fileLoadSession === startupSession)) quit();
       throw error;
@@ -784,14 +1059,29 @@ function createMpvHost(deps) {
 
   function setSubtitles(assText) {
     if (!client) return null;
+    if (subOwner) {
+      try { temporaryFiles.write(subOwner, assText || ''); }
+      catch (error) {
+        // A replaced or unavailable file must never be reopened for writing.
+        // Give mpv a fresh track instead of losing future live updates.
+        retiredFiles.add(subOwner);
+        subOwner = null;
+        subFile = null;
+        subAdded = false;
+      }
+    }
     try {
       if (!subFile) {
-        ensureTmp?.();
-        subFile = path.join(tmpDir, 'subtool-mpv-' + process.pid + '-' + generation + '-' + now() + '.ass');
-        tempFiles?.add(subFile);
+        subOwner = temporaryFiles.create('ass');
+        subFile = subOwner.file;
+        temporaryFiles.write(subOwner, assText || '');
       }
-      fs.writeFileSync(subFile, assText || '', 'utf8');
-    } catch (error) { return null; }
+    } catch (error) {
+      temporaryFiles.remove(subOwner);
+      subOwner = null;
+      subFile = null;
+      return null;
+    }
     if (!subAdded) {
       subAdded = true;
       return send(['sub-add', subFile, 'select']);
@@ -804,7 +1094,8 @@ function createMpvHost(deps) {
     directionGeneration++;
     settleFileLoad(false);
     const previousSource = fileLoadSession?.loading ? null : fileLoadSession;
-    const session = { client, generation, path: filePath, loading: true };
+    if(fileLoadSession?.loading) releaseSourceObservers(fileLoadSession);
+    const session = { client, generation, path: filePath, loading: true, awaitingPositioning:true, sourceSessionId: randomBytes(16).toString('hex') };
     fileLoadSession = session;
     const current = () => session === fileLoadSession && session.client === client && session.generation === generation;
     const superseded = () => ({ ok: false, duration: 0 });
@@ -817,7 +1108,10 @@ function createMpvHost(deps) {
       info = describeSource ? await describeSource(filePath) : null;
     } catch (error) {
       // A rejected probe has not changed mpv's source or its saved audio graph.
-      if (current()) fileLoadSession = previousSource;
+      if (current()) {
+        fileLoadSession = previousSource;
+        if(!previousSource) for(const old of [...sourceObserverSessions]) releaseSourceObservers(old);
+      }
       throw error;
     }
     if (!current()) return superseded();
@@ -830,6 +1124,7 @@ function createMpvHost(deps) {
     sourceClock = info?.video || null;
     await send(['set_property', 'sub-delay', playerTime(0)]);
     if (!current()) return superseded();
+    for(const old of [...sourceObserverSessions]) if(old!==session) releaseSourceObservers(old);
     // 建立 waiter 後才送命令，避免快速載入的 file-loaded 先於 command ack 到達。
     const ready = waitForFileLoad(session);
     try {
@@ -844,17 +1139,23 @@ function createMpvHost(deps) {
       log('[mpv] loadfile: matching source load did not complete:', filePath);
       return { ok: false, duration: 0 };
     }
+    if (!await installSourceObservers(session)) return superseded();
     const duration = await send(['get_property', 'duration'], true);
     if (!current()) return superseded();
     session.loading = false;
-    return { ok: true, duration: typeof duration === 'number' ? sourceDuration(duration) : 0 };
+    publishPendingSourceProperties(session);
+    if (session.durationAgain) { session.durationAgain = false; refreshDurationForSession(session); }
+    return { ok: true, duration: readySourceDuration(duration, info), sourceSessionId: session.sourceSessionId };
   }
 
   return {
     detect,
+    logPath: () => lastLogFile && (temporaryFiles.owns?.(lastLogFile) ?? true) ? lastLogFile.file : null,
     launch,
     quit,
     dispose: quit,
+    disposeAndWait,
+    resume,
     setBounds: applyBounds,
     setVisible,
     reapplyBounds,
@@ -869,23 +1170,39 @@ function createMpvHost(deps) {
     loadFile,
     // time-pos 讓最新目標立即取代舊目標，適合一般連續逐格；少數 HEVC MP4 在
     // frame boundary 會把 time-pos 呈現到下一格，改用 mpv 的 absolute+exact command。
-    seek: (time, { exact = false } = {}) => exact
-      ? send(['seek', playerTime(time), 'absolute+exact'])
-      : send(['set_property', 'time-pos', playerTime(time)]),
+    seek: async (time, { exact = false } = {}) => {
+      const session=fileLoadSession;
+      const positioningGeneration=session?(session.positioningGeneration=(session.positioningGeneration||0)+1):0;
+      const command=exact?['seek',playerTime(time),'absolute+exact']:['set_property','time-pos',playerTime(time)];
+      const result=await send(command,true,{requireSuccess:true,onSuccess:()=>{
+        if(session===fileLoadSession&&session?.positioningGeneration===positioningGeneration) session.awaitingPositioning=false;
+      }});
+      return result;
+    },
     present,
     cancelPresent,
     screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles'], true, { requireSuccess: true })
       .then(() => ({ ok: true })),
-    play: () => {
+    play: (options = {}) => {
+      const commandGeneration=++playbackCommandGeneration,session=fileLoadSession,previousPaused=playerPaused;
+      if(fileLoadSession) fileLoadSession.playbackIntentId=typeof options?.intentId==='string'?options.intentId:null;
       // Keep the ordered play/pause intent for presentation; a late ACK must
       // not overwrite a newer pause. The Promise proves command acceptance,
       // not frame presentation, and rejects pipe/command/timeout failures.
       playerPaused = false;
-      return send(['set_property', 'pause', false], true, { requireSuccess: true });
+      return send(['set_property', 'pause', false], true, { requireSuccess: true }).catch(error=>{
+        if(commandGeneration===playbackCommandGeneration&&session===fileLoadSession) playerPaused=previousPaused;
+        throw error;
+      });
     },
-    pause: () => {
+    pause: (options = {}) => {
+      const commandGeneration=++playbackCommandGeneration,session=fileLoadSession,previousPaused=playerPaused;
+      if(fileLoadSession) fileLoadSession.playbackIntentId=typeof options?.intentId==='string'?options.intentId:null;
       playerPaused = true;
-      return send(['set_property', 'pause', true]);
+      return send(['set_property', 'pause', true],true,{requireSuccess:true}).catch(error=>{
+        if(commandGeneration===playbackCommandGeneration&&session===fileLoadSession) playerPaused=previousPaused;
+        throw error;
+      });
     },
     direction: setDirection,
     // The renderer uses this acknowledgment as the handoff boundary before

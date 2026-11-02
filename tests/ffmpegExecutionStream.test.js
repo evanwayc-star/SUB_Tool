@@ -24,6 +24,7 @@ function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend, 
     getFFmpegPath: () => stage === 'missing' ? null : 'fake-ffmpeg',
     getUserDataDir: () => root,
     getQueueDir: () => queueDir,
+    getSharedOutputLock: () => ({ sharedQueueDir: path.join(root, 'shared'), sharedAuthority: {} }),
     ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
     onLogRetained: file => observers.logRetained?.(file),
     send: (sender, event, data) => {
@@ -68,6 +69,41 @@ function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend, 
 }
 
 describe('public FFmpeg execution terminal and pipe records', () => {
+  it('direct 可將受持有的輸入與輸出 fd 分別交給 stdin 與 stdout', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-input-fd-')); roots.push(root);
+    const input=fs.openSync(path.join(root,'input.wav'),'wx+'),output=fs.openSync(path.join(root,'output.mp3'),'wx+');
+    let spawned;
+    const engine=createFFmpegExecution({getFFmpegPath:()=> 'fake',getUserDataDir:()=>root,
+      spawnDirect(_exe,args,options){spawned={args,options};const child=new EventEmitter();child.stderr=new EventEmitter();child.kill=()=>{};
+        queueMicrotask(()=>child.emit('close',0,null));return child;}});
+    try{
+      const args=['-f','wav','-i','fd:','-f','mp3','fd:'];
+      await engine.execute(args,{executionKind:'direct',inputDescriptor:input,outputDescriptor:output});
+      expect(spawned).toEqual({args,options:{stdio:[input,output,'pipe']}});
+      fs.writeSync(input,Buffer.from('still-open'));fs.writeSync(output,Buffer.from('still-open'));
+    }finally{fs.closeSync(input);fs.closeSync(output);}
+  });
+
+  it.each([0,1,2,-1,2.5,NaN,Infinity,'3',null])('拒絕無效 inputDescriptor %s，不啟動子程序',async inputDescriptor=>{
+    const root=fs.mkdtempSync(path.join(os.tmpdir(),'subtool-invalid-input-fd-'));roots.push(root);
+    let calls=0;
+    const engine=createFFmpegExecution({getFFmpegPath:()=> 'fake',getUserDataDir:()=>root,
+      spawnDirect(){calls++;throw new Error('must not spawn');}});
+    await expect(engine.execute(['-f','wav','-i','fd:','out.mp3'],{executionKind:'direct',inputDescriptor})).rejects.toThrow(/inputDescriptor/);
+    expect(calls).toBe(0);
+  });
+
+  it('不得將 inputDescriptor 用於 queued-delivery、不同輸入路徑或同一輸出 fd',async()=>{
+    const root=fs.mkdtempSync(path.join(os.tmpdir(),'subtool-input-fd-invalid-use-'));roots.push(root);
+    let calls=0;
+    const engine=createFFmpegExecution({getFFmpegPath:()=> 'fake',getUserDataDir:()=>root,getQueueDir:()=>root,
+      spawnDirect(){calls++;throw new Error('must not spawn');},spawnWatchdog(){calls++;throw new Error('must not spawn');}});
+    await expect(engine.execute(['-i','fd:','out.mp3'],{executionKind:'queued-delivery',jobId:'q',outPath:path.join(root,'out.mp3'),inputDescriptor:3})).rejects.toThrow(/inputDescriptor/);
+    await expect(engine.execute(['-i','other.wav','out.mp3'],{executionKind:'direct',inputDescriptor:3})).rejects.toThrow(/inputDescriptor/);
+    await expect(engine.execute(['-i','fd:','-f','mp3','fd:'],{executionKind:'direct',inputDescriptor:3,outputDescriptor:3})).rejects.toThrow(/inputDescriptor/);
+    expect(calls).toBe(0);
+  });
+
   it('direct 將呼叫方持有的輸出 fd 映射到 child stdout，close 後 fd 仍可用', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-fd-spawn-')); roots.push(root);
     const output = path.join(root, 'reserved.wav');

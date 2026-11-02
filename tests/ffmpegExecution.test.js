@@ -130,6 +130,7 @@ describe('FFmpeg execution', () => {
       getFFmpegPath: () => 'ffmpeg-test',
       getUserDataDir: () => userDataDir,
       getQueueDir: () => queueDir,
+      getSharedOutputLock: () => ({ sharedQueueDir: path.join(userDataDir, 'shared'), sharedAuthority: {} }),
       spawnDirect() { spawned++; throw new Error('不可啟動 direct'); },
       spawnWatchdog() { spawned++; throw new Error('不可啟動 watchdog'); },
     });
@@ -175,6 +176,7 @@ describe('FFmpeg execution', () => {
       getFFmpegPath: () => 'ffmpeg-test',
       getUserDataDir: () => userDataDir,
       getQueueDir: () => queueDir,
+      getSharedOutputLock: () => ({ sharedQueueDir: path.join(userDataDir, 'shared'), sharedAuthority: {} }),
       ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
       spawnWatchdog(config, handlers) {
         handlers.onStderr(Buffer.from('frame=25 time=00:00:05.00 speed=1.0x\n'));
@@ -252,6 +254,7 @@ describe('FFmpeg execution', () => {
       getFFmpegPath: () => 'ffmpeg-test',
       getUserDataDir: () => userDataDir,
       getQueueDir: () => queueDir,
+      getSharedOutputLock: () => ({ sharedQueueDir: path.join(userDataDir, 'shared'), sharedAuthority: {} }),
       ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
       spawnDirect() {
         throw new Error('交付工作不可由 Electron main 直接持有 ffmpeg');
@@ -271,6 +274,7 @@ describe('FFmpeg execution', () => {
       jobId: 'delivery-abc',
       label: '匯出 ProRes',
       outPath,
+      sourcePaths: ['master.mxf'],
       cwd: userDataDir,
       onProcess: value => owned.push(value),
     });
@@ -280,6 +284,7 @@ describe('FFmpeg execution', () => {
       args: ['-i', 'master.mxf', outPath],
       cwd: userDataDir,
       outPath,
+      sourcePaths: ['master.mxf'],
       jobId: 'delivery-abc',
       queueDir,
     })]);
@@ -336,6 +341,7 @@ describe('FFmpeg execution', () => {
       getFFmpegPath: () => 'ffmpeg-test',
       getUserDataDir: () => userDataDir,
       getQueueDir: () => queueDir,
+      getSharedOutputLock: () => ({ sharedQueueDir: path.join(userDataDir, 'shared'), sharedAuthority: {} }),
       ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
       spawnWatchdog(value) {
         config = value;
@@ -363,6 +369,7 @@ describe('FFmpeg execution', () => {
       getFFmpegPath: () => 'ffmpeg-test',
       getUserDataDir: () => userDataDir,
       getQueueDir: () => queueDir,
+      getSharedOutputLock: () => ({ sharedQueueDir: path.join(userDataDir, 'shared'), sharedAuthority: {} }),
       ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
       send: (_sender, channel, data) => events.push({ channel, data }),
       onLogRetained: file => authority.grantDiagnosticLogFile(file),

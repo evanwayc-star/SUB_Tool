@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const { spawnExportWatchdog, recoverExportLeases } = require('../electron/export-watchdog');
@@ -69,6 +71,15 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
           if (options.signal.aborted) throw abortError();
           if (process.env.DISC_TEST_MODE === 'author-preflight-fail') throw Object.assign(new Error('tool missing'), {code:'DISC_TOOL_MISSING'});
           await options.onOutputStart?.();
+          if (process.env.DISC_TEST_MODE === 'reserve-wait') {
+            fs.writeFileSync(process.env.DISC_TEST_RESERVED, target);
+            const markAbort = () => fs.writeFileSync(process.env.DISC_TEST_ABORTED, 'aborted');
+            options.signal.addEventListener('abort', markAbort, {once:true});
+            try { while (!fs.existsSync(process.env.DISC_TEST_GATE)) await delay(10); }
+            finally { options.signal.removeEventListener('abort', markAbort); }
+          }
+          if (options.signal.aborted) throw abortError();
+          await options.onBeforeProcess?.();
           const program = 'const fs=require("fs");fs.writeFileSync(process.argv[1],"partial ISO");fs.writeFileSync(process.argv[2],String(process.pid));setInterval(()=>{},1000);';
           const child = spawn(process.execPath, ['-e', program, target, process.env.DISC_TEST_AUTHOR], {windowsHide:true, stdio:'ignore'});
           const closed = new Promise((resolve, reject) => { child.once('close', resolve); child.once('error', reject); });
@@ -106,9 +117,14 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
 
   function launch(mode = 'success', format = 'dvd-iso') {
     const messages = [];
+    // 僅測試的小型既有輸出；正式交付使用可取消的非同步完整雜湊。
+    const outputAuthority=require('../electron/export-lease').captureDestinationEvidence(captureOutputAuthority(outPath,captureOutputDirectory(path.dirname(outPath))));
+    if(outputAuthority.destinationEvidence.identity!==null) outputAuthority.destinationEvidence={...outputAuthority.destinationEvidence,
+      version:2,sha256:crypto.createHash('sha256').update(fs.readFileSync(outPath)).digest('hex')};
     const controller = spawnExportWatchdog({
       ffmpegPath: process.execPath, args: [encoderPath, outPath], outPath,
-      outputAuthority: captureOutputAuthority(outPath, captureOutputDirectory(path.dirname(outPath))),
+      ...require('../electron/export-lease').prepareSharedLeaseRoot(tempDir),
+      outputAuthority,
       queueDir, jobId: mode, outputFormat: format,
     }, {
       scriptPath: bootstrapPath,
@@ -117,6 +133,8 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
         DISC_TEST_PREPARED: path.join(tempDir, 'prepared.json'),
         DISC_TEST_ENCODER: path.join(tempDir, 'encoded.log'),
         DISC_TEST_AUTHOR: path.join(tempDir, 'author.log'),
+        DISC_TEST_RESERVED: path.join(tempDir, 'reserved.log'),
+        DISC_TEST_ABORTED: path.join(tempDir, 'aborted.log'),
         DISC_TEST_GATE: path.join(tempDir, 'gate'),
         DISC_TEST_DISCONNECTED: path.join(tempDir, 'disconnected.log'),
       },
@@ -140,6 +158,31 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
     expect(fs.existsSync(stage.workDir)).toBe(false);
     expect(listLeases(queueDir)).toEqual([]);
     expect(messages.some(message => message.type === 'progress' && message.progress.pct === 96)).toBe(true);
+  });
+
+  it.each([['dvd-iso','start'],['dvd-iso','cancel'],['bd-iso','start'],['bd-iso','cancel']])('%s 原生合成前 stage 被填入，%s 時保留內容', async (format,action) => {
+    const {controller}=launch('reserve-wait',format);
+    await controller.ready;
+    await waitFor(()=>fs.existsSync(path.join(tempDir,'reserved.log')));
+    const stage=fs.readFileSync(path.join(tempDir,'reserved.log'),'utf8'), before=fs.statSync(stage,{bigint:true});
+    const foreign=Buffer.from('外部寫入的 ISO 預留內容');
+    const writer=spawnSync(process.execPath,['-e',"require('fs').writeFileSync(process.argv[1],Buffer.from(process.argv[2],'base64'))",stage,foreign.toString('base64')],
+      {encoding:'utf8',windowsHide:true});
+    expect(writer.status,writer.stderr).toBe(0);
+    const after=fs.statSync(stage,{bigint:true});
+    expect([after.dev,after.ino]).toEqual([before.dev,before.ino]);
+    if(action==='cancel') {
+      controller.stop('user-stop');
+      await waitFor(()=>fs.existsSync(path.join(tempDir,'aborted.log')));
+    }
+    fs.writeFileSync(path.join(tempDir,'gate'),'release');
+    const result=await controller.completion;
+    expect(result.ok).toBe(false);
+    expect(result.cleanup).toMatchObject({retainedLease:true,untouched:true});
+    expect(fs.existsSync(path.join(tempDir,'author.log'))).toBe(false);
+    expect(fs.readFileSync(stage)).toEqual(foreign);
+    expect(fs.readFileSync(outPath,'utf8')).toBe('original ISO');
+    expect(listLeases(queueDir)).toMatchObject([{valid:true,owner:{retainedResult:{code:'DELIVERY_STAGE_CHANGED'}}}]);
   });
 
   it.each(['encoding-fail', 'author-preflight-fail'])('%s 不得刪除既有 ISO', async mode => {

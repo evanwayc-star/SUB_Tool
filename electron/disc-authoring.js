@@ -86,7 +86,7 @@ async function stopNative(child) {
   if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
 }
 
-async function runNative(executable, args, { cwd, signal, onProgress, onProcess, onOutputStart, assertOutput } = {}) {
+async function runNative(executable, args, { cwd, signal, onProgress, onBeforeProcess, onProcess, onOutputStart, assertOutput } = {}) {
   abortIfNeeded(signal);
   if (typeof executable !== 'string' || !executable) throw fail('DISC_NATIVE_MISSING', '缺少光碟合成工具');
   await fs.access(executable).catch(() => { throw fail('DISC_NATIVE_MISSING', `找不到光碟合成工具：${path.basename(executable)}`); });
@@ -94,6 +94,7 @@ async function runNative(executable, args, { cwd, signal, onProgress, onProcess,
   await onOutputStart?.();
   abortIfNeeded(signal);
   assertOutput?.();
+  await onBeforeProcess?.();
   const child = spawn(executable, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let detail = '';
   let nativeError = null, stopping = null, resolveClosed, rejectSpawn;
@@ -239,7 +240,7 @@ async function verifyDiscIso(format, outPath) {
   } finally { await file.close(); }
 }
 
-async function finalizeDiscOutput(format, encodedPath, outPath, { signal, nativePaths = nativeDiscPaths(), audioPlan, fps, onProgress, onProcess, onOutputStart, onOutputLink, assertOutput, nativeWorkRoot } = {}) {
+async function finalizeDiscOutput(format, encodedPath, outPath, { signal, nativePaths = nativeDiscPaths(), audioPlan, fps, onProgress, onBeforeProcess, onProcess, onOutputStart, onOutputLink, assertOutput, nativeWorkRoot } = {}) {
   const spec = discFormat(format);
   discAudioStreams(format, audioPlan);
   abortIfNeeded(signal);
@@ -250,7 +251,7 @@ async function finalizeDiscOutput(format, encodedPath, outPath, { signal, native
   const cwd = path.dirname(encodedPath);
   if (!path.basename(cwd).startsWith(WORK_PREFIX)) throw fail('INVALID_DISC_TEMP', '光碟來源不是本工作暫存檔');
   const options = { cwd: nativeWorkRoot ? path.join(nativeWorkRoot, path.basename(cwd)) : cwd,
-    signal, onProgress, onProcess, assertOutput };
+    signal, onProgress, onBeforeProcess, onProcess, assertOutput };
   if (format === 'dvd-iso') {
     assertOutput?.();
     fsSync.writeFileSync(path.join(cwd, 'disc.xml'), dvdAuthorXml(audioPlan), { encoding: 'utf8', flag: 'wx' });

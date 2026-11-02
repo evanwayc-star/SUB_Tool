@@ -152,12 +152,25 @@ it.each(['replace','partial','same-value'])('accepted timecode clipboard %s keep
 it.each(['Escape','blur','replace'])('timecode clipboard completion after %s cannot edit the next inline session',async action=>{
  await withNoteClipboard(async({input,paste,requests})=>{
   paste();
-  if(action==='Escape')key(input,'Escape');else if(action==='blur')input.blur();else Notes.renderNotes();
+  if(action==='Escape')key(input,'Escape');else if(action==='blur')input.blur();else {
+   // A routine redraw keeps the same editor; replace its owner to model an
+   // actual newer editing session without changing the saved note content.
+   State.notes=[{...State.notes[0]}];Notes.renderNotes();
+  }
   expect(input.isConnected).toBe(false);
   document.querySelector('.nt-time').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));const current=document.querySelector('.nt-te');
   current.value='00:00:03:00';requests[0].resolve('00:00:02:00');await Promise.resolve();
   expect(input.value).toBe('00:00:01:00');expect(current.value).toBe('00:00:03:00');
   key(current,'Enter');expect(State.notes[0].time).toBe(3);expect(History.stack).toHaveLength(2);
+ });
+});
+it('timecode clipboard remains usable when redraw preserves the same note editor',async()=>{
+ await withNoteClipboard(async({input,paste,requests})=>{
+  paste();Notes.renderNotes();expect(document.querySelector('.nt-te')).toBe(input);
+  requests[0].resolve('00:00:02:00');await Promise.resolve();
+  expect(input.value).toBe('00:00:02:00');key(input,'Enter');
+  expect(input.isConnected).toBe(false);expect(State.notes[0].time).toBe(2);
+  expect(History.stack).toHaveLength(2);
  });
 });
 it('a later edit returning to the original timecode still cancels the old clipboard request',async()=>{

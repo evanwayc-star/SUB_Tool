@@ -12,16 +12,17 @@ import { DELIVERY_FRAME_RATES, exactDeliveryFrameRate } from '../shared/delivery
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const { FileAuthority } = require('../electron/file-authority.js');
+const { createIpcGuards } = require('../electron/ipc-guards.js');
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('../electron/media-intake-runtime.js');
 
-function intakeBridge(runtime, coordinator, sender, waveformCoordinator = createMediaIngestCoordinator()) {
+function intakeBridge(runtime, coordinator, sender, waveformCoordinator = createMediaIngestCoordinator(), readable = () => {}) {
   const source = fs.readFileSync(path.join(ROOT, 'electron/main.js'), 'utf8');
   const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
-  const channels = ['ffmpeg:ingest', 'ffmpeg:streamIngest', 'ffmpeg:prepareSourceWaveform', 'ffmpeg:cancelIntake', 'ffmpeg:releaseStream'];
+  const channels = ['ffmpeg:ingest', 'ffmpeg:streamIngest', 'ffmpeg:prepareSourceWaveform', 'ffmpeg:cancelIntake', 'ffmpeg:releaseStream', 'ffmpeg:sourceKey'];
   const handlers = new Map();
   const context = { mediaIntakeRuntime: runtime, mediaIngestCoordinator: coordinator, mediaWaveformCoordinator: waveformCoordinator,
-    requireReadablePath() {}, TypeError,
+    requireReadablePath: readable, TypeError,
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) } };
   const selected = ast.body.filter(node => (node.type === 'FunctionDeclaration'
     && ['mediaIntakeOwner', 'mediaIntakeSession'].includes(node.id?.name))
@@ -160,14 +161,60 @@ describe('sandbox 佇列精確 FPS bridge', () => {
 });
 
 describe('Electron invoke interface', () => {
+  it('source-v3 查驗走真 preload 與授權 main，並與實際波形及串流的來源 key 一致',async()=>{
+    const root=fs.mkdtempSync(path.join(os.tmpdir(),'subtool-wave-source-key-'));
+    const source=path.join(root,'source.mov');fs.writeFileSync(source,'source bytes');
+    const authority=new FileAuthority();
+    const runtime=createMediaIntakeRuntime({tempRoot:root,cacheRoot:path.join(root,'cache'),allowSidecarCache:false,
+      fileAuthority:new FileAuthority({internalDirectories:[root]}),ffmpegExecution:{execute:async (args,options)=>{
+        if(Number.isInteger(options.outputDescriptor)) fs.writeSync(options.outputDescriptor,Buffer.alloc(131072,7));
+        else fs.writeFileSync(args.at(-1),Buffer.alloc(131072,7));
+      }}});
+    const coordinator=createMediaIngestCoordinator(),sender=new EventEmitter();
+    const api=intakeBridge(runtime,coordinator,sender,createMediaIngestCoordinator(),createIpcGuards(authority).requireReadablePath);
+    try{
+      expect(()=>api.mediaSourceKey('')).toThrow();
+      await expect(api.mediaSourceKey(source)).rejects.toMatchObject({code:'UNAUTHORIZED_PATH'});
+      expect(authority.grantTrustedFile(source)).toBe(true);
+      const key=await api.mediaSourceKey(source);
+      expect(key).toMatch(/^[a-f0-9]{16}$/);
+      const wave=await api.prepareSourceWaveform({path:source,duration:1,audio:[{channels:1}],start:0,length:1,sessionId:'s',requestId:'w'});
+      expect(wave.sourceKey).toBe(key);
+      const stream=await api.streamIngest({path:source,duration:1,audio:[],sessionId:'s',requestId:'v'});
+      expect(stream.sourceKey).toBe(key);
+      fs.writeFileSync(source,'new mother content');
+      expect(await api.mediaSourceKey(source)).not.toBe(key);
+    }finally{
+      await coordinator.cancelAllAndWait();await runtime.close();
+      const resolved=fs.realpathSync(root);
+      if(path.dirname(resolved)!==fs.realpathSync(os.tmpdir())||!path.basename(resolved).startsWith('subtool-wave-source-key-'))throw new Error('unsafe fixture cleanup');
+      fs.rmSync(resolved,{recursive:true,force:true});
+    }
+  });
+  it('source-v3 查驗等待完成前撤銷讀取能力，不交出來源證據',async()=>{
+    let release,started,allowed=true;
+    const pending=new Promise(resolve=>{release=resolve;});
+    const entered=new Promise(resolve=>{started=resolve;});
+    const runtime={sourceKey:async()=>{started();await pending;return 'a'.repeat(16);}};
+    const coordinator=createMediaIngestCoordinator();
+    const api=intakeBridge(runtime,coordinator,new EventEmitter(),createMediaIngestCoordinator(),()=>{
+      if(!allowed)throw Object.assign(new Error('未授權'),{code:'UNAUTHORIZED_PATH'});
+    });
+    const work=api.mediaSourceKey('C:/source.mov');await entered;allowed=false;release();
+    await expect(work).rejects.toMatchObject({code:'UNAUTHORIZED_PATH'});
+  });
   it('來源波形經真 preload/main/runtime 不排在 Proxy 後；取消只停止自己並等待 writer close 清理', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-wave-ipc-'));
     const source = path.join(root, 'mother.mov'); fs.writeFileSync(source, 'mother');
     const children = [], outputs = [];
     const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg-test', getUserDataDir: () => root,
-      spawnDirect(_executable, args) {
+      spawnDirect(_executable, args, options) {
         const child = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = vi.fn();
-        outputs.push(args.at(-1)); fs.writeFileSync(args.at(-1), 'wave partial'); children.push(child);
+        expect(args.slice(-3)).toEqual(['-f', 'wav', 'fd:']);
+        expect(Number.isInteger(options.stdio?.[1])).toBe(true);
+        const file = fs.readdirSync(root).find(name => name.endsWith('.source-wave.wav'));
+        expect(file).toBeTruthy(); outputs.push(path.join(root, file));
+        fs.writeSync(options.stdio[1], Buffer.from('wave partial')); children.push(child);
         return child;
       } });
     const runtime = createMediaIntakeRuntime({ tempRoot: root, cacheRoot: path.join(root, 'cache'), allowSidecarCache: false,
@@ -290,7 +337,7 @@ describe('Electron invoke interface', () => {
     expect(present).toHaveBeenCalledWith(1,options);
   });
 
-  it('截圖reservation釋放只接受path字串並使用獨立main channel', async () => {
+  it('截圖預留的釋放與寫入使用路徑及獨立憑證', async () => {
     const invoke = vi.fn().mockResolvedValue(true);
     let api;
     vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'electron/preload.js'), 'utf8'), {
@@ -301,9 +348,13 @@ describe('Electron invoke interface', () => {
       ArrayBuffer, Uint8Array, Promise, TypeError, RangeError,
     });
     expect(() => api.releaseScreenshotPath(null)).toThrow(TypeError);
+    expect(() => api.releaseScreenshotPath('C:/Project/Shot-001.jpg')).toThrow(TypeError);
+    expect(() => api.writeScreenshot('C:/Project/Shot-001.jpg', 'image')).toThrow(TypeError);
     expect(invoke).not.toHaveBeenCalled();
-    await api.releaseScreenshotPath('C:/Project/Shot-001.jpg');
-    expect(invoke).toHaveBeenCalledWith('fs:releaseScreenshotPath', 'C:/Project/Shot-001.jpg');
+    await api.releaseScreenshotPath('C:/Project/Shot-001.jpg', 'owner-token');
+    expect(invoke).toHaveBeenCalledWith('fs:releaseScreenshotPath', { path:'C:/Project/Shot-001.jpg', token:'owner-token' });
+    await api.writeScreenshot('C:/Project/Shot-001.jpg', 'image', 'owner-token');
+    expect(invoke).toHaveBeenCalledWith('fs:writeScreenshot', { path:'C:/Project/Shot-001.jpg', b64:'image', token:'owner-token' });
   });
   it('preload 暴露的每一條 invoke channel 都有主程序 handler', () => {
     const preloadSources = ['preload.js', 'queue-preload.js', 'compare-preload.js']
