@@ -56,6 +56,14 @@ describe('SUB Tool ASS import plan', () => {
     expect(plan.cues[0].end).toBe(sourceCue.end);
   });
 
+  it.each([fps, 24])('未定時字幕在目標 %s FPS 時保留原始秒數', targetFps => {
+    const original = { start: 1.001, end: 2.003, text: '未定時原稿', timed: false, track: 0 };
+    const ass = SubFormats.toASS([sourceCue, original], fps, [sourceTrack], 1920, 1080, { includeMetadata: true });
+    const plan = buildSubtitleImportPlan(SubFormats.parseASS(ass), { fps: targetFps, target: 'new' });
+    expect(plan.cues[1]).toMatchObject({ start: original.start, end: original.end, text: original.text, timed: false });
+    if (targetFps === fps) expect(plan.cues[0]).toMatchObject({ start: sourceCue.start, end: sourceCue.end });
+  });
+
   it.each(['new', 'existing'].flatMap(target => [fps, 24].map(targetFps => ({ target, targetFps }))))
   ('合併多軌 ASS 匯入 $target 目的軌（$targetFps FPS）保留全部原稿、時間與各自生效樣式', ({ target, targetFps }) => {
     const verticalPreset = { vertical: true, font: 'Arial', fontSize: 60, lineSpacing: 1.8,

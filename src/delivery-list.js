@@ -28,7 +28,7 @@
 ============================================================================== */
 import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { getDeliveryFormatPreset, getDeliveryFormatOption, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
-import { deliveryResolution, suggestKbps, deriveDeliverySpec } from '../shared/delivery-resolution.cjs';
+import { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight } from '../shared/delivery-resolution.cjs';
 
 /** 交付格式對應的副檔名；未知格式一律當 MP4。 */
 export function extensionFor(format) {
@@ -124,7 +124,7 @@ function applyFormatPreset(row, projectFps) {
     row.targetFps = mode.fps;
     row.kbps = preset.videoKbps;
     row.audioPlan = normalizeDeliveryPresetAudio(row.format, row.audioPlan);
-  }
+  } else row.targetH = normalizeTargetHeight(row.targetH);
 }
 
 /**
@@ -225,7 +225,7 @@ export function createDeliveryList({
        套在 4K 上則會糊掉（v4.32 使用者回報「輸出像 proxy」的成因）。 */
     setTargetHeight(i, h) {
       const r = at(i); if (!r) return;
-      r.targetH = (r.format === 'bd-iso' ? bdVideoMode(r.targetFps)?.height : getDeliveryFormatPreset(r.format)?.height) || Number(h) || 0;
+      r.targetH = (r.format === 'bd-iso' ? bdVideoMode(r.targetFps)?.height : getDeliveryFormatPreset(r.format)?.height) || normalizeTargetHeight(h);
       if (r.format === 'h264') {
         r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav: false }));
       }

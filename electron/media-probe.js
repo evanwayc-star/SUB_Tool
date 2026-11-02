@@ -51,6 +51,7 @@ function fpsOf(stream) {
  *   duration: number,
  *   video: {codec: string, width: number, height: number, sampleAspectRatio?: string, pixelFormat?: string,
  *     colorSpace?: string, colorPrimaries?: string, colorTransfer?: string, colorRange?: string,
+ *     displayTransform?: true, fieldOrder?: string|null,
  *     fps: number|null, timestampOffset: number, presentationTimestampOffset: number}|null,
  *   audio: Array<{index: number, streamIndex: number, codec: string, channels: number, lang: string, title: string, timestampOffset: number, presentationTimestampOffset: number}>
  * }} 標準化媒體描述
@@ -59,6 +60,11 @@ function descriptorOf(document = {}) {
   const streams = Array.isArray(document.streams) ? document.streams : [];
   const video = streams.find(stream => stream?.codec_type === 'video' && !stream?.disposition?.attached_pic) || null;
   const audio = streams.filter(stream => stream?.codec_type === 'audio');
+  // 保留「存在變換」而非只判斷角度：包含 0 度、鏡像及無法解析的矩陣。
+  const displayTransform = Array.isArray(video?.side_data_list) && video.side_data_list.some(side =>
+    String(side?.side_data_type || '').trim().toLowerCase() === 'display matrix'
+      || (side && Object.hasOwn(side, 'displaymatrix')))
+    || Object.keys(video?.tags || {}).some(key => key.toLowerCase() === 'rotate');
   const starts = streams.map(stream => Number(stream?.start_time)).filter(Number.isFinite);
   const containerStart = finiteNumber(document.format?.start_time, starts.length ? Math.min(...starts) : 0);
   // FFmpeg 在 input 層減去容器起點；預覽聲道再轉回影片來源第零秒。
@@ -84,6 +90,8 @@ function descriptorOf(document = {}) {
       ...(video.color_primaries ? { colorPrimaries: video.color_primaries } : {}),
       ...(video.color_transfer ? { colorTransfer: video.color_transfer } : {}),
       ...(video.color_range ? { colorRange: video.color_range } : {}),
+      ...(displayTransform ? { displayTransform: true } : {}),
+      ...(Object.hasOwn(video, 'field_order') ? { fieldOrder: video.field_order } : {}),
       fps: fpsOf(video),
       timestampOffset: containerStart - videoStart,
       // HTML 與 MP4 edit-list／WebCodecs 保留絕對呈現 PTS；FFmpeg／mpv

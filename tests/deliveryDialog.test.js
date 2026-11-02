@@ -179,6 +179,28 @@ describe('匯出交付清單', () => {
     }));
   });
 
+  it('手動輸入奇數高度時，畫面與送出的尺寸及預設檔名一致', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-res')).not.toBeNull());
+    const resolution = document.querySelector('.ev-res');
+    resolution.value = 'custom';
+    resolution.dispatchEvent(new Event('change', { bubbles: true }));
+    const custom = document.querySelector('.ev-custom-res');
+    custom.value = '721';
+    custom.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(document.querySelector('.ev-res').value).toBe('720');
+    expect(document.querySelector('.ev-name').value).toContain('_720p.mp4');
+    const outDir = document.querySelector('.ev-outdir');
+    outDir.value = 'D:/交付';
+    outDir.dispatchEvent(new Event('input', { bubbles: true }));
+    window.subtool.exportVideo.mockResolvedValue('job-odd-height');
+    const submit = spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn');
+    await submit.act();
+    expect(window.subtool.exportVideo).toHaveBeenCalledWith(expect.objectContaining({
+      width: 1280, height: 720, targetH: 720, defaultName: expect.stringContaining('_720p.mp4'),
+    }));
+  });
+
   it('依需求列出九種交付格式與兩種獨立 DMPES 碼率', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-format')).not.toBeNull());

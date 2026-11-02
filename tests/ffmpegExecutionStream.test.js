@@ -68,6 +68,103 @@ function setup(kind, { chunks = [], code = 0, stage, signal = null, shouldSend, 
 }
 
 describe('public FFmpeg execution terminal and pipe records', () => {
+  it('direct 將呼叫方持有的輸出 fd 映射到 child stdout，close 後 fd 仍可用', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-fd-spawn-')); roots.push(root);
+    const output = path.join(root, 'reserved.wav');
+    const fd = fs.openSync(output, 'wx+');
+    let spawned;
+    const engine = createFFmpegExecution({ getFFmpegPath: () => 'fake', getUserDataDir: () => root,
+      spawnDirect(_exe, args, options) {
+        spawned = { args, options };
+        const child = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => {};
+        queueMicrotask(() => child.emit('close', 0, null)); return child;
+      } });
+    try {
+      await engine.execute(['-f', 'wav', 'fd:'], { executionKind: 'direct', outputDescriptor: fd, cwd: root });
+      expect(spawned).toEqual({ args: ['-f', 'wav', 'fd:'], options: { cwd: root, stdio: ['ignore', fd, 'pipe'] } });
+      fs.writeSync(fd, Buffer.from('OWNER STILL OPEN'));
+      expect(fs.readFileSync(output, 'utf8')).toBe('OWNER STILL OPEN');
+    } finally { fs.closeSync(fd); }
+  });
+
+  it.each([0, 1, 2, -1, 2.5, NaN, Infinity, '3', null])('拒絕無效 outputDescriptor %s，不啟子程序', async outputDescriptor => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-invalid-fd-')); roots.push(root);
+    let calls = 0;
+    const engine = createFFmpegExecution({ getFFmpegPath: () => 'fake', getUserDataDir: () => root,
+      spawnDirect() { calls++; throw new Error('must not spawn'); } });
+    await expect(engine.execute([], { executionKind: 'direct', outputDescriptor })).rejects.toThrow(/outputDescriptor/);
+    expect(calls).toBe(0);
+  });
+
+  it('queued-delivery 不接受 outputDescriptor，亦不得啟動 watchdog', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-queued-fd-')); roots.push(root);
+    let calls = 0;
+    const engine = createFFmpegExecution({ getFFmpegPath: () => 'fake', getQueueDir: () => root,
+      getUserDataDir: () => root, spawnWatchdog() { calls++; throw new Error('must not spawn'); } });
+    await expect(engine.execute([], { executionKind: 'queued-delivery', jobId: 'q',
+      outPath: path.join(root, 'out.mp4'), outputDescriptor: 3 })).rejects.toThrow(/outputDescriptor/);
+    expect(calls).toBe(0);
+  });
+
+  it('指定 outputDescriptor 時不接受路徑輸出，避免失權後退回路徑寫入', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-fd-path-')); roots.push(root);
+    let calls = 0;
+    const engine = createFFmpegExecution({ getFFmpegPath: () => 'fake', getUserDataDir: () => root,
+      spawnDirect() { calls++; throw new Error('must not spawn'); } });
+    await expect(engine.execute(['-y', path.join(root, 'out.wav')],
+      { executionKind: 'direct', outputDescriptor: 3 })).rejects.toThrow(/outputDescriptor/);
+    expect(calls).toBe(0);
+  });
+  it('queued 重試不覆寫同名外來檔，兩次失敗各保留獨立診斷', async () => {
+    const fixture = setup('queued-delivery', { code: 1, chunks: ['OWN_NATIVE_DIAGNOSTIC\n'] });
+    const queueDir = path.join(fixture.root, 'queue');
+    fs.mkdirSync(queueDir, { recursive: true });
+    const foreignPath = path.join(queueDir, 'ingest.log');
+    fs.writeFileSync(foreignPath, 'FOREIGN_BYTES');
+    const first = await fixture.run().catch(error => error);
+    const second = await fixture.run().catch(error => error);
+    expect(fs.readFileSync(foreignPath, 'utf8')).toBe('FOREIGN_BYTES');
+    const firstPath = /\[LOG_PATH\](.*?)\[\/LOG_PATH\]/.exec(first.message)?.[1];
+    const secondPath = /\[LOG_PATH\](.*?)\[\/LOG_PATH\]/.exec(second.message)?.[1];
+    expect(firstPath).toBeTruthy();
+    expect(secondPath).toBeTruthy();
+    expect(firstPath).not.toBe(secondPath);
+    expect(fs.readFileSync(firstPath, 'utf8')).toContain('OWN_NATIVE_DIAGNOSTIC');
+    expect(fs.readFileSync(secondPath, 'utf8')).toContain('OWN_NATIVE_DIAGNOSTIC');
+  });
+  it.each(['direct', 'queued-delivery'].flatMap(kind => [0, 1].map(code => [kind, code])))(
+    '%s close 後記錄被同名替換時，結束碼 %s 不讀取、刪除或發布外來記錄', async (kind, code) => {
+      const retained = [];
+      const foreign = 'FOREIGN_PRIVATE_CONTENT\nUnknown encoder foreign-only\n';
+      let logPath, original;
+      const fixture = setup(kind, { code, chunks: ['OWN_NATIVE_DIAGNOSTIC\n'], fsModule: {
+        ...fs,
+        createWriteStream(file, options) {
+          logPath = file;
+          original = `${file}.original`;
+          const stream = fs.createWriteStream(file, options);
+          stream.once('close', () => {
+            fs.renameSync(file, original);
+            fs.writeFileSync(file, foreign);
+          });
+          return stream;
+        },
+      }, observers: { logRetained: file => retained.push(file) } });
+      const outcome = await fixture.run().then(result => ({ result }), error => ({ error }));
+      expect(fs.readFileSync(logPath, 'utf8')).toBe(foreign);
+      expect(fs.readFileSync(original, 'utf8')).toContain('OWN_NATIVE_DIAGNOSTIC');
+      expect(retained).toEqual([]);
+      if (code === 0) expect(outcome.error).toBeUndefined();
+      else {
+        expect(outcome.error.code).toBe('FFMPEG_EXIT');
+        expect(outcome.error.message).toContain('OWN_NATIVE_DIAGNOSTIC');
+        expect(outcome.error.message).not.toContain('FOREIGN_PRIVATE_CONTENT');
+        expect(outcome.error.message).not.toContain('foreign-only');
+        expect(outcome.error.message).not.toContain('[LOG_PATH]');
+      }
+    },
+  );
+
   it.each([0, 1])('direct log EEXIST 時結束碼 %s 不讀取、刪除或授權外來記錄', async code => {
     const authority = new FileAuthority();
     const reads = [], deletes = [], openErrors = [];
@@ -240,29 +337,20 @@ describe('public FFmpeg execution terminal and pipe records', () => {
     },
   );
 
-  it.each(['direct', 'queued-delivery'])('%s waits for diagnostic log deletion before publishing completion', async kind => {
-    let releaseDelete, deleted, requested;
-    const deleteRequested = new Promise(resolve => { requested = resolve; });
-    const deleteCompleted = new Promise(resolve => { deleted = resolve; });
+  it.each(['direct', 'queued-delivery'])('%s completes diagnostic log deletion before publishing completion', async kind => {
+    let observedDeletion = false;
     const fixture = setup(kind, { fsModule: {
       ...fs,
-      unlink(filename, callback) {
-        releaseDelete = () => fs.unlink(filename, error => { callback(error); deleted(); });
-        requested();
+      unlinkSync(filename) {
+        if (filename.endsWith('.discard') && path.basename(filename).startsWith('.subtool-log-')) {
+          observedDeletion = true;
+          expect(fixture.sent.some(item => item.data.done)).toBe(false);
+        }
+        return fs.unlinkSync(filename);
       },
     } });
-    let settled = false;
-    const work = fixture.run().then(value => { settled = true; return value; });
-    try {
-      await deleteRequested;
-      await new Promise(resolve => setImmediate(resolve));
-      expect(settled).toBe(false);
-      expect(fixture.sent.some(item => item.data.done)).toBe(false);
-    } finally {
-      releaseDelete();
-      await deleteCompleted;
-      await work;
-    }
+    await fixture.run();
+    expect(observedDeletion).toBe(true);
     expect(fs.readdirSync(fixture.root, { recursive: true }).filter(file => file.endsWith('.log'))).toEqual([]);
     expect(fixture.sent.at(-1).data.outcome).toBe('success');
   });

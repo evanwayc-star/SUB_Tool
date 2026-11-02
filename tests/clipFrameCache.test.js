@@ -22,7 +22,11 @@ const { motherSourceFingerprint } = require('../electron/mother-source-evidence.
 const ROOT = path.resolve('');
 const { ffmpeg: FFMPEG, ffprobe: FFPROBE } = nativeTestTools();
 const nativeIt = fs.existsSync(FFMPEG) ? it : it.skip;
-const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9l8AAAAASUVORK5CYII=', 'base64');
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64');
+const stagingIn = root => {
+  const bucket = path.join(root, fs.readdirSync(root).find(name => /^[a-f0-9]{64}$/.test(name)));
+  return path.join(bucket, fs.readdirSync(bucket).find(name => name.startsWith('entry-')), 'content.png');
+};
 const directories = [];
 
 function fixture(extra = {}) {
@@ -33,7 +37,7 @@ function fixture(extra = {}) {
   fs.writeFileSync(source, 'mother video');
   const authority = new FileAuthority();
   authority.grantTrustedFile(source, { read: true, write: false });
-  const execute = vi.fn(async args => fs.writeFileSync(args.at(-1), PNG));
+  const execute = vi.fn(async (_args, options) => fs.writeFileSync(options.outputDescriptor, PNG));
   const probe = vi.fn(async () => ({ duration: 2, video: { fps: 30, width: 1, height: 1 } }));
   const options = { cacheRoot, fileAuthority: authority, execute, probe, ...extra };
   const runtime = createClipFrameCache(options);
@@ -123,9 +127,9 @@ describe('固定畫面的母素材幀快取', () => {
     fs.writeFileSync(f.source, 'AAAA');
     fs.utimesSync(f.source, fixedTime, fixedTime);
     const changedPNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwH4QBEfcD/ePF9e8AAAAASUVORK5CYII=', 'base64');
-    f.execute.mockImplementation(async args => {
+    f.execute.mockImplementation(async (_args, options) => {
       const bytes = fs.readFileSync(f.source, 'utf8') === 'AAAA' ? PNG : changedPNG;
-      fs.writeFileSync(args.at(-1), bytes);
+      fs.writeFileSync(options.outputDescriptor, bytes);
     });
     const first = await f.runtime.frame(f.request);
     const before = fs.statSync(f.source);
@@ -147,8 +151,8 @@ describe('固定畫面的母素材幀快取', () => {
     const fixedTime = new Date('2026-10-01T00:00:00.000Z');
     fs.writeFileSync(f.source, 'AAAA');
     fs.utimesSync(f.source, fixedTime, fixedTime);
-    f.execute.mockImplementationOnce(async args => {
-      fs.writeFileSync(args.at(-1), PNG);
+    f.execute.mockImplementationOnce(async (_args, options) => {
+      fs.writeFileSync(options.outputDescriptor, PNG);
       fs.writeFileSync(f.source, 'BBBB');
       fs.utimesSync(f.source, fixedTime, fixedTime);
     });
@@ -212,10 +216,10 @@ describe('固定畫面的母素材幀快取', () => {
 
   it('不完整 PNG、來源途中被改與關閉期間不能發布，私有 staging 全部清除', async () => {
     const f = fixture();
-    f.execute.mockImplementationOnce(async args => fs.writeFileSync(args.at(-1), PNG.subarray(0, 24)));
+    f.execute.mockImplementationOnce(async (_args, options) => fs.writeFileSync(options.outputDescriptor, PNG.subarray(0, 24)));
     await expect(f.runtime.frame(f.request)).rejects.toThrow(/完整 PNG/);
-    f.execute.mockImplementationOnce(async args => {
-      fs.writeFileSync(args.at(-1), PNG);
+    f.execute.mockImplementationOnce(async (_args, options) => {
+      fs.writeFileSync(options.outputDescriptor, PNG);
       fs.writeFileSync(f.source, 'source changed while decoding');
     });
     await expect(f.runtime.frame(f.request)).rejects.toThrow(/已變更/);
@@ -230,7 +234,7 @@ describe('固定畫面的母素材幀快取', () => {
     let stage, closing = false, processStarted;
     const ready = new Promise(resolve => { processStarted = resolve; });
     const execute = vi.fn((args, options) => {
-      stage = args.at(-1); fs.writeFileSync(stage, PNG);
+      stage = stagingIn(f.cacheRoot); fs.writeFileSync(options.outputDescriptor, PNG);
       return new Promise((resolve, reject) => {
         child.once('close', () => reject(new Error('process terminated')));
         options.onProcess(child); processStarted();
@@ -265,8 +269,8 @@ describe('固定畫面的母素材幀快取', () => {
     let staging = null, closing = false, processStarted;
     const ready = new Promise(resolve => { processStarted = resolve; });
     const execution = createFFmpegExecution({ getFFmpegPath: () => 'trusted-ffmpeg', getUserDataDir: () => f.directory,
-      spawnDirect: (_, args) => {
-        staging = args.at(-1); fs.writeFileSync(staging, PNG); return child;
+      spawnDirect: (_, _args, options) => {
+        staging = stagingIn(f.cacheRoot); fs.writeFileSync(options.stdio[1], PNG); return child;
       } });
     const runtime = createClipFrameCache({ ...f.options,
       execute: (args, options) => execution.execute(args, { ...options, onProcess: process => {
@@ -305,13 +309,13 @@ describe('固定畫面的母素材幀快取', () => {
     const ready = new Promise(resolve => { processStarted = resolve; });
     const cleanupGate = new Promise(resolve => { finishCleanup = resolve; });
     const cleanupEntered = new Promise(resolve => { cleanupStarted = resolve; });
-    const originalUnlink = fsp.unlink;
-    const unlink = vi.spyOn(fsp, 'unlink').mockImplementation(async file => {
+    const originalLstat = fsp.lstat;
+    const cleanupStat = vi.spyOn(fsp, 'lstat').mockImplementation(async (file, ...args) => {
       if (file === staging) { cleanupStarted(); await cleanupGate; }
-      return originalUnlink(file);
+      return originalLstat(file, ...args);
     });
     const execution = createFFmpegExecution({ getFFmpegPath: () => 'trusted-ffmpeg', getUserDataDir: () => f.directory,
-      spawnDirect: (_, args) => { staging = args.at(-1); fs.writeFileSync(staging, PNG); return child; } });
+      spawnDirect: (_, _args, options) => { staging = stagingIn(f.cacheRoot); fs.writeFileSync(options.stdio[1], PNG); return child; } });
     const runtime = createClipFrameCache({ ...f.options,
       execute: (args, options) => execution.execute(args, { ...options, onProcess: process => {
         options.onProcess(process); processStarted();
@@ -340,7 +344,7 @@ describe('固定畫面的母素材幀快取', () => {
       const shutdown = execution.cancelAllAndWait();
       child.emit('close', null, 'SIGKILL'); finishCleanup();
       try { await shutdown; await outcome; await runtime.waitForIdle?.(); }
-      finally { unlink.mockRestore(); }
+      finally { cleanupStat.mockRestore(); }
     }
   });
 

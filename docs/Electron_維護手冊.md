@@ -36,8 +36,10 @@ flowchart LR
 | `mother-source-evidence.js` | 本機 stat／內容取樣證據與跨電腦完整內容證據 |
 | `media-intake-runtime.js` | Proxy／音訊／波形快取、串流及 intake coordinator |
 | `media-source-clock.js` | FFmpeg seek 捨入及音訊 PTS filter；純原點映射使用 shared |
-| `clip-frame-cache.js`、`clip-audio-cache.js` | 固定畫面 PNG、反向片段 WAV 的私有 staging 及完整性 |
+| `clip-frame-cache.js`、`clip-audio-cache.js` | 固定畫面 PNG、反向片段 WAV 的格式完整性及母素材證據 |
+| `clip-cache-artifact.js` | 片段快取的目錄世代、輸出 handle、發布及失敗清理 |
 | `ffmpeg-execution-engine.js` | 工具解析、encoder、stderr 解析及程序執行 |
+| `diagnostic-log.js` | 每次執行記錄的身分、保留、讀取及回收 |
 | `audio-normalization-runtime.js` | 聲量量測、平衡階段及原生取消 |
 | `vocal-waveform-runtime.js` | 人聲分析的受限 PCM 讀取與逐 sender 取消 |
 | `vocal-waveform-fingerprint.js` | 人聲波形來源指紋的 namespace adapter |
@@ -279,6 +281,8 @@ Proxy 色彩探測前後核對同一來源 key，描述隨其證據一起進入�
 
 Proxy-only 不能滿足有音訊的請求，部分 sidecar 不能遮住完整中央快取。只補缺件，寫本次私有 generation；來源與重用檔案重核、完成紀錄提交成功後才發布成功。失敗、取消或 runtime 關閉後晚到的工作不能發布，清除本次未提交 generation，保留既有完成紀錄及檔案。沒有按天過期規則；孤兒清理也讀取 generation 完成紀錄，不能因缺少相容索引便刪除有效快取，遇權限或暫時 I/O 錯誤同樣保留。
 
+串流 lease 綁定首次准入的快取根、generation 及 Proxy 檔案 dev／ino；可播檢查及每次 HTTP 開檔前後都重核，不能因同名路徑出現新檔便供應替代內容。新 Proxy 先以 `wx` 預留，FFmpeg 在同一檔案上寫入；這個身分不以母素材仍存在或目前相容索引仍指向舊 generation 為條件，已完成的有效串流可繼續讀取。
+
 `ingest` 與 `streamIngest` 共用 coordinator，直到完整背景 completion 才允許下一個 writer。新 caller 必須提供每次工作區取代或整個 session 取消後唯一的 sessionId，以及每份工作唯一的 requestId；兩者都是非空且不超過 128 字元的字串。main 從 event 綁定 sender，不採信 payload 的 sender。同專案首次加影片、保留既有外音的 reset 沿用目前 session，避免取消合法的外音準備。
 
 | 操作 | 生命週期契約 |
@@ -296,11 +300,23 @@ Proxy-only 不能滿足有音訊的請求，部分 sidecar 不能遮住完整中
 
 Writer 與每個串流 reader 分別保護快取目錄；writer 完成不能讓仍在播放的快取被刪。每個 HTTP request 自有 reader／timer，斷線先結束該 request；release／cancel／runtime close 結束相關全部 request。清快取只計實際刪除 bytes，保留被引用目錄。診斷應呼叫 `inspectCache()` 共用完整性與圍堵規則，不自行取 basename 重組路徑。
 
+### 固定畫面與反向音訊快取
+
+兩種片段快取共用 `clip-cache-artifact.js` 的檔案生命週期；PNG／WAV 格式驗證與母素材指紋仍由各自模組持有。每個 key 只搜尋自己的完成世代及舊版平面檔案。有效舊快取可沿用；損毀的既有產物保留，另建新世代，不依賴 hardlink 發布。
+
+PNG 逐區塊核對長度、順序與 CRC，串流解壓 IDAT，依尺寸、色彩型別、位深與 Adam7 分段核對實際列長及濾鏡；完整標頭或 IEND 不能替損毀的影像資料作證。檔案與解壓資料各受 1 GiB 工作預算限制，超限不發布；不一次配置整張解壓影像。格式依 [PNG 規格](https://www.w3.org/TR/png-3/)；此檢查是私有固定畫面快取的准入條件，不是通用圖片編輯器。
+
+新世代以 `wx+` 建立檔案並持有 handle，FFmpeg 經 `fd:` 寫入同一個實體檔案；此協定對一般檔案可 seek，WAV 長度欄位可正常回填，詳見 [FFmpeg fd protocol](https://ffmpeg.org/ffmpeg-protocols.html#fd)。`ffmpeg-execution-engine.js` 的 `outputDescriptor` 只允許 direct 執行且輸出為 `fd:`，不接管 caller 的關檔責任。
+
+原生程序結束後，先核對檔案及目錄身分、格式內容與母素材指紋，再建立 `ready` 標記供後續讀取。失敗或取消會等 handle 關閉，僅清理仍持有的未完成檔案與空目錄；同名路徑被替換時保留現場。這是多次檔案系統核對，不提供 OS 級原子沙箱。
+
 ### 執行進度與終態
 
-stderr 以增量 UTF-8、CR／LF record 解析，保留跨 chunk 文字，結束時處理最後 record；carry 有界，原始 log 保留 bytes。執行 module 同時持有記錄檔收尾：等待串流 `close` 確認檔案已釋放，成功時再等刪除回呼，才完成工作及發布終態。寫入 `finish` 或等待期限不能代替 `close`；記錄寫入或刪除失敗仍保留原生執行結果。
+stderr 以增量 UTF-8、CR／LF record 解析，保留跨 chunk 文字，結束時處理最後 record；carry 有界，原始 log 保留 bytes。執行 module 同時持有記錄檔收尾：等待串流 `close` 確認檔案已釋放，成功時完成身分核對與同步刪除，才完成工作及發布終態。寫入 `finish` 或等待期限不能代替 `close`；記錄寫入或刪除失敗仍保留原生執行結果。
 
-Direct FFmpeg 的每次執行以獨立隨機名稱及 `wx` 建立記錄，避免同毫秒同類工作混寫或互刪。只有已實際開啟、關閉並保留的失敗記錄，才經 `onLogRetained` 授予該份 `.log` 的系統開啟資格；不授予整個 userData 或一般讀寫能力。成功工作不取得此資格，既有交付佇列的持久記錄路徑維持不變。
+Direct 與交付佇列的每次執行都以獨立隨機名稱及 `wx` 建立記錄。診斷 owner 將檔案與父目錄的 dev／ino／建立時間寫入獨立 receipt；關檔後再次核對才能讀取、保留或發布路徑。交付重試保留各次失敗記錄，不覆寫舊記錄；清除工作及重啟恢復時，依 job 身分只回收仍與 receipt 相符的記錄。舊版固定名沒有可信身分，保守保留。系統開啟時再次核 receipt，Direct 仍僅授予單份記錄的開啟資格，不授予同目錄或一般讀寫能力。這些是多個 filesystem syscall，並非 OS 級原子圍堵；失權時保留無法確認的資料。
+
+佇列清理遇到鎖檔或權限等 I/O 失敗會保留待刪 journal，之後重啟再嘗試；不能把 rename／身分讀取失敗當成已清除。身分不符與檔案已不存在分開處理，不為完成清理而刪除替代內容。
 
 記錄檔若未成功開啟，例如 `wx` 遇到同名外來檔，執行器不得讀取、刪除、授權或以 `LOG_PATH` 發布該路徑；診斷僅使用本次 stderr 與開檔錯誤。記錄失敗不改變原生工作的成功／失敗判定。
 
@@ -375,6 +391,29 @@ Windows filtergraph 路徑由既有兩層跳脫處理，包含逗號、單引號
 ### Encoder
 
 一般 H.264 可用硬體 encoder，狀態須回報實際採用者；不能以命令成功推定使用 GPU。固定交付採自己的規格。
+
+#### Proxy 的 GPU 路徑
+
+背景 `ingest` 與 `streamIngest` 依實際選中的 encoder 及同一來源的 probe 描述選路徑。NVENC 可用時，將相容 SDR YUV 的縮放交給 CUDA；音訊拆聲道、AAC 及波形仍在同一次 FFmpeg 中完成，沒有另開一輪影片轉檔。
+
+| 來源／條件 | 優先路徑 |
+|---|---|
+| H.264／HEVC、8-bit 4:2:0、無旋轉／交錯的 SDR | CUDA 解碼 → CUDA 縮放 → NVENC，畫格不先下載回 CPU |
+| 其他受支援的 SDR YUV，例如 ProRes | CPU 解碼及轉成 4:2:0 → 上傳 CUDA → CUDA 縮放 → NVENC |
+| RGB、full-range、HDR、顯示矩陣／旋轉、交錯或描述不足 | 沿用相容色彩／幾何處理，再使用已選中的硬體 encoder |
+| QSV、AMF、VideoToolbox 或純 CPU | 保留相容路徑；本次 CUDA 縮放不適用 |
+
+`previewPipelineCandidates()` 擁有准入規則，`buildIngestArgs()` 產生實際參數。CUDA 採 `scale_cuda` 的 bicubic；720p、來源畫格時間、NVENC p4／CQ 26、無 B 幀及 GOP 2 維持既有預覽規格。未知色彩先依原尺寸固定解讀，再縮放；不能用縮放後高度猜母素材色彩。CPU 與 CUDA 縮放結果並非逐像素相同，驗證須比較完整畫格與色彩，不能只比輸出標籤。正式交付仍走自己的編碼規格。
+
+只有同次 FFmpeg 的明確硬體／濾鏡相容性錯誤才能重試：依序降至 CPU 解碼加 GPU 縮放、CPU 解碼縮放加硬體編碼，最後 libx264；實際候選依上表省略不適用路徑。磁碟、權限、來源毀損、取消及來源身分變更不屬這個退路。每次都等待原 writer `close`、重核來源與本次 generation、清除自己的未完成檔案，再建立新 generation。已交出串流 URL 後不換輸出或重新編碼，避免同一 URL 前後屬於不同影片。進度標籤回報目前嘗試的「GPU 解碼／縮放／編碼」、「GPU 縮放／編碼」、「GPU 編碼」或「CPU 轉檔」。
+
+背景 ingest 保留起始一秒的排程讓步，讓原生播放器先讀取母素材，避免首次播放無聲；重試不重複這段等待。串流 intake 沒有此等待。已完成的相容快取直接重用，不因 GPU 路徑改進強制重建；舊式獨立 `ffmpeg:proxy` 暫存 API 保留原相容參數。
+
+濾鏡與硬體傳輸介面參考 [FFmpeg scale_cuda](https://ffmpeg.org/ffmpeg-filters.html#scale_005fcuda) 及 [NVIDIA FFmpeg 指南](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/ffmpeg-with-nvidia-gpu/index.html)。效能驗收使用實際 runtime、獨立空快取及相同母素材片段，同時核對 PTS、畫格數、GOP、色彩和所有聲道／波形的解碼內容；需分開記錄首次 GPU 初始化與後續運行，不能把 warm cache 命中當成加速。
+
+[proxyGpuNative.test.js](../tests/proxyGpuNative.test.js) 在 Windows 以真 NVENC 探針確認硬體，再驗 H.264／ProRes 的實際 GPU 輸出。沒有 NVENC 的機器明確略過；探針成功後的管線錯誤不得略過。色彩比較固定相同 encoder，避免把 x264 與 NVENC 的量化差異歸因於縮放器。
+
+#### MOD-FHD 交付規格
 
 | MOD-FHD 項目 | 對應規格 |
 |---|---|

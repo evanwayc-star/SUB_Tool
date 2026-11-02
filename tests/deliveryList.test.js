@@ -87,6 +87,27 @@ describe('交付解析度', () => {
   it('等比縮放到指定高度', () => {
     expect(deliveryResolution({ canvasW: 1920, canvasH: 1080, targetH: 720 })).toEqual({ w: 1280, h: 720 });
   });
+  it('奇數自訂高度先對齊為實際輸出高度，再依畫布比例計算寬度', () => {
+    const list = base();
+    list.setTargetHeight(0, 17);
+    const [job] = list.toJobs({});
+    expect({ width: job.width, height: job.height }).toEqual({ width: 28, height: 16 });
+    list.setTargetHeight(0, 721);
+    expect(list.get(0)).toMatchObject({ targetH: 720, customName: 'ST_拼桌_29.97fps_720p.mp4' });
+    expect(list.toJobs({})[0]).toMatchObject({ width: 1280, height: 720, targetH: 720,
+      defaultName: 'ST_拼桌_29.97fps_720p.mp4' });
+    expect(deriveDeliverySpec({ format: 'h264', canvasW: 1920, canvasH: 1080,
+      targetH: 721, fps: 25 })).toMatchObject({ width: 1280, height: 720, targetH: 720 });
+    list.setName(0, '客戶的721p名稱');
+    list.setTargetHeight(0, 721);
+    expect(list.toJobs({})[0].defaultName).toBe('客戶的721p名稱.mp4');
+    list.setTargetHeight(0, 0);
+    expect(list.toJobs({})[0]).toMatchObject({ width: 1920, height: 1080, targetH: 0 });
+    const restored = base({ initial: [{ format: 'h264', targetH: 721, outDir: 'D:/交付',
+      customName: '舊預設名稱.mp4', nameModified: false }] });
+    expect(restored.toJobs({})[0]).toMatchObject({ width: 1280, height: 720, targetH: 720,
+      defaultName: 'ST_拼桌_29.97fps_720p.mp4' });
+  });
   it('寬度一律取偶數（H.264 要求，奇數寬會讓 ffmpeg 直接失敗）', () => {
     // 4:3 → 720 高會算出 960（偶數）；用會產生奇數的比例驗證夾偶
     const r = deliveryResolution({ canvasW: 1919, canvasH: 1080, targetH: 721 });

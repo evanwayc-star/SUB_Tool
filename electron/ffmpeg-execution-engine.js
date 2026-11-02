@@ -15,7 +15,7 @@ const nodeFs = require('fs');
 const { randomUUID } = require('crypto');
 const { spawn: nodeSpawn, spawnSync: nodeSpawnSync } = require('child_process');
 const { StringDecoder } = require('string_decoder');
-const QueueStore = require('./queue-store');
+const DiagnosticLog = require('./diagnostic-log');
 const ExportWatchdog = require('./export-watchdog');
 const { artifactProgress, isDiscOutput } = require('./export-artifact');
 const discTools = require('./disc-tools.json');
@@ -424,6 +424,42 @@ class FFmpegErrorAnalyzer {
   }
 }
 
+// GPU 縮放只處理已確認的 SDR YUV；旋轉、交錯、RGB、HDR 與 full-range
+// 沿用原本的軟體色彩／幾何濾鏡。編碼器可用不代表某份來源能硬解。
+function previewPipelineCandidates({ encoder = 'libx264', video, needsProxy = true } = {}) {
+  encoder ||= 'libx264';
+  const software = { encoder, mode: 'software', label: encoder === 'libx264' ? 'CPU 轉檔' : 'GPU 編碼' };
+  if (!needsProxy || encoder === 'libx264') return [software];
+  const candidates = [];
+  const missing = value => !value || ['unknown', 'unspecified', 'reserved'].includes(value);
+  const safeTransfer = missing(video?.colorTransfer) || ['bt709', 'smpte170m', 'smpte240m', 'bt470m', 'bt470bg'].includes(video.colorTransfer);
+  const safeFieldOrder = video && (video.fieldOrder === undefined || ['progressive', 'unknown'].includes(video.fieldOrder));
+  const gpuScale = encoder === 'h264_nvenc' && video?.width > 0 && video?.height > 0
+    && !video.displayTransform && safeFieldOrder && safeTransfer
+    && video.colorSpace !== 'gbr' && !['pc', 'jpeg', 'full'].includes(video.colorRange)
+    && ['yuv420p', 'nv12', 'yuv422p', 'yuv422p10le', 'yuv420p10le', 'p010le', 'yuv444p', 'yuv444p10le'].includes(video.pixelFormat);
+  if (gpuScale) {
+    if (['h264', 'hevc'].includes(video.codec) && ['yuv420p', 'nv12'].includes(video.pixelFormat)) {
+      candidates.push({ encoder, mode: 'cuda', label: 'GPU 解碼／縮放／編碼' });
+    }
+    candidates.push({ encoder, mode: 'cuda-upload', label: 'GPU 縮放／編碼' });
+  } else {
+    candidates.push({ encoder, mode: 'compatible', label: 'GPU 編碼' });
+  }
+  return [...candidates, software, { encoder: 'libx264', mode: 'software', label: 'CPU 轉檔' }];
+}
+
+// 只處理明確的硬體相容性錯誤；來源、磁碟、權限及取消錯誤仍交回原 owner。
+// stderr 由同一次 execute 的 onStderr 提供，不重讀或推測其他工作的日誌。
+function previewFallbackAllowed(candidate, error, stderr = '') {
+  if (!candidate || candidate.encoder === 'libx264' || error?.code !== 'FFMPEG_EXIT' || error.signal) return false;
+  const detail = `${stderr}\n${error.message || ''}`;
+  if (/permission denied|access (?:is )?denied|no space left|disk (?:is )?full|input\/output error|invalid data found when processing input/i.test(detail)) return false;
+  if (/CUDA_ERROR_|cannot load[^\n]*(?:cuda|nvenc|nvencode)|no (?:cuda capable|capable) devices|(?:openencodesessionex|initializeencoder) failed|(?:cuda|nvenc|qsv|amf)[^\n]*(?:initiali[sz].*(?:fail|error)|not supported|unsupported|device.*(?:fail|error))|driver[^\n]*(?:nvenc|cuda)|(?:failed|error)[^\n]*(?:initiali[sz].*)?(?:cuda|nvenc|qsv|amf)/i.test(detail)) return true;
+  return ['cuda', 'cuda-upload'].includes(candidate.mode)
+    && /no device available for decoder: device type cuda needed for codec|no such filter[^\n]*(?:scale_cuda|hwupload_cuda)|impossible to convert between the formats|failed to configure output pad|error reinitializing filters/i.test(detail);
+}
+
 function buildIngestArgs({
   src,
   needsProxy,
@@ -435,10 +471,14 @@ function buildIngestArgs({
   wavePath,
   encoder,
   video,
+  pipeline,
   isStream = false,
 }) {
+  encoder = pipeline?.encoder || encoder;
   let hwdec = [];
-  if (encoder && encoder !== 'libx264') {
+  if (pipeline?.mode === 'cuda') {
+    hwdec = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'];
+  } else if (!['software', 'cuda-upload'].includes(pipeline?.mode) && encoder && encoder !== 'libx264') {
     hwdec = ['-hwaccel', 'auto'];
   }
 
@@ -479,6 +519,10 @@ function buildIngestArgs({
       const transfer = usesFrameColor && !missingColor(video.colorTransfer) ? 'auto' : matrix;
       const range = missingColor(video.colorRange) ? 'limited' : 'auto';
       vf = `setpts=PTS-STARTPTS,setparams=colorspace=${matrix}:color_primaries=${primaries}:color_trc=${transfer}:range=${range},scale=-2:720,format=yuv420p`;
+    }
+    if (pipeline?.mode === 'cuda' || pipeline?.mode === 'cuda-upload') {
+      const upload = pipeline.mode === 'cuda-upload' ? 'format=yuv420p,hwupload_cuda,' : '';
+      vf = vf.replace('scale=-2:720,format=yuv420p', `${upload}scale_cuda=-2:720:format=yuv420p:interp_algo=bicubic`);
     }
     const vencArgs = previewVideoEncoderArgs(encoder);
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
@@ -643,6 +687,7 @@ function createFFmpegExecution(options = {}) {
     discAudioPlan,
     discVideoFps,
     outputAuthority,
+    outputDescriptor,
     isCancelled,
   } = {}) {
     return new Promise((resolve, reject) => {
@@ -651,6 +696,11 @@ function createFFmpegExecution(options = {}) {
         return;
       }
       const isQueueExport = executionKind === 'queued-delivery';
+      if (outputDescriptor !== undefined && (isQueueExport || !Number.isSafeInteger(outputDescriptor)
+        || outputDescriptor < 3 || !Array.isArray(args) || args.at(-1) !== 'fd:')) {
+        reject(new TypeError('outputDescriptor 只接受 direct 工作持有的有效檔案描述符'));
+        return;
+      }
       const queueDir = isQueueExport ? getQueueDir() : null;
       if (isQueueExport && (typeof queueDir !== 'string' || !queueDir.trim()
         || typeof jobId !== 'string' || !jobId.trim()
@@ -670,12 +720,21 @@ function createFFmpegExecution(options = {}) {
       // 同類背景工作可同毫秒啟動；每份 direct 工作獨占記錄與刪除資格，
       // 不能讓一份成功收尾刪掉另一份仍在寫入的失敗診斷。
       const logPath = isQueueExport
-        ? QueueStore.logPath(queueDir, jobId)
+        ? DiagnosticLog.queueLogPath(queueDir, jobId)
         : path.join(getUserDataDir(), `export-${startedAt}-${randomUUID()}-${jobId || 'task'}.log`);
-      const logStream = fs.createWriteStream(logPath, { flags: isQueueExport ? 'w' : 'wx' });
-      let logOpened = false;
-      logStream.once('open', () => { logOpened = true; });
+      const logStream = fs.createWriteStream(logPath, { flags: 'wx' });
+      let logOwner = null;
       let logError = null;
+      logStream.once('open', descriptor => {
+        try { logOwner = DiagnosticLog.record(logPath, descriptor, isQueueExport ? jobId : null, fs); }
+        catch (error) { logError = error; }
+      });
+      const ownsLog = () => {
+        const current = DiagnosticLog.load(logPath, fs);
+        return DiagnosticLog.matchesOwner(current, logOwner);
+      };
+      const readOwnedLog = fallback => DiagnosticLog.read(logPath, logOwner, fallback, fs);
+      const deleteOwnedLog = async () => { try { await DiagnosticLog.remove(logPath, logOwner, fs); } catch (error) {} };
       let logFinishPromise = null;
       // finish 只代表寫入完成，close 才確認 fd 已釋放；錯誤也可能早於 native close。
       const logClosed = new Promise(done => {
@@ -738,25 +797,23 @@ function createFFmpegExecution(options = {}) {
         consumeText(stderrDecoder.end());
         reportParsedProgress(parser.flush());
         await finishLog();
-        if (processError) { reject(processError); return; }
+        if (processError) { await deleteOwnedLog(); reject(processError); return; }
         if (isCancelled?.()) {
+          await deleteOwnedLog();
           const error = new Error('FFmpeg 工作已取消');
           error.name = 'AbortError'; error.code = 'ABORT_ERR';
           reject(error); return;
         }
         if (code === 0 && !signal && (!watchdogResult || watchdogResult.ok)) {
           // 成功通知也不能早於本次記錄刪除的收尾；刪除失敗仍保留原生結果。
-          if (logOpened) await new Promise(done => fs.unlink(logPath, done));
+          await deleteOwnedLog();
           resolve({ tail, maps: parser.maps });
           return;
         }
 
-        let fullLog = tail;
+        let fullLog = readOwnedLog(tail);
         // wx 可能因同名外來檔失敗；未取得記錄時只使用自己的 stderr，
         // 不能讀取、刪除或以 LOG_PATH 發布那個不屬於本次執行的檔案。
-        if (logOpened) {
-          try { fullLog = fs.readFileSync(logPath, 'utf8'); } catch (error) {}
-        }
         if (logError) fullLog += `\n\n[無法寫入完整記錄：${logError.message || logError}]`;
         const { summary, errorCode } = FFmpegErrorAnalyzer.analyze(
           fullLog,
@@ -765,14 +822,14 @@ function createFFmpegExecution(options = {}) {
           watchdogResult,
           outPath,
         );
-        const logReference = logOpened ? `[LOG_PATH]${logPath}[/LOG_PATH]` : '';
+        const logReference = ownsLog() ? `[LOG_PATH]${logPath}[/LOG_PATH]` : '';
         const failure = new Error(`${logReference}ffmpeg 結束碼 ${code}\n${summary}`);
         failure.code = errorCode;
         failure.watchdogResult = watchdogResult;
         if (signal) failure.signal = signal;
         // 成功會刪除記錄，從未授予其開啟能力；只讓已關檔且保留下來的
         // 真實失敗診斷交給主程序授權，不能把整個 userData 開放給 shell。
-        if (logOpened) observe(() => options.onLogRetained?.(logPath));
+        if (ownsLog()) observe(() => options.onLogRetained?.(logPath));
         reject(failure);
       };
 
@@ -813,7 +870,10 @@ function createFFmpegExecution(options = {}) {
       }
 
       let process;
-      try { process = spawnDirect(ffmpegPath, args, cwd ? { cwd } : {}); }
+      try { process = spawnDirect(ffmpegPath, args, {
+        ...(cwd ? { cwd } : {}),
+        ...(outputDescriptor !== undefined ? { stdio: ['ignore', outputDescriptor, 'pipe'] } : {}),
+      }); }
       catch (error) { void finishProcess(1, null, error); return; }
       let processError = null;
       process.stderr?.on('data', consumeStderr);
@@ -852,5 +912,7 @@ module.exports = {
   mpvEmbeddingSupported,
   nativeToolCandidates,
   previewVideoEncoderArgs,
+  previewPipelineCandidates,
+  previewFallbackAllowed,
   videoEncoderCandidates,
 };

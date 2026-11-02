@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const fs = require('node:fs');
+const DiagnosticLog = require('../electron/diagnostic-log');
 const {
   burnAssFileName,
   cleanupOrphanAssFiles,
@@ -205,13 +206,33 @@ describe('匯出佇列持久化', () => {
     expect(burnAssFileName('export-one')).not.toBe(burnAssFileName('export-two'));
   });
 
-  test('工作 log 使用固定安全檔名，手動清除時可一併刪除', () => {
+  test('清除工作只刪屬於該工作的可信診斷，保留舊固定名與被替換的檔案', () => {
     const dir = makeTempDir();
     const filePath = logPath(dir, 'export-test-1');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(filePath, 'ffmpeg error', 'utf8');
+    writeFileSync(filePath, 'foreign legacy', 'utf8');
+    const createLog = id => {
+      const file = DiagnosticLog.queueLogPath(dir, id);
+      const fd = fs.openSync(file, 'wx');
+      DiagnosticLog.record(file, fd, id);
+      fs.writeFileSync(fd, `owned ${id}`);
+      fs.closeSync(fd);
+      return file;
+    };
+    const first = createLog('export-test-1');
+    const second = createLog('export-test-1');
+    const replaced = createLog('export-test-1');
+    const other = createLog('export-test-2');
+    fs.renameSync(replaced, `${replaced}.original`);
+    fs.writeFileSync(replaced, 'foreign replacement');
     removeLogFile(dir, 'export-test-1');
-    expect(existsSync(filePath)).toBe(false);
+    expect(readFileSync(filePath, 'utf8')).toBe('foreign legacy');
+    expect(existsSync(first)).toBe(false);
+    expect(existsSync(second)).toBe(false);
+    expect(existsSync(`${first}.owner`)).toBe(false);
+    expect(existsSync(`${second}.owner`)).toBe(false);
+    expect(readFileSync(replaced, 'utf8')).toBe('foreign replacement');
+    expect(readFileSync(other, 'utf8')).toBe('owned export-test-2');
   });
 
   test('done、failed 與 stopped 不會成為可恢復的 job JSON snapshot', () => {

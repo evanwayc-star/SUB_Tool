@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const QueueStore = require('../electron/queue-store.js');
+const DiagnosticLog = require('../electron/diagnostic-log.js');
 const { createExportQueue, ExportQueueState, JOB_STATUS } = require('../electron/export-queue.js');
 const { FileAuthority } = require('../electron/file-authority.js');
 const { createIpcGuards } = require('../electron/ipc-guards.js');
@@ -52,6 +53,78 @@ function job(id, sourcePath, assRef) {
 }
 
 describe('匯出佇列 outcome 跨重啟復原', () => {
+  it.each(['EACCES', 'EPERM'].flatMap(code => ['rename', 'claimed-stat'].map(stage => [code, stage])))
+  ('清除時記錄 %s／%s 留下待刪 journal，重啟後可續刪', (code, stage) => {
+    const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-locked-log-recovery-'));
+    try {
+      const id = 'locked-log';
+      const file = DiagnosticLog.queueLogPath(queueDir, id);
+      const fd = fs.openSync(file, 'wx');
+      DiagnosticLog.record(file, fd, id);
+      fs.writeFileSync(fd, 'ORIGINAL DIAGNOSTIC'); fs.closeSync(fd);
+      const source = path.join(queueDir, 'source.mxf'); fs.writeFileSync(source, 'source');
+      QueueStore.stageTerminalOutcome(queueDir, { ...job(id, source, null), status: JOB_STATUS.FAILED });
+      const lockedFs = { ...fs, renameSync(from, to) {
+        if (stage === 'rename' && from === file) throw Object.assign(new Error('記錄檔被鎖定'), { code });
+        return fs.renameSync(from, to);
+      }, lstatSync(name, ...args) {
+        if (stage === 'claimed-stat' && path.basename(name).startsWith('.subtool-log-')) {
+          throw Object.assign(new Error('記錄檔被鎖定'), { code });
+        }
+        return fs.lstatSync(name, ...args);
+      } };
+      const lockedStore = { ...QueueStore, removeLogFile(dir, currentId) {
+        return DiagnosticLog.removeJobLogs(dir, currentId, lockedFs);
+      } };
+      const state = new ExportQueueState();
+      const queue = makeQueue(queueDir, state, lockedStore);
+      queue.restoreJobs();
+      expect(queue.clearJob(id)).toBe(true);
+      expect(QueueStore.loadPendingDeletes(queueDir)).toEqual([{ id, assRef: null }]);
+      expect(fs.readFileSync(file, 'utf8')).toBe('ORIGINAL DIAGNOSTIC');
+      expect(fs.existsSync(`${file}.owner`)).toBe(true);
+
+      const restarted = new ExportQueueState();
+      makeQueue(queueDir, restarted).restoreJobs();
+      expect(QueueStore.loadPendingDeletes(queueDir)).toEqual([]);
+      expect(restarted.get(id)).toBeNull();
+      expect(fs.existsSync(file)).toBe(false);
+      expect(fs.existsSync(`${file}.owner`)).toBe(false);
+    } finally { rmSync(queueDir, { recursive: true, force: true }); }
+  });
+  it('重啟恢復失敗工作後可開啟仍屬原工作的診斷，清除時只回收已登記記錄', () => {
+    const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-restart-log-'));
+    try {
+      const createLog = bytes => {
+        const file = DiagnosticLog.queueLogPath(queueDir, 'recover-log');
+        const fd = fs.openSync(file, 'wx');
+        DiagnosticLog.record(file, fd, 'recover-log');
+        fs.writeFileSync(fd, bytes); fs.closeSync(fd);
+        return file;
+      };
+      const previous = createLog('PREVIOUS DIAGNOSTIC');
+      const latest = createLog('LATEST DIAGNOSTIC');
+      const legacy = QueueStore.logPath(queueDir, 'recover-log');
+      fs.writeFileSync(legacy, 'FOREIGN LEGACY');
+      const source = path.join(queueDir, 'source.mxf'); fs.writeFileSync(source, 'source');
+      const failed = { ...job('recover-log', source, null), status: JOB_STATUS.FAILED,
+        errorMsg: `[LOG_PATH]${latest}[/LOG_PATH]failure` };
+      QueueStore.stageTerminalOutcome(queueDir, failed);
+      const state = new ExportQueueState();
+      const queue = makeQueue(queueDir, state);
+      const authority = new FileAuthority(); authority.grantQueueLogDirectory(queueDir);
+      queue.restoreJobs();
+      expect(state.get('recover-log').errorMsg).toContain(latest);
+      expect(authority.canOpenQueueLog(latest)).toBe(true);
+      expect(readFileSync(latest, 'utf8')).toBe('LATEST DIAGNOSTIC');
+      expect(queue.clearJob('recover-log')).toBe(true);
+      expect(existsSync(previous)).toBe(false);
+      expect(existsSync(latest)).toBe(false);
+      expect(existsSync(`${previous}.owner`)).toBe(false);
+      expect(existsSync(`${latest}.owner`)).toBe(false);
+      expect(readFileSync(legacy, 'utf8')).toBe('FOREIGN LEGACY');
+    } finally { rmSync(queueDir, { recursive: true, force: true }); }
+  });
   it.each(['history', 'outcome'])('已完成 %s 復原只授權精確輸出定位，不能讀寫或重新執行', async origin => {
     const queueDir = mkdtempSync(path.join(tmpdir(), 'subtool-history-reveal-'));
     try {

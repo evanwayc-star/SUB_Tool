@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
 const { motherSourceFingerprintSync, portableSourceFingerprint } = require('./mother-source-evidence');
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
-const { buildIngestArgs } = require('./ffmpeg-execution-engine');
+const { buildIngestArgs, previewPipelineCandidates, previewFallbackAllowed } = require('./ffmpeg-execution-engine');
 const { sourceAudioClockFilter } = require('./media-source-clock');
 const SOURCE_CACHE_VERSION = 'source-v3';
 const PORTABLE_SOURCE_FORMAT = SOURCE_CACHE_VERSION + '-sha256';
@@ -184,6 +184,27 @@ function createMediaIntakeRuntime(options = {}) {
       || (sourceRequired && !sameSourceContent(current.sourceContent, sourceContent))
       || !sameCacheDirectory(before, cacheDirectoryOwner(dir))) throw cacheDirectoryChanged();
     return { owner: before, current };
+  }
+  function captureStreamGuard(dir, rootOwner, file, reserved = null) {
+    if (!file || !withinCachePath(dir, file)) throw cachePathEscape();
+    const parent = path.dirname(file), parentOwner = cacheDirectoryOwner(parent);
+    const fileOwner = fs.lstatSync(file, { bigint: true });
+    if (!fileOwner.isFile() || fileOwner.isSymbolicLink()) throw cachePathEscape();
+    if (reserved && (reserved.dev !== fileOwner.dev || reserved.ino !== fileOwner.ino)) throw cacheDirectoryChanged();
+    const verify = observed => {
+      try {
+        if (!sameCacheDirectory(rootOwner, cacheDirectoryOwner(dir))
+          || !sameCacheDirectory(parentOwner, cacheDirectoryOwner(parent))) throw cacheDirectoryChanged();
+        const current = fs.lstatSync(file, { bigint: true });
+        if (!current.isFile() || current.isSymbolicLink() || current.dev !== fileOwner.dev || current.ino !== fileOwner.ino
+          || (observed && (observed.dev !== fileOwner.dev || observed.ino !== fileOwner.ino))) throw cacheDirectoryChanged();
+      } catch (error) {
+        if (['ENOENT', 'ENOTDIR'].includes(error.code)) throw cacheDirectoryChanged();
+        throw error;
+      }
+    };
+    verify();
+    return verify;
   }
   async function openCacheComponent(cacheDirectory, filePath) {
     const resolveCurrent = async () => {
@@ -913,7 +934,12 @@ function createMediaIntakeRuntime(options = {}) {
         };
         const cacheDirectory = [...activeCacheDirs.keys()].filter(dir => withinCachePath(dir, job.filePath))
           .sort((left, right) => right.length - left.length)[0];
-        const openStreamFile = () => openCacheComponent(cacheDirectory, job.filePath);
+        const openStreamFile = async () => {
+          job.verifySourceOwner();
+          const file = await openCacheComponent(cacheDirectory, job.filePath);
+          try { job.verifySourceOwner(await file.stat({ bigint: true })); return file; }
+          catch (error) { await file.close(); throw error; }
+        };
         const streamStat = async () => {
           const file = await openStreamFile();
           try { return await file.stat(); } finally { await file.close(); }
@@ -922,6 +948,8 @@ function createMediaIntakeRuntime(options = {}) {
           if (!live()) return;
           const file = await openStreamFile();
           try {
+            if (!live()) { await file.close(); return; }
+            job.verifySourceOwner(await file.stat({ bigint: true }));
             if (!live()) { await file.close(); return; }
             // 沿已驗證的 handle 讀取；准入後再換 junction 也不能把 reader 轉向外檔。
             reader = fs.createReadStream(job.filePath, { ...streamOptions, fd: file, autoClose: true });
@@ -996,7 +1024,7 @@ function createMediaIntakeRuntime(options = {}) {
           if (!live()) return;
           let size = 0;
           try { size = (await streamStat()).size; }
-          catch (error) { if (error.code === 'CACHE_PATH_ESCAPE') { fail(error, 403); return; } }
+          catch (error) { if (['CACHE_PATH_ESCAPE', 'CACHE_DIRECTORY_CHANGED'].includes(error.code)) { fail(error, 403); return; } }
           if (!live()) return;
           if (job.error) { fail(new Error(job.error)); return; }
           if (size <= start && !job.done && attempt < 120) {
@@ -1031,7 +1059,7 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   // cache coverage 與補建publication共用一個owner，batch/stream不能各自重抽已完成元件。
-  function planIntake({ src, needsProxy, audio }, isStream, description = null, portable = null) {
+  function planIntake({ src, needsProxy, audio }, isStream, description = null, portable = null, previewPipeline = null) {
     const video = description?.video || null;
     const audioSources = Array.isArray(audio) ? audio : [];
     const hit = readCache(src, audioSources, needsProxy);
@@ -1042,7 +1070,8 @@ function createMediaIntakeRuntime(options = {}) {
     if (hit
       && coversAudioRequest(hit.meta, audioSources)
       && (!needsProxy || hit.meta.proxy)) {
-      return { cached: true, dir: hit.dir, meta: hit.meta };
+      return { cached: true, dir: hit.dir, meta: hit.meta,
+        streamGuard: () => captureStreamGuard(hit.dir, inspectedCacheOwners.get(hit), hit.meta.proxy) };
     }
     const copyCompleted = hit && !isDirWritable(hit.dir);
     const hitOwner = hit && inspectedCacheOwners.get(hit);
@@ -1110,14 +1139,34 @@ function createMediaIntakeRuntime(options = {}) {
       chMaps: channelMaps,
       waveLabel: reuseWave ? null : audioPlan.waveLabel,
       wavePath: wave,
-      encoder: getEncoder(),
+      encoder: buildProxy ? getEncoder() : 'libx264',
+      pipeline: buildProxy ? previewPipeline : null,
       isStream,
       video,
     });
     let committed = false;
+    let streamGuard = null;
     return {
-      cached: false, dir, args, meta,
+      cached: false, dir, args, meta, buildProxy,
       readDirs: copyCompleted ? [hit.dir] : [],
+      assertRetryOwner() {
+        if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
+        verifyPublication();
+      },
+      streamGuard() {
+        if (streamGuard) return streamGuard;
+        verifyPublication();
+        if (buildProxy) {
+          const fd = fs.openSync(proxy, 'wx');
+          try { streamGuard = captureStreamGuard(dir, directoryOwner, proxy, fs.fstatSync(fd, { bigint: true })); }
+          finally { fs.closeSync(fd); }
+        } else {
+          streamGuard = captureStreamGuard(dir, directoryOwner, proxy);
+        }
+        streamGuard();
+        verifyPublication();
+        return streamGuard;
+      },
       prepare: copies.size ? async (owns = () => true) => {
         // 唯讀共享快取只缺部分元件時，非同步複用完成 bytes 到既有本機退路；
         // 原 Proxy 不動，也不能因無法補寫音訊便重新編碼影片。
@@ -1152,8 +1201,8 @@ function createMediaIntakeRuntime(options = {}) {
         }
         if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
       } : null,
-      label: buildProxy && audioPlan.channels.length ? '正在轉檔 Proxy 與分析音訊'
-        : (buildProxy ? '正在轉檔 Proxy' : '正在分析音訊'),
+      label: buildProxy ? `${audioPlan.channels.length ? '正在轉檔 Proxy 與分析音訊' : '正在轉檔 Proxy'}（${previewPipeline.label}）`
+        : '正在分析音訊',
       commit() {
         if (closed) throw new IngestSupersededError();
         if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
@@ -1166,25 +1215,27 @@ function createMediaIntakeRuntime(options = {}) {
         committed = true;
       },
       dispose() {
-        if (committed) return;
+        if (committed) return true;
         // 失敗只收回自己建立的實體 generation；同名路徑可已被另一個 writer 接手。
         const quarantine = path.join(dir, '.subtool-discard-' + crypto.randomBytes(12).toString('hex'));
         let moved = false;
         try {
           if (!sameCacheDirectory(directoryOwner, cacheDirectoryOwner(dir))
-            || !sameCacheDirectory(outputOwner, cacheDirectoryOwner(outputDir))) return;
+            || !sameCacheDirectory(outputOwner, cacheDirectoryOwner(outputDir))) return false;
           fs.renameSync(outputDir, quarantine);
           moved = true;
           if (!sameCacheDirectory(directoryOwner, cacheDirectoryOwner(dir))
-            || !sameCacheDirectory(outputOwner, cacheDirectoryOwner(quarantine))) return;
+            || !sameCacheDirectory(outputOwner, cacheDirectoryOwner(quarantine))) return false;
           fs.rmSync(quarantine, { recursive: true, force: true });
           moved = false;
+          return true;
         } catch (error) {}
         finally {
           if (moved) {
             try { if (!fs.existsSync(outputDir)) fs.renameSync(quarantine, outputDir); } catch (error) {}
           }
         }
+        return false;
       },
     };
   }
@@ -1220,35 +1271,54 @@ function createMediaIntakeRuntime(options = {}) {
   async function ingest(request, session = {}) {
     if (closed || cancelled(session)) throw new IngestSupersededError();
     const portable = await preparePortableCache(request, session);
-    const description = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
+    let description = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
     if (closed || cancelled(session)) throw new IngestSupersededError();
-    let plan = planIntake(request, false, description, portable);
+    let pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: request.needsProxy });
+    let index = 0;
+    let plan = planIntake(request, false, description, portable, pipelines[index]);
     if (plan.needsVideoDescription) {
-      const replacementDescription = await describeMissingProxy(request.src, request.audio, true);
+      description = await describeMissingProxy(request.src, request.audio, true);
       if (closed || cancelled(session)) throw new IngestSupersededError();
-      plan = planIntake(request, false, replacementDescription, portable);
+      pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: request.needsProxy });
+      plan = planIntake(request, false, description, portable, pipelines[index]);
     }
     if (plan.cached) {
       reportCacheHit(session);
       return Object.assign({ cached: true }, plan.meta);
     }
 
-    const unprotect = protectPlan(plan);
+    let unprotect = protectPlan(plan);
     try {
       await delay(1000);
       if (cancelled(session)) throw new IngestSupersededError();
-      if (plan.prepare) await plan.prepare(() => !cancelled(session));
-      if (closed || cancelled(session)) throw new IngestSupersededError();
-      await ffmpegExecution.execute(plan.args, {
-        executionKind: 'direct',
-        deferTerminal: true,
-        onProgress: payload => reportProgress(session, payload),
-        duration: request.duration,
-        jobId: 'ingest',
-        label: plan.label,
-        onProcess: process => session.ownProcess?.(process),
-        shouldSend: () => !cancelled(session),
-      });
+      for (;;) {
+        if (plan.prepare) await plan.prepare(() => !cancelled(session));
+        if (closed || cancelled(session)) throw new IngestSupersededError();
+        let stderr = '';
+        try {
+          await ffmpegExecution.execute(plan.args, {
+            executionKind: 'direct', deferTerminal: true,
+            onProgress: payload => reportProgress(session, payload),
+            onStderr: text => { stderr = (stderr + text).slice(-16000); },
+            duration: request.duration, jobId: 'ingest', label: plan.label,
+            onProcess: process => session.ownProcess?.(process),
+            shouldSend: () => !cancelled(session),
+          });
+          break;
+        } catch (error) {
+          if (closed || cancelled(session)) throw new IngestSupersededError();
+          if (!plan.buildProxy || index + 1 >= pipelines.length || !previewFallbackAllowed(pipelines[index], error, stderr)) throw error;
+          plan.assertRetryOwner();
+          if (!plan.dispose()) throw new Error('無法安全清理失敗的媒體轉檔，已保留原資料');
+          unprotect();
+          unprotect = () => {};
+          index++;
+          const next = planIntake(request, false, description, portable, pipelines[index]);
+          if (next.cached || next.needsVideoDescription) throw new Error('媒體快取在重試期間變更，請重新載入');
+          plan = next;
+          unprotect = protectPlan(plan);
+        }
+      }
       if (closed || cancelled(session)) throw new IngestSupersededError();
       plan.commit();
       reportCompletion(session, 'ingest', plan.label);
@@ -1270,21 +1340,27 @@ function createMediaIntakeRuntime(options = {}) {
       if (closed || cancelled(session)) return { response: null, completion: null };
       throw error;
     }
-    const description = options.describeVideo ? await describeMissingProxy(src, audio) : null;
+    let description = options.describeVideo ? await describeMissingProxy(src, audio) : null;
     if (closed || cancelled(session)) return { response: null, completion: null };
-    let plan = planIntake({ src, needsProxy: true, audio }, true, description, portable);
+    const request = { src, needsProxy: true, audio };
+    let pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: true });
+    let index = 0;
+    let plan = planIntake(request, true, description, portable, pipelines[index]);
     if (plan.needsVideoDescription) {
-      const replacementDescription = await describeMissingProxy(src, audio, true);
+      description = await describeMissingProxy(src, audio, true);
       if (closed || cancelled(session)) return { response: null, completion: null };
-      plan = planIntake({ src, needsProxy: true, audio }, true, replacementDescription, portable);
+      pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: true });
+      plan = planIntake(request, true, description, portable, pipelines[index]);
     }
     if (plan.cached) {
+      if (closed || cancelled(session)) return { response: null, completion: null };
+      const verifySourceOwner = plan.streamGuard();
       reportCacheHit(session);
       if (closed || cancelled(session)) return { response: null, completion: null };
       const id = createStreamId('c-');
       streamJobs.set(id, {
         filePath: plan.meta.proxy, done: true, error: null,
-        owner: session.owner,
+        owner: session.owner, verifySourceOwner,
         releaseCache: protectCacheDir(plan.dir),
       });
       return Object.assign({
@@ -1294,11 +1370,11 @@ function createMediaIntakeRuntime(options = {}) {
       }, plan.meta);
     }
 
-    const { proxy, channels, wave } = plan.meta;
-
     const id = createStreamId('l-');
     // HTTP reader 與 writer 各自持有引用；writer 完成不代表播放端已釋放。
-    const job = { filePath: proxy, done: false, error: null, owner: session.owner,
+    let streamGuard = null;
+    const job = { filePath: plan.meta.proxy, done: false, error: null, owner: session.owner,
+      verifySourceOwner: observed => { if (!streamGuard) throw cacheDirectoryChanged(); streamGuard(observed); },
       releaseCache: protectCacheDir(plan.dir) };
     streamJobs.set(id, job);
     // close/cancel 也可在等待可播 bytes 期間收回 registry；URL 只有仍持有
@@ -1311,36 +1387,56 @@ function createMediaIntakeRuntime(options = {}) {
       plan.dispose();
       return { response: null, completion: null };
     }
-    const unprotect = protectPlan(plan);
-    let execution;
+    let unprotect = protectPlan(plan);
     let writer = null;
     let readinessError = null;
-    let preparationReady = !plan.prepare;
+    let preparationReady = false;
+    let published = false;
+    let attemptEpoch = 0;
     const stopUnreadyWriter = () => { try { writer?.kill?.(); } catch (error) {} };
-    try {
-      const startWriter = () => ffmpegExecution.execute(plan.args, {
-        executionKind: 'direct',
-        deferTerminal: true,
-        onProgress: payload => reportProgress(session, payload),
-        duration,
-        jobId: id,
-        label: plan.label,
-        onProcess: process => {
-          writer = process;
-          session.ownProcess?.(process);
-          if (readinessError) stopUnreadyWriter();
-        },
-        shouldSend: () => !cancelled(session),
-      });
-      execution = plan.prepare ? plan.prepare(() => !cancelled(session)).then(() => {
-        if (closed || cancelled(session)) throw new IngestSupersededError();
+    const runAttempts = async () => {
+      for (;;) {
+        attemptEpoch++;
+        preparationReady = false;
+        if (plan.prepare) await plan.prepare(() => ownsStream());
+        if (!ownsStream()) throw new IngestSupersededError();
+        streamGuard = plan.streamGuard();
         preparationReady = true;
-        return startWriter();
-      }) : startWriter();
-    } catch (error) {
-      execution = Promise.reject(error);
-    }
-    const completion = Promise.resolve(execution).then(() => {
+        let stderr = '';
+        try {
+          await ffmpegExecution.execute(plan.args, {
+            executionKind: 'direct', deferTerminal: true,
+            onProgress: payload => reportProgress(session, payload),
+            onStderr: text => { stderr = (stderr + text).slice(-16000); },
+            duration, jobId: id, label: plan.label,
+            onProcess: process => { writer = process; session.ownProcess?.(process); if (readinessError) stopUnreadyWriter(); },
+            shouldSend: () => !cancelled(session),
+          });
+          return;
+        } catch (error) {
+          if (!ownsStream()) throw new IngestSupersededError();
+          if (published || job.requests?.size || readinessError || !plan.buildProxy || index + 1 >= pipelines.length
+            || !previewFallbackAllowed(pipelines[index], error, stderr)) throw error;
+          // Revoke outstanding stat results before any await or path change.
+          attemptEpoch++;
+          preparationReady = false;
+          streamGuard = null;
+          plan.assertRetryOwner();
+          if (!plan.dispose()) throw new Error('無法安全清理失敗的媒體轉檔，已保留原資料');
+          unprotect();
+          unprotect = () => {};
+          index++;
+          const next = planIntake(request, true, description, portable, pipelines[index]);
+          if (next.cached || next.needsVideoDescription) throw new Error('媒體快取在重試期間變更，請重新載入');
+          plan = next;
+          unprotect = protectPlan(plan);
+          job.releaseCache();
+          job.releaseCache = protectCacheDir(plan.dir);
+          job.filePath = plan.meta.proxy;
+        }
+      }
+    };
+    const completion = runAttempts().then(() => {
       job.done = true;
       if (readinessError) {
         reportCompletion(session, id, plan.label, readinessError);
@@ -1350,23 +1446,36 @@ function createMediaIntakeRuntime(options = {}) {
       }
     }).catch(error => {
       job.done = true;
-      const failure = readinessError || error;
+      const failure = readinessError && error?.code === 'ABORT_ERR' ? readinessError : error;
       job.error = failure.message;
       reportCompletion(session, id, plan.label, failure);
     }).finally(() => { try { plan.dispose(); } finally { unprotect(); } });
 
     const startedAt = now();
-    let published = false;
     let ready = false;
     try {
       /* 可播門檻的 300ms 輪詢也可能打到 SMB sidecar，因此只用 fsp.stat。 */
       while (now() - startedAt < 60000) {
         if (!ownsStream()) return { response: null, completion };
         if (job.error) throw new Error('轉檔失敗：' + job.error);
+        if (!preparationReady) {
+          // 即使測試注入零延遲，仍讓出 I/O 事件迴圈，避免餓死準備中的複製。
+          try { await fsp.stat(plan.meta.proxy); } catch (error) {}
+          await delay(300);
+          continue;
+        }
+        const observedPlan = plan, observedEpoch = attemptEpoch;
+        const observedGuard = streamGuard;
         let size = 0;
-        try { size = (await fsp.stat(proxy)).size; } catch (error) {}
+        let stat;
+        try { observedGuard(); stat = await fsp.stat(observedPlan.meta.proxy, { bigint: true }); } catch (error) {
+          if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
+        }
         if (!ownsStream()) return { response: null, completion };
         if (job.error) throw new Error('轉檔失敗：' + job.error);
+        if (observedPlan !== plan || observedEpoch !== attemptEpoch) continue;
+        observedGuard(stat);
+        if (stat) size = stat.size;
         if (preparationReady && (size >= 131072 || (job.done && size > 0))) { ready = true; break; }
         await delay(300);
         if (!ownsStream()) return { response: null, completion };
@@ -1385,16 +1494,21 @@ function createMediaIntakeRuntime(options = {}) {
           cached: false,
           streamUrl: `http://127.0.0.1:${port}/${id}`,
           streamLeaseId: id,
-          proxy,
-          channels,
-          wave,
+          proxy: plan.meta.proxy,
+          channels: plan.meta.channels,
+          wave: plan.meta.wave,
           ingestJobId: id,
         },
         completion,
       };
     } catch (error) {
       // 未交付的exception也必須等writer settle，不能讓coordinator提前准入下一個。
+      if (!readinessError && ['CACHE_DIRECTORY_CHANGED', 'CACHE_PATH_ESCAPE'].includes(error.code)) {
+        readinessError = error;
+        stopUnreadyWriter();
+      }
       await completion;
+      if (job.error && job.error !== error.message) error.message += `：${job.error}`;
       throw error;
     } finally {
       if (!published) releaseStream(id);

@@ -5,11 +5,21 @@ import { sourceClockTime, playerClockTime } from '../../shared/media-source-cloc
 
 const indexes=new Map();
 const MAX_SOURCES=4;
+const INCOMPLETE_RETRY_MS=1000;
 
-function sourceIndex(url){
-  let pending=indexes.get(url);
-  if(pending){indexes.delete(url);indexes.set(url,pending);return pending;}
-  pending=(async()=>{
+function sourceIndex(url,{retryIncomplete=false}={}){
+  const existing=indexes.get(url);
+  if(existing&&!(existing.retryable&&(retryIncomplete||Date.now()>=existing.retryAt))){
+    indexes.delete(url);indexes.set(url,existing);return existing.pending;
+  }
+  const previous=existing?.result||null;
+  const entry={pending:null,result:null,retryable:false,retryAt:0};
+  const incomplete=result=>!result||[result.metadata?.audioPresentationTimestampOffsets,
+    result.metadata?.decoderAudioPresentationTimestampOffsets].some(offsets=>offsets?.includes(null));
+  const evidenceCount=result=>result?[result.metadata?.audioPresentationTimestampOffsets,
+    result.metadata?.decoderAudioPresentationTimestampOffsets].reduce((count,offsets)=>
+    count+(offsets||[]).filter(Number.isFinite).length,0):-1;
+  entry.pending=(async()=>{
     const webm=await webmPresentationMetadata(url);
     if(webm!==undefined)return webm?{samples:[],metadata:webm}:null;
     return demuxIndex(url,{allowAudio:true,metadataOnly:true});
@@ -37,15 +47,22 @@ function sourceIndex(url){
       ...(info.decoderAudioPresentationTimestampOffsets?.length
         ?{decoderAudioPresentationTimestampOffsets:Object.freeze([...info.decoderAudioPresentationTimestampOffsets])}:{}),
     })};
+  }).then(result=>{
+    const chosen=evidenceCount(result)>=evidenceCount(previous)?result:previous;
+    if(indexes.get(url)===entry){entry.result=chosen;entry.retryable=incomplete(chosen);entry.retryAt=Date.now()+INCOMPLETE_RETRY_MS;}
+    return chosen;
   }).catch(()=>{
     // Failed I/O is retryable. An old failure must not evict a newer load for
     // this URL after reset/eviction; late completion never re-inserts itself.
-    if(indexes.get(url)===pending) indexes.delete(url);
-    return null;
+    if(indexes.get(url)===entry){
+      if(previous){entry.result=previous;entry.retryable=true;entry.retryAt=Date.now()+INCOMPLETE_RETRY_MS;}
+      else indexes.delete(url);
+    }
+    return previous;
   });
-  indexes.set(url,pending);
+  indexes.set(url,entry);
   while(indexes.size>MAX_SOURCES) indexes.delete(indexes.keys().next().value);
-  return pending;
+  return entry.pending;
 }
 
 export async function sourceFrameWindow(url,sourceTime,clock=null){
@@ -65,7 +82,8 @@ export async function sourceFrameWindow(url,sourceTime,clock=null){
    may still finish for another caller, but cannot publish that intake's clock. */
 export async function sourcePresentationMetadata(url,{owns=()=>true,timeoutMs=10000}={}){
   if(!url||!owns()) return null;
-  const pending=sourceIndex(url);
+  // 明確重新取得 metadata 可立即重試短回應；逐格查詢仍對不完整來源限流。
+  const pending=sourceIndex(url,{retryIncomplete:true});
   return new Promise(resolve=>{
     let settled=false;
     const finish=value=>{

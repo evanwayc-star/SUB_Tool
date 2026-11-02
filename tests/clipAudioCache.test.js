@@ -19,6 +19,10 @@ const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.j
 const { createIpcGuards } = require('../electron/ipc-guards.js');
 const { ffmpeg: FFMPEG } = nativeTestTools();
 const directories = [];
+const stagingIn = root => {
+  const bucket = path.join(root, fs.readdirSync(root).find(name => /^[a-f0-9]{64}$/.test(name)));
+  return path.join(bucket, fs.readdirSync(bucket).find(name => name.startsWith('entry-')), 'content.wav');
+};
 
 function wav(value = 0.3, duration = 1, channels = 2) {
   const length = Math.round(48000 * duration), bytes = Buffer.alloc(44 + length * channels * 2);
@@ -36,7 +40,7 @@ function fixture(extra = {}) {
   const source = path.join(directory, 'mother.wav');
   fs.writeFileSync(source, wav());
   const authority = new FileAuthority(); authority.grantTrustedFile(source, { read: true, write: false });
-  const execute = vi.fn(async args => fs.writeFileSync(args.at(-1), wav()));
+  const execute = vi.fn(async (_args, options) => fs.writeFileSync(options.outputDescriptor, wav()));
   const options = { cacheRoot: path.join(directory, 'reverse'), fileAuthority: authority, execute, ...extra };
   return { directory, source, authority, execute, options, runtime: createClipAudioCache(options),
     request: { path: source, in: 0, out: 1, sourceStream: 0 } };
@@ -117,18 +121,18 @@ describe('反轉片段預覽音訊', () => {
     fs.writeFileSync(f.source, wav(0.6));
     const changed = await f.runtime.reverse(f.request);
     expect(changed.path).not.toBe(first.path);
-    f.execute.mockImplementationOnce(async args => fs.writeFileSync(args.at(-1), wav(0.6, 0.5)));
+    f.execute.mockImplementationOnce(async (_args, options) => fs.writeFileSync(options.outputDescriptor, wav(0.6, 0.5)));
     expect((await f.runtime.reverse({ ...f.request, in: 0.5 })).path).not.toBe(changed.path);
   });
   it('未授權、關閉、短缺／損毀 PCM 和來源途中修改不發布，失敗可以重試', async () => {
     const f = fixture();
     await expect(f.runtime.reverse({ ...f.request, path: path.join(f.directory, 'forbidden.wav') })).rejects.toThrow(/未授權/);
     await expect(createClipAudioCache({ ...f.options, isClosing: () => true }).reverse(f.request)).rejects.toMatchObject({ name: 'AbortError' });
-    f.execute.mockImplementationOnce(async args => fs.writeFileSync(args.at(-1), wav().subarray(0, 80)));
+    f.execute.mockImplementationOnce(async (_args, options) => fs.writeFileSync(options.outputDescriptor, wav().subarray(0, 80)));
     await expect(f.runtime.reverse(f.request)).rejects.toThrow(/完整/);
     expect(fs.readdirSync(f.options.cacheRoot)).toEqual([]);
-    f.execute.mockImplementationOnce(async args => {
-      fs.writeFileSync(args.at(-1), wav()); fs.writeFileSync(f.source, wav(0.7));
+    f.execute.mockImplementationOnce(async (_args, options) => {
+      fs.writeFileSync(options.outputDescriptor, wav()); fs.writeFileSync(f.source, wav(0.7));
     });
     await expect(f.runtime.reverse(f.request)).rejects.toThrow(/變更/);
     expect(fs.readdirSync(f.options.cacheRoot)).toEqual([]);
@@ -141,7 +145,7 @@ describe('反轉片段預覽音訊', () => {
     let staging, closing = false, processStarted;
     const ready = new Promise(resolve => { processStarted = resolve; });
     const execution = createFFmpegExecution({ getFFmpegPath: () => 'trusted-ffmpeg', getUserDataDir: () => f.directory,
-      spawnDirect: (_, args) => { staging = args.at(-1); fs.writeFileSync(staging, wav()); return child; } });
+      spawnDirect: (_, _args, options) => { staging = stagingIn(f.options.cacheRoot); fs.writeFileSync(options.stdio[1], wav()); return child; } });
     const runtime = createClipAudioCache({ ...f.options,
       execute: (args, options) => execution.execute(args, { ...options, onProcess: process => {
         options.onProcess(process); processStarted();
@@ -175,13 +179,13 @@ describe('反轉片段預覽音訊', () => {
     const ready = new Promise(resolve => { processStarted = resolve; });
     const cleanupGate = new Promise(resolve => { finishCleanup = resolve; });
     const cleanupEntered = new Promise(resolve => { cleanupStarted = resolve; });
-    const originalUnlink = fsp.unlink;
-    const unlink = vi.spyOn(fsp, 'unlink').mockImplementation(async file => {
+    const originalLstat = fsp.lstat;
+    const cleanupStat = vi.spyOn(fsp, 'lstat').mockImplementation(async (file, ...args) => {
       if (file === staging) { cleanupStarted(); await cleanupGate; }
-      return originalUnlink(file);
+      return originalLstat(file, ...args);
     });
     const execution = createFFmpegExecution({ getFFmpegPath: () => 'trusted-ffmpeg', getUserDataDir: () => f.directory,
-      spawnDirect: (_, args) => { staging = args.at(-1); fs.writeFileSync(staging, wav()); return child; } });
+      spawnDirect: (_, _args, options) => { staging = stagingIn(f.options.cacheRoot); fs.writeFileSync(options.stdio[1], wav()); return child; } });
     const runtime = createClipAudioCache({ ...f.options,
       execute: (args, options) => execution.execute(args, { ...options, onProcess: process => {
         options.onProcess(process); processStarted();
@@ -214,7 +218,7 @@ describe('反轉片段預覽音訊', () => {
         try { await shutdown; }
         finally { await outcome; await runtime.waitForIdle(); }
       }
-      finally { unlink.mockRestore(); }
+      finally { cleanupStat.mockRestore(); }
     }
   });
   it('shutdown 等待已進入但尚未完成 fingerprint 的請求，再拒絕建立 staging', async () => {

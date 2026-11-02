@@ -3,7 +3,8 @@
 
 const fs = require('fs/promises');
 const path = require('path');
-const { createHash, randomUUID } = require('crypto');
+const { createHash } = require('crypto');
+const { createClipCacheArtifact } = require('./clip-cache-artifact');
 const { motherSourceFingerprint } = require('./mother-source-evidence');
 const { sourceClockSeek, sourceAudioClockFilter } = require('./media-source-clock');
 const SAMPLE_RATE = 48000;
@@ -32,10 +33,12 @@ function buildReverseAudioArgs(request, output, clock = null) {
     '-ar', String(SAMPLE_RATE), '-c:a', 'pcm_s16le', '-rf64', 'auto', '-f', 'wav', output];
 }
 
-async function completeWave(file, duration) {
+async function completeWave(file, duration, verify = null) {
   let handle;
   try {
+    verify?.();
     handle = await fs.open(file, 'r');
+    verify?.(await handle.stat({ bigint: true }));
     const stat = await handle.stat(), header = Buffer.alloc(12);
     if (!stat.isFile() || stat.size < 44) return false;
     if ((await handle.read(header, 0, 12, 0)).bytesRead !== 12) return false;
@@ -67,6 +70,7 @@ async function completeWave(file, duration) {
       position += 8 + length + (length % 2);
     }
     const samples = dataLength / (channels * 2);
+    verify?.(await handle.stat({ bigint: true }));
     return position === stat.size && channels > 0 && Number.isInteger(samples)
       && Math.abs(samples - Math.round(duration * SAMPLE_RATE)) <= 1;
   } catch (_) { return false; }
@@ -110,20 +114,24 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null,
     return result;
   }
   async function generate(request, identity, key, clock) {
-    const directory = root(), output = path.join(directory, `${key}.wav`), duration = request.out - request.in;
-    await fs.mkdir(directory, { recursive: true });
+    const duration = request.out - request.in;
+    const store = createClipCacheArtifact(root(), key, 'wav');
     assertSource(request.path);
-    if (await completeWave(output, duration)) {
+    for (const existing of store.candidates()) {
+      if (!await completeWave(existing.path, duration, existing.verify)) continue;
       if (await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== identity) throw new Error('音訊來源在建立快取期間已變更');
-      fileAuthority.grantTrustedFile(output, { read: true, write: false });
-      return { path: output, duration };
+      existing.verify(); assertSource(request.path);
+      fileAuthority.grantTrustedFile(existing.path, { read: true, write: false });
+      return { path: existing.path, duration };
     }
-    const staging = path.join(directory, `.${key}-${randomUUID()}.wav`);
-    let timer = null, killTimer = null, timedOut = false;
+    const artifact = store.reserve();
+    let timer = null, killTimer = null, timedOut = false, failure = null;
     try {
       assertSource(request.path);
-      await execute(buildReverseAudioArgs(request, staging, clock), {
+      artifact.verify();
+      await execute(buildReverseAudioArgs(request, 'fd:', clock), {
         executionKind: 'direct', deferTerminal: true, jobId: `clip-audio-${key.slice(0, 12)}`, label: '準備反向音訊',
+        outputDescriptor: artifact.fd,
         onProcess: child => {
           child.once?.('close', () => { clearTimeout(timer); clearTimeout(killTimer); });
           timer = setTimeout(() => {
@@ -138,17 +146,24 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null,
       });
       if (timedOut) throw new Error('反向音訊準備逾時');
       assertSource(request.path);
+      artifact.verify();
       if (await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== identity) throw new Error('音訊來源在建立快取期間已變更');
-      if (!await completeWave(staging, duration)) throw new Error('反向音訊未產生完整 PCM WAV');
-      await fs.rename(staging, output);
+      artifact.verify();
+      if (!await completeWave(artifact.path, duration, artifact.verify)) throw new Error('反向音訊未產生完整 PCM WAV');
+      if (await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== identity) throw new Error('音訊來源在建立快取期間已變更');
+      assertSource(request.path);artifact.verify();
+      const output = artifact.publish();
       fileAuthority.grantTrustedFile(output, { read: true, write: false });
       return { path: output, duration };
     } catch (error) {
-      if (timedOut) throw Object.assign(new Error('反向音訊準備逾時'), { code: 'CLIP_AUDIO_TIMEOUT', cause: error });
-      throw error;
+      failure = timedOut ? Object.assign(new Error('反向音訊準備逾時'), { code: 'CLIP_AUDIO_TIMEOUT', cause: error }) : error;
+      throw failure;
     } finally {
       clearTimeout(timer); clearTimeout(killTimer);
-      await fs.unlink(staging).catch(() => {});
+      try { await artifact.close(); } catch (error) {
+        if (failure) throw Object.assign(new Error(`原始錯誤：${failure.message}；${error.message}`, { cause: failure }), { code: error.code });
+        throw error;
+      }
     }
   }
   async function waitForIdle() {

@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
+const DiagnosticLog = require('../electron/diagnostic-log');
 const { FileAuthority, collectProjectMediaPaths, collectProjectMediaPathsFromBuffer, parseProjectBuffer } = require('../electron/file-authority.js');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -88,13 +89,22 @@ describe('FileAuthority', () => {
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });
 
-  it('系統開啟只接受受控佇列 log，不把 queue 的其他內部檔案交給 shell', () => {
-    const authority = makeAuthority();
-    authority.grantQueueLogDirectory('C:\\SUB Tool\\profile\\export-queue');
-
-    expect(authority.canOpenQueueLog('C:\\SUB Tool\\profile\\export-queue\\export-a.log')).toBe(true);
-    expect(authority.canOpenQueueLog('C:\\SUB Tool\\profile\\export-queue\\export-a.json')).toBe(false);
-    expect(authority.canOpenQueueLog('C:\\SUB Tool\\profile\\export-queue-copy\\export-a.log')).toBe(false);
+  it('重啟後只開啟仍符合持久身分的佇列 log', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-log-grant-'));
+    try {
+      const file = DiagnosticLog.queueLogPath(dir, 'export-a');
+      const fd = fs.openSync(file, 'wx');
+      DiagnosticLog.record(file, fd, 'export-a');
+      fs.writeFileSync(fd, 'owned diagnostic'); fs.closeSync(fd);
+      const authority = new FileAuthority();
+      authority.grantQueueLogDirectory(dir);
+      expect(authority.canOpenQueueLog(file)).toBe(true);
+      expect(authority.canOpenQueueLog(path.join(dir, 'legacy.log'))).toBe(false);
+      fs.renameSync(file, `${file}.old`);
+      fs.writeFileSync(file, 'foreign bytes');
+      expect(authority.canOpenQueueLog(file)).toBe(false);
+      expect(fs.readFileSync(file, 'utf8')).toBe('foreign bytes');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
   it('主程序產生的旁置快取可個別升格為內部檔案，無須授權整個媒體資料夾', () => {
@@ -109,16 +119,25 @@ describe('FileAuthority', () => {
   });
 
   it('主程序保留的診斷只授精確 log 開啟能力，不授同目錄、read 或 write', () => {
-    const authority = makeAuthority();
-    const file = 'C:\\SUB Tool\\profile\\export-owned.log';
-    expect(authority.grantDiagnosticLogFile(file)).toBe(true);
-    expect(authority.canOpenQueueLog(file)).toBe(true);
-    expect(authority.canOpenQueueLog('C:\\SUB Tool\\profile\\export-other.log')).toBe(false);
-    expect(authority.canRead(file)).toBe(false);
-    expect(authority.canWrite(file)).toBe(false);
-    expect(authority.grantDiagnosticLogFile('C:\\SUB Tool\\profile\\program.exe')).toBe(false);
-    expect(authority.grantDiagnosticLogFile(null)).toBe(false);
-    expect(authority.canOpenQueueLog('C:\\SUB Tool\\profile\\program.exe')).toBe(false);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-direct-log-grant-'));
+    try {
+      const authority = new FileAuthority();
+      const file = path.join(dir, 'export-owned.log');
+      const fd = fs.openSync(file, 'wx'); DiagnosticLog.record(file, fd, null); fs.closeSync(fd);
+      expect(authority.grantDiagnosticLogFile(file)).toBe(true);
+      expect(authority.canOpenQueueLog(file)).toBe(true);
+      expect(authority.canOpenQueueLog(path.join(dir, 'export-other.log'))).toBe(false);
+      expect(authority.canRead(file)).toBe(false);
+      expect(authority.canWrite(file)).toBe(false);
+      expect(authority.grantDiagnosticLogFile(path.join(dir, 'program.exe'))).toBe(false);
+      expect(authority.grantDiagnosticLogFile(null)).toBe(false);
+      fs.renameSync(file, `${file}.old`); fs.writeFileSync(file, 'foreign');
+      expect(authority.canOpenQueueLog(file)).toBe(false);
+      fs.renameSync(`${file}.owner`, `${file}.owner.old`);
+      const foreignFd = fs.openSync(file, 'r+'); DiagnosticLog.record(file, foreignFd, null); fs.closeSync(foreignFd);
+      expect(authority.canOpenQueueLog(file)).toBe(false);
+      expect(fs.readFileSync(file, 'utf8')).toBe('foreign');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
   it('專案與截圖寫入同時需要副檔名和既有寫入授權', () => {

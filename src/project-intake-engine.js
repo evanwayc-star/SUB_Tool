@@ -81,8 +81,11 @@ export function buildSubtitleImportPlan(parsed, { fps, target = 'new' } = {}) {
   // 無法選出一份 trackPatch 就捨棄原稿、未定時字幕及精確影格中繼資料。
   const preserveEffectiveStyle = target === 'existing' || sourceTrackCount > 1;
   const cues = metadata.cues.map(sourceCue => {
-    const start = useFrameTiming ? sourceCue.startFrame / exactFps : sourceCue.start;
-    const end = useFrameTiming ? sourceCue.endFrame / exactFps : sourceCue.end;
+    // 未定時原稿不屬於專案格網；例如 TXT 行具有毫秒遞增的原始秒數。
+    // 使用格數會把這些秒數量化，破壞自產 ASS 的無損往返。
+    const useCueFrames = useFrameTiming && sourceCue.timed !== false;
+    const start = useCueFrames ? sourceCue.startFrame / exactFps : sourceCue.start;
+    const end = useCueFrames ? sourceCue.endFrame / exactFps : sourceCue.end;
     const cue = {
       start,
       end: Math.max(start, end),

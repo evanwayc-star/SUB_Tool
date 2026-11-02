@@ -11,15 +11,22 @@
      奇數寬度會導致 FFmpeg 編碼器直接報錯中斷。因此計算出之寬度必須向下對齊偶數。
    ============================================================================== */
 
+function normalizeTargetHeight(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  const h = Math.floor(n);
+  return Math.max(2, h - (h % 2));
+}
+
 /**
  * 依據專案畫布比例與目標高度，計算出合法的交付解析度（寬高皆為偶數）。
- * 
+ *
  * @param {object} [options]
  * @param {number} [options.canvasW=1920] 專案畫布寬度（像素）
  * @param {number} [options.canvasH=1080] 專案畫布高度（像素）
  * @param {number} [options.targetH] 目標高度（像素）；若為 0 或未提供則維持畫布尺寸
  * @param {boolean} [options.isWav=false] 是否為純音訊 WAV 匯出（WAV 無視訊軌，直接回傳畫布尺寸）
- * @returns {{w: number, h: number}} 交付解析度物件（寬度必定為偶數且大於等於 2）
+ * @returns {{w: number, h: number}} 交付解析度物件（寬高必定為偶數且大於等於 2）
  */
 function deliveryResolution({ canvasW, canvasH, targetH, isWav } = {}) {
   const rawW = Number(canvasW);
@@ -27,23 +34,22 @@ function deliveryResolution({ canvasW, canvasH, targetH, isWav } = {}) {
   const W = Number.isFinite(rawW) && rawW > 0 ? Math.floor(rawW) : 1920;
   const H = Number.isFinite(rawH) && rawH > 0 ? Math.floor(rawH) : 1080;
 
-  const rawTargetH = Number(targetH);
-  const validTarget = Number.isFinite(rawTargetH) && rawTargetH > 0;
+  const h = normalizeTargetHeight(targetH);
 
-  if (isWav || !validTarget) {
+  if (isWav || !h) {
     // 確保即使畫布是奇數，交付時也安全修正為偶數
     const safeW = W - (W % 2);
     const safeH = H - (H % 2);
     return { w: Math.max(2, safeW), h: Math.max(2, safeH) };
   }
 
-  const h = Math.floor(rawTargetH);
+  // 寬度必須使用實際輸出高度；奇數高度會先向下對齊，否則畫面會被拉伸。
   let w = Math.round(h * (W / H));
   w -= (w % 2); // 確保 H.264/H.265 4:2:0 要求之偶數寬度
 
   return {
     w: Math.max(2, w),
-    h: Math.max(2, h - (h % 2)),
+    h,
   };
 }
 
@@ -76,7 +82,7 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH =
     throw new Error('BD 輸出影格率必須是支援的光碟格式，且不得低於專案 FPS');
   }
   const fixed = bdMode || preset;
-  const height = fixed?.height || targetH;
+  const height = fixed?.height || normalizeTargetHeight(targetH);
   const { w, h } = fixed
     ? { w: fixed.width, h: fixed.height }
     : deliveryResolution({ canvasW, canvasH, targetH: height, isWav });
@@ -97,4 +103,4 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH =
   };
 }
 
-module.exports = { deliveryResolution, suggestKbps, deriveDeliverySpec };
+module.exports = { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight };

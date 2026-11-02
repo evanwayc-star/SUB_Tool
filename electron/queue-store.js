@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const DiagnosticLog = require('./diagnostic-log');
 
 const { isRestorable, isTerminal, JOB_STATUS } = require('./export-queue');
 
@@ -243,9 +244,7 @@ function removeAssFile(queueDir, assRef) {
 }
 
 function removeLogFile(queueDir, id) {
-  try { fs.unlinkSync(logPath(queueDir, id)); } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
+  DiagnosticLog.removeJobLogs(queueDir, id);
 }
 
 function writeAssFile(queueDir, assRef, content) {

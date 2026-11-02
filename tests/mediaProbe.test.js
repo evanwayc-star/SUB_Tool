@@ -607,6 +607,60 @@ describe('媒體探測 interface', () => {
       colorSpace: 'bt470bg', colorPrimaries: 'bt470bg', colorTransfer: 'bt709', colorRange: 'tv' });
   });
 
+  it.each([
+    ['90 度 Display Matrix', { side_data_type: 'Display Matrix', displaymatrix: '\n00000000:            0      -65536           0\n00000001:        65536           0           0\n00000002:            0           0  1073741824\n', rotation: 90 }],
+    ['180 度 Display Matrix', { side_data_type: 'Display Matrix', displaymatrix: '\n00000000:       -65536           0           0\n00000001:            0      -65536           0\n00000002:            0           0  1073741824\n', rotation: -180 }],
+    ['0 度 Display Matrix', { side_data_type: 'Display Matrix', displaymatrix: '\n00000000:        65536           0           0\n00000001:            0       65536           0\n00000002:            0           0  1073741824\n', rotation: 0 }],
+    ['無法解析的 Display Matrix', { side_data_type: 'Display Matrix', displaymatrix: 'invalid', rotation: 'unknown' }],
+    ['只有 Display Matrix 識別', { side_data_type: 'Display Matrix' }],
+    ['只有 displaymatrix 資料', { displaymatrix: 'invalid' }],
+  ])('%s 不因角度或矩陣內容而被當成無變換', (_label, sideData) => {
+    const { descriptorOf } = require('../electron/media-probe');
+    const { video } = descriptorOf({ streams: [{ codec_type: 'video', width: 1920, height: 1080, side_data_list: [sideData] }] });
+    expect(video.displayTransform).toBe(true);
+  });
+
+  it.each(['90', '180', '0', '', 'unknown'])('legacy rotate tag %j 只要存在就保守標記變換', rotate => {
+    const { descriptorOf } = require('../electron/media-probe');
+    const { video } = descriptorOf({ streams: [{ codec_type: 'video', tags: { rotate } }] });
+    expect(video.displayTransform).toBe(true);
+  });
+
+  it('describe 從 ffprobe JSON 傳遞旋轉及交錯描述，忽略封面影片', async () => {
+    const { createMediaProbe } = require('../electron/media-probe');
+    const probe = createMediaProbe({ fingerprintSource: () => 'stable-test-source', executable: 'ffprobe', spawnProcess: () => completedProcess({
+      stdout: JSON.stringify({ format: { duration: '8.5' }, streams: [
+        { codec_type: 'video', codec_name: 'mjpeg', disposition: { attached_pic: 1 }, tags: { rotate: '90' } },
+        { codec_type: 'video', codec_name: 'h264', width: 1080, height: 1920, field_order: 'tt',
+          tags: { ROTATE: '0' }, avg_frame_rate: '25/1', start_time: '0.2', color_space: 'bt709' },
+        { codec_type: 'audio', index: 2, codec_name: 'aac', channels: 2 },
+      ] }),
+    }) });
+    await expect(probe.describe('D:/media/rotation.mp4')).resolves.toMatchObject({
+      duration: 8.5, video: { codec: 'h264', width: 1080, height: 1920, fps: 25, colorSpace: 'bt709', displayTransform: true, fieldOrder: 'tt' },
+      audio: [{ streamIndex: 2, codec: 'aac', channels: 2 }],
+    });
+  });
+
+  it('非旋轉 side data 與一般標籤不新增變換欄位，保留實際 field order', () => {
+    const { descriptorOf } = require('../electron/media-probe');
+    const document = { streams: [{ codec_type: 'video', width: 1920, height: 1080, field_order: 'progressive',
+      side_data_list: [{ side_data_type: 'Mastering display metadata' }], tags: { encoder: 'example' } }] };
+    const { video } = descriptorOf(document);
+    expect(video).not.toHaveProperty('displayTransform');
+    expect(video.fieldOrder).toBe('progressive');
+    document.streams[0].field_order = 'tt';
+    expect(descriptorOf(document).video.fieldOrder).toBe('tt');
+    delete document.streams[0].field_order;
+    expect(descriptorOf(document).video).not.toHaveProperty('fieldOrder');
+  });
+
+  it.each(['unknown', '', null])('field_order 存在但值為 %j 時不偽裝成逐行掃描', field_order => {
+    const { descriptorOf } = require('../electron/media-probe');
+    const { video } = descriptorOf({ streams: [{ codec_type: 'video', field_order }] });
+    expect(video).toHaveProperty('fieldOrder', field_order);
+  });
+
   it('stalled ffprobe 到期後先終止並等 close，下一次探測才可啟動', async () => {
     vi.useFakeTimers();
     try {

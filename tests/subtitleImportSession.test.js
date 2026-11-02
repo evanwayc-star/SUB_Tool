@@ -30,6 +30,41 @@ beforeEach(()=>{
 afterEach(()=>{ui.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('字幕匯入工作歸屬',()=>{
+  it('TXT 未定時原稿匯出自產 ASS 再匯入，同格率仍保留原稿的保留秒數',()=>{
+    State.mediaName='video.mov';State.fps=25;
+    subio._openImportModal('原稿',subio._parseSubtitleText('甲\n乙\n丙','txt'),'txt');
+    document.querySelector('#modalFoot button.primary').click();
+    const original=State.cues.map(({text,start,end,timed})=>({text,start,end,timed}));
+    expect(original.map(cue=>cue.start)).toEqual([0,0.001,0.002]);
+    const ass=subio.getFileData('ass',State.cues,'原稿');
+    const text=Buffer.from(ass.content,'base64').subarray(2).toString('utf16le');
+    const parsed=subio._parseSubtitleText(text,'ass');
+    expect(parsed.subtool.cues).toHaveLength(3);
+    State.cues=[];State.tracks=[{name:'原軌',visible:true,locked:false}];
+    subio._openImportModal('重新匯入自產 ASS',parsed,'ass');
+    document.querySelector('#modalFoot button.primary').click();
+    expect(State.cues.map(({text,start,end,timed})=>({text,start,end,timed}))).toEqual(original);
+  });
+
+  it.each(['startFrame','endFrame','both'])('ASS 的 %s 與秒數矛盾時退回標準 Dialogue',field=>{
+    State.mediaName='video.mov';State.fps=25;
+    const source=[{id:'source',start:1,end:2,text:'標準時間',track:0,timed:true}];
+    const file=subio.getFileData('ass',source,'原稿');
+    const ass=Buffer.from(file.content,'base64').subarray(2).toString('utf16le');
+    const metadata=structuredClone(subio._parseSubtitleText(ass,'ass').subtool);
+    if(field==='startFrame') metadata.cues[0].startFrame=26;
+    if(field==='endFrame') metadata.cues[0].endFrame=51;
+    if(field==='both'){metadata.cues[0].startFrame=250;metadata.cues[0].endFrame=275;}
+    const encoded=Buffer.from(JSON.stringify(metadata),'utf8').toString('base64');
+    const damaged=ass.replace(/^; SUBTOOL-META:.*\r?\n/gm,'')
+      .replace('[Script Info]',`[Script Info]\n; SUBTOOL-META:1:1/1:${encoded}`);
+    const parsed=subio._parseSubtitleText(damaged,'ass');
+    expect(parsed.subtool).toBeUndefined();
+    subio._openImportModal('匯入損壞的 ASS',parsed,'ass');
+    document.querySelector('#modalFoot button.primary').click();
+    expect(State.cues[0]).toMatchObject({start:1,end:2,text:'標準時間',timed:true});
+  });
+
   it.each(['new','0'])('合併多軌 ASS 由匯入視窗提交到 %s 目的軌，保留全部原稿與外觀',async target=>{
     const {SubFormats}=await import('../src/formats.js');
     const {effStyle}=await import('../src/substyle.js');

@@ -2,12 +2,15 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
 const { createAudioNormalizationRuntime } = require('../electron/audio-normalization-runtime.js');
+const DiagnosticLog = require('../electron/diagnostic-log.js');
+const { FileAuthority } = require('../electron/file-authority.js');
 
 const tempRoots = [];
 
@@ -352,13 +355,20 @@ describe('FFmpeg execution', () => {
     const queueDir = path.join(userDataDir, 'export-queue');
     const outPath = path.join(userDataDir, 'delivery.mov');
     const watchdogResult = { ok: false, code: 1, cleanup: { retainedLease: false } };
+    const stderr = Buffer.from('WATCHDOG_BUSY_DIAGNOSTIC\n', 'utf8');
+    const events = [];
+    const authority = new FileAuthority();
+    authority.grantQueueLogDirectory(queueDir);
     const execution = createFFmpegExecution({
       getFFmpegPath: () => 'ffmpeg-test',
       getUserDataDir: () => userDataDir,
       getQueueDir: () => queueDir,
       ensureQueueDir: () => fs.mkdirSync(queueDir, { recursive: true }),
+      send: (_sender, channel, data) => events.push({ channel, data }),
+      onLogRetained: file => authority.grantDiagnosticLogFile(file),
       spawnWatchdog(config, handlers) {
         handlers.onMessage({ type: 'error', code: 'OUTPUT_BUSY' });
+        handlers.onStderr(stderr);
         return {
           ready: Promise.resolve(),
           completion: Promise.resolve(watchdogResult),
@@ -366,14 +376,30 @@ describe('FFmpeg execution', () => {
       },
     });
 
-    await expect(execution.execute(['-i', 'master.mxf', outPath], {
+    const failure = await execution.execute(['-i', 'master.mxf', outPath], {
       executionKind: 'queued-delivery',
       jobId: 'export-busy',
       outPath,
-    })).rejects.toMatchObject({
-      code: 'OUTPUT_BUSY',
-      watchdogResult,
-      message: expect.stringContaining(`[LOG_PATH]${path.join(queueDir, 'export-busy.log')}[/LOG_PATH]`),
-    });
+      sender: { id: 1 },
+    }).then(() => { throw new Error('watchdog 失敗不可回報成功'); }, error => error);
+    expect(failure).toMatchObject({ code: 'OUTPUT_BUSY', watchdogResult });
+    const match = /\[LOG_PATH\](.*?)\[\/LOG_PATH\]/.exec(failure.message);
+    expect(match).not.toBeNull();
+    const logPath = match[1];
+    const jobHash = createHash('sha256').update('export-busy').digest('hex').slice(0, 24);
+    expect(path.dirname(logPath)).toBe(queueDir);
+    expect(path.basename(logPath)).toMatch(new RegExp(`^diagnostic-${jobHash}-[a-f0-9-]{36}\\.log$`));
+    const bytes = fs.readFileSync(logPath);
+    expect(bytes.subarray(-stderr.length)).toEqual(stderr);
+    const owner = DiagnosticLog.load(logPath);
+    expect(owner).toMatchObject({ version: 1, job: jobHash, file: path.basename(logPath) });
+    expect(fs.existsSync(`${logPath}.owner`)).toBe(true);
+    expect(authority.canOpenQueueLog(logPath)).toBe(true);
+    const restoredAuthority = new FileAuthority();
+    restoredAuthority.grantQueueLogDirectory(queueDir);
+    expect(restoredAuthority.canOpenQueueLog(logPath)).toBe(true);
+    expect(events.at(-1)).toMatchObject({ channel: 'task-progress', data: {
+      jobId: 'export-busy', done: true, outcome: 'failed', errorCode: 'OUTPUT_BUSY', errorMsg: failure.message,
+    } });
   });
 });

@@ -15,6 +15,7 @@
 const path = require('path');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 const { decodeText } = require('../shared/text-encoding.cjs');
+const DiagnosticLog = require('./diagnostic-log');
 
 /** 專案檔副檔名正規表達式 */
 const PROJECT_FILE = /\.(subtool|json)$/i;
@@ -114,7 +115,7 @@ class FileAuthority {
     this._deliveryRevealFiles = new Set();
     this._screenshotDirectories = new Map();
     this._queueLogDirectories = new Set();
-    this._diagnosticLogFiles = new Set();
+    this._diagnosticLogFiles = new Map();
 
     for (const directory of internalDirectories) {
       this.grantInternalDirectory(directory);
@@ -339,7 +340,9 @@ class FileAuthority {
   grantDiagnosticLogFile(file) {
     const resolved = this._resolve(file);
     if (!resolved || !QUEUE_LOG_FILE.test(file)) return false;
-    this._diagnosticLogFiles.add(resolved);
+    const owner = DiagnosticLog.load(file);
+    if (!owner) return false;
+    this._diagnosticLogFiles.set(resolved, owner);
     return true;
   }
 
@@ -376,8 +379,15 @@ class FileAuthority {
   /** 檢查記錄檔是否允許使用系統 Shell 開啟。 */
   canOpenQueueLog(file) {
     const candidate = this._resolve(file);
-    return !!candidate && QUEUE_LOG_FILE.test(file || '') &&
-      (this._diagnosticLogFiles.has(candidate) || this._matchesDirectoryCapability(candidate, this._queueLogDirectories));
+    if (!candidate || !QUEUE_LOG_FILE.test(file || '')) return false;
+    const owner = DiagnosticLog.load(file);
+    if (!owner) return false;
+    if (this._diagnosticLogFiles.has(candidate)) {
+      return DiagnosticLog.matchesOwner(owner, this._diagnosticLogFiles.get(candidate));
+    }
+    const directory = this._resolve(this._path.dirname(file));
+    return !!directory && this._queueLogDirectories.has(directory)
+      && !!owner.job && this._path.basename(file).startsWith(`diagnostic-${owner.job}-`);
   }
 
   /** 檢查目錄是否為授權之截圖目錄。 */

@@ -348,7 +348,7 @@ function encodeSubtoolMetadata(metadata){
     return lines.join('\n')+'\n';
   }catch(e){ return ''; }
 }
-function validateMetadataCue(value, trackCount){
+function validateMetadataCue(value, trackCount, exactFps){
   if(!isPlainRecord(value) || Object.keys(value).some(key=>!CUE_META_KEYS.has(key))) return null;
   const required=['startFrame', 'endFrame', 'start', 'end', 'text', 'track', 'timed'];
   if(required.some(key=>!hasOwn(value, key))) return null;
@@ -359,6 +359,8 @@ function validateMetadataCue(value, trackCount){
   const text=safeCueText(value.text);
   const track=Number.isSafeInteger(value.track) && value.track >= 0 && value.track < trackCount ? value.track : null;
   if(startFrame == null || endFrame == null || start == null || end == null || text == null || track == null || typeof value.timed !== 'boolean') return null;
+  // 秒數與影格來自同一份原稿；兩者不一致時不能採用矛盾的影格。
+  if(startFrame !== metadataFrame(start, exactFps) || endFrame !== metadataFrame(end, exactFps)) return null;
   const out={startFrame, endFrame, start, end, text, track, timed:value.timed};
   if(hasOwn(value, 'id')){
     if(!((typeof value.id === 'string' && safeLabel(value.id) != null) || (typeof value.id === 'number' && Number.isSafeInteger(value.id)))) return null;
@@ -377,6 +379,7 @@ function validateSubtoolMetadata(value){
   if(value.version !== SUBTOOL_META_VERSION || !hasOwn(value, 'fps') || !hasOwn(value, 'dropFrame') || !Array.isArray(value.tracks) || !Array.isArray(value.cues)) return null;
   const fps=boundedNumber(value.fps, 1, 240);
   if(fps == null || typeof value.dropFrame !== 'boolean' || value.tracks.length > MAX_SUBTOOL_META_TRACKS || value.cues.length > MAX_SUBTOOL_META_CUES) return null;
+  const exactFps=getExactFps(fps);
   const tracks=[];
   for(const track of value.tracks){
     const clean=normalizeTrackRecord(track, true);
@@ -385,7 +388,7 @@ function validateSubtoolMetadata(value){
   }
   const cues=[];
   for(const cue of value.cues){
-    const clean=validateMetadataCue(cue, tracks.length);
+    const clean=validateMetadataCue(cue, tracks.length, exactFps);
     if(clean == null) return null;
     cues.push(clean);
   }
