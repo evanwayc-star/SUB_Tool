@@ -8,7 +8,7 @@ vi.mock('../src/media.js',()=>({Media:mocks.media}));
 vi.mock('../src/project.js',()=>({Project:{captureWorkspaceOwnership:()=>()=>true}}));
 vi.mock('../src/events.js',()=>({emit:vi.fn(),on:vi.fn()}));
 vi.mock('../src/history.js',()=>({recordHistory:vi.fn()}));
-vi.mock('../src/ui.js',()=>({openModal:mocks.open,closeModal:mocks.close,showToast:mocks.toast}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),openModal:mocks.open,closeModal:mocks.close,showToast:mocks.toast}));
 vi.mock('../src/audio-engine.js',()=>({AudioEngine:{markSourceAudioBuffer:buffer=>buffer,
   inheritSourceAudioClock:(_original,copy)=>copy,normalizeSourceAudioBuffer:async buffer=>buffer,decodeAudioData:mocks.decode}}));
 vi.mock('../src/speech-recognition-engine.js',async importOriginal=>({...await importOriginal(),transcribeAudioStream:mocks.transcribe}));

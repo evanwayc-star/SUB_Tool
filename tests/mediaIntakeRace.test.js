@@ -29,6 +29,7 @@ const domMock = vi.hoisted(() => {
           addEventListener: vi.fn(), removeEventListener: vi.fn(),
           classList: { add: vi.fn(), remove: vi.fn() },
           querySelectorAll: () => [],
+          querySelector: () => null,
           getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 360 }),
         });
       }
@@ -54,7 +55,8 @@ const deskMock = vi.hoisted(() => ({
 
 vi.mock('../src/dom.js', () => domMock);
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
-vi.mock('../src/ui.js', () => ({
+vi.mock('../src/ui.js', async original => ({
+  renderCurrentTimecode: (await original()).renderCurrentTimecode,
   setStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));

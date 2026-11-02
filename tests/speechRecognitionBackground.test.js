@@ -35,7 +35,7 @@ vi.mock('../src/audio.js', () => ({
   }
 }));
 
-vi.mock('../src/ui.js', () => ({
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   openModal: uiMocks.openModal,
   closeModal: uiMocks.closeModal,
   showToast: uiMocks.showToast

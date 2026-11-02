@@ -475,7 +475,8 @@ function renderSubList(){
 }
 
 function lineCountClass(text){
-  const n=((text||'').match(/\n|\/\//g)||[]).length;
+  // 舊式換行由匯入 parser 正規化；runtime 的 URL／字面斜線不是換行。
+  const n=((text||'').match(/\n/g)||[]).length;
   return n>=2?' multi-line':n===1?' two-line':'';
 }
 
@@ -929,8 +930,13 @@ sublist?.addEventListener?.('focusout', e => {
 
 sublist?.addEventListener?.('keydown', e => {
   if (e.isComposing || e.keyCode === 229) { e.stopPropagation(); return; }
-  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); return; }
   const txt = e.target.closest('.txt');
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    // 多行文字由瀏覽器移動游標；仍阻止事件冒泡到播放／字幕導航快捷鍵。
+    if (txt?.contentEditable === 'true') e.stopPropagation();
+    else e.preventDefault();
+    return;
+  }
   if (!txt || txt.contentEditable !== 'true') return;
   const row = txt.closest('.sub-row');
   if (!row) return;

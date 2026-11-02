@@ -9,6 +9,54 @@ describe('逐行文字稿時間匹配', () => {
     ]);
   });
 
+  it.each([
+    ['英文分解原稿', 'Cafe\u0301', 'Café'],
+    ['英文分解證據', 'Café', 'Cafe\u0301'],
+    ['日文分解原稿', 'か\u3099', 'が'],
+    ['日文分解證據', 'が', 'か\u3099'],
+    ['韓文分解原稿', '\u1100\u1161', '가'],
+    ['韓文分解證據', '가', '\u1100\u1161'],
+    ['半形日文原稿', 'ｶﾞﾗｽ', 'ガラス'],
+    ['半形日文證據', 'ガラス', 'ｶﾞﾗｽ'],
+  ])('%s 在切 token 前正規化，保留原稿字形及證據時間', (_label, transcript, evidence) => {
+    for (const wordTiming of [true, false]) {
+      const evidenceSegments = [{ start: 1, end: 2, text: evidence,
+        ...(wordTiming ? { words: [{ text: evidence, start: 1, end: 2 }] } : {}) }];
+      const result = alignTranscriptToEvidence({ transcript, evidenceSegments });
+
+      expect(result.status).toBe('aligned');
+      expect(result.summary.coverage).toBe(1);
+      expect(result.completeSegments).toEqual([expect.objectContaining({
+        text: transcript, timed: true, start: 1, end: 2,
+        alignment: expect.objectContaining({
+          status: wordTiming ? 'matched' : 'review',
+          tokenCoverage: 1,
+          timingEvidence: wordTiming ? 'word' : 'segment',
+        }),
+      })]);
+      expect(evidenceSegments[0].text).toBe(evidence);
+    }
+  });
+
+  it('匹配副本的 Unicode 字數改變時，不改寫原稿標點、逐行文字或其時間', () => {
+    const lines = ['Cafe\u0301！', 'ｶﾞﾗｽ。', '\u1100\u1161？'];
+    const evidence = ['Café', 'ガラス', '가'];
+    const result = alignTranscriptToEvidence({
+      transcript: lines.join('\n'),
+      evidenceSegments: evidence.map((text, index) => ({
+        text, start: index * 2 + 1, end: index * 2 + 2,
+        words: [{ text, start: index * 2 + 1, end: index * 2 + 2 }],
+      })),
+    });
+
+    expect(result.status).toBe('aligned');
+    expect(result.completeSegments.map(({ text, start, end, timed, transcriptLineIndex }) => (
+      { text, start, end, timed, transcriptLineIndex }
+    ))).toEqual(lines.map((text, index) => ({
+      text, start: index * 2 + 1, end: index * 2 + 2, timed: true, transcriptLineIndex: index,
+    })));
+  });
+
   it('完全保留使用者逐行內容，不因同一行包含多個句子而再次拆分', () => {
     const transcript = [
       '你好，世界。這仍是同一行！',

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
-vi.mock('../src/ui.js', () => ({ openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
 vi.mock('../src/decode/source-frame-index.js', () => ({ sourcePresentationMetadata: vi.fn() }));
 
 import { sourcePresentationMetadata } from '../src/decode/source-frame-index.js';

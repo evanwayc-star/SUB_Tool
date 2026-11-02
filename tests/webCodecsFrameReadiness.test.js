@@ -20,7 +20,7 @@ vi.mock('../src/media.js',()=>({Media:{
 }}));
 vi.mock('../src/media-player-adapter.js',()=>({getPlayerAdapter:()=>({})}));
 vi.mock('../src/events.js',()=>({emit:vi.fn()}));
-vi.mock('../src/ui.js',()=>({showToast:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),showToast:vi.fn()}));
 vi.mock('../src/decode/demux.js',async importOriginal=>{
   const actual=await importOriginal();
   const samples=url=>Array.from({length:url==='a.mp4'?500:250},(_,i)=>({

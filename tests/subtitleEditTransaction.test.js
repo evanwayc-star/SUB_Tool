@@ -472,6 +472,33 @@ function placeCursor(textElement, offset) {
   selection.addRange(range);
 }
 
+describe('多行字幕列表文字的游標導航', () => {
+  it.each(['ArrowUp', 'ArrowDown'])('%s 保留瀏覽器的垂直游標移動，不觸發播放導航或 History', async key => {
+    const cue=State.cues.find(cue=>cue.id==='target');
+    cue.text='第一行\n第二行\n第三行';
+    Subtitles.renderSubList();
+    const editor=document.querySelector('.sub-row[data-id="target"] .txt');
+    editor.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));
+    await Promise.resolve(); await Promise.resolve();
+    expect(editor.contentEditable).toBe('true');
+    const seek=vi.spyOn(Media,'seek').mockResolvedValue(true);
+    const escaped=vi.fn();window.addEventListener('keydown',escaped);
+    const before=structuredClone(State.cues),history=History.stack.length;
+    try {
+      const event=new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true});
+      editor.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(escaped).not.toHaveBeenCalled();
+      expect(seek).not.toHaveBeenCalled();
+      expect(State.cues).toEqual(before);
+      expect(History.stack).toHaveLength(history);
+    } finally {
+      window.removeEventListener('keydown',escaped);seek.mockRestore();
+      editor.dispatchEvent(new FocusEvent('focusout',{bubbles:true}));
+    }
+  });
+});
+
 describe('拆分字幕 UI adapters', () => {
   beforeEach(() => {
     State.cues = [

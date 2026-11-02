@@ -4,6 +4,25 @@ import { SubFormats, splitN, decodeLegacyLineBreaks } from '../src/formats.js';
 import { assFontName, uiFontNameFromAss } from '../src/substyle.js';
 
 describe('SRT round-trip', () => {
+  it.each([
+    { label: 'LF 空白行', eol: '\n', separator: ' ' },
+    { label: 'CRLF Tab 行', eol: '\r\n', separator: '\t' },
+    { label: '連續兩個空行', eol: '\n', separator: '\n' },
+    { label: '連續三個空行', eol: '\r\n', separator: '\r\n\r\n' },
+    { label: '相鄰空格與 Tab 行', eol: '\n', separator: ' \n\t' },
+    { label: '連續混合空白行', eol: '\n', separator: ' \t\n\t \n' },
+    { label: '檔案開頭空白行', eol: '\n', separator: '', prefix: '\n' },
+  ])('$label 仍分成獨立字幕，保留句內換行與空白', ({ eol, separator, prefix = '' }) => {
+    const input = [
+      '1', '00:00:01,000 --> 00:00:02,000', '第一句  文字', '下一行',
+      separator, '2', '00:00:03,000 --> 00:00:04,000', '第二句', '',
+    ].join(eol);
+    expect(SubFormats.parseSRT(prefix + input)).toEqual([
+      { start: 1, end: 2, text: '第一句  文字\n下一行' },
+      { start: 3, end: 4, text: '第二句' },
+    ]);
+  });
+
   it('cues -> toSRT -> parseSRT 還原 start/end/text', () => {
     const cues = [
       { start: 1, end: 2.5, text: 'Hello' },
@@ -233,6 +252,41 @@ Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,外部字幕`;
 
     expect(parsed.subtool).toBeUndefined();
     expect(parsed).toEqual([{ start: 1, end: 2, text: '外部字幕', track: 0 }]);
+  });
+
+  it('明確要求無損 ASS 時，超長原稿必須拒絕匯出，不能靜默變成沒有字幕的檔案', () => {
+    const source = { start: 0, end: 0, text: '字'.repeat(100000), track: 0, timed: false };
+    const exportDraft = cues => SubFormats.toASS(cues, 25, [], 1920, 1080, { includeMetadata: true });
+    const accepted = SubFormats.parseASS(exportDraft([source]));
+    expect(accepted.subtool.cues[0].text).toBe(source.text);
+    expect(() => exportDraft([{ ...source, text: source.text + '字' }])).toThrow(/ASS 無損匯出失敗/);
+    // mpv／交付使用的標準 ASS 不要求原稿 metadata，保留其既有行為。
+    expect(() => SubFormats.toASS([{ ...source, text: source.text + '字' }], 25)).not.toThrow();
+  });
+
+  it('個別原稿合法但合計超過 metadata 預算時，明確拒絕而不輸出遺失原稿的 ASS', () => {
+    const cues = Array.from({ length: 30 }, (_, id) => ({
+      id: String(id), start: id, end: id, track: 0, timed: false, text: '字'.repeat(100000),
+    }));
+    expect(() => SubFormats.toASS(cues, 25, [], 1920, 1080, { includeMetadata: true }))
+      .toThrow(/ASS 無損匯出失敗.*8 MiB/);
+  });
+
+  it('完整 UTF-8 metadata 達 8 MiB 可往返，多一 byte 必須拒絕，不能只比較 Base64 長度', () => {
+    const cues = Array.from({ length: 84 }, (_, id) => ({ id, start: 0, end: 0, track: 0, timed: false, text: '' }));
+    const exportDraft = () => SubFormats.toASS(cues, 25, [], 1920, 1080, { includeMetadata: true });
+    const metadata = SubFormats.parseASS(exportDraft()).subtool;
+    let remaining = 8 * 1024 * 1024 - new TextEncoder().encode(JSON.stringify(metadata)).length;
+    for (const cue of cues) {
+      const count = Math.min(100000, remaining);
+      cue.text = 'x'.repeat(count); remaining -= count;
+    }
+    expect(remaining).toBe(0);
+    const parsed = SubFormats.parseASS(exportDraft());
+    expect(parsed.subtool.cues).toHaveLength(cues.length);
+    expect(parsed.subtool.cues.map(cue => cue.text)).toEqual(cues.map(cue => cue.text));
+    cues.at(-1).text += 'x';
+    expect(() => exportDraft()).toThrow(/ASS 無損匯出失敗.*8 MiB/);
   });
 });
 

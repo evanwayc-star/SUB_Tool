@@ -288,7 +288,8 @@
         .replace(/'/g, '&#39;');
     }
 
-    function highlightDiff(first, second, cssClass) {
+    function highlightDiff(first, second, cssClass, active) {
+      if (!active) return { left: escapeHtml(first), right: escapeHtml(second) };
       // 先比較原字元，再各段跳脫，否則共同前後綴可能切斷 &amp; 等 entity。
       const left = Array.from(String(first == null ? '' : first));
       const right = Array.from(String(second == null ? '' : second));
@@ -335,9 +336,9 @@
       let html = '';
       for (const row of plan.rows) {
         if (hideIdentical.checked && !row.active.any) continue;
-        const start = highlightDiff(row.left && row.left.startTimecode, row.right && row.right.startTimecode, 'diff-time');
-        const end = highlightDiff(row.left && row.left.endTimecode, row.right && row.right.endTimecode, 'diff-time');
-        const text = highlightDiff(row.left && row.left.text, row.right && row.right.text, 'diff-text');
+        const start = highlightDiff(row.left && row.left.startTimecode, row.right && row.right.startTimecode, 'diff-time', row.active.time);
+        const end = highlightDiff(row.left && row.left.endTimecode, row.right && row.right.endTimecode, 'diff-time', row.active.time);
+        const text = highlightDiff(row.left && row.left.text, row.right && row.right.text, 'diff-text', row.active.text);
         const styleTitle = row.difference.style
           ? '不同的屬性: ' + row.difference.styleKeys.join(', ')
           : '';

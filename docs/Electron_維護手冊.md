@@ -363,6 +363,8 @@ Execution 的編碼完成不等於交付完成；封裝、內容驗證、成品�
 
 `audio-normalization-runtime.js` 的聲量分析等 FFmpeg 成功，再解析必要量測值。空報告、缺欄位或程序失敗均失敗；`-inf` 必須來自實際量測，不能補造，也不能單憑它認定靜音。Renderer 可保留快速預覽，但不得把量測失敗顯示成成功。
 
+面板量測使用 `buildAudioIngestPlan(..., { waveOnly: true })`，與來源 MIX 波形共用全部原始聲道等權、來源時鐘與短 stream 尾端補零規則，不讓 FFmpeg 自選單一 stream。此混合報告只供面板顯示；效果仍逐實體 stream 量測及保存，不能把可能因反相抵消而靜音的 MIX 報告當成各 stream 的處理證據。
+
 量測和轉檔使用 `mother-source-evidence.js` 的本機來源指紋，核對處理前後及各階段的檔案身分和內容；來源消失、無法讀取或證據變動時不交出報告或 WAV。指紋採 stat 與前／中／尾有界取樣，並非整檔雜湊，不能保證偵測所有未取樣區段的變更。對話框也只接受仍屬目前工作及來源的結果。
 
 Renderer 的效果快取及多 stream 整批使用 `audioSourceFingerprint`，沿用已授權的 `vocal-waveform-fingerprint.js` namespace；它與原生轉檔各自核對來源，不跨 namespace 比較 digest。舊 bridge 缺少此介面時，單 stream 可處理但不重用效果快取，多 stream 因無法核對整批來源而拒絕啟動。
@@ -373,7 +375,7 @@ Renderer 的效果快取及多 stream 整批使用 `audioSourceFingerprint`，�
 
 平衡以整份母素材量測及處理；輸出無容器 PTS 的 WAV 前才對齊來源零點、補靜音及裁長。Peak、True Peak 第二遍與無聲保護共用此步驟，已對齊結果不重套偏移。取消同時傳給 probe 與後續原生階段，遲到 probe 不得啟動新程序。
 
-True Peak 第一遍失敗時，即使 stderr 已含報告，也不能以它判定無聲或保存為交付用量測；改用單遍濾鏡，並讓預覽與交付共用相同退路。
+Peak 與 True Peak 都先量測母素材的指定 stream，確認無聲時維持 0 dB，成功報告隨效果保存供重開及交付共用；正常 Peak 仍使用 `alimiter`。第一遍失敗時，即使 stderr 已含報告，也不能以它判定無聲或保存為交付用量測；改用單遍濾鏡，並讓預覽與交付共用相同退路。
 
 已保存的量測欄位只接受有內容的數字或數字字串，缺值及錯型不可轉成零冒充量測；非靜音報告也須符合 FFmpeg 的 `measured_*`／`offset` 範圍，否則改用單遍。FFmpeg 的完全靜音報告可能有 `target_offset: "inf"`；只在其餘量測可確認靜音時保留此報告，讓交付與預覽同樣維持無聲保護。
 
@@ -561,6 +563,8 @@ mpv 的 `screenshot-to-file` 會覆寫既有同名檔；main 不把 renderer 提
 ## 6. 匯出佇列
 
 狀態真相在 `export-queue.js` 的 JOB_STATUS／TRANSITIONS。常見路徑為 queued→running→done／failed，停止先到 stopping，再依實際結果裁定 stopped／done／failed；missing-source 需重連才可回 queued。`paused` 是排程旗標，不是個別工作狀態。
+
+監控視窗編輯某一等待工作的格式時，保留該 editor 的 DOM、焦點與草稿，其他工作的進度、完成狀態及摘要仍持續刷新。原工作被移除或不再等待時撤銷 editor，不能以舊草稿提交格式；局部編輯不應凍結整份監控清單。
 
 每份交付使用凍結快照、自己的 FFmpeg 程序；同輸出路徑只有一個 live job，跨程序由 `output-leases/*.lock/owner.json` 保護。決策與代價見 [ADR-0001](adr/0001-每份交付各自一個-ffmpeg-程序.md)。重啟先確認舊程序停止、復原 journal／lease、清本工作私有半成品，再恢復佇列。
 

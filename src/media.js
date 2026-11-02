@@ -35,7 +35,7 @@ import { MediaIntakeJobs } from './media-intake-jobs.js';
 import { MediaAudioRouter, AudioPipeline } from './audio-routing-engine.js';
 import { destroyScrubber } from './audio-engine.js';
 import { State, DESK, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
-import { setStatus, showToast, openModal, closeModal } from './ui.js';
+import { setStatus, showToast, openModal, closeModal, renderCurrentTimecode } from './ui.js';
 import { Seq } from './sequence.js';
 import { createAudioEffects } from './audio-effects.js';
 import { createMpvSourceTransition } from './mpv-source-transition.js';
@@ -706,6 +706,9 @@ const Media = {
   _webFfmpegTail:Promise.resolve(),
   objectURLs:[],
   _objectURLLeases:new Map(),
+  // 快照本身只有純資料；WeakMap 不延長被截斷或淘汰的 History 存活時間。
+  _externalAudioHistoryFiles:new WeakMap(),
+  _pendingExternalAudioFiles:new Map(),
   get mpvMode(){ return getPlayerAdapter().mode === 'mpv'; },
   _mpvTime:0, _mpvDuration:0, _mpvExactSeek:false, _mpvSeekOffset:0, _bgVersion:0,
   _nativeReverse:false,
@@ -862,16 +865,31 @@ const Media = {
     const assetOperation=this._assetOperation(operation,{kind:'project-external-audio',path:serialized.path},upstreamOwns);
     return this.addAudioFileDesktop(serialized.path,{...serialized,_restore:true},assetOperation);
   },
-  /* History 只保存純資料；還原時優先重用仍在 runtime 的 asset，已被刪除的桌面檔案則非同步重建。
-     這個入口刻意不紀錄新的 history，避免 Ctrl+Z/Redo 產生遞迴項目。 */
-  restoreExternalAudioEditState(rawSources){
+  /* 純快照與 File 分開持有；被截斷的快照可釋放 File，不留下全工作區來源索引。 */
+  captureExternalAudioHistorySnapshot(snapshot){
+    if(!snapshot||typeof snapshot!=='object') return;
+    const files=new Map();
+    for(const source of snapshot.externalAudioState||[]){
+      const file=this.externalAudio.byAudioSourceId(source.audioSourceId)?._file
+        ||this._pendingExternalAudioFiles.get(source.audioSourceId);
+      if(file) files.set(source.audioSourceId,file);
+    }
+    if(files.size) this._externalAudioHistoryFiles.set(snapshot,files);
+  },
+  /* 還原先重用 runtime asset，再依同一快照持有的 File 或桌面 path 非同步重建。
+     不紀錄新的 history，避免 Ctrl+Z/Redo 產生遞迴項目。 */
+  restoreExternalAudioEditState(rawSources,snapshot=null){
     const restoreVersion=++this._externalRestoreVersion;
     const restoreOwns=()=>this._externalRestoreVersion===restoreVersion;
     const assetOperation=this._assetOperation(null,'history-external-audio-restore',restoreOwns);
     const owns=()=>this._ownsAssetOperation(assetOperation);
     // 「誰留下、誰要移除、誰得重建」是資料判斷 → library；
     // 移除要拆 AudioElement、重建要開檔 → 留在這裡。
-    const plan=this.externalAudio.planRestore(rawSources);
+    const files=snapshot&&this._externalAudioHistoryFiles.get(snapshot);
+    const plan=this.externalAudio.planRestore(rawSources,{fileSourceIds:files?.keys()});
+    this._pendingExternalAudioFiles=new Map(plan.pending
+      .filter(source=>files?.has(source.audioSourceId))
+      .map(source=>[source.audioSourceId,files.get(source.audioSourceId)]));
     const keptIds=new Set(plan.kept.map(({source})=>source.audioSourceId));
     this._pendingExternalAudioRestore=new Map(plan.wanted
       .filter(source=>!keptIds.has(source.audioSourceId)).map(source=>[source.audioSourceId,source]));
@@ -883,12 +901,18 @@ const Media = {
     Seq.recomputeDuration();
     this.syncMuteState(); if(this.playing) this._restartElements(); notifyAudioTracks(); emit('media:timeline');
     for(const source of plan.pending){
-      if(!DESK) continue; // 只有桌面版能依原始 path 重建
+      const file=this._pendingExternalAudioFiles.get(source.audioSourceId);
+      if(!file&&!DESK) continue; // File 只由同一工作區的 History 快照持有；桌面可另依原路徑重建。
       const sourceOwns=()=>owns()&&this._pendingExternalAudioRestore.get(source.audioSourceId)===source;
       const sourceOperation=this._assetOperation(null,'history-external-audio-source',sourceOwns);
-      void this.restoreExternalAudioSource({...source,_restore:true},sourceOperation).then(asset=>{
+      const restoring=file?this.addAudioFile(file,{...source,_restore:true},sourceOperation)
+        :this.restoreExternalAudioSource({...source,_restore:true},sourceOperation);
+      void restoring.then(asset=>{
         if(!sourceOwns()) return;
-        if(asset&&this.externalAudioSources.includes(asset)) this._pendingExternalAudioRestore.delete(source.audioSourceId);
+        if(asset&&this.externalAudioSources.includes(asset)){
+          this._pendingExternalAudioRestore.delete(source.audioSourceId);
+          this._pendingExternalAudioFiles.delete(source.audioSourceId);
+        }
         this.recomputeTimelineDuration(); this.syncMuteState(); notifyAudioTracks(); emit('media:timeline');
       }).catch(error=>console.warn('restore history external audio:',error));
     }
@@ -1005,6 +1029,7 @@ const Media = {
     if(!asset) return false;
     if(record && asset.locked){ showToast('音訊軌已鎖定'); return false; }
     if(record) this._pendingExternalAudioRestore.delete(asset.audioSourceId);
+    if(record) this._pendingExternalAudioFiles.delete(asset.audioSourceId);
     this._invalidateExternalAssetEdit(asset);
     const source=asset.audioSrc;
     const oldTracks=this.tracks.filter(track=>track.source===source);
@@ -1014,6 +1039,7 @@ const Media = {
       try{track.gain?.disconnect();}catch(e){}
     }
     this.externalAudio.remove(asset);
+    if(asset._objectURL) this._releaseObjectURL(asset._objectURL);
     Wave.forgetSourceWaveforms(asset);
     if(this.activeSource===source) this.activeSource=null;
     deselect('audio', asset.id);
@@ -1271,8 +1297,9 @@ const Media = {
   _resetForFirstVideo(options={}){
     const preserved=this._captureImageOnlyTimeline();
     // 首次影片不取代已有的外部音訊；已存在影片時仍採完整取代語意。
-    const keepExternalAudio=!this.seqOn()&&this.externalAudioSources.length>0;
-    this.reset({keepObjectURLs:preserved?.objectURLs,keepExternalAudio, ...options});
+    const keepExternalAudioHistory=!this.seqOn();
+    const keepExternalAudio=keepExternalAudioHistory&&this.externalAudioSources.length>0;
+    this.reset({keepObjectURLs:preserved?.objectURLs,keepExternalAudio,keepExternalAudioHistory, ...options});
     this._preservedImageTimeline=preserved;
     return !!preserved;
   },
@@ -1385,6 +1412,7 @@ const Media = {
         fallbackCount:chCount,
         file
       });
+      asset._objectURL=url;
       this.updateExternalAudioSourceDuration(asset,sourceDuration);
       const newTracks=this._splitToChannelTracks(node,asset.audioSrc,el,chCount,asset,asset.descriptors);
       this.tracks.push(...newTracks);
@@ -2252,7 +2280,7 @@ const Media = {
         const t=this._transport.observeSourceTime(e.data,{
           clip,playing:this.playing,fps:State.fps,dropFrame:State.dropFrame,
         });
-        $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
+        renderCurrentTimecode(t);
         $('seekBar').value=Math.round(t*1000);
         emit('media:playhead');
         if(Math.abs(e.data-prev)>0.5) window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:driverTimeline}));
@@ -2329,7 +2357,7 @@ const Media = {
     const committed=this._transport.seek(targetTime,{
       duration:State.duration,fps:State.fps,dropFrame:State.dropFrame,
     });
-    const tc=$('tcCur'); if(tc) tc.textContent=secToEncore(committed,State.fps,State.dropFrame);
+    renderCurrentTimecode(committed);
     const seekBar=$('seekBar'); if(seekBar) seekBar.value=Math.round(committed*1000);
     window.dispatchEvent(new CustomEvent('mpv:seeked',{detail:committed}));
     emit('media:playhead');
@@ -3928,7 +3956,7 @@ const Media = {
     // 有影片時才設上限；無影片時允許任意位置（空專案先排字幕）。
     // FPS-SYNC：每次 seek 都由 transport 以唯一格網吸附，並記下暫停權威位置。
     t=this._transport.seek(t,{duration:State.duration,fps:State.fps,dropFrame:State.dropFrame});
-    const tc=$('tcCur'); if(tc) tc.textContent=secToEncore(t,State.fps,State.dropFrame);
+    renderCurrentTimecode(t);
     const seekBar=$('seekBar'); if(seekBar) seekBar.value=Math.round(t*1000);
     // 停止舊 buffer 與 element（含疊合 clone），再定位或同步通知新目標。
     if(this.playing){ this.stopBufferSources(); this.stopElementSources(); }
@@ -4622,7 +4650,12 @@ const Media = {
   },
   reset(options={}){
     this._presenterStart=null;
-    if(!options.keepExternalAudio) this._pendingExternalAudioRestore.clear();
+    if(!options.keepExternalAudio){
+      this._pendingExternalAudioRestore.clear();
+      this._pendingExternalAudioFiles.clear();
+    }
+    // 首支影片只重設播放 runtime；既有 Undo 仍可持有先前刪除的外音 File。
+    if(!options.keepExternalAudio&&!options.keepExternalAudioHistory) this._externalAudioHistoryFiles=new WeakMap();
     const keptAudio=options.keepExternalAudio?[...this.externalAudioSources]:[];
     // 同專案首次影片沿用既有外音與其工作；真正的工作區替換才撤銷
     // 原生 session，與下方 asset epoch／背景世代採相同保留語意。
@@ -4742,8 +4775,9 @@ function scheduleAudioEffectSync(){
 }
 function notifyAudioTracks(){ scheduleAudioEffectSync();emit('media:audioTracks'); }
 on('audio:sourceRegistered',scheduleAudioEffectSync);
+on('audio:externalSnapshot',detail=>Media.captureExternalAudioHistorySnapshot(detail?.snapshot));
 on('audio:externalRestored',detail=>{
-  try{ Media.restoreExternalAudioEditState(detail?.sources); }catch(error){ console.warn('restore external audio history:',error); }
+  try{ Media.restoreExternalAudioEditState(detail?.sources,detail?.snapshot); }catch(error){ console.warn('restore external audio history:',error); }
 });
 on('media:sequenceWillRestore',()=>{
   Media._audioEffects?.invalidate();

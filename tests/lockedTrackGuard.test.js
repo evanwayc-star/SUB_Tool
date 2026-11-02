@@ -18,7 +18,7 @@ const ui = vi.hoisted(() => ({
   showOsd: vi.fn(),
 }));
 
-vi.mock('../src/ui.js', () => ui);
+vi.mock('../src/ui.js', () => ({...ui,renderCurrentTimecode:vi.fn()}));
 vi.mock('../src/media.js', () => ({ Media: {
   displayTime: () => 5,
   externalAudio: { list: () => [], get: () => null },

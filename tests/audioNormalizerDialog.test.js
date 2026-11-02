@@ -17,7 +17,7 @@ vi.mock('../src/media.js', () => ({
   Wave: { peaks: null },
 }));
 vi.mock('../src/state.js', () => ({ IS_DESKTOP: true }));
-vi.mock('../src/ui.js', () => ({
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   openModal: (title, html) => {
     document.getElementById('modalBody').innerHTML = html;
     const owner=++modal.generation;

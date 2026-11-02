@@ -7,7 +7,7 @@ const engineMocks = vi.hoisted(() => ({
 
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
-vi.mock('../src/ui.js', () => ({ openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
 vi.mock('../src/speech-recognition-engine.js', async importOriginal => ({
   ...(await importOriginal()),
   transcribeAudioStream: engineMocks.transcribeAudioStream

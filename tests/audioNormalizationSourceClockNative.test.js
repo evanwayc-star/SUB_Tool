@@ -72,7 +72,34 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預
       fs.rmSync(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:50});
     }
   },30000);
-  it.each([[.1, -80], [1, -80], [1, -72]])('整體響度為 -inf 的 %s 秒、峰值 %s dB 底噪在預覽與交付保持原音', async (duration, peakDb) => {
+  it.each([1,2])('多 stream 分析含 %s 聲道靜音與另一條有聲 mono，依全部原始聲道平均量測',async silentChannels=>{
+    const directory=fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()),'subtool-normalization-clock-native-'));
+    const source=path.join(directory,'multiple.mkv');
+    const probe=createMediaProbe({executable:FFPROBE});
+    const execution=createFFmpegExecution({getFFmpegPath:()=>FFMPEG,getUserDataDir:()=>directory});
+    const runtime=createAudioNormalizationRuntime({createTempPath:()=> 'unused.wav',
+      probe:(file,options)=>probe.describe(file,options),
+      execute:(args,options)=>execution.execute(args,{...options,executionKind:'direct'})});
+    try{
+      const generated=spawnSync(FFMPEG,['-hide_banner','-nostdin','-loglevel','error','-y','-f','lavfi','-i',
+        `anullsrc=r=48000:cl=${silentChannels===1?'mono':'stereo'}:d=1`,'-f','lavfi','-i',
+        'sine=frequency=440:sample_rate=48000:duration=1','-map','0:a:0','-map','1:a:0','-c:a','pcm_s16le',source],
+      {windowsHide:true,timeout:20000});
+      expect(generated.error||generated.status,generated.stderr?.toString()).toBe(0);
+      const report=await runtime.analyze(source,{duration:1});
+      expect(report.isSilence).toBe(false);
+      expect(report.maxDb).toBeCloseTo(20*Math.log10(.125/(silentChannels+1)),0);
+      expect(report.meanDb).toBeGreaterThan(-40);
+    }finally{
+      await execution.cancelAllAndWait();await probe.cancelAllAndWait();
+      const resolved=fs.realpathSync(directory);
+      if(path.dirname(resolved)!==fs.realpathSync(tmpdir())||!path.basename(resolved).startsWith('subtool-normalization-clock-native-'))throw new Error('拒絕清除未核對的量測測試目錄');
+      fs.rmSync(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:50});
+    }
+  },30000);
+
+  it.each([false,true].flatMap(isTruePeak=>[[.1,-80],[1,-80],[1,-72]].map(([duration,peakDb])=>({isTruePeak,duration,peakDb}))))
+  ('$isTruePeak 模式整體響度為 -inf 的 $duration 秒、峰值 $peakDb dB 底噪在預覽與交付保持原音', async ({isTruePeak,duration,peakDb}) => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-normalization-clock-native-'));
     const source = path.join(directory, 'low-level.wav');
     const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => directory });
@@ -89,7 +116,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預
     });
     try {
       run(['-y', '-f', 'lavfi', '-i', `aevalsrc=${10 ** (peakDb / 20)}*sin(2*PI*440*t):s=48000:d=${duration}`, '-c:a', 'pcm_f32le', source]);
-      const result = await runtime.normalize(source, { maximumAmplitude: -6, targetLoudness: -12 });
+      const result = await runtime.normalize(source, { maximumAmplitude: -6, targetLoudness: -12, isTruePeak, inputBoost:6 });
       const sourcePcm = run(['-i', source, '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']);
       const preview = run(['-i', result.outputPath, '-f', 's16le', 'pipe:1']);
       expect(preview.length).toBe(Math.round(duration * 48000) * 2);
@@ -97,7 +124,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預
       expect(result.isSilence).toBe(true);
       expect(result.report.input_i).toBe('-inf');
       expect(Number(result.report.input_tp)).toBeCloseTo(peakDb, 1);
-      const filter = audioLimiterFilter({ max: -6, min: -12, reports: { 0: result.report } });
+      const filter = audioLimiterFilter({ max: -6, min: -12, isTruePeak, inputBoost:6, reports: { 0: result.report } });
       expect(filter).toBe('anull');
       const delivered = run(['-i', source, '-af', `${filter},aresample=48000:async=1:first_pts=0`, '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']);
       expect(delivered).toEqual(sourcePcm);
@@ -145,7 +172,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預
     }
   }, 30000);
 
-  it('100ms 可聽短音的整體響度為 -inf 時，預覽與交付仍處理實際峰值', async () => {
+  it.each([false,true])('%s 模式 100ms 可聽短音的整體響度為 -inf 時，預覽與交付仍處理實際峰值', async isTruePeak => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-normalization-clock-native-'));
     const source = path.join(directory, 'short.wav');
     const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => directory });
@@ -164,7 +191,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預
       } }),
       removeFile: file => fs.promises.unlink(file),
     });
-    const options = { isTruePeak: true, maximumAmplitude: -6, targetLoudness: -12 };
+    const options = { isTruePeak, maximumAmplitude: -6, targetLoudness: -12, inputBoost:6 };
     try {
       run(['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=0.1,volume=8', '-c:a', 'pcm_s16le', source]);
       const result = await runtime.normalize(source, options);

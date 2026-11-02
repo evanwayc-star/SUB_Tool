@@ -30,6 +30,43 @@ beforeEach(()=>{
 afterEach(()=>{ui.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('字幕匯入工作歸屬',()=>{
+  it.each(['new','0'].flatMap(target=>
+    ['srt','txt'].flatMap(kind=>
+      ['partial','null','missing'].map(styleKind=>({target,kind,styleKind}))))
+  )('$kind 匯入 $target 軌套用 $styleKind 樣式，缺欄使用預設且保留原文與時間',async({target,kind,styleKind})=>{
+    const styles=await import('../src/substyle.js');
+    const preset={name:'部分樣式',...(styleKind==='partial'?{style:{fontSize:48}}:styleKind==='null'?{style:null}:{})};
+    styles.savePresets([preset]);
+    Object.assign(State.tracks[0],{font:'舊字型',color:'#ff0000',outline:8,posX:10,posY:20,angle:30,vertical:true});
+    try {
+      const parsed=subio._parseSubtitleText(kind==='srt'?srt('第一行\n第二行'):'甲，原文\n乙！原稿',kind);
+      const expected=parsed.map(({text,start,end})=>({text,start,end,timed:kind!=='txt'}));
+      subio._openImportModal('匯入部分常用樣式',parsed,kind);
+      document.getElementById('importTkSel').value=target;
+      document.getElementById('importPresetSel').value=styles.presetIdentity(preset);
+      document.querySelector('#modalFoot button.primary').click();
+      expect(State.cues.map(({text,start,end,timed})=>({text,start,end,timed}))).toEqual(expected);
+      for(const cue of State.cues)expect(styles.effStyle(cue,State.tracks[cue.track])).toEqual({...styles.STYLE_DEFAULTS,...preset.style});
+      expect(styles.getPresets()).toEqual([preset]);
+      expect(workflow.record).toHaveBeenCalledOnce();
+    } finally {styles.savePresets([]);}
+  });
+
+  it('拖入空白分隔行含空格與 Tab 的 SRT，兩句皆可確認匯入並重新匯出',async()=>{
+    State.mediaName='video.mov';
+    const request=subio.importDropped({name:'spaced.srt'});
+    workflow.reads.get('spaced.srt')(bytes('1\r\n00:00:01,000 --> 00:00:02,000\r\n第一句  文字\r\n下一行\r\n \t \r\n2\r\n00:00:03,000 --> 00:00:04,000\r\n第二句\r\n'));
+    await request;
+    expect(document.getElementById('modalTitle').textContent).toContain('2 條');
+    document.querySelector('#modalFoot button.primary').click();
+    const expected=[{start:1,end:2,text:'第一句  文字\n下一行'},{start:3,end:4,text:'第二句'}];
+    expect(State.cues.map(({start,end,text})=>({start,end,text}))).toEqual(expected);
+    expect(workflow.record).toHaveBeenCalledOnce();
+    const output=subio.getFileData('srt',State.cues,'重新匯出');
+    const text=Buffer.from(output.content,'base64').subarray(2).toString('utf16le');
+    expect(subio._parseSubtitleText(text,'srt')).toEqual(expected);
+  });
+
   it('TXT 未定時原稿匯出自產 ASS 再匯入，同格率仍保留原稿的保留秒數',()=>{
     State.mediaName='video.mov';State.fps=25;
     subio._openImportModal('原稿',subio._parseSubtitleText('甲\n乙\n丙','txt'),'txt');

@@ -137,3 +137,30 @@ it('軌道重排後仍按原選項輸出同一軌；相同索引替換成另一�
   expect(desktop.exportDirectory).not.toHaveBeenCalled();
   expect(document.getElementById('toast').textContent).toContain('所選字幕軌已變更');
 });
+
+it('ASS 無法完整保存原稿時保留匯出選項與原內容，不下載同批其他格式，改選 TXT 可重試', async () => {
+  const { History } = await import('../src/history.js');
+  const text = '字'.repeat(100001);
+  Object.assign(State.cues[0], { text, timed: false });
+  History.reset();
+  showExportDialog();
+  for (const checkbox of document.querySelectorAll('[data-fmt]')) {
+    checkbox.checked = ['srt', 'ass'].includes(checkbox.dataset.fmt);
+  }
+  confirmButton().click();
+  expect(desktop.exportSub).not.toHaveBeenCalled();
+  expect(desktop.exportDirectory).not.toHaveBeenCalled();
+  expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
+  expect(document.getElementById('toast').textContent).toContain('ASS 無損匯出失敗');
+  expect(document.querySelector('[data-fmt="ass"]').checked).toBe(true);
+  expect(State.cues[0].text).toBe(text);
+
+  for (const checkbox of document.querySelectorAll('[data-fmt]')) checkbox.checked = checkbox.dataset.fmt === 'txt';
+  document.querySelector('[data-tk="1"]').checked = false;
+  confirmButton().click();
+  expect(desktop.exportSub).toHaveBeenCalledOnce();
+  expect(desktop.exportDirectory).not.toHaveBeenCalled();
+  const bytes = Buffer.from(desktop.exportSub.mock.calls[0][1], 'base64');
+  expect(bytes.subarray(2).toString('utf16le')).toBe(text + '\n');
+  expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+});

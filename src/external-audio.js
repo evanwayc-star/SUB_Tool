@@ -366,7 +366,8 @@ class ExternalAudioLibrary {
   /* History 還原：算出「哪些留下並套用新值、哪些要移除、哪些得非同步重建」。
      這裡刻意【只做決定】，實際移除與重建由 Media 執行——移除要拆 AudioElement，
      重建要開檔，兩者都是它的本業。 */
-  planRestore(rawSources){
+  planRestore(rawSources,{fileSourceIds=[]}={}){
+    const availableFiles=new Set(fileSourceIds);
     const wanted = (Array.isArray(rawSources) ? rawSources : []).filter(source =>
       source && typeof source === 'object' && typeof source.audioSourceId === 'string' && source.audioSourceId
     ).map(serializeAsset);
@@ -377,7 +378,7 @@ class ExternalAudioLibrary {
     for (const source of wanted) {
       const asset = this.byAudioSourceId(source.audioSourceId);
       if (asset) { kept.push({ asset, source }); }
-      else if (source.path) pending.push(source);
+      else if (source.path||availableFiles.has(source.audioSourceId)) pending.push(source);
     }
     return {
       wanted,

@@ -274,10 +274,19 @@ describe('History 還原：算出留下／移除／重建三份名單', () => {
     expect(plan.kept).toEqual([]);
   });
 
-  /* 沒有 path 就重建不回來；列進 pending 只會製造一次注定失敗的非同步載入。 */
+  /* 沒有 path 或同一快照的 File 證據時，不能啟動注定失敗的非同步載入。 */
   it('沒有 path 的殘缺快照不列進 pending', () => {
     const plan = lib.planRestore([{ audioSourceId: 'asset-nopath', offset: 0, in: 0, out: 4 }]);
     expect(plan.pending).toEqual([]);
+  });
+
+  it('網頁快照仍持有 File 的來源列進 pending，沒有證據的同名來源不推測可用', () => {
+    const plan = lib.planRestore([
+      { audioSourceId: 'available', name: 'same.wav', in: 0, out: 4 },
+      { audioSourceId: 'unavailable', name: 'same.wav', in: 0, out: 4 },
+    ], { fileSourceIds: ['available'] });
+    expect(plan.pending.map(source => source.audioSourceId)).toEqual(['available']);
+    expect(plan.wanted).toHaveLength(2);
   });
 
   /* undo 之後時間軸不可以先縮短再變回來——重建是非同步的，中間那一幀會被看見。 */

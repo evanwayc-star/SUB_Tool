@@ -10,7 +10,7 @@ const mediaMock = vi.hoisted(() => ({
 vi.mock('../src/media.js', () => ({ Media: mediaMock }));
 vi.mock('../src/timeline-renderer.js', () => ({ updatePlayhead: vi.fn(), drawRuler: vi.fn() }));
 vi.mock('../src/history.js', async importOriginal => ({ ...await importOriginal(), recordHistory: vi.fn() }));
-vi.mock('../src/ui.js', () => ({
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   showToast: vi.fn(),
   setStatus: vi.fn(),
   openModal: vi.fn(),

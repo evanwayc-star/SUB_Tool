@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
+import { createSubtitleCompareSession } from '../src/subtitle-comparison-engine.js';
 
 const html = readFileSync(new URL('../electron/compare.html', import.meta.url), 'utf8');
 
@@ -40,6 +41,61 @@ function planPayload(overrides = {}) {
 }
 
 describe('字幕比對視窗 view adapter', () => {
+  it.each(['time', 'text'])('關閉 %s 檢查移除該類差異標示，原文及原始差異仍保留，重新開啟即恢復', check => {
+    const { dom, callbacks, commands } = openCompareView();
+    const updates = [];
+    const deliver = payload => { updates.push(payload); callbacks[0](payload); };
+    const session = createSubtitleCompareSession({ port: { open: deliver, sync: deliver } });
+    dom.window.subtool.sendCommand = command => { commands.push(command); session.handleCommand(command); };
+    const texts = ['前😀&<左>', '前😁&<右>'];
+    session.open({ tracks:[{name:'A',fontSize:80},{name:'B',fontSize:60}], fps:25, cues:[
+      {id:'left',track:0,start:10,end:11,text:texts[0]},
+      {id:'right',track:1,start:10.2,end:11.2,text:texts[1]},
+    ] });
+    const button = dom.window.document.getElementById(check === 'time' ? 'toggleTime' : 'toggleText');
+    const spans = () => dom.window.document.querySelectorAll(`.diff-${check}`);
+    expect(spans().length).toBeGreaterThan(0);
+    button.click();
+    expect(commands.at(-1)).toMatchObject({type:'select',checks:{[check]:false}});
+    expect(updates.at(-1).plan.rows[0].difference[check]).toBe(true);
+    expect(updates.at(-1).plan.rows[0].active[check]).toBe(false);
+    expect(spans()).toHaveLength(0);
+    expect(dom.window.document.querySelector(`.icon.active.${check}`)).toBeNull();
+    expect([...dom.window.document.querySelectorAll('.txt')].map(node => node.textContent)).toEqual(texts);
+    expect(dom.window.document.querySelector('img')).toBeNull();
+    button.click();
+    expect(updates.at(-1).plan.rows[0].active[check]).toBe(true);
+    expect(spans().length).toBeGreaterThan(0);
+    expect([...dom.window.document.querySelectorAll('.txt')].map(node => node.textContent)).toEqual(texts);
+    dom.window.close();
+  });
+
+  it('三類檢查全部關閉後，標示、圖示與隱藏無差異使用同一份 active 結果', () => {
+    const { dom, callbacks } = openCompareView();
+    let current;
+    const deliver = payload => { current=payload; callbacks[0](payload); };
+    const session = createSubtitleCompareSession({port:{open:deliver,sync:deliver}});
+    dom.window.subtool.sendCommand = command => session.handleCommand(command);
+    session.open({tracks:[{name:'A',fontSize:80},{name:'B',fontSize:60}],fps:25,cues:[
+      {id:'left',track:0,start:10,end:11,text:'原文甲'},
+      {id:'right',track:1,start:10.2,end:11.2,text:'原文乙'},
+    ]});
+    for(const id of ['toggleTime','toggleText','toggleStyle']) dom.window.document.getElementById(id).click();
+    expect(current.plan.rows[0].active.any).toBe(false);
+    expect(current.plan.rows[0].difference).toMatchObject({time:true,text:true,style:true,any:true});
+    expect(dom.window.document.querySelectorAll('.diff-time,.diff-text,.icon.active')).toHaveLength(0);
+    expect(dom.window.document.querySelectorAll('.row')).toHaveLength(1);
+    const hide = dom.window.document.getElementById('hideIdentical');
+    hide.checked=true; hide.dispatchEvent(new dom.window.Event('change'));
+    expect(dom.window.document.querySelectorAll('.row')).toHaveLength(0);
+    expect(dom.window.document.getElementById('emptyState').textContent).toBe('無差異字幕');
+    dom.window.document.getElementById('toggleTime').click();
+    expect(dom.window.document.querySelectorAll('.row')).toHaveLength(1);
+    expect(dom.window.document.querySelectorAll('.diff-time').length).toBeGreaterThan(0);
+    expect(dom.window.document.querySelectorAll('.diff-text,.icon.active.text,.icon.active.style')).toHaveLength(0);
+    dom.window.close();
+  });
+
   it('收到新plan時清掉舊選單，不得用最新revision包裝先前pair IDs', () => {
     const { dom, callbacks, commands } = openCompareView();
     callbacks[0](planPayload());

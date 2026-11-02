@@ -68,12 +68,12 @@ describe('audio-normalization-runtime.js', () => {
       for(const [args] of execute.mock.calls) expect(args.slice(args.indexOf('-map'),args.indexOf('-map')+2)).toEqual(['-map','0:a:1']);
       expect(execute.mock.calls[1][0].join(' ')).toContain('measured_LRA=0.0');
     });
-    it('取消正在執行的Pass1會停止子程序、清理輸出，不能再做Pass2', async () => {
+    it.each([false,true])('取消 %s 模式正在執行的Pass1會停止子程序、清理輸出，不能再做Pass2', async isTruePeak => {
       const controller=new AbortController();const removeFile=vi.fn();const kill=vi.fn();
       let reject;
       const execute=vi.fn((args,options)=>{options.onProcess({kill});return new Promise((_,r)=>{reject=r;});});
       const runtime=createAudioNormalizationRuntime({createTempPath:()=>'/temp/cancel.wav',execute,removeFile});
-      const pending=runtime.normalize('master.mxf',{isTruePeak:true},{signal:controller.signal});
+      const pending=runtime.normalize('master.mxf',{isTruePeak},{signal:controller.signal});
       controller.abort();reject(new Error('killed'));
       await expect(pending).rejects.toMatchObject({name:'AbortError'});
       expect(kill).toHaveBeenCalledOnce();expect(execute).toHaveBeenCalledOnce();
@@ -123,16 +123,16 @@ describe('audio-normalization-runtime.js', () => {
       expect(res.isSilence).toBe(false);
     });
 
-    it('短音訊有可聽峰值但整體響度不可測時，使用單遍處理而不是無聲 bypass', async () => {
+    it.each([false,true])('%s 模式短音訊有可聽峰值但整體響度不可測時，仍處理而不是無聲 bypass', async isTruePeak => {
       const report = { input_i: '-inf', input_tp: '-0.00', input_lra: '0', input_thresh: '-70', target_offset: 'inf' };
       const calls = [];
       const runtime = createAudioNormalizationRuntime({ createTempPath: () => 'tmp/short.wav',
         execute: async (args, opts) => { calls.push({ args, opts }); if (opts.jobId === 'loudnorm-p1') opts.onStderr(JSON.stringify(report)); },
       });
-      const result = await runtime.normalize('short.wav', { maximumAmplitude: -6, targetLoudness: -12 });
-      expect(calls[1].opts.jobId).toBe('loudnorm-p2');
+      const result = await runtime.normalize('short.wav', { maximumAmplitude: -6, targetLoudness: -12, isTruePeak });
+      expect(calls[1].opts.jobId).toBe(isTruePeak?'loudnorm-p2':'limiter-peak');
       const filter = calls[1].args[calls[1].args.indexOf('-af') + 1];
-      expect(filter).toContain('loudnorm=');
+      expect(filter).toContain(isTruePeak?'loudnorm=':'alimiter=');
       expect(filter).not.toContain('measured_I=');
       expect(result.isSilence).toBe(false);
       expect(result.report).toBeNull();
@@ -165,7 +165,7 @@ describe('audio-normalization-runtime.js', () => {
       } finally { warning.mockRestore(); }
     });
 
-    it('無聲保護：若 Pass 1 檢測到極弱無聲，Pass 2 維持 0 dB 不放大', async () => {
+    it.each([false,true])('%s 模式無聲保護：若 Pass 1 檢測到極弱無聲，Pass 2 維持 0 dB 不放大', async isTruePeak => {
       const calls = [];
       const runtime = createAudioNormalizationRuntime({
         createTempPath: ext => `tmp/silence.${ext}`,
@@ -187,7 +187,7 @@ describe('audio-normalization-runtime.js', () => {
       const res = await runtime.normalize('silence.wav', {
         maximumAmplitude: -6.0,
         targetLoudness: -12.0,
-        isTruePeak: true,
+        isTruePeak,
         silenceProtection: true,
       });
 
@@ -200,12 +200,14 @@ describe('audio-normalization-runtime.js', () => {
       expect(res.isSilence).toBe(true);
     });
 
-    it('Peak 模式：直接調用 alimiter 單遍處理', async () => {
+    it('Peak 模式先量測無聲保護，正常音訊仍只以 alimiter 處理且保留 stream 報告', async () => {
       const calls = [];
+      const report={input_i:'-22',input_tp:'-2',input_lra:'0',input_thresh:'-32',target_offset:'0'};
       const runtime = createAudioNormalizationRuntime({
         createTempPath: ext => `tmp/peak.${ext}`,
         execute: async (args, opts) => {
           calls.push({ args, opts });
+          if(opts.jobId==='loudnorm-p1')opts.onStderr(JSON.stringify(report));
         },
       });
 
@@ -213,12 +215,35 @@ describe('audio-normalization-runtime.js', () => {
         maximumAmplitude: -6.0,
         inputBoost: 3.0,
         isTruePeak: false,
+        sourceStream: 1,
       });
 
-      expect(calls.length).toBe(1);
-      expect(calls[0].opts.jobId).toBe('limiter-peak');
-      expect(calls[0].args.join(' ')).toContain('alimiter=limit=0.501187');
+      expect(calls.length).toBe(2);
+      expect(calls[0].opts.jobId).toBe('loudnorm-p1');
+      expect(calls[1].opts.jobId).toBe('limiter-peak');
+      expect(calls[1].args.join(' ')).toContain('alimiter=limit=0.501187');
+      expect(calls[1].args.join(' ')).not.toContain('loudnorm=');
+      for(const {args} of calls)expect(args.slice(args.indexOf('-map'),args.indexOf('-map')+2)).toEqual(['-map','0:a:1']);
+      expect(res.report).toEqual(report);
       expect(res.isSilence).toBe(false);
+    });
+
+    it('Peak 量測輸出報告後失敗，丟棄 stderr 並以原 alimiter 設定處理',async()=>{
+      const warning=vi.spyOn(console,'warn').mockImplementation(()=>{});
+      const calls=[];
+      const runtime=createAudioNormalizationRuntime({createTempPath:()=> 'tmp/peak-fallback.wav',execute:async(args,options)=>{
+        calls.push({args,options});
+        if(options.jobId==='loudnorm-p1'){
+          options.onStderr('{"input_i":"-inf","input_tp":"-inf","input_lra":"0","input_thresh":"-70","target_offset":"inf"}');
+          throw new Error('measurement failed after report');
+        }
+      }});
+      try{
+        const result=await runtime.normalize('mother.wav',{isTruePeak:false,inputBoost:6});
+        expect(calls).toHaveLength(2);
+        expect(calls[1].args.join(' ')).toContain('volume=6.00dB,alimiter=');
+        expect(result).toMatchObject({isSilence:false,report:null});
+      }finally{warning.mockRestore();}
     });
   });
 });

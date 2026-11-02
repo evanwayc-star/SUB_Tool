@@ -21,7 +21,10 @@ function normalizeToken(value) {
 }
 
 function tokenize(value) {
-  return [...String(value ?? '').matchAll(TOKEN_PATTERN)].map(match => ({
+  // 切 token 前先合成重音、濁點與相容字形，避免 regex 先丟掉組合標記。
+  // 只處理匹配副本；輸出的逐行原稿仍使用 parseTranscriptLines() 的原文。
+  const matchingText = String(value ?? '').normalize('NFKC');
+  return [...matchingText.matchAll(TOKEN_PATTERN)].map(match => ({
     raw: match[0],
     normalized: normalizeToken(match[0])
   }));

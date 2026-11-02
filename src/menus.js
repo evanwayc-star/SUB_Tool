@@ -665,6 +665,16 @@ export function showImageGeom(c){
   },0);
 }
 
+// 先保留緊湊時碼語意；十進秒數必須整串有效，不能把非法時碼猜成數字前綴。
+function parseDurationInput(raw){
+  const time=parseTimecodeInput(raw);
+  if(time!==null) return Number.isFinite(time)?time:null;
+  const text=String(raw??'').trim();
+  if(!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(text)) return null;
+  const seconds=Number(text);
+  return Number.isFinite(seconds)?seconds:null;
+}
+
 export function showClipFade(c){
   if(!c) return;
   const owns=captureClipEdit(c);
@@ -682,13 +692,9 @@ export function showClipFade(c){
     [{label:'清除',act:()=>{ if(current() && setClipFade(c,0,0)) session.close({committed:true}); }},
      {label:'套用',primary:true,act:()=>{
         if(!current()) return;
-        let vi = parseTimecodeInput($('cfInV').value);
-        if(vi===null) vi = parseFloat($('cfInV').value);
-        if(isNaN(vi)) vi = +$('cfIn').value;
-
-        let vo = parseTimecodeInput($('cfOutV').value);
-        if(vo===null) vo = parseFloat($('cfOutV').value);
-        if(isNaN(vo)) vo = +$('cfOut').value;
+        const vi = parseDurationInput($('cfInV').value);
+        const vo = parseDurationInput($('cfOutV').value);
+        if(vi===null || vo===null){ showToast('請輸入有效的淡入淡出時間'); return; }
 
         if(setClipFade(c,vi,vo)) session.close({committed:true});
      }}]);
@@ -700,14 +706,12 @@ export function showClipFade(c){
     if(a) a.oninput=()=>{ if(aV) aV.value=secToEncore(+a.value, State.fps, State.dropFrame); };
     if(b) b.oninput=()=>{ if(bV) bV.value=secToEncore(+b.value, State.fps, State.dropFrame); };
     if(aV) aV.onchange=()=>{
-        let v = parseTimecodeInput(aV.value);
-        if(v===null) v = parseFloat(aV.value);
-        if(!isNaN(v)) { a.value = Math.max(0, Math.min(maxF, v)); aV.value = secToEncore(+a.value, State.fps, State.dropFrame); }
+        const v = parseDurationInput(aV.value);
+        if(v!==null) { a.value = Math.max(0, Math.min(maxF, v)); aV.value = secToEncore(+a.value, State.fps, State.dropFrame); }
     };
     if(bV) bV.onchange=()=>{
-        let v = parseTimecodeInput(bV.value);
-        if(v===null) v = parseFloat(bV.value);
-        if(!isNaN(v)) { b.value = Math.max(0, Math.min(maxF, v)); bV.value = secToEncore(+b.value, State.fps, State.dropFrame); }
+        const v = parseDurationInput(bV.value);
+        if(v!==null) { b.value = Math.max(0, Math.min(maxF, v)); bV.value = secToEncore(+b.value, State.fps, State.dropFrame); }
     };
   },0);
 }
@@ -813,9 +817,8 @@ export function showClipDuration(c){
     [{label:'取消',act:()=>session.close()},
      {label:'套用',primary:true,act:()=>{
         if(!current()) return;
-        let v = parseTimecodeInput($('cdVal').value);
-        if(v===null) v = parseFloat($('cdVal').value);
-        if(!Number.isFinite(v) || v<=0){ showToast('請輸入有效的持續時間'); return; }
+        const v = parseDurationInput($('cdVal').value);
+        if(v===null || v<=0){ showToast('請輸入有效的持續時間'); return; }
         const clamped=setClipDuration(c,v);
         if(clamped===null) return;
         session.close({committed:true});
@@ -843,9 +846,8 @@ export function showCrossfade(c){
     [{label:'取消',act:()=>session.close()},
      {label:'建立溶接',primary:true,act:()=>{
          if(!current()) return;
-         let T = parseTimecodeInput($('xfTV').value);
-         if(T===null) T = parseFloat($('xfTV').value);
-         if(isNaN(T)) T = +$('xfT').value;
+         const T = parseDurationInput($('xfTV').value);
+         if(T===null || T<=0){ showToast('請輸入有效的溶接時間'); return; }
          if(crossfadeWithPrev(c,T,prev)) session.close({committed:true});
      }}]);
   setTimeout(()=>{
@@ -854,9 +856,8 @@ export function showCrossfade(c){
     if(sV) setupTimecodeInput(sV);
     if(s) s.oninput=()=>{ if(sV) sV.value=secToEncore(+s.value, State.fps, State.dropFrame); };
     if(sV) sV.onchange=()=>{
-        let v = parseTimecodeInput(sV.value);
-        if(v===null) v = parseFloat(sV.value);
-        if(!isNaN(v)) { s.value = Math.max(minT, Math.min(maxT, v)); sV.value = secToEncore(+s.value, State.fps, State.dropFrame); }
+        const v = parseDurationInput(sV.value);
+        if(v!==null) { s.value = Math.max(minT, Math.min(maxT, v)); sV.value = secToEncore(+s.value, State.fps, State.dropFrame); }
     };
   },0);
 }

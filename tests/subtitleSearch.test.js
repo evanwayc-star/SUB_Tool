@@ -10,7 +10,7 @@ const ui = vi.hoisted(() => ({
 
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
-vi.mock('../src/ui.js', () => ui);
+vi.mock('../src/ui.js', () => ({...ui,renderCurrentTimecode:vi.fn()}));
 
 import { State } from '../src/state.js';
 import { emit } from '../src/events.js';
@@ -89,6 +89,23 @@ describe('字幕搜尋與導航定位 (subtitle-search)', () => {
     searchNext();
     expect(getSearchCountText()).toBe('1/3');
     expect(selectCueMock).toHaveBeenCalledWith('c1', { seek: true });
+  });
+
+  it.each([
+    { query: 'σ', text: 'ς', matched: true },
+    { query: 'ς', text: 'Σ', matched: true },
+    { query: 'σ', text: 'Σ', matched: true },
+    { query: 'i', text: 'İ', matched: false },
+  ])('大小寫比對的計數、標示與單句取代一致：$query / $text', ({ query, text, matched }) => {
+    State.cues = [{ id: 'unicode', text, start: 1, end: 2, track: 0 }];
+    searchUpdate(query);
+
+    expect(getSearchCountText()).toBe(matched ? '1/1' : '無結果');
+    expect(isSearchHit('unicode')).toBe(matched);
+    expect(txtHTML(text).includes('class="search-match"')).toBe(matched);
+    searchReplace(false, '已取代');
+    expect(State.cues[0].text).toBe(matched ? '已取代' : text);
+    expect(recordHistory).toHaveBeenCalledTimes(matched ? 1 : 0);
   });
 
   it('searchPrev 能向上定位到上一筆符合的字幕，並要求播放器跳轉（seek: true）', () => {

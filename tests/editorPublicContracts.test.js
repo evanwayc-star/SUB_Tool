@@ -400,7 +400,9 @@ it.each([
 ])('metadata style admission 仍拒絕非法/超界值 %j', style => {
   expect(normalizeStyleRecord(style, true, true)).toBe(null);
   const unsafe = { ...State.cues[0], style };
-  const parsed = SubFormats.parseASS(SubFormats.toASS([unsafe], 25, State.tracks, 1920, 1080, { includeMetadata: true }));
+  expect(() => SubFormats.toASS([unsafe], 25, State.tracks, 1920, 1080, { includeMetadata: true }))
+    .toThrow(/ASS 無損匯出失敗/);
+  const parsed = SubFormats.parseASS(SubFormats.toASS([unsafe], 25, State.tracks, 1920, 1080));
   expect(parsed.subtool).toBeUndefined();
 });
 

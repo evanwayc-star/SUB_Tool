@@ -8,7 +8,7 @@ import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { parse } from 'acorn';
 const ui=vi.hoisted(()=>({setStatus:vi.fn(),setMediaIntakeStatus:vi.fn(),showToast:vi.fn()}));
-vi.mock('../src/ui.js',()=>ui);
+vi.mock('../src/ui.js', () => ({...ui,renderCurrentTimecode:vi.fn()}));
 vi.mock('../src/media.js',()=>({Media:{mpvMode:false}}));
 
 // Execute the actual registered IPC consumer without booting the app ticker/native UI.

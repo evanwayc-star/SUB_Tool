@@ -4,7 +4,7 @@
    持續警告；不是掃原始碼裡有沒有某段文字。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../src/ui.js', () => ({
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   setStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));

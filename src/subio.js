@@ -22,7 +22,7 @@ import { Media } from './media.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { parseTimecodeInput } from './tcparse.js';
 import { buildXLSX } from './xlsx-export.js';
-import { getAllPresets, loadFonts, presetIdentity } from './substyle.js';
+import { getAllPresets, loadFonts, presetIdentity, STYLE_DEFAULTS } from './substyle.js';
 import { buildSubtitleImportPlan } from './project-intake-engine.js';
 import { Project } from './project.js';
 import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
@@ -178,40 +178,46 @@ function showExportDialog() {
       if (!fmts.length && !notesE && !notesG) { showToast('請至少勾選一個格式'); return; }
       if (fmts.length && showTrackChoices && !tks.length) { showToast('請至少勾選一個軌道'); return; }
       if (fmts.length && tks.some(index => index < 0)) { showToast('所選字幕軌已變更，請重新開啟匯出視窗'); return; }
-      session.close();
-      const committedCues=History.committedSnapshot().cues;
       const filesToExport = [];
-      for (const fmt of fmts) {
-        if (fmt === 'xlsx') {
-          const list = tks.map(i => ({ name: State.tracks[i]?.name || ('軌道' + (i + 1)), cues: committedCues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length);
-          const f = getXLSXFileData(list); if (f) filesToExport.push(f);
-        } else {
-          const shouldMerge = document.getElementById(`merge_${fmt}`)?.checked;
-          if (shouldMerge) {
-            const mergedCues = [];
-            const mergedNames = [];
-            for (const i of tks) {
-              const cues = committedCues.filter(c => (c.track || 0) === i);
-              if (cues.length) {
-                mergedCues.push(...cues);
-                mergedNames.push(State.tracks[i]?.name || ('軌道' + (i + 1)));
-              }
-            }
-            if (mergedCues.length) {
-              mergedCues.sort((a, b) => a.start - b.start);
-              const f = getFileData(fmt, mergedCues, mergedNames.join('+'));
-              if (f) filesToExport.push(f);
-            }
+      try {
+        const committedCues=History.committedSnapshot().cues;
+        for (const fmt of fmts) {
+          if (fmt === 'xlsx') {
+            const list = tks.map(i => ({ name: State.tracks[i]?.name || ('軌道' + (i + 1)), cues: committedCues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length);
+            const f = getXLSXFileData(list); if (f) filesToExport.push(f);
           } else {
-            for (const i of tks) {
-              const cues = committedCues.filter(c => (c.track || 0) === i);
-              if (cues.length) { const f = getFileData(fmt, cues, showTrackChoices ? State.tracks[i]?.name : undefined); if (f) filesToExport.push(f); }
+            const shouldMerge = document.getElementById(`merge_${fmt}`)?.checked;
+            if (shouldMerge) {
+              const mergedCues = [];
+              const mergedNames = [];
+              for (const i of tks) {
+                const cues = committedCues.filter(c => (c.track || 0) === i);
+                if (cues.length) {
+                  mergedCues.push(...cues);
+                  mergedNames.push(State.tracks[i]?.name || ('軌道' + (i + 1)));
+                }
+              }
+              if (mergedCues.length) {
+                mergedCues.sort((a, b) => a.start - b.start);
+                const f = getFileData(fmt, mergedCues, mergedNames.join('+'));
+                if (f) filesToExport.push(f);
+              }
+            } else {
+              for (const i of tks) {
+                const cues = committedCues.filter(c => (c.track || 0) === i);
+                if (cues.length) { const f = getFileData(fmt, cues, showTrackChoices ? State.tracks[i]?.name : undefined); if (f) filesToExport.push(f); }
+              }
             }
           }
         }
+        if (notesE) { const f = getNotesEdiusFileData(); if (f) filesToExport.push(f); }
+        if (notesG) { const f = getNotesGeneralFileData(); if (f) filesToExport.push(f); }
+      } catch (error) {
+        const message = error?.message || '無法產生字幕匯出檔案';
+        setStatus(message, 'err'); showToast(message);
+        return;
       }
-      if (notesE) { const f = getNotesEdiusFileData(); if (f) filesToExport.push(f); }
-      if (notesG) { const f = getNotesGeneralFileData(); if (f) filesToExport.push(f); }
+      session.close();
       executeBatchExport(filesToExport);
     }
   }, { label: '取消', act: () => session.close() }]);
@@ -702,6 +708,7 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
         if (selVal !== 'new' && trackLocked(+selVal, '匯入字幕')) return;
         const presetVal = hasRoundTripMetadata ? '' : $('importPresetSel').value;
         const selectedPreset = presetVal ? getAllPresets().find(p => presetIdentity(p) === presetVal) : null;
+        const selectedPresetStyle = selectedPreset ? {...STYLE_DEFAULTS,...selectedPreset.style} : null;
         const importPlan = kind === 'ass'
           ? buildSubtitleImportPlan(parsed, { fps: grid.fps, target: selVal === 'new' ? 'new' : 'existing' }) : null;
         const tkName=selVal==='new' ? ($('importNewTkName').value.trim() || importPlan?.trackPatch?.name || ('軌道 '+(State.tracks.length+1))) : null;
@@ -721,7 +728,7 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
         if (selVal === 'new') {
           const trk = newTrack(tkName);
           if (importPlan?.trackPatch) { Object.assign(trk, importPlan.trackPatch); trk.name = tkName; }
-          else if (selectedPreset && selectedPreset.style) Object.assign(trk, selectedPreset.style);
+          else if (selectedPresetStyle) Object.assign(trk, selectedPresetStyle);
           State.tracks.push(trk); syncTrackCount();
           targetTk = State.tracks.length - 1;
         } else { targetTk = +selVal; }
@@ -732,8 +739,8 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
           const e = Number.isFinite(Number(p.end)) ? Math.max(s, Number(p.end)) : s;
           const cue = { id: newId(), start: s, end: e, text: p.text || '', track: targetTk, timed: p.timed !== false && !(p.start === 0 && p.end === 0 && kind === 'txt') };
           if (p.style && typeof p.style === 'object') cue.style = Object.assign({}, p.style);
-          else if (selVal !== 'new' && selectedPreset && selectedPreset.style) {
-            cue.style = Object.assign({}, selectedPreset.style);
+          else if (selVal !== 'new' && selectedPresetStyle) {
+            cue.style = Object.assign({}, selectedPresetStyle);
           }
           return cue;
         });

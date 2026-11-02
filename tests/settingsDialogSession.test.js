@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../src/ui.js', () => ({
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   setStatus: vi.fn(),
   showToast: vi.fn(),
 }));
@@ -26,6 +26,43 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
 
   const recordKey = key => document.getElementById('settings-input-toggle_play_pause-0')
     .dispatchEvent(new KeyboardEvent('keydown', { key, bubbles:true, cancelable:true }));
+
+  it.each(['Backspace', 'Delete'])('刪除第一組（%s）後，衝突標示對準仍在第二欄的綁定，後續編輯可儲存並重載', async deleteKey => {
+    State.defaultKeymap = { toggle_play_pause:[{key:' '},{key:'enter'}], rewind:[{key:'j'}] };
+    State.keymap = structuredClone(State.defaultKeymap);
+    const input = (action, index) => document.getElementById(`settings-input-${action}-${index}`);
+    const press = (action, index, key) => input(action, index)
+      .dispatchEvent(new KeyboardEvent('keydown', {key, bubbles:true, cancelable:true}));
+    const previousScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    try {
+      showSettingsModal();
+      press('toggle_play_pause', 0, deleteKey);
+      expect(input('toggle_play_pause', 0).value).toBe('');
+      expect(input('toggle_play_pause', 1).value).toBe('Enter');
+      press('rewind', 0, 'Enter');
+      expect(input('toggle_play_pause', 1).classList.contains('flash-duplicate')).toBe(true);
+      expect(input('toggle_play_pause', 0).classList.contains('flash-duplicate')).toBe(false);
+      expect(input('rewind', 0).value).toBe('J');
+      expect(State.keymap).toEqual(State.defaultKeymap);
+
+      press('toggle_play_pause', 0, 'q');
+      press('toggle_play_pause', 1, deleteKey);
+      press('toggle_play_pause', 2, 'w');
+      await document.getElementById('settingsSaveBtn').onclick();
+      const expected = {toggle_play_pause:[{key:'q'},{key:'w'}],rewind:[{key:'j'}]};
+      expect(State.keymap).toEqual(expected);
+      expect(JSON.parse(localStorage.getItem('subtool_keys'))).toEqual(expected);
+      State.keymap = structuredClone(State.defaultKeymap);
+      await stateModule.loadKeys();
+      expect(State.keymap).toEqual(expected);
+      showSettingsModal();
+      expect([0,1,2].map(index => input('toggle_play_pause', index).value)).toEqual(['Q','W','']);
+    } finally {
+      if (previousScrollIntoView) HTMLElement.prototype.scrollIntoView = previousScrollIntoView;
+      else delete HTMLElement.prototype.scrollIntoView;
+    }
+  });
 
   it('持久化失敗保留原快捷鍵與草稿，重試成功才套用及宣稱已儲存', async () => {
     const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementationOnce(() => { throw new Error('QuotaExceeded'); });
@@ -121,6 +158,59 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
       expect(State.keymap.toggle_play_pause).toEqual([{key:'中'}]);
     } finally {
       anchorClick.mockRestore();
+    }
+  });
+
+  it('刪光快捷鍵後匯出再匯入仍保持停用，匯出不改動目前草稿的欄位索引', async () => {
+    State.defaultKeymap = {
+      toggle_play_pause:[{key:' '},{key:'enter'}], rewind:[{key:'j'},{key:'h'}], forward:[{key:'l'}],
+    };
+    State.keymap = structuredClone(State.defaultKeymap);
+    let downloaded;
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL(blob) { downloaded = blob; return 'blob:keymap'; }
+      static revokeObjectURL() {}
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const previousScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const input = (action, index) => document.getElementById(`settings-input-${action}-${index}`);
+    const press = (action, index, key) => input(action, index)
+      .dispatchEvent(new KeyboardEvent('keydown', {key, bubbles:true, cancelable:true}));
+    try {
+      showSettingsModal();
+      press('toggle_play_pause', 0, 'Backspace');
+      press('toggle_play_pause', 1, 'Delete');
+      press('rewind', 0, 'Backspace');
+      document.getElementById('settingsExportBtn').click();
+      const bytes = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(new Uint8Array(reader.result));
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(downloaded);
+      });
+      const expected = {toggle_play_pause:[],rewind:[{key:'h'}],forward:[{key:'l'}]};
+      expect(JSON.parse(Buffer.from(bytes).toString('utf16le').slice(1)).keymap).toEqual(expected);
+      press('forward', 0, 'h');
+      expect(input('rewind', 1).value).toBe('H');
+      expect(input('rewind', 1).classList.contains('flash-duplicate')).toBe(true);
+      expect(input('rewind', 0).classList.contains('flash-duplicate')).toBe(false);
+      expect(State.keymap).toEqual(State.defaultKeymap);
+
+      const fileInput = document.getElementById('settingsImportFile');
+      document.getElementById('settingsImportBtn').click();
+      Object.defineProperty(fileInput, 'files', {configurable:true,value:[new File([bytes], 'disabled-keymap.json')]});
+      fileInput.dispatchEvent(new Event('change', {bubbles:true}));
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(expect.stringContaining('已匯入')));
+      await document.getElementById('settingsSaveBtn').onclick();
+      expect(State.keymap).toEqual(expected);
+      expect(JSON.parse(localStorage.getItem('subtool_keys'))).toEqual(expected);
+      State.keymap = structuredClone(State.defaultKeymap);
+      await stateModule.loadKeys();
+      expect(State.keymap).toEqual(expected);
+    } finally {
+      if (previousScrollIntoView) HTMLElement.prototype.scrollIntoView = previousScrollIntoView;
+      else delete HTMLElement.prototype.scrollIntoView;
     }
   });
 

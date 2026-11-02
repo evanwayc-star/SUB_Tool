@@ -94,7 +94,7 @@ vi.mock('../src/subtitles.js', () => ({
 }));
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/project.js', () => ({ Project:{captureWorkspaceOwnership:()=>()=>true}, ensureProjectSaved: vi.fn(), isProjectGuardDone: () => true }));
-vi.mock('../src/ui.js', () => ({ showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn() }));
 vi.mock('../src/keyboard.js', () => ({ jklReset: vi.fn(), nudge: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));

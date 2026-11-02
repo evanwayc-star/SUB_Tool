@@ -120,6 +120,21 @@ describe('音訊聲量分析 (analyzePeaksLoudness & parseVolumeAnalysis)', () =
   });
 
   describe('audioNormalizationRuntime.analyze', () => {
+    it('多 stream 量測沿波形 MIX 的全部原始聲道等權與來源時鐘，不由 ffmpeg 自選一條', async () => {
+      const probe=vi.fn(async()=>({audio:[{channels:2,timestampOffset:-.5},{channels:1,timestampOffset:.25}]}));
+      const execute=vi.fn(async(args,options)=>options.onStderr('mean_volume: -18 dB\nmax_volume: -3 dB'));
+      const runtime=createAudioNormalizationRuntime({createTempPath:()=> 'unused.wav',probe,execute});
+      expect(await runtime.analyze('multiple.mkv')).toMatchObject({maxDb:-3,meanDb:-18});
+      expect(probe).toHaveBeenCalledWith('multiple.mkv');
+      const args=execute.mock.calls[0][0],filter=args[args.indexOf('-filter_complex')+1];
+      expect(filter).toContain('[0:a:0]asetpts=PTS-0.500000/TB,aresample=48000:async=1:first_pts=0');
+      expect(filter).toContain('pan=mono|c0=0.333333333333*c0+0.333333333333*c1');
+      expect(filter).toContain('[0:a:1]asetpts=PTS+0.250000/TB,aresample=48000:async=1:first_pts=0');
+      expect(filter).toContain('volume=0.333333333333');
+      expect(filter).toContain('amix=inputs=2:normalize=0');
+      expect(filter).toContain('volumedetect,loudnorm=print_format=json');
+      expect(args.slice(args.indexOf('-map'),args.indexOf('-map')+2)).toEqual(['-map','[measurement]']);
+    });
     it('FFmpeg失敗不發布fake report，成功但無measurement也拒絕', async () => {
       const execute = vi.fn(async (args, options) => {
         options.onStderr('source.wav: No such file or directory');

@@ -40,7 +40,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.j
 import { createCommands } from './commands.js';
 import { renderPointerSeekControl, requestPointerSeek, timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction-engine.js';
 import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
-import { togglePanel, renderQueueMonitorIndicator, renderAsrIndicator, renderProjectIdentity } from './ui.js';
+import { togglePanel, renderQueueMonitorIndicator, renderAsrIndicator, renderProjectIdentity, renderCurrentTimecode } from './ui.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { bindMediaIntakeView, handleMediaIntakeProgress } from './media-intake-view.js';
@@ -125,7 +125,7 @@ on('audio:projectRestored', ()=>{ Media.applyGains(); renderAudioTracks(); });
 on('fps:changed', ()=>{
   const sel=$('fpsSel'); if(sel) sel.value=State.dropFrame?String(State.fps)+'df':String(State.fps);
   const t=Media.displayTime();
-  $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
+  renderCurrentTimecode(t);
   renderDurationReadout();
   renderTimecodeWatermark(t);
   
@@ -255,8 +255,13 @@ function ensurePlayheadVisible(){
   const x=timeToX(t);
   if(x<40 || x>vw-40){
     const newLeft=Math.max(0, t*State.pxPerSec - vw*0.3);
-    tlScroll.scrollLeft=newLeft;
-    State.viewStart=tlScroll.scrollLeft/State.pxPerSec; // read back actual (browser may clamp)
+    const previousLeft=tlScroll.scrollLeft, previousStart=State.viewStart;
+    if(newLeft!==previousLeft) tlScroll.scrollLeft=newLeft;
+    const actualLeft=tlScroll.scrollLeft; // browser may clamp either end
+    State.viewStart=actualLeft/State.pxPerSec;
+    // A playhead near a scroll limit still moves, but its viewport may not.
+    // Keep stale-state correction without rebuilding every timeline frame.
+    if(actualLeft===previousLeft && State.viewStart===previousStart) return;
     drawRuler(); drawWave(); renderCueBlocks(); updatePlayhead(); // sync immediately; don't wait for passive scroll event
   }
 }
@@ -265,7 +270,7 @@ function ensurePlayheadVisible(){
 video.addEventListener('timeupdate',()=>{
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：tcCur/seekBar/播放點都以 displayTime() 為唯一來源
   let t = Media.displayTime();
-  $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame); // 時:分:秒:格
+  renderCurrentTimecode(t);
   renderSeekBar($('seekBar'), t);
   renderTimecodeWatermark(t);
   if(!Media.playing) updatePlayhead();
@@ -291,7 +296,7 @@ video.addEventListener('play',()=>{
 video.addEventListener('pause',()=>{
   $('playBtn').textContent='▶';
   const t=Media.displayTime();
-  $('tcCur').textContent=secToEncore(t,State.fps,State.dropFrame);
+  renderCurrentTimecode(t);
   renderSeekBar($('seekBar'), t);
   renderTimecodeWatermark(t);
   updatePlayhead();
@@ -561,7 +566,7 @@ function startTimeEdit(){
   span.textContent=''; span.appendChild(inp); inp.focus();
   setupTimecodeInput(inp);
   let done=false;
-  const fin=(commit)=>{ if(done)return; done=true; inp.remove(); span.textContent=secToEncore(Media.displayTime(),State.fps,State.dropFrame);
+  const fin=(commit)=>{ if(done)return; done=true; inp.remove(); renderCurrentTimecode(Media.displayTime());
     if(commit){
       const raw=inp.value.trim(); let t=null;
       if(raw.startsWith('+')||raw.startsWith('-')){
@@ -708,7 +713,7 @@ function rafLoop(renderVideoSubCallback) {
     const tcStr = secToEncore(t, State.fps, State.dropFrame);
     if (tcStr !== _lastCurTcStr) {
       _lastCurTcStr = tcStr;
-      $('tcCur').textContent = tcStr;
+      renderCurrentTimecode(t);
       renderTimecodeWatermark(t);
     }
     renderSeekBar($('seekBar'), t);

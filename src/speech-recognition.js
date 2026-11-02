@@ -12,7 +12,7 @@ import { AudioEngine } from './audio-engine.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { snapTimeToFrame, secToEncore } from './time.js';
-import { sortCues, hasActiveCueEdit } from './subtitle-model.js';
+import { sortCues, hasActiveCueEdit, extendDurationForCues } from './subtitle-model.js';
 import { recordHistory } from './history.js';
 import { Project } from './project.js';
 import { openModal, closeModal, showToast } from './ui.js';
@@ -644,6 +644,8 @@ export function insertAsrSubtitles(results, {
     State.activeEdge='start';
   }
   syncTrackCount();
+  // 背景工作使用已接受的 placement；期間移除／縮短素材後，新字幕仍須可定位。
+  extendDurationForCues(newCues);
   recordHistory(historyLabel);
 
   emit('timeline:invalidate');

@@ -327,11 +327,13 @@ export function initPresetLibrary({ styleChanged }){
     if(editB){ _presetEditBegin(+editB.dataset.preEdit); return; }
     if(applyB){ const p=getAllPresets()[+applyB.dataset.preApply]; const t=StylePanelController.styleTarget();
       if(p&&t){
+        // 常用樣式缺少的欄位依其預覽／匹配契約使用預設；一般樣式 patch 仍只改指定欄位。
+        const style={...STYLE_DEFAULTS,...p.style};
         if(t.cues.length){
           for(const c of t.cues){
-            applyCueStylePatch(c, p.style);
+            applyCueStylePatch(c, style);
           }
-        } else Object.assign(t.trk,p.style);
+        } else Object.assign(t.trk,style);
         styleChanged(); recordHistory('套用常用樣式：'+p.name); showToast('已套用：'+p.name); } return; }
     if(renB){
       const l=[...getPresets()], p=l[+renB.dataset.preRen]; if(!p)return;

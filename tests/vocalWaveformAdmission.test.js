@@ -12,7 +12,7 @@ vi.mock('../src/audio-engine.js',()=>({AudioEngine:{isReady:true}}));
 vi.mock('../src/audio-routing-engine.js',()=>({AudioPipeline:{}}));
 vi.mock('../src/media.js',()=>({Media:mocks.media}));
 vi.mock('../src/dom.js',()=>({$:vi.fn(),video:{}}));
-vi.mock('../src/ui.js',()=>({setStatus:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),setStatus:vi.fn()}));
 // Keep Wave, the source owner and client admission real; replace only the Worker port.
 vi.mock('../src/vocal-waveform-worker.js?worker&inline',()=>({default:class{
   listeners=new Map();requests=[];terminated=0;

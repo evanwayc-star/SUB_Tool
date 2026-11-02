@@ -307,7 +307,8 @@ function buildSubtoolMetadata(cues, fps, tracks, options){
   const trackCount=Math.max(sourceTracks.length, ...safeCues.map(cue=>cue.track + 1), 0);
   if(trackCount > MAX_SUBTOOL_META_TRACKS) return null;
   // 不認識的舊欄位可以略過；但已知、可表示的樣式欄位若不安全/無效，不能靜默
-  // 漏掉後還宣稱「無損」。這種情況寧可不寫 metadata，讓標準 ASS fallback 接手。
+  // 漏掉後還宣稱「無損」。回傳 null，讓顯式無損匯出的 caller 拒絕整份輸出；
+  // 外來 ASS 的非法 metadata 仍由匯入端走標準 Dialogue fallback。
   const safeTracks=Array.from({length:trackCount}, (_, index)=>{
     const source=sourceTracks[index];
     const normalized=normalizeTrackRecord(source);
@@ -326,6 +327,7 @@ function buildSubtoolMetadata(cues, fps, tracks, options){
 }
 function utf8ToBase64(value){
   const bytes=new TextEncoder().encode(value);
+  if(bytes.length > MAX_SUBTOOL_META_BYTES) throw new Error('metadata too large');
   let binary='';
   for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i, i+0x8000));
   return btoa(binary);
@@ -599,7 +601,9 @@ function assApplyLeadingOverrides(baseStyle, baseMargins, text, styles, styleMar
 const SubFormats = {
   /* ---- SRT ---- */
   parseSRT(text){
-    const out=[]; const blocks=text.replace(/\r/g,'').split(/\n{2,}/);
+    // 分隔空行可能含空格／Tab；檔首空行也不應吞掉第一句。
+    // 只在區塊外處理空白，保留句內換行與連續空格。
+    const out=[]; const blocks=text.replace(/\r/g,'').trim().split(/\n(?:[ \t]*\n)+/);
     for(const blk of blocks){
       const lines=blk.split('\n');
       let i=0; while(i<lines.length && /^\s*\d+\s*$/.test(lines[i]))i++;
@@ -696,6 +700,13 @@ const SubFormats = {
     const metadataPayload=options && options.includeMetadata === true
       ? buildSubtoolMetadata(cues, fps, tracks, options) : null;
     const metadata=metadataPayload ? encodeSubtoolMetadata(metadataPayload) : '';
+    if(options?.includeMetadata === true && !metadata){
+      // 原稿、隱藏字幕及完整樣式只存在 metadata；顯式無損匯出不能在
+      // 超出安全預算或驗證失敗後，靜默交出僅剩標準 Dialogue 的檔案。
+      const reason=metadataPayload ? '中繼資料超過 8 MiB，請分批匯出或以專案格式保存。'
+        : '字幕內容或樣式超出支援範圍，無法完整保存；請分批匯出或以專案格式保存。';
+      throw Object.assign(new Error('ASS 無損匯出失敗：'+reason), {code:'ASS_METADATA_EXPORT_FAILED'});
+    }
 
     const builder = new AssDocumentBuilder(fps, vww, vwh);
 

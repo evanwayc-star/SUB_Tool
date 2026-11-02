@@ -2,7 +2,7 @@
 import {readFileSync} from 'node:fs';
 import {beforeAll,beforeEach,afterEach,it,expect,vi} from 'vitest';
 
-vi.mock('../src/ui.js',()=>({setStatus:vi.fn(),showToast:vi.fn(),showOsd:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),setStatus:vi.fn(),showToast:vi.fn(),showOsd:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()}));
 const elements=[],buffers=[];
 const node=()=>({connect:vi.fn(),disconnect:vi.fn()});

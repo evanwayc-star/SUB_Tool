@@ -59,6 +59,7 @@ vi.mock('../src/notes.js', () => ({
   updateNoteActive: vi.fn(),
 }));
 vi.mock('../src/ui.js', () => ({
+  renderCurrentTimecode: vi.fn(),
   setStatus: vi.fn(),
   closeModal: vi.fn(),
   showOsd: vi.fn(),

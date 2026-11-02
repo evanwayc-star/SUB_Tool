@@ -23,7 +23,7 @@ vi.mock('../src/media.js',()=>({Media:{mpvMode:false,seqOn:()=>true,tlTime:()=>f
 }}));
 vi.mock('../src/media-player-adapter.js',async importOriginal=>({...await importOriginal(),getPlayerAdapter:()=>({sourceClock:()=>fixture.clock})}));
 vi.mock('../src/events.js',()=>({emit:vi.fn()}));
-vi.mock('../src/ui.js',()=>({showToast:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),showToast:vi.fn()}));
 import { WCPreview } from '../src/decode/player.js';
 
 const ffmpeg=process.env.FFMPEG_PATH||path.resolve('electron/ffmpeg/ffmpeg.exe');

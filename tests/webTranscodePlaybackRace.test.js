@@ -11,7 +11,7 @@ const dom=vi.hoisted(()=>{
       querySelectorAll:()=>[],getBoundingClientRect:()=>({left:0,top:0,width:640,height:360})});return elements.get(id);}};
 });
 vi.mock('../src/dom.js',()=>dom);
-vi.mock('../src/ui.js',()=>new Proxy({setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()},
+vi.mock('../src/ui.js',()=>new Proxy({renderCurrentTimecode:vi.fn(),setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()},
   {get:(target,key)=>key==='then'?undefined:(target[key]||vi.fn())}));
 vi.mock('../src/timeline-renderer.js',()=>new Proxy({drawTimeline:vi.fn(),updatePlayhead:vi.fn()},
   {get:(target,key)=>key==='then'?undefined:(target[key]||vi.fn())}));

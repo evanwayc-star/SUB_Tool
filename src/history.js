@@ -134,7 +134,13 @@ const History = {
       audioProject:normalizeAudioProject(audioProjectForSnapshot()),externalAudioState,
       fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clips}), {clipGeo:'clips'});
   },
-  snap(){ const {clips,...snapshot}=this.committedSnapshot({externalAudioState:externalAudioSnapshot()}); return {...snapshot,clipGeo:clips}; },
+  snap(){
+    const {clips,...snapshot}=this.committedSnapshot({externalAudioState:externalAudioSnapshot()});
+    const saved={...snapshot,clipGeo:clips};
+    // 純資料仍留在 History；Media 以此快照身分持有網頁 File 的 runtime 資格。
+    emit('audio:externalSnapshot',{snapshot:saved});
+    return saved;
+  },
   // Undo/redo and reset replace the editing context; an unrelated new record
   // may truncate redo by replacing the array without replacing that context.
   captureOwnership(){ const epoch=historyEpoch; return ()=>epoch===historyEpoch; },
@@ -264,8 +270,8 @@ const History = {
     // 還原快照後通知協調層重新套用，避免 Ctrl+Z/Redo 看起來已變、聲音卻維持舊設定。
     emit('audio:projectRestored', { audioProject: State.audioProject });
     State.externalAudioState=Array.isArray(d.externalAudioState)?d.externalAudioState:[];
-    // Media 不反向由 History import；用事件讓它重用現存音源、或在桌面版依路徑重建。
-    emit('audio:externalRestored', { sources: State.externalAudioState });
+    // Media 不反向由 History import；由快照身分取回 File 或依桌面路徑重建。
+    emit('audio:externalRestored', { sources: State.externalAudioState, snapshot:this.stack[i].snap });
     Seq.restore(d.clipGeo); // 影片區塊幾何（位置/修剪）；compact 會補足 videoTracks 涵蓋現有片段
     if(d.fps) setFps(d.dropFrame?String(d.fps)+'df':d.fps);
     State.exportIn=d.exportIn??null;

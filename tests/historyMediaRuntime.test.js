@@ -30,7 +30,7 @@ const domMock = vi.hoisted(() => {
 });
 
 vi.mock('../src/dom.js', () => domMock);
-vi.mock('../src/ui.js', () => ({
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   setStatus: vi.fn(),
   showToast: vi.fn(),
   openModal: vi.fn(),

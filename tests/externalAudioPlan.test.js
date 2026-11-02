@@ -142,6 +142,25 @@ describe('external audio project export plan', () => {
     expect(args.join(' ')).not.toContain('C:/cache');
   });
 
+  it('Peak 每 stream 的無聲報告經快照與交付編譯保留，只對該 stream 還原原音',()=>{
+    Object.assign(State.audioProject.sourceMaps['asset-external'].channels[1],{sourceStream:1,sourceChannel:0});
+    Object.assign(mediaTracks[1],{sourceStream:1,sourceChannel:0});
+    Object.assign(liveExternalSources[0],{hasAudioLimiter:true,audioLimiterSpec:{max:-6,min:-12,inputBoost:6,isTruePeak:false,reports:{
+      0:{input_i:'-inf',input_tp:'-inf',input_lra:0,input_thresh:-70,target_offset:'inf'},
+      1:{input_i:-22,input_tp:-2,input_lra:0,input_thresh:-32,target_offset:0},
+    }}});
+    const data=snapshot();
+    liveExternalSources[0].audioLimiterSpec.reports[0].input_i=0;
+    const plan=ExportPlan._normalizeAudioPlan(composeDeliveryAudioPlan(data.audioPlan),{requireStreams:false});
+    expect(plan.buses[0].inputs[0].audioLimiterSpec.reports[0].input_i).toBe('-inf');
+    const {args}=ExportPlan.buildDeliveryArgv({format:'wav',duration:data.duration,audioPlan:plan,outPath:'C:/out/peak.wav'});
+    const graph=args[args.indexOf('-filter_complex')+1];
+    expect(graph).toContain('[0:a:0]anull,pan=mono|c0=c0');
+    expect(graph).toContain('[0:a:1]volume=6.00dB,alimiter=');
+    expect(graph).not.toContain('loudnorm=');
+    expect(args.join(' ')).not.toContain('C:/cache');
+  });
+
   it('carries video effects into both legacy branches without reusing a seeked picture input', () => {
     resetAudioProject();
     liveExternalSources = [];

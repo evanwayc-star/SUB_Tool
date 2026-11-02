@@ -7,7 +7,7 @@ vi.mock('../src/media.js',()=>({Media:{
 }}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn()}));
 vi.mock('../src/notes.js',()=>({renderNotes:vi.fn()}));
-vi.mock('../src/ui.js',()=>({setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
 
 let State,History,Project,resetProject,isProjectDirty,getProjectDir,styles,desk;
 const decode=b64=>JSON.parse(Buffer.from(b64,'base64').subarray(2).toString('utf16le'));

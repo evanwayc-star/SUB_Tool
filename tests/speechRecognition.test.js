@@ -3,9 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
-vi.mock('../src/ui.js', () => ({ openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
 
-import { State } from '../src/state.js';
+import { State, setSelection } from '../src/state.js';
+import { Seq } from '../src/sequence.js';
+import { TimelineTransport } from '../src/media.js';
+import { recordHistory } from '../src/history.js';
+import { beginCueEdit } from '../src/subtitle-model.js';
 import { emit } from '../src/events.js';
 import { openModal } from '../src/ui.js';
 import {
@@ -885,6 +889,75 @@ describe('語音辨識與字幕生成模組', () => {
   });
 
   describe('字幕時碼映射與軌道注入 (insertAsrSubtitles)', () => {
+    it.each(['transcribe', 'align'])('背景 %s 完成時原素材已刪除，字幕提交會延伸時長並讓尾端可定位', async taskMode => {
+      State.fps = 25;
+      State.externalAudioEnd = 0;
+      const source = { id:'recognizing',offset:20,in:0,out:10,dur:10 };
+      State.clips = [{ id:'remaining',offset:0,in:0,out:5,dur:5 }, source];
+      Seq.recomputeDuration();
+      let finish;
+      const work = startAsrWork({ taskMode, clips:[source], timelineFps:25, transcript:'辨識字幕\n待補時間' }, {
+        extractAudio:async()=>({duration:10}),
+        transcribe:()=>new Promise(resolve=>{finish=resolve;}),
+        resolveAlignment:({evidenceSegments})=>({segments:evidenceSegments}),
+        commit:(results,{timelineFps})=>insertAsrSubtitles(results,{
+          timelineFps,requireValidTimes:taskMode==='align',preserveUntimedSegments:taskMode==='align'
+        })
+      });
+      await vi.waitFor(()=>expect(finish).toBeTypeOf('function'));
+      Seq.remove(source.id);
+      expect(State.duration).toBe(5);
+      vi.clearAllMocks();
+      const durationsAtCommit=[];
+      vi.mocked(recordHistory).mockImplementationOnce(()=>durationsAtCommit.push(State.duration));
+      finish([{start:1,end:2,text:'辨識字幕'},...(taskMode==='align'?[{text:'待補時間',timed:false}]:[])]);
+      await expect(work.promise).resolves.toMatchObject({status:'completed',count:taskMode==='align'?2:1});
+      expect(State.cues.find(cue=>cue.text==='辨識字幕')).toMatchObject({start:21,end:22,timed:true});
+      expect(State.duration).toBe(22);
+      expect(new TimelineTransport().seek(22,{duration:State.duration,fps:25})).toBe(22);
+      expect(durationsAtCommit).toEqual([22]);
+      expect(recordHistory).toHaveBeenCalledOnce();
+      expect(emit).toHaveBeenCalledWith('duration:known');
+      if(taskMode==='align') expect(State.cues.find(cue=>cue.text==='待補時間')).toMatchObject({start:0,end:0,timed:false});
+      clearAsrSession();
+    });
+
+    it('全為未定時原稿的提交不延長素材時長',()=>{
+      State.clips=[{id:'remaining',offset:0,in:0,out:5,dur:5}];
+      State.externalAudioEnd=0;State.duration=5;
+      expect(insertAsrSubtitles([{clip:{offset:20,in:0,out:10},segments:[{text:'未定時稿',timed:false}]}],{
+        requireValidTimes:true,preserveUntimedSegments:true
+      })).toBe(1);
+      expect(State.duration).toBe(5);
+      expect(State.cues[0]).toMatchObject({start:0,end:0,timed:false});
+      expect(recordHistory).toHaveBeenCalledOnce();
+    });
+
+    it('辨識字幕較短時保留既有虛擬時間軸範圍',()=>{
+      State.clips=[];State.externalAudioEnd=0;State.duration=60;
+      expect(insertAsrSubtitles([{clip:{offset:20,in:0,out:10},segments:[{start:1,end:2,text:'較短辨識'}]}])).toBe(1);
+      expect(State.duration).toBe(60);
+      expect(emit).not.toHaveBeenCalledWith('duration:known');
+      expect(recordHistory).toHaveBeenCalledOnce();
+    });
+
+    it('辨識提交延伸時長時保留正在編輯的字幕與選取，只記一筆 History',()=>{
+      const cue={id:'editing-original',track:0,start:0,end:1,text:'正在編輯'};
+      State.cues=[cue];State.clips=[];State.externalAudioEnd=0;State.duration=5;State.listTrack=0;
+      setSelection({kind:'sub',ids:[cue.id]});
+      const editor=beginCueEdit(cue);
+      try{
+        expect(editor.isCurrent()).toBe(true);
+        expect(insertAsrSubtitles([{clip:{offset:20,in:0,out:10},segments:[{start:1,end:2,text:'背景新增'}]}])).toBe(1);
+        expect(State.duration).toBe(22);
+        expect(State.listTrack).toBe(0);
+        expect(State.selectedId).toBe(cue.id);
+        expect(cue.text).toBe('正在編輯');
+        expect(editor.isCurrent()).toBe(true);
+        expect(recordHistory).toHaveBeenCalledOnce();
+      }finally{editor.cancel();}
+    });
+
     it.each([
       { speed: 2, reverse: false, start: 12, end: 13.6 },
       { speed: 0.25, reverse: false, start: 26, end: 38.8 },

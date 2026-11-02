@@ -51,6 +51,16 @@ it.each([
   expect(State.clips.filter(c=>c!==target).every(c=>!c.hasAudioLimiter)).toBe(true);
 });
 
+it('右鍵面板改一般峰值後，套用保留畫面參數並提交 Peak 無聲保護流程',async()=>{
+  Timeline.drawTimeline();
+  context(document.querySelector('.audio-clip-block[data-clip-id="secondary"]'));
+  document.querySelector('[data-menu-id="hard_limiter"]').click();
+  const peak=document.getElementById('hlPeakRadio');peak.checked=true;peak.dispatchEvent(new Event('change',{bubbles:true}));
+  document.querySelector('#modalFoot button.primary').click();
+  await vi.waitFor(()=>expect(normalizeAudio).toHaveBeenCalledOnce());
+  expect(normalizeAudio.mock.calls[0][1]).toMatchObject({isTruePeak:false,maximumAmplitude:-6,targetLoudness:-12,inputBoost:6,sourceStream:0});
+});
+
 it.each(['primary','secondary'])('只有 %s 套用效果時，各來源音訊區塊與右鍵對話框僅顯示自己的狀態',sourceId=>{
   const target=State.clips.find(clip=>clip.id===sourceId);
   Object.assign(target,{hasAudioLimiter:true,audioLimiterLabel:sourceId+' FX',audioLimiterSpec:{max:-6,min:-12}});

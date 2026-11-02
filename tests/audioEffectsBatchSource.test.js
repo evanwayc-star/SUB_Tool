@@ -85,6 +85,34 @@ it('穩定母素材的多串流仍保留各串流來源座標及輸出', async (
   expect(desk.cleanupAudio).not.toHaveBeenCalled();
 });
 
+it('公開套用 Peak 效果保留各 stream 的正常／無聲報告，不以 MIX 結果覆蓋',async()=>{
+  root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-effects-batch-'));
+  const file=path.join(root,'mother.mov');fs.writeFileSync(file,'stable mother');
+  const reports=[
+    {input_i:'-22',input_tp:'-2',input_lra:'0',input_thresh:'-32',target_offset:'0'},
+    {input_i:'-inf',input_tp:'-inf',input_lra:'0',input_thresh:'-70',target_offset:'inf'},
+  ];
+  desk.probe.mockResolvedValue({audio:[{channels:1},{channels:1}]});
+  desk.audioSourceFingerprint=vocalSourceFingerprint;
+  desk.normalizeAudio=vi.fn(async(_file,options)=>({outputPath:`stream-${options.sourceStream}.wav`,report:reports[options.sourceStream]}));
+  const source={id:'reports',audioSourceId:'reports',path:file,dur:1,in:0,out:1,offset:0,
+    descriptors:[{sourceStream:0,sourceChannel:0},{sourceStream:1,sourceChannel:0}]};
+  State.clips=[source];
+  vi.spyOn(Media,'_prepareAudioEffect').mockImplementation(async(_source,result)=>result);
+  vi.spyOn(Media,'_installAudioEffect').mockImplementation(()=>{});
+  const effects=Media.audioEffects;
+  try{
+    expect(await effects.apply(source,{max:-6,min:-12,inputBoost:6,isTruePeak:false})).toEqual({status:'completed'});
+    expect(desk.normalizeAudio.mock.calls.map(([,options])=>[options.sourceStream,options.isTruePeak])).toEqual([[0,false],[1,false]]);
+    expect(source.audioLimiterSpec.reports).toEqual({
+      0:{input_i:-22,input_tp:-2,input_lra:0,input_thresh:-32,target_offset:0},
+      1:{input_i:'-inf',input_tp:'-inf',input_lra:0,input_thresh:-70,target_offset:'inf'},
+    });
+    expect(source.hasAudioLimiter).toBe(true);
+    expect(source.path).toBe(file);
+  }finally{effects.invalidate({clear:true});State.clips=[];}
+});
+
 it('最後一軌完成後母素材被替換，清理整批輸出且不交接', async () => {
   desk.probe.mockResolvedValue({audio:[{channels:1},{channels:1}]});
   root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-effects-batch-'));

@@ -23,7 +23,7 @@ const mediaMock = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/media.js', () => ({ Media: mediaMock, Wave: {} }));
-vi.mock('../src/ui.js', () => ({
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   setStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(),
   openModal: spies.openModal, closeModal: spies.closeModal,
 }));

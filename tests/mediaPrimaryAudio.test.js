@@ -5,7 +5,7 @@ const dom=vi.hoisted(()=>{
  const elements=new Map();return {video,$(id){if(!elements.has(id))elements.set(id,{style:{},textContent:'',innerHTML:'',value:'',addEventListener:vi.fn(),removeEventListener:vi.fn(),classList:{add:vi.fn(),remove:vi.fn()},querySelectorAll:()=>[],getBoundingClientRect:()=>({left:0,top:0,width:640,height:360})});return elements.get(id);}};
 });
 vi.mock('../src/dom.js',()=>dom);
-vi.mock('../src/ui.js',()=>({setStatus:vi.fn(),showToast:vi.fn(),showOsd:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),setStatus:vi.fn(),showToast:vi.fn(),showOsd:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
 vi.mock('../src/mixer.js',()=>({renderAudioTracks:vi.fn(),clearMeterStrips:vi.fn()}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()}));
 vi.mock('../src/notes.js',()=>({renderNotes:vi.fn(),updateNoteActive:vi.fn()}));

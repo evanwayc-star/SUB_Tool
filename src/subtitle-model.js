@@ -29,6 +29,21 @@ export function snapAllCuesToFrames() {
   return changed;
 }
 
+// 新字幕提交只延長可定位範圍；不縮短虛擬片長，也不讀取其他 live 手勢的預覽。
+export function extendDurationForCues(cues=[]) {
+  const duration=Number(State.duration)||0;
+  let end=duration;
+  for(const cue of cues){
+    if(!cue || cue.timed===false) continue;
+    const cueEnd=Number(cue.end);
+    if(Number.isFinite(cueEnd)) end=Math.max(end,cueEnd);
+  }
+  if(end<=duration) return false;
+  State.duration=end;
+  emit('duration:known');
+  return true;
+}
+
 export function moveCuesToTrack(cues,target) {
   const targets=[...new Set(cues)].filter(cue=>State.cues.includes(cue));
   if (!State.tracks[target] || !targets.length || trackLocked(target,'移動字幕') || cuesTrackLocked(targets,'移動字幕')) return false;
@@ -218,6 +233,7 @@ export function addCue(start, end, text, track, { historyLabel = '新增字幕' 
   sortCues();
   setSelection({ kind:'sub', ids:[c.id] });
   State.activeEdge='start';
+  extendDurationForCues([c]);
   emit('render:all');
   emit('render:selection');
   recordHistory(historyLabel);
@@ -774,6 +790,7 @@ export function pasteCues(){
   State.cues.push(...newCues);
   sortCues();
   setSelection({ kind:'sub', ids:newCues.map(c=>c.id), primary:newCues[0].id });
+  extendDurationForCues(newCues);
   emit('render:all'); emit('render:selection'); recordHistory('貼上字幕');
   showToast(`已貼上 ${newCues.length} 條字幕`);
 }

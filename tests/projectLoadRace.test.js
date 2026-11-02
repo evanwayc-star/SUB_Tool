@@ -26,7 +26,7 @@ const uiMock = vi.hoisted(() => ({
 vi.mock('../src/media.js', () => ({ Media: mediaMock }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
-vi.mock('../src/ui.js', () => uiMock);
+vi.mock('../src/ui.js', () => ({...uiMock,renderCurrentTimecode:vi.fn()}));
 
 let History;
 let Project;

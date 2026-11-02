@@ -205,7 +205,8 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
 
           if (e.key === 'Backspace' || e.key === 'Delete') {
             binds[i] = null;
-            tempKeymap[action] = binds.filter(b => b !== null);
+            // 草稿索引對應畫面的三個欄位；儲存時才壓縮空位，避免衝突提示指錯欄。
+            tempKeymap[action] = binds;
             onChange();
             input.value = '';
             updateStyle();
@@ -319,7 +320,8 @@ export function showSettingsModal() {
   // 匯出：把目前編輯中的這份 keymap 存成 json（桌面走原生存檔對話框、網頁走下載）
   document.getElementById('settingsExportBtn').onclick = async () => {
     if (!canEdit()) return;
-    const json = JSON.stringify({ _type: 'subtool-keymap', version: 1, keymap: tempKeymap }, null, 2);
+    const keymap = stripEmptyBinds(structuredClone(tempKeymap));
+    const json = JSON.stringify({ _type: 'subtool-keymap', version: 1, keymap }, null, 2);
     const bytes = encodeUTF16LE(json);
     const name = 'SUBTool_快捷鍵.json';
     try {

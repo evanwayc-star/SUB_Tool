@@ -21,7 +21,7 @@ vi.mock('../src/timeline-renderer.js', () => ({ updatePlayhead: vi.fn(), drawTim
 vi.mock('../src/project.js', () => ({ ensureProjectSaved: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ updateNoteActive: vi.fn() }));
-vi.mock('../src/ui.js', () => ({ setStatus: statusMock, showOsd: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), setStatus: statusMock, showOsd: vi.fn() }));
 
 let State;
 let requestPointerSeek;

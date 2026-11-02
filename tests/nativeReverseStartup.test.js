@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import {readFileSync} from 'node:fs';
 import {beforeAll,beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
-vi.mock('../src/ui.js',()=>({setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()}));
 vi.mock('../src/decode/source-frame-index.js',()=>({sourceFrameWindow:vi.fn(),sourcePresentationMetadata:vi.fn(()=>null),clearSourceFrameIndexes:vi.fn()}));
 const elements=[];

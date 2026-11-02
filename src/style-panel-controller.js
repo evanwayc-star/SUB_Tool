@@ -501,10 +501,11 @@ let _tsSetTarget = null;
     const t=styleTarget(), v=e.target.value; e.target.value='';
     if(!v||!t)return;
     const p=getAllPresets().find(x=>presetIdentity(x)===v); if(!p)return;
+    const style={...STYLE_DEFAULTS,...p.style};
     const changed = t.cues.length
-      ? t.cues.reduce((anyChanged, cue) => applyCueStylePatch(cue, p.style) || anyChanged, false)
-      : Object.keys(p.style || {}).some(key => t.trk[key] !== p.style[key]);
-    if(!t.cues.length && changed) Object.assign(t.trk, p.style);
+      ? t.cues.reduce((anyChanged, cue) => applyCueStylePatch(cue, style) || anyChanged, false)
+      : Object.keys(style).some(key => t.trk[key] !== style[key]);
+    if(!t.cues.length && changed) Object.assign(t.trk, style);
     if(!changed) return;
     styleChanged(); recordHistory('套用常用樣式：'+v);
   });

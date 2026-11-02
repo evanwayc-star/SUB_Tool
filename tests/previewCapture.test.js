@@ -14,7 +14,7 @@ vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:
 vi.mock('../src/mixer.js',()=>({renderAudioTracks:vi.fn(),clearMeterStrips:vi.fn()}));
 vi.mock('../src/subtitles.js',()=>({refreshSelectionUI:vi.fn(),selectCueSingle:vi.fn()}));
 vi.mock('../src/history.js',()=>({History:{},recordHistory:vi.fn()}));
-vi.mock('../src/ui.js',()=>({showToast:vi.fn(),setMpvWindowVisible:vi.fn(),setStatus:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),showToast:vi.fn(),setMpvWindowVisible:vi.fn(),setStatus:vi.fn()}));
 
 // A tiny software canvas adapter checks the resulting content. It deliberately
 // knows nothing about SUB Tool's geometry, presenter selection or fade rules.

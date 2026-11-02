@@ -14,7 +14,7 @@ const dom=vi.hoisted(()=>{
 });
 const workspace=vi.hoisted(()=>({version:0}));
 vi.mock('../src/dom.js',()=>dom);
-vi.mock('../src/ui.js',()=>({showToast:vi.fn(),setStatus:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),showToast:vi.fn(),setStatus:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
 vi.mock('../src/project.js',()=>({Project:{captureWorkspaceOwnership:()=>{
   const version=workspace.version;return ()=>workspace.version===version;
 }}}));

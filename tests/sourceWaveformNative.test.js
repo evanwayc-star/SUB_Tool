@@ -14,7 +14,7 @@ vi.mock('../src/audio-engine.js',()=>({AudioEngine:{isReady:true}}));
 vi.mock('../src/audio-routing-engine.js',()=>({AudioPipeline:{}}));
 vi.mock('../src/media.js',()=>({Media:{tracks:[],activeSource:null}}));
 vi.mock('../src/dom.js',()=>({$:vi.fn(),video:{}}));
-vi.mock('../src/ui.js',()=>({setStatus:vi.fn()}));
+vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),setStatus:vi.fn()}));
 import { Wave } from '../src/waveform-decoder.js';
 
 const require=createRequire(import.meta.url);

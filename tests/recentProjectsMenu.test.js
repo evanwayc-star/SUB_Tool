@@ -42,7 +42,7 @@ const ui = vi.hoisted(() => ({
      在什麼時機呼叫，是本檔案要盯的東西之一。 */
   syncMenuOverlay: vi.fn(),
 }));
-vi.mock('../src/ui.js', () => ui);
+vi.mock('../src/ui.js', () => ({...ui,renderCurrentTimecode:vi.fn()}));
 vi.mock('../src/project.js', () => {
   const confirmDiscardUnsaved=vi.fn().mockResolvedValue(true);
   const Project={loadDesktop:vi.fn()};

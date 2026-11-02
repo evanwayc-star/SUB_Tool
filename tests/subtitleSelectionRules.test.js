@@ -42,7 +42,7 @@ vi.mock('../src/project.js', () => ({
   ensureProjectSaved: project.ensureProjectSaved,
   isProjectGuardDone: () => project.guardDone,
 }));
-vi.mock('../src/ui.js', () => ({ showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn() }));
 vi.mock('../src/history.js', () => ({
   recordHistory: vi.fn(),
   History: {

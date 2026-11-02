@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
 
-const ui=vi.hoisted(()=>({setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
+const ui=vi.hoisted(()=>({renderCurrentTimecode:vi.fn(),setStatus:vi.fn(),showToast:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
 const dom=vi.hoisted(()=>{
   const video={style:{},src:'',currentTime:0,duration:10,playbackRate:1,muted:false,
     hasAttribute:()=>false,pause:vi.fn(),dispatchEvent:vi.fn()};

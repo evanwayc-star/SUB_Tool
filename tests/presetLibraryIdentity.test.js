@@ -64,6 +64,70 @@ afterEach(() => {
 });
 
 describe('常用樣式公開操作的 identity 保全', () => {
+  async function importPartialPreset() {
+    const preset={name:'部分樣式',group:'匯入組',style:{fontSize:48}};
+    const payload=new TextEncoder().encode(JSON.stringify([preset]));
+    let picker;
+    const create=document.createElement.bind(document);
+    const createSpy=vi.spyOn(document,'createElement').mockImplementation((tag,...options)=>{
+      const element=create(tag,...options);
+      if(tag==='input') { picker=element;vi.spyOn(element,'click').mockImplementation(()=>{}); }
+      return element;
+    });
+    vi.stubGlobal('FileReader',class { readAsArrayBuffer(){this.result=payload.buffer;this.onload();} });
+    try {
+      document.getElementById('tsPresetMgr').click();document.getElementById('preImportBtn').click();
+      Object.defineProperty(picker,'files',{value:[new File([payload],'partial.json')]});
+      await picker.onchange();
+      expect(Styles.getPresets()).toEqual([preset]);
+      return preset;
+    } finally {createSpy.mockRestore();vi.unstubAllGlobals();}
+  }
+
+  function prepareNonDefaultStyle() {
+    Object.assign(State.tracks[0],Styles.STYLE_DEFAULTS,{
+      font:'舊字型',color:'#ff0000',outline:8,shadow:4,posX:10,posY:20,angle:15,
+      align:'left',valign:'top',vertical:true,bgBox:true,bgColor:'#ff00ff',bgAlpha:.8,lineSpacing:2.5,
+    });
+    State.cues[0].style={font:'逐句字型',fontSize:100,color:'#00ff00',posX:30,angle:40,italic:true};
+    vi.spyOn(HTMLMediaElement.prototype,'pause').mockImplementation(()=>{});
+    vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockImplementation(()=>new Proxy({
+      measureText:()=>({width:1}),createLinearGradient:()=>({addColorStop(){}}),
+    },{get:(target,key)=>target[key]||(()=>{})}));
+  }
+
+  function applyImportedPreset(channel,preset) {
+    if(channel==='manager') document.querySelector('[data-pre-apply="1"]').click();
+    else {UI.closeModal();applyPreset(preset.group,preset.name);}
+  }
+
+  it.each(['dropdown','manager'])('%s 套用匯入的部分樣式時，缺欄使用預設，完整外觀與樣式名稱一致且可 Undo',async channel=>{
+    prepareNonDefaultStyle();
+    const {History}=await import('../src/history.js');
+    const original=structuredClone(Styles.effStyle(State.cues[0],State.tracks[0]));
+    const preset=await importPartialPreset();History.reset();
+    applyImportedPreset(channel,preset);
+    const effective=Styles.effStyle(State.cues[0],State.tracks[0]);
+    expect(effective).toEqual({...Styles.STYLE_DEFAULTS,fontSize:48});
+    expect(Styles.styleMatchesPreset(effective,preset)).toBe(true);
+    expect(Styles.getPresets()).toEqual([preset]);
+    expect(History.stack).toHaveLength(2);
+    History.undo();
+    expect(Styles.effStyle(State.cues[0],State.tracks[0])).toEqual(original);
+    History.redo();
+    expect(Styles.styleMatchesPreset(Styles.effStyle(State.cues[0],State.tracks[0]),preset)).toBe(true);
+  });
+
+  it.each(['dropdown','manager'])('%s 的部分樣式不修改已上鎖軌道或留下 History',async channel=>{
+    prepareNonDefaultStyle();
+    const {History}=await import('../src/history.js');
+    const preset=await importPartialPreset();State.tracks[0].locked=true;History.reset();
+    const original=structuredClone(State.cues);
+    applyImportedPreset(channel,preset);
+    expect(State.cues).toEqual(original);
+    expect(History.stack).toHaveLength(1);
+  });
+
   it.each(['false','reject'])('公開存為常用保存 %s 保留輸入，重試後才關閉並回報成功', async failure => {
     window.subtool={configSave:vi.fn().mockImplementationOnce(()=>failure==='reject' ? Promise.reject(new Error('disk unavailable')) : Promise.resolve(false)).mockResolvedValue(true)};
     document.getElementById('tsPresetSave').click();

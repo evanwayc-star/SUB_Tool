@@ -9,6 +9,11 @@ const { createAudioNormalizationRuntime }=require('../electron/audio-normalizati
 const { createMediaIntakeRuntime }=require('../electron/media-intake-runtime.js');
 const { FileAuthority }=require('../electron/file-authority.js');
 const { motherSourceFingerprint }=require('../electron/mother-source-evidence.js');
+const measured=(options)=>{
+  if(options.jobId!=='loudnorm-p1')return false;
+  options.onStderr(JSON.stringify({input_i:'-22',input_tp:'-2',input_lra:'0',input_thresh:'-32',target_offset:'0'}));
+  return true;
+};
 const roots=[];
 afterEach(()=>{
   vi.restoreAllMocks();
@@ -24,6 +29,7 @@ function fixture({probe,execute,fingerprintSource}={}){
   const owner=createMediaIntakeRuntime({tempRoot:dir,cacheRoot:dir,
     fileAuthority:new FileAuthority({internalDirectories:[dir]}),forgetTemporaryFile:file=>reserved.delete(file)});
   const write=execute||vi.fn(async(args,options)=>{
+    if(measured(options))return;
     if(Number.isInteger(options.outputDescriptor)) fs.writeSync(options.outputDescriptor,Buffer.from('owned wav'));
     else fs.writeFileSync(args.at(-1),'owned wav');
   });
@@ -51,6 +57,7 @@ describe('音訊平衡化私有輸出的實際檔案歸屬',()=>{
     let started,release;
     const entered=new Promise(resolve=>{started=resolve;});const gate=new Promise(resolve=>{release=resolve;});
     const f=fixture({fingerprintSource:motherSourceFingerprint,execute:async(args,options)=>{
+      if(measured(options))return;
       fs.writeSync(options.outputDescriptor,Buffer.from('old output'));started();await gate;
     }});
     const source=path.join(f.dir,'source.wav');fs.writeFileSync(source,'old mother audio');
@@ -77,6 +84,7 @@ describe('音訊平衡化私有輸出的實際檔案歸屬',()=>{
   it('writer 進行時路徑換成外來檔，不能交付或刪除替代檔',async()=>{
     let f;
     const execute=vi.fn(async(args,options)=>{
+      if(measured(options))return;
       if(Number.isInteger(options.outputDescriptor))fs.writeSync(options.outputDescriptor,Buffer.from('owned output'));
       else fs.writeFileSync(args.at(-1),'owned output');
       fs.renameSync(f.output,f.output+'.moved');fs.writeFileSync(f.output,'foreign after write');
@@ -88,7 +96,8 @@ describe('音訊平衡化私有輸出的實際檔案歸屬',()=>{
   });
   it('成功只寫入預留 handle 並交付該 WAV 給 caller',async()=>{
     const f=fixture();const result=await f.runtime.normalize('mother.wav',{isTruePeak:false});
-    const [args,options]=f.write.mock.calls[0];
+    expect(f.write.mock.calls[0][1].outputDescriptor).toBeUndefined();
+    const [args,options]=f.write.mock.calls.at(-1);
     expect(args.at(-1)).toBe('fd:');expect(args.slice(-3,-1)).toEqual(['-f','wav']);
     expect(Number.isInteger(options.outputDescriptor)).toBe(true);
     expect(result.outputPath).toBe(f.output);expect(fs.readFileSync(f.output,'utf8')).toBe('owned wav');
@@ -98,6 +107,7 @@ describe('音訊平衡化私有輸出的實際檔案歸屬',()=>{
     const progress=[];let outputDescriptor;
     const originalClose=fs.closeSync;
     const execute=vi.fn(async(args,options)=>{
+      if(measured(options))return;
       outputDescriptor=options.outputDescriptor;
       fs.writeSync(outputDescriptor,Buffer.from('output'));
       vi.spyOn(fs,'closeSync').mockImplementation(fd=>{
@@ -130,11 +140,12 @@ describe('音訊平衡化私有輸出的實際檔案歸屬',()=>{
   it('取消正在寫入的工作時等 writer 結束，才關閉 handle 並清除本工作檔案',async()=>{
     const controller=new AbortController(),kill=vi.fn();let reject;
     const execute=vi.fn((args,options)=>{
+      if(measured(options))return;
       fs.writeSync(options.outputDescriptor,Buffer.from('partial'));
       options.onProcess({kill});return new Promise((resolve,fail)=>{reject=fail;});
     });
     const f=fixture({execute});const work=f.runtime.normalize('mother.wav',{isTruePeak:false},{signal:controller.signal});
-    expect(execute).toHaveBeenCalledOnce();controller.abort();
+    await vi.waitFor(()=>expect(reject).toBeTypeOf('function'));controller.abort();
     expect(kill).toHaveBeenCalledOnce();expect(fs.readFileSync(f.output,'utf8')).toBe('partial');
     reject(new Error('writer stopped'));await expect(work).rejects.toMatchObject({name:'AbortError'});
     expect(fs.existsSync(f.output)).toBe(false);expect(f.reserved.size).toBe(0);

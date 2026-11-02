@@ -690,6 +690,7 @@
     let _isDragging = false;
     let _closing = false;
     const _retryActions = new Map();
+    const _deliveryEditors = new WeakMap();
     const releaseRetryActions = () => { _closing = true; _retryActions.clear(); };
     window.addEventListener('beforeunload', releaseRetryActions);
     window.addEventListener('pagehide', releaseRetryActions);
@@ -1071,6 +1072,10 @@
 
       const q = sel => box.querySelector(sel);
       const errEl = q('.job-editor-error');
+      const ownsEditor = () => !_closing && box.isConnected && cardEl.querySelector('.job-editor') === box
+        && _jobs.some(current => current.id === job.id && current.status === 'queued'
+          && (current.attempt || 0) === (job.attempt || 0) && current.payload?.outPath === p.outPath);
+      _deliveryEditors.set(box, { cardEl, ownsEditor });
       const syncVisibility = () => {
         const f = q('[data-f="format"]').value;
         const preset = deliveryPreset(f);
@@ -1113,9 +1118,10 @@
       q('[data-f="res"]').addEventListener('change', syncVisibility);
       syncVisibility();
 
-      const close = () => { box.remove(); renderJobs(); };
+      const close = () => { if (box.isConnected) { box.remove(); renderJobs(); } };
       q('[data-f="cancel"]').addEventListener('click', close);
       q('[data-f="save"]').addEventListener('click', async () => {
+        if (!ownsEditor()) return;
         const format = q('[data-f="format"]').value;
         const resVal = q('[data-f="res"]').value;
         const targetH = resVal === 'custom' ? Number(q('[data-f="customH"]').value) || 0 : Number(resVal);
@@ -1126,9 +1132,11 @@
         errEl.hidden = true;
         try {
           await window.queueAPI.updateDelivery(job.id, patch);
+          if (!ownsEditor()) return;
           close();
           await loadData();
         } catch (err) {
+          if (!ownsEditor()) return;
           errEl.textContent = String(err && err.message ? err.message : err).replace(/^Error:\s*/, '');
           errEl.hidden = false;
           q('[data-f="save"]').disabled = false;
@@ -1145,7 +1153,12 @@
         if (!_jobs.some(job => sameRetryTarget(job, action))) _retryActions.delete(id);
       }
       if (_isDragging) return;
-      if (UI.board.querySelector('.job-editor')) return;
+      const editingCards = new Map();
+      for (const box of UI.board.querySelectorAll('.job-editor')) {
+        const editor = _deliveryEditors.get(box);
+        if (editor?.ownsEditor()) editingCards.set(editor.cardEl.dataset.jobId, editor.cardEl);
+        else box.remove();
+      }
       const completed = _jobs.filter(job => job.status === 'done');
       const unfinished = _jobs.filter(job => job.status !== 'done');
       const active = unfinished.filter(job => job.status === 'running' || job.status === 'stopping');
@@ -1153,7 +1166,10 @@
       const attention = unfinished.filter(job => !['running', 'stopping', 'queued'].includes(job.status));
 
       UI.completedList.replaceChildren();
-      UI.unfinishedList.replaceChildren();
+      const keptCards = new Set(editingCards.values());
+      for (const child of [...UI.unfinishedList.children]) {
+        if (!keptCards.has(child)) child.remove();
+      }
       UI.completedCount.textContent = String(completed.length);
       UI.completedSummaryCount.textContent = String(completed.length);
       UI.unfinishedCount.textContent = String(unfinished.length);
@@ -1177,10 +1193,31 @@
           ? '目前沒有匯出工作。'
           : '所有工作都已完成。'));
       } else {
-        unfinished.forEach(job => {
+        const cards = unfinished.map(job => {
           const index = _jobs.findIndex(item => item.id === job.id);
-          UI.unfinishedList.appendChild(createJobCard(job, index));
+          const card = editingCards.get(job.id) || createJobCard(job, index);
+          card.dataset.index = String(index);
+          return card;
         });
+        // Move the surrounding cards rather than detaching the input that owns focus.
+        const focusedCard = document.activeElement?.closest('.job');
+        let cursor = UI.unfinishedList.firstChild;
+        for (const card of cards) {
+          if (card === focusedCard && card !== cursor && card.parentElement === UI.unfinishedList) {
+            while (cursor && cursor !== card) {
+              const next = cursor.nextSibling;
+              UI.unfinishedList.insertBefore(cursor, card.nextSibling);
+              cursor = next;
+            }
+          }
+          if (card === cursor) cursor = cursor.nextSibling;
+          else UI.unfinishedList.insertBefore(card, cursor);
+        }
+        while (cursor) {
+          const next = cursor.nextSibling;
+          cursor.remove();
+          cursor = next;
+        }
       }
     }
 

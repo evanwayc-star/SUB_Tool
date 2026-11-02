@@ -10,7 +10,7 @@
    ============================================================================== */
 import { $, video } from './dom.js';
 import { State, deselect, focusTrackKind, cueSuffix } from './state.js';
-import { fmtClock, secToEncore, snapTimeToFrame, getExactFps } from './time.js';
+import { fmtClock, snapTimeToFrame, getExactFps } from './time.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { selectCueSingle, commitCueTimeEdit } from './subtitles.js';
@@ -21,7 +21,7 @@ import { updatePlayhead, drawTimeline } from './timeline-renderer.js';
 import { recordHistory } from './history.js';
 import { updateNoteActive } from './notes.js';
 import { emit, on } from './events.js';
-import { setStatus, showOsd } from './ui.js';
+import { setStatus, showOsd, renderCurrentTimecode } from './ui.js';
 
 /* 倒帶工作階段：集中管理方向、速率、取消、呈現節流與持續健康檢查。
    對外與 presentation port 一律使用時間軸時間；播放器來源時間只存在 Media 邊界內。 */
@@ -340,7 +340,7 @@ const _reverseSession = createReverseShuttleSession({
     emit('render:videoSub');
     if (!video.src) {
       const displayT = Media.displayTime();
-      const tc = $('tcCur'); if (tc) tc.textContent = secToEncore(displayT, State.fps, State.dropFrame);
+      renderCurrentTimecode(displayT);
       const sb = $('seekBar'); if (sb) sb.value = Math.round(displayT * 1000);
     }
   },

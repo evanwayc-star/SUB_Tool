@@ -270,22 +270,105 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(document.querySelector('[data-job-id="long"] .job-duration b').textContent).toBe(secToEncore(duration, fps));
   });
 
-  it('取消editor後呈現被editor壓住的最後完成更新', async () => {
+  it('原工作開始執行時撤銷editor，立即呈現完成更新且舊儲存按鈕不能送出', async () => {
     const queued = { id: 'editing', status: 'queued', payload: { format: 'h264', outPath: 'C:/out/a.mp4' } };
     const running = { id: 'running', status: 'running', etaS: null, payload: { outPath: 'C:/out/b.mp4' } };
     const { document, queueAPI } = await openQueueWindow([queued, running]);
     document.querySelector('[data-job-id="editing"] [data-action="edit"]').click();
+    const oldEditor = document.querySelector('.job-editor');
+    const oldSave = oldEditor.querySelector('[data-f="save"]');
     queueAPI.getAll.mockResolvedValue({ jobs: [{ ...queued, status: 'running' }, { ...running, status: 'done' }], concurrency: 1 });
     queueAPI.onUpdate.mock.calls[0][0]();
     await vi.waitFor(() => expect(queueAPI.getAll).toHaveBeenCalledTimes(2));
     // queue.html owns a separate realm: allow its awaited getAll result to settle.
     await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
-    expect(document.querySelector('[data-job-id="running"]').dataset.status).toBe('running');
-    document.querySelector('[data-f="cancel"]').click();
     expect(document.querySelector('[data-job-id="running"]').dataset.status).toBe('done');
+    expect(oldEditor.isConnected).toBe(false);
+    expect(document.querySelector('.job-editor')).toBeNull();
+    oldSave.click();
+    expect(queueAPI.updateDelivery).not.toHaveBeenCalled();
     expect(document.querySelector('[data-job-id="editing"]').draggable).toBe(false);
     expect(document.getElementById('completedCount').textContent).toBe('1');
     expect(document.getElementById('clearCompletedBtn').disabled).toBe(false);
+  });
+
+  it('編輯等待工作時其他進度與完成摘要即時更新，草稿節點、焦點及取消保持正確', async () => {
+    const queued = { id: 'editing', status: 'queued', payload: { format: 'h264', outPath: 'C:/out/a.mp4', videoKbps: 8000 } };
+    const running = { id: 'running', status: 'running', pct: 10, payload: { outPath: 'C:/out/b.mp4' } };
+    const { document, queueAPI } = await openQueueWindow([queued, running]);
+    document.querySelector('[data-job-id="editing"] [data-action="edit"]').click();
+    const editor = document.querySelector('.job-editor'), input = editor.querySelector('[data-f="kbps"]');
+    input.value = '9000'; input.focus();
+    const update = async job => {
+      queueAPI.getAll.mockResolvedValue({ jobs: [queued, job], concurrency: 1, isPaused: false });
+      queueAPI.onUpdate.mock.calls[0][0]();
+      await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+    };
+    await update({ ...running, pct: 55 });
+    expect(document.querySelector('[data-job-id="running"] .job-status').textContent).toContain('55.0%');
+    expect(document.querySelector('[data-job-id="running"] [role="progressbar"]').getAttribute('aria-valuenow')).toBe('55.0');
+    expect(document.querySelector('.job-editor')).toBe(editor);
+    expect(document.activeElement).toBe(input); expect(input.value).toBe('9000');
+    await update({ ...running, status: 'done', pct: 100 });
+    expect(document.getElementById('activeCount').textContent).toBe('0');
+    expect(document.getElementById('completedSummaryCount').textContent).toBe('1');
+    expect(document.getElementById('queueWarning').hidden).toBe(true);
+    expect(document.querySelector('.job-editor')).toBe(editor);
+    expect(document.activeElement).toBe(input); expect(input.value).toBe('9000');
+    editor.querySelector('[data-f="cancel"]').click();
+    expect(queueAPI.updateDelivery).not.toHaveBeenCalled();
+    document.querySelector('[data-job-id="editing"] [data-action="edit"]').click();
+    expect(document.querySelector('.job-editor [data-f="kbps"]').value).toBe('8000');
+  });
+
+  it('其他進度更新後仍保存目前格式草稿，不回寫開窗時的舊設定', async () => {
+    const queued = { id: 'editing', status: 'queued', payload: { format: 'h264', outPath: 'C:/out/a.mp4', videoKbps: 8000 } };
+    const running = { id: 'running', status: 'running', pct: 10, payload: { outPath: 'C:/out/b.mp4' } };
+    const { document, queueAPI } = await openQueueWindow([queued, running]);
+    document.querySelector('[data-job-id="editing"] [data-action="edit"]').click();
+    const editor = document.querySelector('.job-editor');
+    editor.querySelector('[data-f="res"]').value = '720';
+    editor.querySelector('[data-f="kbps"]').value = '9000';
+    queueAPI.getAll.mockResolvedValue({ jobs: [queued, { ...running, pct: 55 }], concurrency: 1 });
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+    expect(document.querySelector('[data-job-id="running"] .job-status').textContent).toContain('55.0%');
+    queueAPI.getAll.mockResolvedValue({ jobs: [{ ...queued, payload: { ...queued.payload, videoKbps: 9000, targetH: 720 } }, running], concurrency: 1 });
+    editor.querySelector('[data-f="save"]').click();
+    await vi.waitFor(() => expect(document.querySelector('.job-editor')).toBeNull());
+    expect(queueAPI.updateDelivery).toHaveBeenCalledExactlyOnceWith('editing', { format: 'h264', targetH: 720, kbps: 9000, burnTimecode: false });
+    document.querySelector('[data-job-id="editing"] [data-action="edit"]').click();
+    expect(document.querySelector('.job-editor [data-f="kbps"]').value).toBe('9000');
+  });
+
+  it.each(['stopped', 'removed'])('編輯中的工作變成 %s 時立即移除草稿，舊節點不能修改工作', async status => {
+    const queued = { id: 'editing', status: 'queued', payload: { format: 'h264', outPath: 'C:/out/a.mp4' } };
+    const { document, queueAPI } = await openQueueWindow([queued]);
+    document.querySelector('[data-action="edit"]').click();
+    const editor = document.querySelector('.job-editor'), oldSave = editor.querySelector('[data-f="save"]');
+    queueAPI.getAll.mockResolvedValue({ jobs: status === 'removed' ? [] : [{ ...queued, status }], concurrency: 1 });
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+    expect(editor.isConnected).toBe(false); expect(document.querySelector('.job-editor')).toBeNull();
+    oldSave.click(); expect(queueAPI.updateDelivery).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-job-id="editing"]')?.dataset.status).toBe(status === 'removed' ? undefined : status);
+  });
+
+  it('多份草稿與工作重排更新保留各自欄位，不移走目前有焦點的editor', async () => {
+    const first = { id: 'first', status: 'queued', payload: { format: 'h264', outPath: 'C:/out/a.mp4' } };
+    const second = { id: 'second', status: 'queued', payload: { format: 'h264', outPath: 'C:/out/b.mp4' } };
+    const { document, queueAPI } = await openQueueWindow([first, second]);
+    document.querySelector('[data-job-id="first"] [data-action="edit"]').click();
+    document.querySelector('[data-job-id="second"] [data-action="edit"]').click();
+    const firstInput = document.querySelector('[data-job-id="first"] [data-f="kbps"]');
+    const secondInput = document.querySelector('[data-job-id="second"] [data-f="kbps"]');
+    firstInput.value = '9000'; secondInput.value = '12000'; secondInput.focus();
+    queueAPI.getAll.mockResolvedValue({ jobs: [second, first], concurrency: 1 });
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+    expect([...document.querySelectorAll('#unfinishedJobList .job')].map(card => card.dataset.jobId)).toEqual(['second', 'first']);
+    expect(document.activeElement).toBe(secondInput);
+    expect(firstInput.isConnected).toBe(true); expect(firstInput.value).toBe('9000'); expect(secondInput.value).toBe('12000');
   });
 
   it.each([null, undefined, NaN, Infinity, -1])('未知ETA %s 顯示估算中，實際零秒仍正確顯示', async etaS => {

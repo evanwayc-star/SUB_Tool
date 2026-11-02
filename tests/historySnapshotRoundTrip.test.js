@@ -17,7 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
-vi.mock('../src/ui.js', () => ({ setStatus: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), setStatus: vi.fn() }));
 vi.mock('../src/media.js', () => ({ Media: {mpvPresenting:()=>false} }));
 
 import { State, syncTrackCount } from '../src/state.js';

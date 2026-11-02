@@ -16,7 +16,10 @@ for(const event of ['render:all','render:subList','render:subRow']) on(event,()=
 function refreshSearch(force=false){
   if(!force && !searchDirty && searchCues===State.cues && searchTrack===State.tracks[State.listTrack] && searchTrackIndex===State.listTrack) return;
   const previous=_searchMatches[_searchIdx];
-  _searchMatches=_searchTerms.length ? State.cues.filter(c=>(c.track||0)===State.listTrack && _searchTerms.some(t=>String(c.text||'').toLowerCase().includes(t.toLowerCase()))).map(c=>c.id) : [];
+  // 與標示／取代共用 RegExp 的大小寫語意；轉小寫再 includes 對部分
+  // Unicode 字形會產生不同結果，導致顯示命中卻無法取代，或漏掉命中。
+  const pattern=_searchTerms.length ? new RegExp(_searchTerms.map(escRe).join('|'),'i') : null;
+  _searchMatches=pattern ? State.cues.filter(c=>(c.track||0)===State.listTrack && pattern.test(String(c.text||''))).map(c=>c.id) : [];
   const selected=_searchMatches.indexOf(State.selectedId);
   const retained=_searchMatches.indexOf(previous);
   _searchIdx=selected>=0 ? selected : retained>=0 ? retained : _searchMatches.length ? 0 : -1;

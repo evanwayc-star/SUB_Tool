@@ -8,11 +8,20 @@ import { State } from './state.js';
 import { Media } from './media.js';
 import { emit } from './events.js';
 import { getNativePreviewRuntime } from './media-player-adapter.js';
+import { secToEncore } from './time.js';
 
 /* 狀態列 / toast / modal */
 export function renderProjectIdentity({name}={}) {
   const label=name||'未命名專案';
   document.title=label+' — SUB TOOL';
+}
+
+// 播放讀數與使用者的時碼草稿共用同一位置；背景更新不能移除正在輸入的節點。
+export function renderCurrentTimecode(time) {
+  const label = $('tcCur');
+  if (!label || label.querySelector('input')) return;
+  const text = secToEncore(time, State.fps, State.dropFrame);
+  if (label.textContent !== text) label.textContent = text;
 }
 
 // X6：狀態點除顏色外提供文字等價（aria-label），供報讀器與非顏色辨識

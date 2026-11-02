@@ -47,7 +47,7 @@ vi.mock('../src/sequence.js', () => ({
 }));
 vi.mock('../src/media-player-adapter.js', () => ({ getPlayerAdapter: () => ({}) }));
 vi.mock('../src/events.js', () => ({ emit: vi.fn() }));
-vi.mock('../src/ui.js', () => ({ showToast: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), showToast: vi.fn() }));
 vi.mock('../src/decode/demux.js', async importOriginal => ({...await importOriginal(),
   demuxFile: vi.fn(), demuxIndex: vi.fn(), SampleReader: class {}, MemReader: class {},
 }));

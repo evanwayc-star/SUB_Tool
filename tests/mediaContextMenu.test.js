@@ -118,7 +118,7 @@ vi.mock('../src/sequence.js', async importOriginal => ({
   },
 }));
 
-vi.mock('../src/ui.js', () => ({ showToast: mocks.showToast, promptModal: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), showToast: mocks.showToast, promptModal: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/events.js', () => ({ emit: mocks.emit }));
 vi.mock('../src/audio-routing.js', () => ({ AudioRouting: { openForSource: vi.fn(), openForClip: vi.fn() } }));
