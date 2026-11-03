@@ -8,7 +8,8 @@ const context={state:'running',currentTime:0,destination:{},resume:vi.fn(),
   createAnalyser:()=>({...node(),fftSize:2048,getFloatTimeDomainData:buf=>buf.fill(0)}),
   createMediaElementSource:()=>node(),createChannelSplitter:()=>node(),createChannelMerger:()=>node()};
 class AudioElement extends EventTarget{
-  constructor(){super();this.src='file:///external.wav';this.currentTime=0;this.duration=10;this.readyState=1;this.paused=true;this.playbackRate=1;}
+  // 已可播的外音，測試只延遲舊 ended 事件，不延遲解碼資料。
+  constructor(){super();this.src='file:///external.wav';this.currentTime=0;this.duration=10;this.readyState=4;this.paused=true;this.playbackRate=1;}
   play=vi.fn(async()=>{this.paused=false;});pause=vi.fn(()=>{this.paused=true;});load=vi.fn();
 }
 let Media,State,resetAudioProject,ensureAudioSourceMap,Seq,AudioEngine,resetPlayerAdapter,video;

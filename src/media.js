@@ -213,6 +213,7 @@ import { MediaIntakeSession, maxKnownSourceDuration, probeAudioChannelDescriptor
 import { ResetEpoch, createMediaPresentationSession } from './media-presentation-core.js';
 import { MediaPlaybackRuntime } from './media-playback-runtime.js';
 import { clipSourceFingerprint, liveClipForSource, sourceWaveformChunkLength } from './media-intake-engine.js';
+import { createSourceWaveformProgress } from './source-waveform-progress.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
 import { emit, on } from './events.js';
 import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
@@ -523,7 +524,9 @@ const Media = {
         const bytes=await response.arrayBuffer();
         if(!current()) return false;
         report({label:'整理波形',pct:null});
-        let peaks=sourceWaveform?Wave.calcSourceWaveform(bytes,duration):Wave.calcFromWav(bytes,duration);
+        let peaks=await (sourceWaveform?Wave.calcSourceWaveformAsync(bytes,duration,{owns:current})
+          :Wave.calcFromWavAsync(bytes,duration,{owns:current}));
+        if(!current())return false;
         if(!peaks&&decodeFallback){
           const buffer=await AudioEngine.decodeAudioData(bytes);
           if(!current()) return false;
@@ -553,7 +556,9 @@ const Media = {
     const key=clipSourceFingerprint(source),previous=this._sourceWavePreparations.get(key);
     if(previous?.owns()) return previous.promise;
     const totalBuckets=Math.ceil(duration*Wave.resolution);
-    if(live.peaks?.length>=totalBuckets*2||Wave._sourceState(live,false)?.mix.peaks?.length>=totalBuckets*2) return true;
+    // 最後一批峰值可早於完成紀錄到達；取消後仍須由 native 確認持久 WAV。
+    if(DESK.sourceWaveformContinuous!==true
+      &&(live.peaks?.length>=totalBuckets*2||Wave._sourceState(live,false)?.mix.peaks?.length>=totalBuckets*2)) return true;
     const version=this._bgVersion;
     const current=()=>this._bgVersion===version&&owns()&&!!this._liveClipForSource(source);
     const initialPeaks=live.peaks||null,initialMix=Wave.getSourceMixPeaks(live);
@@ -572,6 +577,33 @@ const Media = {
         return await MediaIntakeJobs.prepareWaveform(async({report,owns:ownsJob})=>{
           const active=()=>entry.owns()&&ownsJob();
           report({label:'優先產生波形',pct:null,overall:true,queued:true});
+          if(DESK.sourceWaveformContinuous===true){
+            const progress=createSourceWaveformProgress({duration,resolution:Wave.resolution,owns:active,publish:peaks=>{
+              published=peaks;publishedViews.add(peaks);
+              this._commitOriginalWave(this._liveClipForSource(source),peaks,{mixPath:null});
+              emit('media:timeline');
+            }});
+            let result;
+            try{
+              result=await MediaIntakeJobs.prepareSourceWaveform({path,audio,duration,continuous:true},data=>progress.accept(data));
+              if(!active())return false;
+              progress.verifyResult(result);
+              if(progress.complete){
+                this._commitOriginalWave(this._liveClipForSource(source),published,{mixPath:result.temporary?null:result.wave});
+                emit('media:timeline');
+              }else{
+                const loaded=await this._loadOriginalWave(source,{wave:result.wave},active,{
+                  temporary:!!result.temporary,duration,sourceWaveform:true,
+                  transform:peaks=>{published=peaks;publishedViews.add(peaks);return peaks;},
+                });
+                if(!loaded)return false;
+              }
+              report({label:'波形已就緒',pct:100,overall:true,queued:false});
+              return active();
+            }finally{
+              if(result?.temporary&&result.wave)try{await DESK.cleanupAudio(result.wave);}catch(_){}
+            }
+          }
           let completed=0,sourceKey=null,combined=null,ignoreCached=false;
           while(completed<duration&&active()){
             let result;
@@ -631,7 +663,10 @@ const Media = {
           if(publishedViews.has(this._effectOriginalPeaks.get(source.audioSourceId))) this._effectOriginalPeaks.delete(source.audioSourceId);
           emit('media:timeline');
         }
-        if(current()&&error?.name!=='AbortError') console.warn('優先波形準備失敗，沿用背景處理:',error);
+        if(current()&&error?.name!=='AbortError'){
+          console.warn('優先波形準備失敗:',error);
+          if(DESK.sourceWaveformContinuous===true)setStatus('波形尚未完成，請重新開啟素材以續算','err');
+        }
         return false;
       }finally{
         if(this._sourceWavePreparations.get(key)===entry) this._sourceWavePreparations.delete(key);
@@ -1013,7 +1048,10 @@ const Media = {
     const myVer=this._bgVersion;
     const current=()=>this._bgVersion===myVer&&!!this._liveClipForSource(clip);
     try{
-      if(DESK.prepareSourceWaveform) await this._prepareSourceWaveform(clip,path,audio,duration,current);
+      if(DESK.prepareSourceWaveform){
+        const ready=await this._prepareSourceWaveform(clip,path,audio,duration,current);
+        if(DESK.sourceWaveformContinuous===true&&Number.isFinite(duration)&&duration>0&&!ready)return;
+      }
       if(!current()) return;
       // 與解除影音／外部音檔共用 ingest 佇列，避免同一路徑同時寫入 cache。
       const res=await MediaIntakeJobs.ingest({path,duration,needsProxy:false,audio,queue:true});
@@ -1198,17 +1236,21 @@ const Media = {
     return true;
   },
   async _setExternalWaveFromPath(asset, wavePath, version){
-    if(!wavePath || !DESK?.fileURL || this._bgVersion!==version || !this.externalAudioSources.includes(asset)) return;
+    const owns=()=>this._bgVersion===version&&this.externalAudioSources.includes(asset);
+    if(!wavePath||!DESK?.fileURL||!owns())return;
     try{
       const wavUrl=await DESK.fileURL(wavePath);
+      if(!owns())return;
       const buf=await fetch(wavUrl).then(res=>res.arrayBuffer());
-      if(this._bgVersion!==version || !this.externalAudioSources.includes(asset)) return;
-      let pk=Wave.calcFromWav(buf);
+      if(!owns())return;
+      let pk=await Wave.calcFromWavAsync(buf,0,{owns});
+      if(!owns())return;
       if(!pk){
         const ab=await AudioEngine.decodeAudioData(buf);
+        if(!owns())return;
         pk=Wave.calcPeaks(ab,-1);
       }
-      if(this._bgVersion===version && this.externalAudioSources.includes(asset)){
+      if(owns()){
         this._commitOriginalWave(asset,pk,{mixPath:wavePath,channels:asset.descriptors});
       }
     }catch(e){ console.warn('external wave cache:',e); }
@@ -1557,7 +1599,10 @@ const Media = {
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
     try{
-      if(DESK?.prepareSourceWaveform) await this._prepareSourceWaveform(primary,p,audio,dur,current);
+      if(DESK?.prepareSourceWaveform){
+        const ready=await this._prepareSourceWaveform(primary,p,audio,dur,current);
+        if(DESK.sourceWaveformContinuous===true&&audio?.length&&Number.isFinite(dur)&&dur>0&&!ready)return;
+      }
       if(!current()) return;
       res=await MediaIntakeJobs.ingest({path:p,duration:dur,needsProxy,audio,queue:true});
       if(!current()) return; // 使用者已換另一個檔，丟棄結果
@@ -1609,7 +1654,8 @@ const Media = {
       if(!current()) return;
       this.pendingChannels=[];
       this.usingWebAudio=true; this.syncMuteState();
-      if(this.playing) this.startElementSources(this._mpvTime);
+      if(this.playing&&!this.playbackTransitionPending()) void this._startPresenterPlayback({pauseBeforePrepare:true,
+        started:(sourceTime,timelineTime,prepared)=>this._playback.startFollowers(sourceTime,timelineTime,prepared)});
       notifyAudioTracks();
 
       await waveReady;
@@ -2574,7 +2620,7 @@ const Media = {
           emit('mpv:refreshSubs'); // 換 clip 後字幕需以新映射重擠（app.js 會做 offset 位移）
           if(shouldResume()){
             const started=await this._startPresenterPlayback({owns:()=>owns()&&shouldResume(),clip:c,
-              started:(sourceTime,timelineTime)=>this._playback.startFollowers(sourceTime,timelineTime,{owns,buffers:false})});
+              started:(sourceTime,timelineTime,prepared)=>this._playback.startFollowers(sourceTime,timelineTime,{...prepared,owns,buffers:false})});
             if(started!==true){if(started===false)retryIfSuperseded=false;return;}
           }
           else getPlayerAdapter().pause().catch(()=>{});
@@ -2616,7 +2662,7 @@ const Media = {
         if(!ownsSeek())return;
         if(shouldResume()){
           const started=await this._startPresenterPlayback({owns:ownsSeek,clip:c,
-            started:(sourceTime,timelineTime)=>this._playback.startFollowers(sourceTime,timelineTime,{owns:ownsSeek})});
+            started:(sourceTime,timelineTime,prepared)=>this._playback.startFollowers(sourceTime,timelineTime,{...prepared,owns:ownsSeek})});
           if(started!==true){if(started===false)retryIfSuperseded=false;return;}
         }
         else { try{ video.pause(); }catch(e){} }
@@ -3059,7 +3105,10 @@ const Media = {
     // needsProxy:true（v4.25）：加入的片段一律備 720p 短 GOP proxy——原檔可能非原生（ProRes/MXF）
     // 或過大（>600MB WebCodecs 讀不進來）；沒有 proxy 時預覽引擎解不了它 →【無法參與疊層合成】
     // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
-    if(DESK?.prepareSourceWaveform) await this._prepareSourceWaveform(c,c.path,info?.audio||[],c.dur,owns);
+    if(DESK?.prepareSourceWaveform){
+      const ready=await this._prepareSourceWaveform(c,c.path,info?.audio||[],c.dur,owns);
+      if(DESK.sourceWaveformContinuous===true&&info?.audio?.length&&Number.isFinite(c.dur)&&c.dur>0&&!ready)return;
+    }
     if(!owns()) return;
     let res; try{ res = await MediaIntakeJobs.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
     catch(e){ if(owns()) setStatus('影片音訊抽取失敗：' + (e?.message||e), ''); return; }
@@ -3549,7 +3598,7 @@ const Media = {
     const reason=result?.status==='timeout'?'等待畫面逾時':'畫面載入失敗';
     setStatus(`${reason}，播放已暫停`,'err');
   },
-  async _startPresenterPlayback({owns:upstreamOwns=()=>true,started=()=>{},clip=null}={}){
+  async _startPresenterPlayback({owns:upstreamOwns=()=>true,started=()=>{},clip=null,pauseBeforePrepare=false}={}){
     // 畫格呈現與起播接受是不同證據。初次播放、呈現後續播及自動跨段
     // 共用此 owner；晚到 play 完成不可啟動另一個播放意圖的 follower。
     const adapter=getPlayerAdapter(),active=this._activeClip();
@@ -3561,21 +3610,36 @@ const Media = {
     request.owns=owns;
     this.stopBufferSources();this.stopElementSources();
     try{
+      if(pauseBeforePrepare){await adapter.pause();if(!owns())return null;}
+      const initialSource=this.vTime(),initialTimeline=active?Seq.toTimeline(initialSource,active):initialSource;
+      let prepared=await this._playback.prepareFollowers(initialSource,initialTimeline,{owns});
+      if(!prepared||!owns())return null;
       await adapter.play();
       if(!owns()) return null;
+      let sourceTime=this.vTime(),timelineTime=active?Seq.toTimeline(sourceTime,active):sourceTime;
+      // A slow native play ACK can already have crossed an activity boundary.
+      // Rebuild the whole group once from that accepted clock; never chase it
+      // repeatedly while the individual NAS channels are still seeking.
+      if(!prepared.matches(sourceTime,timelineTime)){
+        prepared.cancel();prepared=await this._playback.prepareFollowers(sourceTime,timelineTime,{owns});
+        if(!prepared||!owns())return null;
+      }
+      const retry=this._reverseStartup;
+      const recovering=retry?.phase==='restarting'&&retry.owns();
+      if(recovering||this._nativeReverse)prepared.cancel();
+      else if(!await prepared.commit()||!owns())return null;
       this._presenterStart=null;
       // ACK 等待期間播放器可以已前進；來源與時間軸必須取自同一時刻、
       // 同一片段，不能讓原音或外音重新從較早的 requested target 起播。
-      const sourceTime=this.vTime(),timelineTime=active?Seq.toTimeline(sourceTime,active):sourceTime;
+      sourceTime=this.vTime();timelineTime=active?Seq.toTimeline(sourceTime,active):sourceTime;
       this._lastSeekTime=null;
-      const retry=this._reverseStartup;
-      if(retry?.phase==='restarting'&&retry.owns()){
+      if(recovering){
         // 同一次復原沿用原 budget；命令接受不代表原生時鐘已恢復。
         retry.resume=started;
         this._armReverseStartup(retry);
       }else{
         this._watchReverseStartup(sourceTime);
-        started(sourceTime,timelineTime);
+        started(sourceTime,timelineTime,{elementsPrepared:true});
       }
       return true;
     }catch(error){
@@ -3760,8 +3824,8 @@ const Media = {
       this._transport.startVirtual(requested,{playbackRate:video.playbackRate||1});
       this._playback.startFollowers(requested,requested,{owns:ownsTarget});
     }else{
-      return void this._startPresenterPlayback({started:(sourceTime,timelineTime)=>
-        this._playback.startFollowers(sourceTime,timelineTime,{owns:ownsTarget})});
+      return void this._startPresenterPlayback({started:(sourceTime,timelineTime,prepared)=>
+        this._playback.startFollowers(sourceTime,timelineTime,{...prepared,owns:ownsTarget})});
     }
     this._lastSeekTime=null;
   },

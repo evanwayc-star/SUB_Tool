@@ -252,6 +252,39 @@ describe('project save ownership',()=>{
     expect(isProjectDirty()).toBe(true);
   });
 
+  it.each(['null','unknown','rejected','throw'])('自動備份收到 %s 失敗結果時在狀態列回報，不靜默或變更儲存基準',async outcome=>{
+    const {showToast,setStatus}=await import('../src/ui.js');
+    vi.useFakeTimers();await Project.saveAs();State.cues[0].text='仍未儲存';
+    showToast.mockClear();setStatus.mockClear();
+    if(outcome==='rejected')desk.writeProject.mockRejectedValueOnce(new Error('NAS write failed'));
+    else if(outcome==='throw')desk.writeProject.mockImplementationOnce(()=>{throw new Error('write unavailable');});
+    else desk.writeProject.mockResolvedValueOnce(outcome==='null'?null:{code:'UNSAFE_PROJECT_OUTPUT'});
+    await vi.advanceTimersByTimeAsync(3*60*1000);
+    expect(setStatus).toHaveBeenCalledWith('自動備份失敗，請手動儲存專案','err');
+    expect(setStatus).not.toHaveBeenCalledWith(expect.stringContaining('自動備份：'),'ok');
+    expect(showToast).not.toHaveBeenCalled();
+    expect(isProjectDirty()).toBe(true);
+    expect(savedText(desk.writeProject.mock.calls[0])).toBe('仍未儲存');
+    expect(getProjectDir()).toBe('C:/');
+  });
+
+  it.each(['reset','open','saveAs'])('自動備份的舊失敗在 %s 後抵達，不覆寫新工作區狀態',async change=>{
+    const {setStatus}=await import('../src/ui.js');
+    vi.useFakeTimers();await Project.saveAs();
+    const pending=deferred();desk.writeProject.mockReturnValueOnce(pending.promise);
+    await vi.advanceTimersByTimeAsync(3*60*1000);
+    if(change==='reset')resetProject();
+    else if(change==='open')await Project.loadDesktop({path:'C:/opened/new.subtool',
+      b64:Buffer.from(JSON.stringify({app:'SUB Tool',version:3,fps:24,media:{},clips:[],
+        tracks:[{name:'新專案'}],cues:[],notes:[]})).toString('base64')});
+    else {desk.saveProject.mockResolvedValueOnce('C:/renamed/new.subtool');await Project.saveAs();}
+    const directory=getProjectDir(),dirty=isProjectDirty();
+    setStatus('目前工作區就緒','ok');pending.resolve(null);
+    await Promise.resolve();await Promise.resolve();
+    expect(setStatus.mock.calls.at(-1)).toEqual(['目前工作區就緒','ok']);
+    expect(getProjectDir()).toBe(directory);expect(isProjectDirty()).toBe(dirty);
+  });
+
   it('treats deleting all saved content as a change',async()=>{
     await Project.saveAs();State.cues=[];expect(isProjectDirty()).toBe(true);
   });

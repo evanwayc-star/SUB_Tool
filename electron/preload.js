@@ -137,6 +137,7 @@ contextBridge.exposeInMainWorld('subtool', {
     return ipcRenderer.invoke('ffmpeg:sourceKey', source);
   },
   prepareSourceWaveform: (opts) => ipcRenderer.invoke('ffmpeg:prepareSourceWaveform', opts),
+  sourceWaveformContinuous: true,
   cancelMediaIntake: (opts) => ipcRenderer.invoke('ffmpeg:cancelIntake', opts),
   releaseStream: (streamLeaseId) => ipcRenderer.invoke('ffmpeg:releaseStream', streamLeaseId),
   readB64:      (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('fs:readB64', p); },

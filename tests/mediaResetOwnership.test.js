@@ -72,6 +72,23 @@ vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePla
 
 let Media, Wave, State, resetAudioProject, resetPlayerAdapter;
 
+async function observeElementCommits() {
+  const {AudioEngine}=await import('../src/audio-engine.js');
+  const original=AudioEngine.prepareElements.bind(AudioEngine),starts=vi.fn();
+  const prepare=vi.spyOn(AudioEngine,'prepareElements').mockImplementation((sourceTime,timelineTime,options)=>{
+    const plan=original(sourceTime,timelineTime,options),commit=plan.commit;
+    plan.commit=()=>{
+      const result=commit();
+      const record=started=>{if(started)starts(sourceTime,timelineTime);return started;};
+      return result?.then?result.then(record):record(result);
+    };
+    return plan;
+  });
+  const restore=starts.mockRestore.bind(starts);
+  starts.mockRestore=()=>{prepare.mockRestore();restore();};
+  return starts;
+}
+
 describe('reset-scoped media ownership', () => {
   it.each(['detach','cached-restore','desktop-restore','web-restore'])('%s 的真實載入入口保留反向二倍速音訊',async kind=>{
     resetAudioProject();
@@ -361,7 +378,8 @@ describe('reset-scoped media ownership', () => {
   it.each(['primary','secondary','external'])('late %s 原音cache只供還原，不能覆蓋已安裝effect與wave',async kind=>{
     resetAudioProject();Media.ensureCtx();
     const processing={max:-6,min:-12,inputBoost:0};
-    const processedPeaks=new Float32Array([0.05]),rawPeaks=new Float32Array([0.2]);
+    const processedPeaks=new Float32Array([0.05]),rawBytes=readyWave(10,8192);
+    const expectedRawPeaks=Wave.calcFromWav(rawBytes);
     let owner;
     if(kind==='external') owner=Media.createExternalAudioSource({name:'A.wav',path:'C:/A.wav',duration:10,fallbackCount:1,audioLimiterSpec:processing});
     else{
@@ -378,8 +396,7 @@ describe('reset-scoped media ownership', () => {
     desktopMock.fileURL.mockImplementation(path=>Promise.resolve('file:///'+path));
     const original={pause:vi.fn(),src:'raw.m4a'};
     const elements=vi.spyOn(Media._intakeSession,'materializeAudioElements').mockResolvedValue([original]);
-    const peaks=vi.spyOn(Wave,'calcFromWav').mockReturnValue(rawPeaks);
-    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:async()=>new ArrayBuffer(2)}));
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:async()=>rawBytes}));
     try{
       const pending=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],10,owner,{needsProxy:false})
         :kind==='secondary'?Media._clipIngest(owner,{audio:[{channels:1}]})
@@ -389,7 +406,10 @@ describe('reset-scoped media ownership', () => {
       expect(Media.tracks).toEqual([processed]);
       expect(processed.el.src).toBe('processed.wav');
       expect(owner.peaks).toBe(processedPeaks);
-      expect(Media._effectOriginalPeaks.get(owner.audioSourceId)).toBe(rawPeaks);
+      const rawPeaks=Media._effectOriginalPeaks.get(owner.audioSourceId);
+      expect(rawPeaks).toEqual(expectedRawPeaks);
+      expect(rawPeaks).toHaveLength(2000);
+      expect(rawPeaks[0]).toBe(-.25);expect(rawPeaks[1]).toBe(.25);
       expect(Media._effectOriginalTracks.get(owner.audioSourceId)[0]).toMatchObject({file:'raw.m4a',volume:0.4,solo:true});
       expect(Media._effectOriginalTracks.get(owner.audioSourceId)[0].gain.gain.value).toBe(0);
       Media._installAudioEffect(owner,null,null);
@@ -397,7 +417,36 @@ describe('reset-scoped media ownership', () => {
       expect(Media.tracks[0].file).toBe('raw.m4a');
       expect(Media.tracks[0]._audioEffect).not.toBe(true);
       expect(owner.peaks).toBe(rawPeaks);
-    }finally{elements.mockRestore();peaks.mockRestore();vi.unstubAllGlobals();}
+    }finally{elements.mockRestore();vi.unstubAllGlobals();}
+  });
+
+  it.each(['primary','secondary','external'])('%s 的長 WAV 整理期間可重設專案，不安裝舊峰值或啟動 fallback',async kind=>{
+    resetAudioProject();Media.ensureCtx();
+    const duration=600,bytes=readyWave(duration),previous=Float32Array.from([-.1,.1]);
+    const owner=kind==='external'
+      ?Media.createExternalAudioSource({name:'A.wav',path:'C:/A.wav',duration,fallbackCount:1})
+      :{id:'A',name:'A.mov',path:'C:/A.mov',dur:duration,in:0,out:duration,offset:0,vtrack:0,
+        primary:kind==='primary',audioSrc:kind==='primary'?'video':'clip:A',audioSourceId:'mother'};
+    if(kind!=='external')State.clips=[owner];
+    owner.peaks=previous;
+    desktopMock.ingest.mockResolvedValue({channels:[],wave:'long-wave.wav'});
+    desktopMock.fileURL.mockResolvedValue('file:///long-wave.wav');
+    const cancelled=deferred();let peaksAtCancel;
+    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>{
+      setTimeout(()=>{peaksAtCancel=owner.peaks;Media.reset();cancelled.resolve();},0);
+      return bytes;
+    }})));
+    const {AudioEngine}=await import('../src/audio-engine.js');
+    const fallback=vi.spyOn(AudioEngine,'decodeAudioData');
+    try{
+      const work=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],duration,owner,{needsProxy:false})
+        :kind==='secondary'?Media._clipIngest(owner,{audio:[{channels:1}]})
+          :Media.cacheExternalRoutingAudio(owner,owner.path,duration,[{channels:1}]);
+      await cancelled.promise;await work;
+      expect(peaksAtCancel===previous).toBe(true);
+      expect(owner.peaks===previous).toBe(true);
+      expect(fallback).not.toHaveBeenCalled();
+    }finally{fallback.mockRestore();vi.unstubAllGlobals();}
   });
 
   it.each(['primary','secondary'])('%s 的完成波形不等待播放聲道 metadata 才顯示',async kind=>{
@@ -448,6 +497,79 @@ describe('reset-scoped media ownership', () => {
       gate.resolve({channels:[]});await work;vi.unstubAllGlobals();
       delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
     }
+  });
+
+  it.each(['primary','secondary'])('%s 連續波形完成前逐步顯示，正式保存後才開始 Proxy',async kind=>{
+    resetAudioProject();Media.ensureCtx();
+    const owner={id:'continuous-wave',name:'A.mov',path:'C:/A.mov',dur:2,in:0,out:2,offset:0,vtrack:0,
+      primary:kind==='primary',audioSrc:kind==='primary'?'video':'clip:continuous-wave',audioSourceId:'continuous-wave'};
+    State.clips=[owner];desktopMock.sourceWaveformContinuous=true;
+    const gate=deferred();desktopMock.prepareSourceWaveform=vi.fn().mockReturnValue(gate.promise);
+    desktopMock.ingest.mockResolvedValue({channels:[]});
+    const {MediaIntakeJobs}=await import('../src/media-intake-jobs.js');
+    const key='a'.repeat(16),peaks=Float32Array.from({length:200},(_,i)=>i%2?.5:-.25);
+    const work=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],2,owner)
+      :Media._clipIngest(owner,{audio:[{channels:1}]});
+    try{
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce());
+      const request=desktopMock.prepareSourceWaveform.mock.calls[0][0];expect(request.continuous).toBe(true);
+      const data={sourceKey:key,startSample:0,completedSamples:4000,totalSamples:8000,sampleRate:4000,resolution:100,peaks};
+      MediaIntakeJobs.progress({...request,stage:'source-waveform',pct:50,waveform:data});
+      expect(owner.peaks).toEqual(peaks);expect(desktopMock.ingest).not.toHaveBeenCalled();
+      MediaIntakeJobs.progress({...request,stage:'source-waveform',pct:100,waveform:{...data,startSample:4000,completedSamples:8000}});
+      expect(owner.peaks).toHaveLength(400);expect(desktopMock.ingest).not.toHaveBeenCalled();
+      gate.resolve({wave:'shared/wave.wav',temporary:false,start:0,duration:2,complete:true,sourceKey:key});
+      await work;expect(desktopMock.ingest).toHaveBeenCalledOnce();
+      expect(Wave._sourceState(owner,false)?.mix.path).toBe('shared/wave.wav');
+      expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce();
+    }finally{
+      gate.resolve({});await work;delete desktopMock.prepareSourceWaveform;delete desktopMock.sourceWaveformContinuous;
+    }
+  });
+
+  it('最後一批波形已顯示但尚未完成時取消，重試仍等待持久 WAV 證據',async()=>{
+    resetAudioProject();Media.ensureCtx();
+    const owner={id:'cancel-full-wave',name:'A.mov',path:'C:/A.mov',dur:2,in:0,out:2,offset:0,vtrack:0,
+      primary:true,audioSrc:'video',audioSourceId:'cancel-full-wave'};
+    State.clips=[owner];desktopMock.sourceWaveformContinuous=true;
+    const first=deferred(),second=deferred();
+    desktopMock.prepareSourceWaveform=vi.fn().mockReturnValueOnce(first.promise).mockReturnValue(second.promise);
+    desktopMock.ingest.mockResolvedValue({channels:[]});
+    const {MediaIntakeJobs}=await import('../src/media-intake-jobs.js');
+    const key='a'.repeat(16),peaks=Float32Array.from({length:400},(_,i)=>i%2?.5:-.25);
+    const data={sourceKey:key,startSample:0,completedSamples:8000,totalSamples:8000,sampleRate:4000,resolution:100,peaks};
+    const work=Media._bgAudioIngest(owner.path,[{channels:1}],2,owner);
+    let retry;
+    try{
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce());
+      MediaIntakeJobs.progress({...desktopMock.prepareSourceWaveform.mock.calls[0][0],stage:'source-waveform',pct:100,waveform:data});
+      expect(owner.peaks).toHaveLength(400);expect(desktopMock.ingest).not.toHaveBeenCalled();
+      await Media.cancelProxyJobs();await work;
+      retry=Media._bgAudioIngest(owner.path,[{channels:1}],2,owner);
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(2));
+      expect(desktopMock.ingest).not.toHaveBeenCalled();
+      MediaIntakeJobs.progress({...desktopMock.prepareSourceWaveform.mock.calls[1][0],stage:'source-waveform',pct:100,waveform:data});
+      second.resolve({wave:'shared/wave.wav',temporary:false,start:0,duration:2,complete:true,sourceKey:key});
+      await retry;expect(desktopMock.ingest).toHaveBeenCalledOnce();
+      expect(Wave._sourceState(owner,false)?.mix.path).toBe('shared/wave.wav');
+    }finally{
+      first.resolve({});second.resolve({});await retry;
+      delete desktopMock.prepareSourceWaveform;delete desktopMock.sourceWaveformContinuous;
+    }
+  });
+
+  it.each(['primary','secondary'])('%s 連續波形保存失敗時不接著啟動 Proxy',async kind=>{
+    resetAudioProject();Media.ensureCtx();
+    const owner={id:'failed-continuous',name:'A.mov',path:'C:/A.mov',dur:2,in:0,out:2,offset:0,vtrack:0,
+      primary:kind==='primary',audioSrc:kind==='primary'?'video':'clip:failed-continuous',audioSourceId:'failed-continuous'};
+    State.clips=[owner];desktopMock.sourceWaveformContinuous=true;
+    desktopMock.prepareSourceWaveform=vi.fn().mockRejectedValue(new Error('checkpoint write failed'));
+    const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    try{
+      if(kind==='primary')await Media._bgAudioIngest(owner.path,[{channels:1}],2,owner);
+      else await Media._clipIngest(owner,{audio:[{channels:1}]});
+      expect(desktopMock.ingest).not.toHaveBeenCalled();expect(owner.peaks).toBeFalsy();
+    }finally{warn.mockRestore();delete desktopMock.prepareSourceWaveform;delete desktopMock.sourceWaveformContinuous;}
   });
 
   it.each(['complete','short'])('正式來源波形遇短快取時重建：%s',async mode=>{
@@ -678,7 +800,7 @@ describe('reset-scoped media ownership', () => {
       const gate=deferred(),read=vi.fn().mockReturnValue(gate.promise);
       vi.stubGlobal('fetch',vi.fn().mockResolvedValue({arrayBuffer:read}));
       const audio=vi.spyOn(Media._intakeSession,'materializeAudioElements').mockResolvedValue([]);
-      const parse=vi.spyOn(Wave,'calcFromWav');
+      const parse=vi.spyOn(Wave,'calcFromWavAsync');
       const work=kind==='primary'?Media._bgAudioIngest(owner.path,[{channels:1}],1,owner)
         :Media._clipIngest(owner,{audio:[{channels:1}]});
       try{
@@ -1476,7 +1598,7 @@ describe('reset-scoped media ownership', () => {
     State.clips=[first,next];State.duration=6;
     Media.activeClipId=first.id;Media.playing=true;
     domMock.video.src=first.web.url;domMock.video.currentTime=1;domMock.video.readyState=1;
-    const playback=deferred(),start=vi.spyOn(Media._audioRouter,'startElementSources');
+    const playback=deferred(),start=await observeElementCommits();
     domMock.video.play.mockReturnValueOnce(playback.promise);
     const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
     try{
@@ -1508,7 +1630,7 @@ describe('reset-scoped media ownership', () => {
       State.clips=clips;State.duration=6;Media.activeClipId=clips[0].id;Media.playing=true;
       domMock.video.src=clips[0].web.url;domMock.video.currentTime=1;domMock.video.readyState=1;
     };
-    const oldPlay=deferred(),newPlay=deferred(),start=vi.spyOn(Media._audioRouter,'startElementSources');
+    const oldPlay=deferred(),newPlay=deferred(),start=await observeElementCommits();
     const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
     domMock.video.play.mockReset();domMock.video.play.mockReturnValueOnce(oldPlay.promise).mockReturnValueOnce(newPlay.promise);
     try{

@@ -256,6 +256,7 @@ mpv 確認目前來源的連線中斷時，影片播放及等待中的呈現工�
 | HTML／mpv 來源原點與真實像素 | `webSourceClock.test.js`、`desktopAudioSourceClock.test.js` |
 | PCM 原點及實際聲音位置 | `decodedSourceAudioClock.test.js`、`decodedSourceAudioClockNative.test.js` |
 | seek／背景起播及聲音數量 | `mediaPlacementAudio.test.js`、`audioScrubOwnership.test.js` |
+| Proxy 聲道跳轉回音、共同就緒與取消 | `proxyAudioHandoffEcho.test.js`、`audioElementStartReadiness.test.js` |
 
 保留三支真實素材矩陣：`V_MAMAMOO_FTR_24fps_51FM.mov`、`V_拼桌_FTR_24FPS_51FM+20FM_30P.mxf`、`V_心機特務_FTR.mp4`。核對中尾段長距離 seek、單格及快速交替、長按、seek 後立即 play／pause、JKL 多倍率、倒帶回母素材，以及畫面、播放點與監看 TC 的持續漂移。
 

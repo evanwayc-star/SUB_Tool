@@ -47,7 +47,30 @@ function runtimeFor(root, profile, { execute, allowSidecarCache = true, sendProg
   return { runtime, run, authority, cacheRoot };
 }
 
+// These fixtures exercise previously published complete-content evidence. New
+// same-file publications deliberately have no SHA; seed the legacy record from
+// the actual test source before making a different-inode copy.
+function seedPortableContentEvidence(fixture) {
+  const sharedRoot = path.join(fixture.media, '.subtool_Cache');
+  if (!fs.existsSync(sharedRoot)) return;
+  const sourceContent = { format: 'source-v3-sha256', size: fs.statSync(fixture.source).size,
+    sha256: crypto.createHash('sha256').update(fs.readFileSync(fixture.source)).digest('hex') };
+  const visit = directory => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(file);
+      else if (entry.isFile() && entry.name.endsWith('.json')) {
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (raw.sourceContent?.format === 'source-v4-shared-file')
+          fs.writeFileSync(file, JSON.stringify({ ...raw, sourceContent }));
+      }
+    }
+  };
+  visit(sharedRoot);
+}
+
 function transfer(fixture) {
+  seedPortableContentEvidence(fixture);
   const media = path.join(fixture.root, 'computer-B', 'renamed-media-folder');
   fs.cpSync(fixture.media, media, { recursive: true });
   const source = path.join(media, 'mother.mxf');
@@ -401,7 +424,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
   });
 
   it.each(['ingest', 'stream'].flatMap(mode => [true, false].map(allowSidecarCache => ({ mode, allowSidecarCache }))))
-  ('$mode 已完成來源驗證後轉檔失敗，重開 sidecar=$allowSidecarCache 不重讀整份母素材', async ({ mode, allowSidecarCache }) => {
+  ('$mode 已完成來源證據後轉檔失敗，重開 sidecar=$allowSidecarCache 不重讀整份母素材', async ({ mode, allowSidecarCache }) => {
     const original = fixture(Buffer.alloc(4 * 1024 * 1024, 27));
     const open = fsp.open;
     let readBytes = 0;
@@ -418,14 +441,14 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const producer = runtimeFor(original.root, 'interrupted', { allowSidecarCache,
       execute: async () => { throw new Error('轉檔中斷'); } });
     await expect(producer.runtime[mode](request(original.source))).rejects.toThrow('轉檔中斷');
-    expect(readBytes).toBe(4 * 1024 * 1024);
+    expect(readBytes).toBe(allowSidecarCache ? 0 : 4 * 1024 * 1024);
     await producer.runtime.close();
     const reopened = runtimeFor(original.root, 'interrupted', { allowSidecarCache });
     await reopened.runtime.cleanOrphans();
     const work = await reopened.runtime[mode](request(original.source));
     if (work.completion) await work.completion;
     const result = work.response || work;
-    expect(readBytes).toBe(4 * 1024 * 1024);
+    expect(readBytes).toBe(allowSidecarCache ? 0 : 4 * 1024 * 1024);
     expect(reopened.run).toHaveBeenCalledOnce();
     expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
     if (mode === 'stream') reopened.runtime.releaseStream(result.streamLeaseId);
@@ -466,6 +489,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const original = fixture(Buffer.alloc(4 * 1024 * 1024, 30));
     const producer = runtimeFor(original.root, 'old-witness');
     const saved = await producer.runtime.ingest(request(original.source, [{ channels: 1 }]));
+    seedPortableContentEvidence(original);
     const key = cacheKeyFor(original.source), originalStat = fs.statSync(original.source);
     const receiptPath = path.join(cacheDir(saved.proxy), 'source-' + key + '.json');
     const previous = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
@@ -520,6 +544,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const original = fixture(Buffer.alloc(4 * 1024 * 1024, 31));
     const producer = runtimeFor(original.root, 'mismatched-witness-producer');
     const saved = await producer.runtime.ingest(request(original.source));
+    seedPortableContentEvidence(original);
     const receipt = path.join(cacheDir(saved.proxy), 'source-' + cacheKeyFor(original.source) + '.json');
     const raw = JSON.parse(fs.readFileSync(receipt, 'utf8'));
     expect(raw.sharedSourceKey).toMatch(/^[a-f0-9]{64}$/);
@@ -542,6 +567,12 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
 
   it('全文讀取後共享身分改變，不得被最佳努力收據寫入吞掉而繼續轉檔', async () => {
     const original = fixture(Buffer.alloc(4 * 1024 * 1024, 33));
+    // An unrelated old content receipt requires the full-content fallback.
+    const candidate = path.join(original.media, '.subtool_Cache', '0'.repeat(16));
+    fs.mkdirSync(candidate, { recursive: true });
+    fs.writeFileSync(path.join(candidate, 'source-' + '0'.repeat(16) + '.json'), JSON.stringify({
+      sourceKey: '0'.repeat(16), sourceContent: { format: 'source-v3-sha256', size: 4 * 1024 * 1024, sha256: '0'.repeat(64) },
+    }));
     const sourceFds = new Set(), openSync = fs.openSync, closeSync = fs.closeSync;
     const statSync = fs.statSync, fstatSync = fs.fstatSync, open = fsp.open;
     let changed = false;
@@ -943,6 +974,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const original = fixture();
     const first = runtimeFor(original.root, 'profile-A');
     const saved = await first.runtime.ingest(request(original.source, [{ channels: 1 }]));
+    seedPortableContentEvidence(original);
     const stored = JSON.parse(fs.readFileSync(metadata(saved.proxy), 'utf8'));
     expect(stored.sourceContent).toEqual({ format: 'source-v3-sha256', size: fs.statSync(original.source).size,
       sha256: crypto.createHash('sha256').update(fs.readFileSync(original.source)).digest('hex') });
@@ -965,10 +997,11 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     }
   });
 
-  it('同一共享資料夾的另一個路徑別名不另建 Proxy 或搬動已完成產物', async () => {
+  it('同一共享資料夾的另一份相同內容有完整 SHA 證據時不另建 Proxy 或搬動已完成產物', async () => {
     const original = fixture();
     const first = runtimeFor(original.root, 'profile-A');
     const saved = await first.runtime.ingest(request(original.source));
+    seedPortableContentEvidence(original);
     const alias = path.join(original.media, 'same-content-another-name.mxf');
     fs.copyFileSync(original.source, alias);
     const second = runtimeFor(original.root, 'profile-B');
@@ -1139,6 +1172,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const original = fixture();
     const first = runtimeFor(original.root, 'profile-A');
     const saved = await first.runtime.ingest(request(original.source));
+    seedPortableContentEvidence(original);
     const alias = path.join(original.media, 'shared-alias.mxf');
     fs.copyFileSync(original.source, alias);
     const aliasKey = cacheKeyFor(alias), metaPath = metadata(saved.proxy);

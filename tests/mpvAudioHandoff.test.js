@@ -20,7 +20,7 @@ describe('mpv 背景聲道接管',()=>{
     const sounds=[];
     let nativeMuted=false;
     class AudioElement extends EventTarget{
-      constructor(){super();this.src='';this.currentTime=0;this.duration=12;this.readyState=1;this.paused=true;this.playbackRate=1;}
+      constructor(){super();this.src='';this.currentTime=0;this.duration=12;this.readyState=4;this.paused=true;this.playbackRate=1;}
       play=vi.fn(async()=>{this.paused=false;sounds.push({nativeMuted,elementPlaying:true,time:this.currentTime});});
       pause=vi.fn(()=>{this.paused=true;});load=vi.fn();
     }

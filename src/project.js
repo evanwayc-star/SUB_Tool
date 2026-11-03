@@ -420,11 +420,14 @@ async function _autoSave(){
   if(IS_DESKTOP && DESK.writeProject && savePath){
     const dir=savePath.replace(/[^\\/]+$/,'');
     const autoSaveDir=dir+'.subtool_AutoSave/';
-    const res=await DESK.writeProject(autoSaveDir+name, bytesToB64(bytes)).catch(()=>null);
+    let res;
+    try{res=await DESK.writeProject(autoSaveDir+name, bytesToB64(bytes));}
+    catch{res=null;}
     // 已送出的舊備份安全完成；換專案或另存新路徑後不再回報到目前工作區。
     if(current()){
       if(res?.code==='PROJECT_DESTINATION_CHANGED') showToast('自動備份失敗：專案檔在儲存期間已變更，請另存新檔');
       else if(typeof res==='string'&&res) setStatus('自動備份：'+name,'ok');
+      else setStatus('自動備份失敗，請手動儲存專案','err');
     }
   } else {
     // Fix #2：瀏覽器版改用 localStorage 避免每 3 分鐘觸發下載干擾工作流

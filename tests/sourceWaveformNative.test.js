@@ -1,7 +1,7 @@
 // @subtool-ci windows
 import fs from 'node:fs';
 import path from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, getPriority, constants } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -51,8 +51,12 @@ it.skipIf(!fs.existsSync(ffmpeg)||!fs.existsSync(ffprobe)).each([
     '-f','lavfi','-i',audio,'-map','0:v:0','-map','1:a:0','-c:v','ffv1','-c:a','pcm_s16le',source]);
   const probe=createMediaProbe({executable:ffprobe});
   const execution=createFFmpegExecution({getFFmpegPath:()=>ffmpeg,getUserDataDir:()=>root});
+  const priorities=[];
   const runtime=createMediaIntakeRuntime({fileAuthority:new FileAuthority({internalDirectories:[root]}),
-    ffmpegExecution:execution,tempRoot:root,cacheRoot:cache,allowSidecarCache:false,
+    backgroundWaveforms:true,
+    ffmpegExecution:{execute:(args,options)=>execution.execute(args,{...options,onProcess:child=>{
+      options.onProcess?.(child);priorities.push(getPriority(child.pid));
+    }})},tempRoot:root,cacheRoot:cache,allowSidecarCache:false,
     describeAudio:async file=>(await probe.describe(file)).audio});
   try{
     const info=await probe.describe(source),start=60,length=duration-start;
@@ -65,6 +69,7 @@ it.skipIf(!fs.existsSync(ffmpeg)||!fs.existsSync(ffprobe)).each([
       expect(sourcePcm.every(value=>value===0)).toBe(true);
     }
     const segment=await runtime.waveform({src:source,duration,audio:info.audio,start,length});
+    expect(priorities).toEqual([constants.priority.PRIORITY_BELOW_NORMAL]);
     expect(segment).toMatchObject({cached:false,temporary:true,start,duration:length});
     const decoded=run(['-i',segment.wave,'-map','0:a:0','-ar','4000','-ac','1','-f','s16le','pipe:1']);
     const frames=decoded.length/2,expected=Math.round(length*4000);
@@ -83,6 +88,7 @@ it.skipIf(!fs.existsSync(ffmpeg)||!fs.existsSync(ffprobe)).each([
     await runtime.close();
     const encode=vi.fn((...args)=>execution.execute(...args));
     const reopened=createMediaIntakeRuntime({fileAuthority:new FileAuthority({internalDirectories:[root]}),
+      backgroundWaveforms:true,
       ffmpegExecution:{execute:encode},tempRoot:root,cacheRoot:cache,allowSidecarCache:false,
       describeAudio:async file=>(await probe.describe(file)).audio});
     try{

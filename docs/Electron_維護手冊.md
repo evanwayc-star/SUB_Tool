@@ -76,6 +76,8 @@ Preload 以 `webUtils.getPathForFile()` 從真正的 File 取得路徑。一般�
 
 Save As 的媒體路徑必須已有讀權。`createAtomicProjectWriter()` 同時持有目錄準備、私有暫存及發布；main 不先以遞迴 mkdir 準備 renderer 傳入的路徑。所選根目錄可以是掛載／連結位置，`.subtool_AutoSave` 及其子目錄則逐層核對實體目錄與 dev／ino，不沿連結寫到其他位置。每筆工作等同目標前一筆完成後，透過實際開啟的 handle 分塊讀取目的檔，核對讀前後身分及路徑，記錄完整內容雜湊。暫存放在所選實體根，完成 write／sync／close 後重核目錄、目的檔與暫存的身分及內容，才 rename；寫入期間目的檔新增、移除、替換或內容改變時拒絕發布，保留既有目的檔。未完成寫入時只清理仍符預留證據的空暫存，無法區分來源的部分資料予以保留。檢查與 rename 仍是分離的系統呼叫。
 
+SMB 儲存可能在 writer 關閉時才更新 mtime／ctime。關檔後先確認暫存仍是原 dev／ino、mode 與長度，再透過唯讀 handle 核對完整預期 SHA 及讀前後快照；全部吻合後，以這份關閉後快照作為發布及清理的依據。後續仍嚴格比對時間戳與完整內容，因此正常關檔不會被誤判成外部改寫，同 inode 的內容變更仍會拒絕發布並保留暫存。自動備份收到失敗或未知回覆時，只有仍屬原工作區及儲存路徑才在狀態列提示失敗，不將晚到結果回報到新專案。
+
 原專案儲存與自動備份沿用可信開檔／另存當時的父目錄身分，不能在下一次寫入時把同名替代目錄重新認成原根。備份根重疊時先選最具體的資格再核對，子根失效不能退回祖先資格。原生另存取得新的明確選擇後才建立新資格；writer 在準備、等待後與發布前都重核該資格，不能只依路徑字串或 `canWriteProject()` 的一次布林結果。
 
 路徑准入依呼叫順序非同步定位，再以實體父目錄與檔名排同目標 FIFO；既有目標的 Windows 8.3 短檔名也先解析為同一個實際目錄項，連結與身分不一致時拒絕，避免別名與原路徑讓較舊內容晚到覆蓋。準入及最後發布依同一順序交易，避免本程序的 rename 在別名解析中途換掉檔案；不同已准入目標仍可並行寫入。最後內容與身分核對、rename 及清理沒有 JavaScript await 缺口，雜湊以有界分塊讀取，但非常大的目的檔會同步占用主程序；這是多次檔案系統呼叫的身分核對，不是 OS 級目錄 handle 的原子沙箱。成功才更新目前專案、重連與近期清單。最近項目以穩定 token 開啟，清單重排不改變原點選目標；清除後 token 失效。重連只接受同名一般檔案，不把目錄當媒體。
@@ -270,13 +272,17 @@ Callback 包裝不把 Electron event 交給頁面。部分 API 替換舊 listene
 
 Runtime 接受 probe 結果，建立 720p 預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。
 
-`ffmpeg:prepareSourceWaveform` 優先供應來源波形，使用獨立 coordinator 與相同 session／request 取消契約，退出時也等待程序 close。有效的既有完整波形或已完成片段可直接沿用，無須等 Proxy；沒有相符證據時才解碼已授權的母素材。Renderer 首段請求 5 秒，第二段補到來源 60 秒，其後每段最多 60 秒，讓大檔先顯示開頭波形。Native 依共用來源時鐘與音訊混合規則輸出 4000 Hz Mono、16-bit PCM，前後核對來源及暫存檔身分。FFmpeg 透過持有的檔案描述元寫入 WAV，並比對預留檔案與開啟檔案的身分，避免路徑被替換時覆寫新物件。輸出先重採樣至最終取樣率，再依請求時長換算的整數 sample 數補靜音及裁切，避免容器時基較粗時極短尾段被時間式裁切成空檔。Renderer 檢查 PCM 長度、容許一個取樣的時長捨入誤差，舊快取不足時不刪原檔，改從母素材重建；重建仍不足則不發布。一般多音軌混音的較短音軌仍可補零。
+`ffmpeg:prepareSourceWaveform` 優先供應來源波形，使用獨立 coordinator 與相同 session／request 取消契約，退出時也等待程序 close。桌面 bridge 以 `sourceWaveformContinuous` 宣告連續處理能力，renderer 傳 `continuous:true`、整份來源時長及音訊配置，不能同時傳分段範圍。有效完整波形可直接沿用；沒有時由一次 FFmpeg 連續解碼成 4000 Hz Mono、16-bit PCM，經有背壓的 stdout 交給 worker。混音、來源時鐘與尾端整數 sample 補零／裁切沿用既有規則。低優先序、單 decoder／filter thread 及隱藏 console 不改變音訊內容或取消關閉屏障。
 
-`source-waveform-cache.js` 在每段完成後，將規格、PCM 及其 SHA-256 原子保存為 `.subtool_Cache/<key>/source-waveforms/*.swc`；側車不可寫時沿用中央快取退路。規格包含來源證據、混音／時鐘版本、聲道配置、來源起點與長度。讀取核對單檔內容雜湊、PCM 格式及精確 sample 數，交給 renderer 的仍是本工作擁有的私有副本；單次 consumer 清理不刪持久片段。取消 Proxy、退出或啟動孤兒清理均保留已完成片段，下次只解碼缺少的區段。這條波形路徑不讀整份母素材 SHA-256，也不替 Proxy 或逐聲道快取作完整來源認證。
+`continuous-waveform-cache.js` 在 `.subtool_Cache/<key>/continuous-waveforms/<規格與工作識別>/` 保存一個 `partial.wav` 與原子更新的 `checkpoint.json`。每五秒來源 PCM 寫入並同步保存後，才把該範圍的峰值交給 renderer；未提交的尾端不算已完成。完成時核對全部樣本與 SHA-256，關閉 writer、重核同一檔案，原子改名為 `wave.wav` 並發布完成紀錄；Proxy intake 沿用這份波形，不再次產生混音 WAV。側車不可寫時沿用中央快取退路；這不把本機退路宣稱為跨電腦共享。
+
+保存規格綁定共享來源證據、混音／時鐘版本、音訊配置及總 sample 數。新工作核對已保存前綴的完整 SHA-256，再複製到自己的 writer 世代；不接管或覆寫另一台電腦的 writer。續算先從完成點前的短範圍解碼並逐樣本比對接點；若 decoder／resampler 的歷史造成不一致，回到來源起點核對既有前綴後再追加，不能拼接錯位 PCM。因而不同格式的續算成本可能不同。取消、正常退出或程序中斷均保留已提交進度，啟動孤兒清理也保留；使用者明確清除全部快取時仍依既有語意清除，並等待在途 writer 收尾。所有完整內容驗證與有界 PCM 讀寫都在 worker，波形證據不替 Proxy 或逐聲道快取作整份母素材認證。
+
+舊 bridge 的分段 interface 與 `source-waveform-cache.js` 保留相容：首段 5 秒、第二段補到 60 秒，後續每段最多 60 秒，以 `.swc` 保存完成片段及其 SHA-256。新連續工作不再按分鐘建立 `.swc`；既有完整 ingest 波形仍可直接重用。清理私有交接檔不能刪除持久的分段或連續波形。
 
 來源 MIX 波形的每個原始聲道等權，跨 stream 合併時依全部聲道總數平均；較短 stream 的尾端視為靜音，不隨剩餘 stream 數量重新正規化。正式快取以 `waveMixVersion` 標示此規格；缺少標記的多 stream 舊波形不再沿用，但保留原檔、Proxy 與逐聲道，優先波形可先從母素材產生，正式 intake 只補建缺少的波形成品。已知聲道配置完整的單 stream 舊波形可繼續使用；聲道識別缺失、重複或不連續時，即使帶版本標記也不能把波形當作已證明的新規格。各 publication 依自己的配置獨立核對。
 
-Renderer 在可用主素材註冊後啟動波形；mpv 背景 intake 與無 mpv 的串流退路都先完成同來源優先波形，再開始 Proxy 的來源驗證與轉檔。無 mpv 時先顯示獨立唯讀來源波形，不提早提交正式片段。同一來源的切片共用準備工作。每段讀完即發布已完成來源範圍的峰值並回收私有副本，未讀尾端不填成靜音。外層工作顯示累積百分比，單段結束不表示整份素材完成；段與段的來源 key 必須相同，換檔或失敗只撤回仍屬本輪的部分結果。
+Renderer 在可用主素材註冊後啟動波形；mpv 背景 intake 與無 mpv 的串流退路都先完成同來源優先波形，再開始 Proxy 的來源驗證與轉檔。無 mpv 時先顯示獨立唯讀來源波形，不提早提交正式片段。同一來源的切片共用準備工作。`MediaIntakeJobs` 只把增量峰值交給仍持有同一 session／request 的 consumer，不把大批峰值留在狀態列快照；`source-waveform-progress.js` 核對連續 sample、100 Hz 桶界線、總長度及來源 key，換檔或失敗只撤回仍屬本輪的結果。已顯示全片峰值仍須等 WAV 正式保存成功，才能啟動 Proxy；連續波形保存失敗時保留可續算成果並回報，不接著啟動重轉檔。
 
 來源波形私有檔交接後，主程序保留原檔與父目錄身分，跨 IPC 清理前重核；失權或已刪除的路徑保留撤銷紀錄，同一 runtime 不重用該名稱。退出前另核對啟動時的暫存根；根或波形所有權無法確認、writer 尚未關閉時，保留整個暫存根，不遞迴清理。正常情況仍回收私有暫存；身分檢查與刪除不是作業系統的原子操作。
 
@@ -288,11 +294,11 @@ Renderer 在可用主素材註冊後啟動波形；mpv 背景 intake 與無 mpv 
 
 來源證據包含完整路徑、size／mtime／ctime／dev／ino 及前／中／尾段取樣。讀取前後核對檔案身分，來源途中替換或截斷即拒絕。這不是整檔 checksum，也不授權路徑。各 owner 仍持有自己的 namespace、規格與 capability／realpath 檢查；`source-v3` 隔離未依影片時鐘對齊的舊 intake。
 
-跨電腦重用保留上述本機 key 與原快取目錄，完成紀錄保存可攜來源證據 `sourceContent`（`source-v3-sha256`、size、完整內容 SHA-256）及已驗證的 `sourceKeys`。`portableSourceFingerprint()` 以固定 1 MiB buffer 非同步讀完整母素材，讀前後核對 handle 與路徑身分，逐段檢查取消，並回報實際已讀 bytes／總 bytes；完成身分核對後才回報驗證 100%。不能把原本的取樣 key 改成只看檔名或部分內容。
+快取保留本機 key 與原目錄，完成紀錄的 `sourceContent` 以 `format` 區分兩種證據：`source-v4-shared-file` 保存 size 與 `sharedSourceKey`，只確認同一份檔案；既有 `source-v3-sha256` 保存 size 與完整內容 SHA-256，可確認不同複製檔的完整內容相等。兩種格式不得混合或用共享指紋填入 sha256。紀錄另保存已驗證的 `sourceKeys`。必須比較跨檔案內容時，`portableSourceFingerprint()` 以固定 1 MiB buffer 非同步讀完整母素材，讀前後核對 handle 與路徑身分，逐段檢查取消，並回報實際已讀 bytes／總 bytes；完成身分核對後才回報驗證 100%。
 
-每個 writer 在自己的 `generation-<隨機識別>/cache-meta.json` 原子發布完成紀錄，這才是真正提交點；根目錄 `meta.json` 只供相容索引使用，寫入失敗不撤銷已完成產物。完整來源驗證一完成就獨立保存 `source-<本機 key>.json` receipt，不等轉檔，也不回寫整份產物索引。只有 receipt 代表來源驗證完成，不能假報 Proxy、聲道或完整波形已完成；之後轉檔失敗或取消，重開仍可沿用來源證據。讀取由同一 owner 合併相同母素材及相容聲道配置的完成元件，避免較晚的 writer 或身分補記抹掉另一行程剛補齊的音訊；不以遠端 PID 或逾時搶鎖判定跨電腦所有權。只有既有 `meta.json` 的舊快取仍可讀取。
+每個 writer 在自己的 `generation-<隨機識別>/cache-meta.json` 原子發布完成紀錄，這才是真正提交點；根目錄 `meta.json` 只供相容索引使用，寫入失敗不撤銷已完成產物。來源證據一完成就獨立保存 `source-<本機 key>.json` receipt，不等轉檔，也不回寫整份產物索引。只有 receipt 代表該格式的來源核對完成，不能假報 Proxy、聲道或完整波形已完成；之後轉檔失敗或取消，重開仍可沿用來源證據。讀取由同一 owner 合併同格式、相同來源證據及相容聲道配置的完成元件，避免較晚的 writer 或身分補記抹掉另一行程剛補齊的音訊；不以遠端 PID 或逾時搶鎖判定跨電腦所有權。只有既有 `meta.json` 的舊快取仍可讀取。
 
-同一 NAS 檔案另以 `sharedSourceFingerprintSync()` 識別：canonical UNC 的 server／share、檔名、size、inode、mtime／ctime／birthtime 的完整奈秒值及前／中／尾取樣共同雜湊，排除 client 的 dev 與掛載路徑；讀取起訖仍核對本次 handle、路徑與完整本機身分。這份共享證據僅在相鄰 sidecar 使用：波形片段可直接共用；Proxy 必須另有同一來源 snapshot 綁定的完整 SHA-256 receipt，且與採用的完成紀錄相符，才能省略全文重讀。來源、目錄或共享證據失效不能被最佳努力的 receipt 寫入吞掉。複製檔、其他 share、缺少可靠檔案 ID／時間戳或舊收據均回退完整驗證；既有相符 Proxy 仍可在驗證後直接重用。無法解析成 UNC 的掛載路徑只在同主機／裝置範圍共享，不猜測跨平台別名。它是檔案新鮮度證據，不能宣稱偵測到保留全部檔案身分與時間戳、只改未取樣區域的外部修改。
+同一 NAS 檔案以 `sharedSourceFingerprintSync()` 識別：canonical UNC 的 server／share、檔名、size、inode、mtime／ctime／birthtime 的完整奈秒值及前／中／尾取樣共同雜湊，排除 client 的 dev 與掛載路徑；讀取起訖仍核對本次 handle、路徑與完整本機身分。波形片段可直接共用；Proxy 首次在可寫的相鄰 sidecar 建立時，若沒有待驗證的其他來源候選，便使用共享檔案證據，不先全文讀取母素材。不同電腦／掛載路徑只可在相鄰 sidecar 以同一共享證據沿用產物；退到中央快取的副本另須符合本機 strict key。讀取、補建、重試、metadata 發布與交接都重核共享身分，不能只以本機 key 代替奈秒時間戳；來源或目錄失效不能被最佳努力的 receipt 寫入吞掉。複製檔、其他 share 或缺少可靠檔案 ID／時間戳時回退完整驗證；只有 SHA 型舊完成紀錄能依完整內容相等沿用，單有 shared-file 紀錄則重建。無法解析成 UNC 的掛載路徑只在同主機／裝置範圍共享，不猜測跨平台別名。共享證據不是全文 checksum，不能宣稱偵測到保留全部檔案身分與時間戳、只改未取樣區域的外部修改。
 
 Runtime 只在既有 sidecar／中央快取根目錄內搜尋可攜 metadata；相符內容才沿用原 generation，磁碟代號、檔案時間或裝置差異不影響內容相等。已確認的本機 key 可免重讀全文；已綁定本機來源但缺少元件時也沿用既有內容證據，只補缺件。唯讀快取無法補記 key 時仍可讀，下次再驗證。完整的舊 metadata 在原本機 key 仍命中時直接交付，不為升級跨機識別阻塞讀取；無證據的外來舊快取不能猜認。處理期間仍核對凍結的本機 key，且沿用原本的色彩版本、聲道完整性與路徑圍堵檢查。
 
@@ -362,6 +368,10 @@ Direct 與交付佇列的每次執行都以獨立隨機名稱及 `wx` 建立記�
 Intake 進度以 `stage` 區分快取檢查、母素材內容驗證與轉檔；未知分母使用 `pct:null`，不補造百分比，切換階段時重設剩餘時間估算。Renderer 的 `MediaIntakeJobs` 也持有本機波形準備工作，其取消與晚到結果同樣受 session／request 歸屬限制；波形讀取及整理與聲道 metadata 載入並行。狀態列保留仍持有的背景進度，一般訊息及播放操作不能覆蓋；錯誤仍可提示，匯出的進度鎖優先，解鎖後恢復目前背景工作。
 
 同來源先完成優先波形，再顯示 Proxy 驗證或轉檔進度；若不同來源的背景工作同時存在，狀態列仍能並排顯示各自階段及百分比。完整標籤、容量及各自估計時間保留在 tooltip 與無障礙狀態文字，狹窄空間保留取消按鈕。
+
+優先波形的 NAS 路徑、來源與 PCM 驗證由 `source-waveform-worker.js`／`source-waveform-task.js` 移到 worker thread，仍使用同一 intake runtime 的檢查。主程序持有排程、probe 與 FFmpeg writer，逐批 PCM 等 worker 保存及回覆後才繼續讀取；取消須等 native close、worker 退出及交接收尾。工作在第一次 await 前登記；清快取依開始順序等待，不與 worker 的讀寫交錯。來源的完整取樣指紋在開始與交接邊界核對，逐批寫入只查來源 stat 與 writer 身分，避免每批重讀 NAS 來源。完成通知及其 microtask 後再核對來源、目錄、檔案身分與內容時間戳，失權不刪除外來替代檔。
+
+波形 FFmpeg 限制輸入 decoder 與 complex filter 的平行度，並對有效子程序 PID 設定低於一般的排程優先序；不降低 Electron 本身或交付作業的優先序。這些設定讓出背景運算資源，並非 CPU／磁碟使用量的硬上限。所有子程序仍隱藏 console，失敗或取消維持原生關閉屏障。
 
 Execution 的編碼完成不等於交付完成；封裝、內容驗證、成品發布及 lease 清理仍由 artifact／watchdog 裁定。取消不發布假成功。
 

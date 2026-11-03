@@ -331,7 +331,8 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
   it.each([0,1])('原生雙聲道 Stream%s 快取晚到仍保留效果正播與反轉來源，還原才接回原音快取',async sourceStream=>{
     const originalCache=deferred(),originalWave=deferred();
     class AudioAdapter {
-      constructor(){this.readyState=1;this.duration=12;this.paused=true;this.src='';this.currentTime=0;this.volume=1;
+      // 此 fixture 立即提供可播放的 PCM；沒有另外排程 canplay。
+      constructor(){this.readyState=4;this.duration=12;this.paused=true;this.src='';this.currentTime=0;this.volume=1;
         this.play=vi.fn(()=>{this.paused=false;return Promise.resolve();});}
       addEventListener(){} removeEventListener(){} pause(){this.paused=true;} load(){}
     }

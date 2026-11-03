@@ -128,7 +128,11 @@ export class MediaAudioRouter {
   }
 
   startElementSources(localT, tlT) {
-    AudioEngine.startElements(localT, tlT);
+    return AudioEngine.startElements(localT, tlT);
+  }
+
+  prepareElementSources(localT,tlT,options) {
+    return AudioEngine.prepareElements(localT,tlT,options);
   }
 
   stopElementSources() {

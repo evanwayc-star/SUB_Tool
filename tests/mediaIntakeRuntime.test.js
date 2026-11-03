@@ -1044,7 +1044,7 @@ describe('native media intake runtime', () => {
     expect(JSON.parse(fs.readFileSync(path.join(cacheDirectory(first.proxy), 'meta.json'), 'utf8')))
       .toEqual({ proxy: path.relative(cacheDirectory(first.proxy), first.proxy).split(path.sep).join('/'), wave: null, channels: [], publicationVersion: 1,
         artifactSizes: { [path.relative(cacheDirectory(first.proxy), first.proxy).split(path.sep).join('/')]: Buffer.byteLength('proxy bytes') },
-        sourceContent: { format: 'source-v3-sha256', size: fs.statSync(source).size, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        sourceContent: { format: 'source-v4-shared-file', size: fs.statSync(source).size, sharedSourceKey: expect.stringMatching(/^[a-f0-9]{64}$/) },
         sourceKeys: [cacheKeyFor(source)] });
     expect(second).toEqual({ ...first, cached: true });
     expect(spawnCount).toBe(1);

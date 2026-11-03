@@ -8,9 +8,36 @@ function fixture(){
   const bridge={fileURL:vi.fn(async()=> 'url'),cleanupAudio:vi.fn(async()=>{}),mediaSourceKey:vi.fn(async()=>key)};
   const changed=vi.fn(),decode=vi.fn(()=>Float32Array.from([-.5,.5]));
   const owner=createProvisionalSourceWaveform({jobs,bridge,decode,read:async()=>new ArrayBuffer(1),changed,resolution:1});
-  return {jobs,bridge,changed,owner};
+  return {jobs,bridge,changed,decode,owner};
 }
 describe('獨立來源波形交接',()=>{
+  it('連續工作只啟動一次，完成前已顯示保存的峰值，完成後不重讀 WAV',async()=>{
+    const f=fixture(),gate=deferred();let send;
+    f.bridge.sourceWaveformContinuous=true;
+    f.jobs.prepareSourceWaveform.mockImplementation((request,onWaveform)=>{send=onWaveform;return gate.promise;});
+    const entry=f.owner.begin({path:'A',name:'A',audio:[{channels:1}],duration:2,owns:()=>true});
+    await vi.waitFor(()=>expect(send).toBeTypeOf('function'));
+    const event={sourceKey:key,startSample:0,completedSamples:4000,totalSamples:8000,sampleRate:4000,resolution:1,peaks:new Float32Array([-.25,.5])};
+    send(event);expect(f.owner.snapshot().peaks).toEqual(event.peaks);
+    expect(f.jobs.prepareSourceWaveform).toHaveBeenCalledWith({path:'A',audio:[{channels:1}],duration:2,continuous:true},expect.any(Function));
+    send({...event,startSample:4000,completedSamples:8000});
+    gate.resolve({wave:'shared/wave.wav',sourceKey:key,start:0,duration:2,complete:true,temporary:false});
+    await entry.finished;expect(f.jobs.prepareSourceWaveform).toHaveBeenCalledOnce();
+    expect(f.owner.snapshot().peaks).toHaveLength(4);expect(f.decode).not.toHaveBeenCalled();
+    expect(f.bridge.cleanupAudio).not.toHaveBeenCalled();entry.cancel();
+  });
+  it('連續工作取消後的進度不能重新顯示，完成來源不一致時撤回已顯示波形',async()=>{
+    const f=fixture(),gate=deferred();let send;f.bridge.sourceWaveformContinuous=true;
+    f.jobs.prepareSourceWaveform.mockImplementation((_request,onWaveform)=>{send=onWaveform;return gate.promise;});
+    const entry=f.owner.begin({path:'A',name:'A',audio:[{channels:1}],duration:2,owns:()=>true});
+    await vi.waitFor(()=>expect(send).toBeTypeOf('function'));
+    send({sourceKey:key,startSample:0,completedSamples:4000,totalSamples:8000,sampleRate:4000,resolution:1,peaks:new Float32Array([-.25,.5])});
+    expect(f.owner.snapshot()).not.toBeNull();
+    gate.resolve({wave:'other.wav',sourceKey:'b'.repeat(16),start:0,duration:2,complete:true});
+    await entry.finished;expect(f.owner.snapshot()).toBeNull();
+    send({sourceKey:key,startSample:4000,completedSamples:8000,totalSamples:8000,sampleRate:4000,resolution:1,peaks:new Float32Array([-.25,.5])});
+    expect(f.owner.snapshot()).toBeNull();
+  });
   it('母素材波形可在串流未完成時讀取，交接時重核同一來源證據',async()=>{
     const f=fixture(),entry=f.owner.begin({path:'A',name:'A',audio:[{channels:1}],duration:1,owns:()=>true});
     await entry.finished;
@@ -39,6 +66,21 @@ describe('獨立來源波形交接',()=>{
     const next=f.owner.begin({path:'B',name:'B',audio:[{channels:1}],duration:1,owns:()=>true});await next.finished;
     gate.resolve({wave:'old-wave',sourceKey:key,start:0,duration:1,temporary:true});await old.finished;
     expect(f.bridge.cleanupAudio).toHaveBeenCalledWith('old-wave');expect(f.owner.snapshot().name).toBe('B');
+    next.cancel();
+  });
+  it('解碼讓出期間新來源接手，舊解碼晚到只清理自己的 WAV',async()=>{
+    const f=fixture(),gate=deferred();
+    f.jobs.prepareSourceWaveform.mockResolvedValueOnce({wave:'old-wave',sourceKey:key,start:0,duration:1,temporary:true});
+    f.decode.mockReturnValueOnce(gate.promise);
+    const old=f.owner.begin({path:'A',name:'A',audio:[{channels:1}],duration:1,owns:()=>true});
+    await vi.waitFor(()=>expect(f.decode).toHaveBeenCalledOnce());
+    const oldOwns=f.decode.mock.calls[0][2].owns;
+    const next=f.owner.begin({path:'B',name:'B',audio:[{channels:1}],duration:1,owns:()=>true});
+    await next.finished;expect(oldOwns()).toBe(false);
+    gate.resolve(Float32Array.from([-.9,.9]));await old.finished;
+    expect(f.owner.snapshot()).toMatchObject({name:'B',peaks:Float32Array.from([-.5,.5])});
+    expect(f.bridge.cleanupAudio.mock.calls.filter(([path])=>path==='old-wave')).toHaveLength(1);
+    expect(f.jobs.prepareSourceWaveform).toHaveBeenCalledTimes(2);
     next.cancel();
   });
   it('交接等待首段期間取消，無須等待 native 完成即可撤銷交接並在晚到後清理',async()=>{

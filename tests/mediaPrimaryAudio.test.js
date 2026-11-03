@@ -717,7 +717,7 @@ it('一般媒體入口 lazy import 尚未完成就換專案，不能再啟動舊
 describe('反向音訊來源準備與替換',()=>{
  let timelineClock,sourceClock;
  beforeEach(()=>{
-  globalThis.Audio.prototype.readyState=1;
+  globalThis.Audio.prototype.readyState=4;
   window.subtool.reverseAudio=vi.fn(async({path,in:start,out:end})=>({path:path+'.reverse.wav',duration:end-start}));
   timelineClock=vi.spyOn(Media,'tlTime').mockReturnValue(20.5);sourceClock=vi.spyOn(Media,'vTime').mockReturnValue(3);
  });

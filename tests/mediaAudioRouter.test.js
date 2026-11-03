@@ -80,9 +80,12 @@ describe('MediaAudioRouter buffer drift clock', () => {
 
   it('calibrates external element tracks against externalAudio.sourceTime instead of global timeline time', () => {
     const el = {
+      src: 'file:///external.wav',
+      readyState: 4,
       paused: false,
       currentTime: 5.0,
-      pause: vi.fn(),
+      pause: vi.fn(function(){this.paused=true;}),
+      play: vi.fn(function(){this.paused=false;return Promise.resolve();}),
     };
     const track = {
       kind: 'element',
@@ -92,6 +95,8 @@ describe('MediaAudioRouter buffer drift clock', () => {
     };
     let tlTime = 1385; // 23:05 on timeline
     const media = {
+      _srcLocalT: (_source,time) => time,
+      audioSourceRate: () => 1,
       tracks: [track],
       playing: true,
       activeSource: 'video',

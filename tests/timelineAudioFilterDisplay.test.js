@@ -26,6 +26,43 @@ describe('時間軸音訊濾鏡標記與波形圖繪製', () => {
     expect(peaks[1]).toBeCloseTo(.5);
     expect(peaks[101]).toBeCloseTo(.25);
   });
+  it('協作解碼在完成長波形前讓出 task，且每個峰值與同步解碼完全相同',async()=>{
+    const duration=600,bytes=pcm(duration*4000),expected=Wave.calcSourceWaveform(bytes,duration);
+    let settled=false;
+    const heartbeat=new Promise(resolve=>setTimeout(resolve,0));
+    const pending=Wave.calcSourceWaveformAsync(bytes,duration);
+    void pending.then(()=>{settled=true;});
+    await heartbeat;
+    expect(settled).toBe(false);
+    const actual=await pending;
+    expect(actual.length).toBe(120000);
+    expect(actual.every((value,index)=>value===expected[index])).toBe(true);
+    expect(actual[0]).toBe(-.5);expect(actual[1]).toBe(.5);
+  });
+  it('協作解碼失權時丟棄未完成結果，且不改既有 Wave peaks',async()=>{
+    const bytes=pcm(600*4000),previous=Wave.peaks;
+    let owns=true;
+    setTimeout(()=>{owns=false;},0);
+    expect(await Wave.calcSourceWaveformAsync(bytes,600,{owns:()=>owns})).toBeNull();
+    expect(Wave.peaks).toBe(previous);
+  });
+  it.each([[1,4000],[60-59.123456,4000],[0.1,44100]])('協作來源段 %.6f 秒、%i Hz 保持捨入容差與精確桶邊界',async(duration,rate)=>{
+    const samples=Math.round(duration*rate);
+    for(const offset of [0,-1]){
+      const bytes=pcm(samples+offset,rate);
+      const actual=await Wave.calcSourceWaveformAsync(bytes,duration);
+      expect(actual).toEqual(Wave.calcSourceWaveform(bytes,duration));
+    }
+    expect(await Wave.calcSourceWaveformAsync(pcm(samples-2,rate),duration)).toBeNull();
+    expect(await Wave.calcSourceWaveformAsync(pcm(0,rate),duration)).toBeNull();
+  });
+  it('協作多來源混音保留不同取樣率與短音軌補零，不平均已縮減峰值',async()=>{
+    const sources=[pcm(1000,4000),pcm(2000,2000)];
+    const actual=await Wave.calcFromWavAsync(sources,1);
+    expect(actual).toEqual(Wave.calcFromWav(sources,1));
+    expect(actual).toHaveLength(200);
+    expect(actual[1]).toBe(.5);expect(actual[101]).toBe(.25);
+  });
   it.each([[0,4],[4,0],[5,0],[-1,4]])('每像素涵蓋來源 %j 時聚合全部峰值，反向與零端點也一致', (first,last) => {
     const ctx={save:vi.fn(),scale:vi.fn(),beginPath:vi.fn(),moveTo:vi.fn(),lineTo:vi.fn(),stroke:vi.fn(),restore:vi.fn()};
     paintClipWave(ctx,{Hpx:10,cvw:1,res:1,n:5,

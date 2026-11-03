@@ -28,6 +28,62 @@ function wavePcm(arrayBuffer){
   return {samples,channels,sampleRate,length:samples.length/channels};
 }
 
+function sourceWavePcm(arrayBuffer,duration){
+  const pcm=wavePcm(arrayBuffer);
+  if(!pcm||!Number.isFinite(duration)||duration<=0||!pcm.length) return null;
+  const expected=Math.round(duration*pcm.sampleRate);
+  return Number.isSafeInteger(expected)&&pcm.length+1>=expected ? pcm : null;
+}
+
+// 同步與協作式解碼共用同一份桶界線／逐 sample 混音；只改排程，不改波形。
+function pcmPeakCalculation(streams,duration,res,channel){
+  if(!streams.length||streams.some(stream=>!stream))return null;
+  if(channel!=null&&(streams.length!==1||!Number.isInteger(channel)||channel<0||channel>=streams[0].channels))return null;
+  const sampleRate=Math.max(...streams.map(stream=>stream.sampleRate));
+  const numChannels=channel==null?streams.reduce((count,stream)=>count+stream.channels,0):1;
+  const sourceDuration=Math.max(Number(duration)||0,...streams.map(stream=>stream.length/stream.sampleRate));
+  const numSamples=Math.ceil(sourceDuration*sampleRate),len=Math.ceil(sourceDuration*res);
+  const peaks=new Float32Array(len*2),spb=sampleRate/res;
+  const fill=(first,last)=>{
+    for(let i=first;i<last;i++){
+      const s0=Math.floor(i*spb),s1=Math.min(numSamples,Math.floor((i+1)*spb));
+      let mn=0,mx=0;
+      for(let j=s0;j<s1;j++){
+        let v=0;
+        for(const stream of streams){
+          const frame=Math.floor(j*stream.sampleRate/sampleRate);
+          if(frame>=stream.length)continue;
+          if(channel!=null)v+=stream.samples[frame*stream.channels+channel];
+          else for(let c=0;c<stream.channels;c++)v+=stream.samples[frame*stream.channels+c];
+        }
+        v=(v/numChannels)/32768.0;
+        if(v<mn)mn=v;if(v>mx)mx=v;
+      }
+      peaks[i*2]=mn;peaks[i*2+1]=mx;
+    }
+  };
+  return {peaks,len,fill,batchBuckets:Math.max(1,Math.floor(16384/(spb*numChannels)))};
+}
+
+async function finishPcmPeaks(calculation,owns){
+  if(!calculation||!owns())return null;
+  const {peaks,len,fill,batchBuckets}=calculation;
+  let next=0;
+  while(next<len){
+    if(!owns())return null;
+    const until=performance.now()+5;
+    let batches=0;
+    do{
+      const end=Math.min(len,next+batchBuckets);
+      fill(next,end);next=end;
+    }while(next<len&&++batches<64&&performance.now()<until);
+    // A microtask alone cannot deliver input/cancel or paint. Keep each task
+    // bounded even on a fast CPU, and recheck the caller after the real yield.
+    if(next<len)await new Promise(resolve=>setTimeout(resolve,0));
+  }
+  return owns()?peaks:null;
+}
+
 let vocalSourceModule=null;
 function loadVocalSourceModule(){
   // One lazy module load also covers all subscriptions in a split audio lane.
@@ -361,7 +417,8 @@ export const Wave = {
         if(!owns()) return null;
         const buffer=await response.arrayBuffer();
         if(!owns()) return null;
-        let peaks=this.calcFromWav(buffer,0,entry.pcmChannel);
+        let peaks=await this.calcFromWavAsync(buffer,0,{channel:entry.pcmChannel,owns});
+        if(!owns())return null;
         if(!peaks){
           const ctx=Media.ensureCtx();
           const ab=await ctx.decodeAudioData(buffer.slice(0));
@@ -720,44 +777,26 @@ export const Wave = {
   },
   // 優先來源波形必須覆蓋宣稱的整段；一般多軌混音仍允許較短音軌補零。
   calcSourceWaveform(arrayBuffer,duration){
-    const pcm=wavePcm(arrayBuffer);
-    if(!pcm||!Number.isFinite(duration)||duration<=0||!pcm.length) return null;
-    const expected=Math.round(duration*pcm.sampleRate);
-    if(!Number.isSafeInteger(expected)||pcm.length+1<expected) return null;
+    if(!sourceWavePcm(arrayBuffer,duration))return null;
     return this.calcFromWav(arrayBuffer,duration);
+  },
+  async calcSourceWaveformAsync(arrayBuffer,duration,{owns=()=>true}={}){
+    if(!owns())return null;
+    const pcm=sourceWavePcm(arrayBuffer,duration);
+    return pcm?finishPcmPeaks(pcmPeakCalculation([pcm],duration,this.resolution,null),owns):null;
+  },
+  async calcFromWavAsync(arrayBuffer,duration=0,{channel=null,owns=()=>true}={}){
+    if(!owns())return null;
+    const streams=(Array.isArray(arrayBuffer)?arrayBuffer:[arrayBuffer]).map(wavePcm);
+    return finishPcmPeaks(pcmPeakCalculation(streams,duration,this.resolution,channel),owns);
   },
   /* 純計算版（不改 this.peaks） */
   calcFromWav(arrayBuffer,duration=0,channel=null){
     const streams=(Array.isArray(arrayBuffer)?arrayBuffer:[arrayBuffer]).map(wavePcm);
-    if(!streams.length||streams.some(stream=>!stream))return null;
-    if(channel!=null&&(streams.length!==1||!Number.isInteger(channel)||channel<0||channel>=streams[0].channels))return null;
-    const sampleRate=Math.max(...streams.map(stream=>stream.sampleRate));
-    const numChannels=channel==null?streams.reduce((count,stream)=>count+stream.channels,0):1;
-    const sourceDuration=Math.max(Number(duration)||0,...streams.map(stream=>stream.length/stream.sampleRate));
-    const numSamples=Math.ceil(sourceDuration*sampleRate);
-    const res = this.resolution;
-    const len = Math.ceil(sourceDuration * res);
-    const peaks = new Float32Array(len * 2);
-    const spb = sampleRate / res;
-    for(let i=0; i<len; i++){
-      const s0 = Math.floor(i * spb);
-      const s1 = Math.min(numSamples, Math.floor((i+1) * spb));
-      let mn = 0, mx = 0;
-      for(let j=s0; j<s1; j++){
-        let v = 0;
-        for(const stream of streams){
-          const frame=Math.floor(j*stream.sampleRate/sampleRate);
-          if(frame>=stream.length)continue;
-          if(channel!=null)v+=stream.samples[frame*stream.channels+channel];
-          else for(let c=0;c<stream.channels;c++)v+=stream.samples[frame*stream.channels+c];
-        }
-        v = (v / numChannels) / 32768.0;
-        if(v < mn) mn = v;
-        if(v > mx) mx = v;
-      }
-      peaks[i*2] = mn; peaks[i*2+1] = mx;
-    }
-    return peaks;
+    const calculation=pcmPeakCalculation(streams,duration,this.resolution,channel);
+    if(!calculation)return null;
+    calculation.fill(0,calculation.len);
+    return calculation.peaks;
   },
   async preparePcmMix(paths,{duration=0,owns=()=>true}={}){
     // A reload descriptor represents original PCM members, never already
@@ -778,7 +817,7 @@ export const Wave = {
       if(!owns())return null;
       buffers.push(buffer);
     }
-    return this.calcFromWav(buffers,descriptor.duration);
+    return this.calcFromWavAsync(buffers,descriptor.duration,{owns});
   }
 };
 

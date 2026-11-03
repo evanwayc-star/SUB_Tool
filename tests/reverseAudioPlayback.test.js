@@ -20,7 +20,7 @@ function setup(kind = 'element') {
   };
   const makeElement = () => {
     const el = new EventTarget(); Object.assign(el, { currentTime: 0, duration: 3,
-      readyState: 1, playbackRate: 1, preservesPitch: false, paused: true, tagName: 'AUDIO', load: vi.fn() });
+      readyState: 4, playbackRate: 1, preservesPitch: false, paused: true, tagName: 'AUDIO', load: vi.fn() });
     let src='';el.sourceAssignments=[];
     Object.defineProperty(el,'src',{get:()=>src,set:value=>{src=value;el.sourceAssignments.push({value,crossOrigin:el.crossOrigin});}});
     el.play = vi.fn(async () => { el.paused = false; }); el.pause = vi.fn(() => { el.paused = true; });

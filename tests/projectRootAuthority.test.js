@@ -15,6 +15,16 @@ const roots=[];
 const projectBytes=Buffer.from(JSON.stringify({app:'SUB Tool',version:3,tracks:[],cues:[],media:{name:'source'}}));
 const payload=projectBytes.toString('base64');
 function deferred(){let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};}
+function writerWithCloseUpdate(update,renameSync=fs.renameSync){
+  return createAtomicProjectWriter({fsModule:{...fs,...fs.promises,renameSync,
+    async open(file,...args){
+      const handle=await fs.promises.open(file,...args);
+      if(args[0]==='r')return handle;
+      return {stat:options=>handle.stat(options),writeFile:bytes=>handle.writeFile(bytes),sync:()=>handle.sync(),
+        async close(){const before=await handle.stat({bigint:true});await handle.close();update(file,before);}};
+    },
+  }});
+}
 function fixture({readFile=fs.promises.readFile,writeFile=createAtomicProjectWriter()}={}){
   const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-project-root-test-'));roots.push(root);
   const selected=path.join(root,'chosen');fs.mkdirSync(selected);
@@ -352,6 +362,52 @@ describe('專案根授權與真實 IPC',()=>{
     await expect(writer(f.project,Buffer.from('intended'))).rejects.toMatchObject({code:'UNSAFE_PROJECT_OUTPUT'});
     expect(fs.readFileSync(f.project)).toEqual(projectBytes);
     expect(fs.readFileSync(stage,'utf8')).toBe('external');
+  });
+
+  it('NAS 關檔才更新時間戳時，真實自動備份 IPC 發布完整 UTF-16 內容且不殘留暫存',async()=>{
+    let stage,beforeClose,afterClose;
+    const writer=writerWithCloseUpdate((file,before)=>{
+      stage=file;beforeClose=before;
+      fs.utimesSync(file,before.atime,new Date(Number(before.mtimeMs)+2000));
+      afterClose=fs.statSync(file,{bigint:true});
+    });
+    const f=fixture({writeFile:writer});
+    expect(await f.workspace.open(f.project)).not.toBeNull();
+    const backup=path.join(f.selected,'.subtool_AutoSave','edit_1103-1314.subtool');
+    expect(await f.handler({}, {path:backup,b64:payload})).toBe(backup);
+    expect(afterClose.dev).toBe(beforeClose.dev);expect(afterClose.ino).toBe(beforeClose.ino);
+    expect(afterClose.size).toBe(beforeClose.size);expect(afterClose.mtimeNs).not.toBe(beforeClose.mtimeNs);
+    const saved=fs.readFileSync(backup);
+    expect([...saved.subarray(0,2)]).toEqual([255,254]);
+    expect(JSON.parse(saved.subarray(2).toString('utf16le'))).toEqual(JSON.parse(projectBytes.toString()));
+    expect(fs.existsSync(stage)).toBe(false);
+    expect(fs.readdirSync(f.selected).sort()).toEqual(['.subtool_AutoSave','edit.subtool']);
+  });
+
+  it('NAS 關檔後同 inode 同長度內容被改寫，仍拒絕發布並保留外部 bytes',async()=>{
+    const intended=Buffer.from('intended'),external=Buffer.from('external');
+    let stage;
+    const writer=writerWithCloseUpdate((file,before)=>{
+      stage=file;fs.writeFileSync(file,external);
+      const after=fs.statSync(file,{bigint:true});
+      expect(after.ino).toBe(before.ino);expect(after.size).toBe(before.size);
+    });
+    const f=fixture({writeFile:writer});
+    await expect(writer(f.project,intended)).rejects.toMatchObject({code:'UNSAFE_PROJECT_OUTPUT'});
+    expect(fs.readFileSync(f.project)).toEqual(projectBytes);
+    expect(fs.readFileSync(stage)).toEqual(external);
+  });
+
+  it('NAS 關檔更新時間後 rename 失敗，只清理已驗證的本次暫存並保留原專案',async()=>{
+    const failure=new Error('SMB rename denied');let stage;
+    const writer=writerWithCloseUpdate((file,before)=>{
+      stage=file;fs.utimesSync(file,before.atime,new Date(Number(before.mtimeMs)+2000));
+    },()=>{throw failure;});
+    const f=fixture({writeFile:writer});
+    await expect(writer(f.project,Buffer.from('intended'))).rejects.toBe(failure);
+    expect(fs.readFileSync(f.project)).toEqual(projectBytes);
+    expect(fs.existsSync(stage)).toBe(false);
+    expect(fs.readdirSync(f.selected)).toEqual(['edit.subtool']);
   });
 
   it('專案部分寫入後發生錯誤且暫存遭改寫，不可清理外部內容',async()=>{

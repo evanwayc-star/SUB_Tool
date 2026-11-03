@@ -431,6 +431,20 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
           completed = await handle.stat({ bigint: true });
           await handle.close();
           handle = null;
+          // SMB may finalize write timestamps only when the writer closes.
+          // Acquire closed-file evidence from the same owned object and exact
+          // bytes; do not relax the strict snapshot checks used for publication.
+          try {
+            prepared.checkRootSync();
+            const closed = statIfPresentSync(temporary);
+            if (!closed?.isFile() || closed.isSymbolicLink() || !sameFile(closed, temporaryOwner)
+              || !['dev', 'ino', 'mode', 'size'].every(field => closed[field] === completed[field])
+              || closed.size !== BigInt(bytes.length)
+              || digestFileSync(fsModule, temporary, closed) !== contentDigest
+              || !sameSnapshot(statIfPresentSync(temporary), closed)) throw unsafe();
+            prepared.checkRootSync();
+            completed = closed;
+          } catch (_) { preserveTemporary = true; throw unsafe(); }
           await prepared.check();
           // Serialize publication with alias discovery so an earlier atomic
           // rename cannot change the target halfway through a later admission.

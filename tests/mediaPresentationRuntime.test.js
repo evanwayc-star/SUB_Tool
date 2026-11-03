@@ -56,6 +56,25 @@ let resetPlayerAdapter;
 let nativeGeneration = 0;
 const nativeSuccess = () => ({ok:true,sourceSessionId:`presentation-${++nativeGeneration}`});
 
+// Observe accepted element starts through the real preparation/commit path.
+// Preparing a fixed seek target alone must never count as audible playback.
+async function observeElementCommits() {
+  const {AudioEngine}=await import('../src/audio-engine.js');
+  const original=AudioEngine.prepareElements.bind(AudioEngine),starts=vi.fn();
+  const prepare=vi.spyOn(AudioEngine,'prepareElements').mockImplementation((sourceTime,timelineTime,options)=>{
+    const plan=original(sourceTime,timelineTime,options),commit=plan.commit;
+    plan.commit=()=>{
+      const result=commit();
+      const record=started=>{if(started)starts(sourceTime,timelineTime);return started;};
+      return result?.then?result.then(record):record(result);
+    };
+    return plan;
+  });
+  const restore=starts.mockRestore.bind(starts);
+  starts.mockRestore=()=>{prepare.mockRestore();restore();};
+  return starts;
+}
+
 describe('Media presentation runtime', () => {
   beforeAll(async () => {
     window.AudioContext = class {
@@ -196,7 +215,7 @@ describe('Media presentation runtime', () => {
       if(action==='reset'||action.startsWith('new-seek'))expect(owns()).toBe(false);
       release();const result=await outcome;if(newer)await newer;
       if(action==='reset'||action.startsWith('new-seek'))expect(result.error?.name).toBe('AbortError');else expect(result.value).toBe('pixels');
-      expect(bridge.play).toHaveBeenCalledTimes(action.startsWith('new-seek')||action==='reverse-play'?1:0);
+      await vi.waitFor(()=>expect(bridge.play).toHaveBeenCalledTimes(action.startsWith('new-seek')||action==='reverse-play'?1:0));
     }finally{release?.();Media._nativeReverse=false;Media.playing=false;runtime.stopBoundsFeeder();Media.resetPresentationSession('capture-test-finished');}
   });
 
@@ -250,8 +269,8 @@ describe('Media presentation runtime', () => {
     Media._transport.seek(1,{duration:4,fps:25});
     if(outcome==='false')bridge.direction.mockResolvedValueOnce(false);
     else bridge.direction.mockRejectedValueOnce(new Error('direction rejected'));
-    const elements=vi.spyOn(Media._audioRouter,'startElementSources');
-    Media.observePlayerPlaybackState(true,{source:'mpv',reason:'play'});elements.mockClear();
+    const elements=await observeElementCommits();
+    Media.observePlayerPlaybackState(true,{source:'mpv',reason:'play'});await vi.waitFor(()=>expect(elements).toHaveBeenCalledOnce());elements.mockClear();
     try{
       expect(Media.seqContinueAtEnd()).toBe(true);
       await vi.waitFor(()=>expect(bridge.direction).toHaveBeenCalledWith('forward'));
@@ -279,7 +298,7 @@ describe('Media presentation runtime', () => {
     State.clips[0].path='C:/program.mov';State.clips.push({id:'next',name:'next',path:'C:/next.mov',in:0,out:10,dur:10,offset:110,vtrack:0});
     Media._mpvPath='C:/program.mov';Media._mpvTime=20;Media.tracks=[];Media.externalAudioSources=[];
     Media.observePlayerPlaybackState(true,{source:'mpv',reason:'play'});
-    const elements=vi.spyOn(Media._audioRouter,'startElementSources');
+    const elements=await observeElementCommits();
     const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
     try{
       expect(Media.seqContinueAtEnd()).toBe(true);
@@ -310,14 +329,14 @@ describe('Media presentation runtime', () => {
     const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
     State.clips[0].path='C:/program.mov';Media._mpvPath='C:/program.mov';Media._mpvTime=15;
     State.duration=110;Media.tracks=[];Media.externalAudioSources=[];
-    const elements=vi.spyOn(Media._audioRouter,'startElementSources');
+    const elements=await observeElementCommits();
     try{
       Media.play();
       Media.observeMpvEvent(reason==='pause'?{event:'property-change',name:'pause',data:true}:
         {event:'end-file',reason:reason==='error'?'error':'eof'});
       expect(Media.playing).toBe(reason==='pause');
       resolve(null);await starting;for(let i=0;i<8;i++)await Promise.resolve();
-      expect(elements).toHaveBeenCalledTimes(reason==='pause'?1:0);
+      await vi.waitFor(()=>expect(elements).toHaveBeenCalledTimes(reason==='pause'?1:0));
       expect(Media.playing).toBe(reason==='pause');
     }finally{
       resolve(null);Media.pause({seekOnPause:false});Media.resetPresentationSession('observed-start-finished');
@@ -333,9 +352,9 @@ describe('Media presentation runtime', () => {
     const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
     State.clips[0].path='C:/program.mov';Media._mpvPath='C:/program.mov';Media.tracks=[];Media.externalAudioSources=[];
     Media.observeMpvEvent({event:'property-change',name:'time-pos',data:15});
-    const elements=vi.spyOn(Media._audioRouter,'startElementSources');
+    const elements=await observeElementCommits();
     try{
-      Media.play();Media.pause({seekOnPause:false});
+      Media.play();await vi.waitFor(()=>expect(bridge.play).toHaveBeenCalledOnce());Media.pause({seekOnPause:false});
       Media.observeMpvEvent({event:'property-change',name:'pause',data:false});
       expect(Media.playing).toBe(false);expect(elements).not.toHaveBeenCalled();
       if(outcome==='reject')reject(new Error('old play rejected'));else resolve(null);
@@ -443,7 +462,7 @@ describe('Media presentation runtime', () => {
     domMock.frameCallbacks.shift()(0, { mediaTime: 14 });
     await pending;
 
-    expect(domMock.video.play).toHaveBeenCalledTimes(1);
+    await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledTimes(1));
     await vi.waitFor(()=>expect(Media.playbackTransitionPending()).toBe(false));
     expect(Media.presenterClockMoving()).toBe(true);
   });
@@ -451,12 +470,12 @@ describe('Media presentation runtime', () => {
   it('公開播放起播拒絕後停止播放且不提前起音，下一次播放可重試', async () => {
     let reject;
     const starting=new Promise((resolve,fail)=>{reject=fail;});
-    const elements=vi.spyOn(Media._audioRouter,'startElementSources'),buffers=vi.spyOn(Media._audioRouter,'startBufferSources');
+    const elements=await observeElementCommits(),buffers=vi.spyOn(Media._audioRouter,'startBufferSources');
     const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
     domMock.video.play.mockReturnValueOnce(starting);
     try{
       Media.play();
-      expect(domMock.video.play).toHaveBeenCalledOnce();
+      await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledOnce());
       expect(elements).not.toHaveBeenCalled();
       expect(buffers).not.toHaveBeenCalled();
       expect(Media.presenterClockMoving()).toBe(false);
@@ -465,10 +484,10 @@ describe('Media presentation runtime', () => {
       expect(domMock.$('playBtn').textContent).toBe('▶');
       expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('播放'), 'err');
       await Promise.resolve();
-      expect(domMock.video.play).toHaveBeenCalledOnce();
+      await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledOnce());
       Media.play();
       await vi.waitFor(()=>expect(elements).toHaveBeenCalledOnce());
-      expect(domMock.video.play).toHaveBeenCalledTimes(2);
+      await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledTimes(2));
       expect(Media.playing).toBe(true);
       expect(Media.presenterClockMoving()).toBe(true);
     }finally{
@@ -486,7 +505,7 @@ describe('Media presentation runtime', () => {
     const {setStatus}=await import('../src/ui.js');
     const deferred=()=>{let resolve,reject;const promise=new Promise((done,fail)=>{resolve=done;reject=fail;});return {promise,resolve,reject};};
     const old=deferred(),latest=deferred();
-    const elements=vi.spyOn(AudioEngine,'startElements'),buffers=vi.spyOn(AudioEngine,'startBuffers');
+    const elements=await observeElementCommits(),buffers=vi.spyOn(AudioEngine,'startBuffers');
     const originalSource={src:domMock.video.src,currentSrc:domMock.video.currentSrc};
     const bridge={launch:vi.fn(async()=>nativeSuccess()),loadfile:vi.fn(async()=>nativeSuccess()),
       present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),seek:vi.fn(async()=>{}),
@@ -502,7 +521,7 @@ describe('Media presentation runtime', () => {
     setStatus.mockClear();elements.mockClear();buffers.mockClear();
     try{
       Media.play();
-      expect(play).toHaveBeenCalledOnce();
+      await vi.waitFor(()=>expect(play).toHaveBeenCalledOnce());
       Media.play();expect(play).toHaveBeenCalledOnce();
       expect(Media.playbackTransitionPending()).toBe(true);
       expect(Media.presenterClockMoving()).toBe(false);
@@ -590,15 +609,15 @@ describe('Media presentation runtime', () => {
     expect(domMock.video.play).not.toHaveBeenCalled();
   });
 
-  it('播放器實際停止後，下一次播放意圖會重新啟動 adapter', () => {
+  it('播放器實際停止後，下一次播放意圖會重新啟動 adapter', async () => {
     Media.play();
-    expect(domMock.video.play).toHaveBeenCalledTimes(1);
+    await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledTimes(1));
 
     Media.observePlayerPlaybackState(false, { source: 'mpv', reason: 'pause' });
     expect(Media.playing).toBe(false);
 
     Media.play();
-    expect(domMock.video.play).toHaveBeenCalledTimes(2);
+    await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledTimes(2));
   });
 
   it('HTML5 ended 的實際停止位置會吸附到專案影格格網', async () => {

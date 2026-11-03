@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import fsp from 'node:fs/promises';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { afterEach, expect, it, vi } from 'vitest';
 
@@ -11,6 +12,23 @@ const {createMediaIntakeRuntime,cacheKeyFor}=require('../electron/media-intake-r
 const {FileAuthority}=require('../electron/file-authority.js');
 const roots=[],runtimes=[];
 const outputs=args=>args.filter(arg=>/\.(?:mp4|wav|m4a)$/.test(arg));
+function seedPortableContentEvidence(directory,source){
+  // A different-inode copy can reuse an old publication only with actual full
+  // content evidence. Keep these attacks on the admitted-cache/copy path.
+  const sourceContent={format:'source-v3-sha256',size:fs.statSync(source).size,
+    sha256:crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex')};
+  const visit=dir=>{
+    for(const entry of fs.readdirSync(dir,{withFileTypes:true})){
+      const file=path.join(dir,entry.name);
+      if(entry.isDirectory())visit(file);
+      else if(entry.isFile()&&entry.name.endsWith('.json')){
+        const raw=JSON.parse(fs.readFileSync(file,'utf8'));
+        if(raw.sourceContent)fs.writeFileSync(file,JSON.stringify({...raw,sourceContent}));
+      }
+    }
+  };
+  visit(directory);
+}
 function fixture(){
   const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-portable-security-'));roots.push(root);
   const source=path.join(root,'mother.bin');fs.writeFileSync(source,'mother source');
@@ -76,6 +94,7 @@ it.each(['proxy','wave','channel'])('複製來的共用 %s 不能經 generation 
   const runtime=create(),request={src:source,duration:1,needsProxy:true,audio:[{channels:1}]};
   const original=await runtime.ingest(request);
   const cache=path.join(root,'.subtool_Cache',cacheKeyFor(source));
+  seedPortableContentEvidence(cache,source);
   const other=path.join(root,'second-computer');fs.mkdirSync(other);
   const moved=path.join(other,'mother.bin');fs.copyFileSync(source,moved);
   const copied=path.join(other,'.subtool_Cache',path.basename(cache));fs.cpSync(cache,copied,{recursive:true});
@@ -114,6 +133,7 @@ it('來源 key junction 不得准入或作為補建位置，原快取 bytes 保�
   const {root,source,create}=fixture(),runtime=create();
   const request={src:source,duration:1,needsProxy:true,audio:[]};
   const original=await runtime.ingest(request),old=path.dirname(path.dirname(original.proxy));
+  seedPortableContentEvidence(old,source);
   const target=path.join(root,'second-computer');fs.mkdirSync(target);
   const moved=path.join(target,'mother.bin');fs.copyFileSync(source,moved);
   const sidecar=path.join(target,'.subtool_Cache');fs.mkdirSync(sidecar);
@@ -162,6 +182,7 @@ it.each(['ingest','stream'])('%s 唯讀快取補建在准入後換 junction，�
   const {root,source,create}=fixture(),producer=create();
   const original=await producer.ingest({src:source,duration:1,needsProxy:true,audio:[]});
   const old=path.dirname(path.dirname(original.proxy)),target=path.join(root,'second-computer');fs.mkdirSync(target);
+  seedPortableContentEvidence(old,source);
   const moved=path.join(target,'mother.bin');fs.copyFileSync(source,moved);
   const sharedRoot=path.join(target,'.subtool_Cache'),copied=path.join(sharedRoot,path.basename(old));fs.cpSync(old,copied,{recursive:true});
   const metaPath=path.join(copied,'meta.json'),before=fs.readFileSync(metaPath);

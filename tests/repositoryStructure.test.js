@@ -75,6 +75,11 @@ function moduleSpecifiers(source) {
     } else if (node.type === 'CallExpression' && node.callee?.type === 'Identifier'
       && node.callee.name === 'require' && typeof node.arguments?.[0]?.value === 'string') {
       specifiers.add(node.arguments[0].value);
+    } else if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression'
+      && node.callee.object?.name === 'require' && node.callee.property?.name === 'resolve'
+      && typeof node.arguments?.[0]?.value === 'string') {
+      // Native worker entries resolve a module without executing it in main.
+      specifiers.add(node.arguments[0].value);
     }
 
     for (const value of Object.values(node)) {

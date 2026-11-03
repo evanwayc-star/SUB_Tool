@@ -17,7 +17,7 @@ it.each(['single','rapid'])('mpv 播放中 %s 跳轉前先停止外部音訊，�
   video.pause=vi.fn();video.play=vi.fn(async()=>{});video.load=vi.fn();
   const trace=[],presented=deferred(),latest=deferred();
   class AudioElement extends EventTarget{
-    constructor(){super();this.src='file:///voice.wav';this._time=0;this.duration=12;this.readyState=1;this.paused=true;this.playbackRate=1;}
+    constructor(){super();this.src='file:///voice.wav';this._time=0;this.duration=12;this.readyState=4;this.paused=true;this.playbackRate=1;}
     get currentTime(){return this._time;}
     set currentTime(value){trace.push({type:'seek',value,paused:this.paused});this._time=value;}
     play=vi.fn(async()=>{this.paused=false;trace.push({type:'play',value:this._time});});

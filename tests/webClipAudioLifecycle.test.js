@@ -10,7 +10,7 @@ const node=()=>({connect:vi.fn(),disconnect:vi.fn()});
 const pcm=()=>({duration:12,sampleRate:1000,length:12000,numberOfChannels:2,
   getChannelData:()=>new Float32Array(12000).fill(.2)});
 class ReadyAudio extends EventTarget{
-  constructor(){super();this.sourceAssignments=[];this.duration=12;this.readyState=1;this.currentTime=0;this.paused=true;this.playbackRate=1;elements.push(this);}
+  constructor(){super();this.sourceAssignments=[];this.duration=12;this.readyState=4;this.currentTime=0;this.paused=true;this.playbackRate=1;elements.push(this);}
   get src(){return this.url||'';}
   set src(value){if(value)this.sourceAssignments.push({value,crossOrigin:this.crossOrigin});this.url=value;}
   play=vi.fn(async()=>{this.paused=false;});pause=vi.fn(()=>{this.paused=true;});load=vi.fn();

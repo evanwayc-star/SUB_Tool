@@ -19,6 +19,16 @@ const deferred = () => {
   return { promise, resolve };
 };
 
+function sourcePcm(seconds=600){
+  const frames=seconds*4000,buffer=new ArrayBuffer(44+frames*2),view=new DataView(buffer);
+  for(const [offset,text] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
+    for(let i=0;i<text.length;i++)view.setUint8(offset+i,text.charCodeAt(i));
+  view.setUint32(4,buffer.byteLength-8,true);view.setUint32(16,16,true);view.setUint16(20,1,true);
+  view.setUint16(22,1,true);view.setUint32(24,4000,true);view.setUint32(28,8000,true);
+  view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,frames*2,true);
+  new Int16Array(buffer,44).fill(8192);return buffer;
+}
+
 beforeEach(() => {
   Wave.clearSources();
   Wave.peaks = null;
@@ -32,13 +42,32 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it.each(['channel','mix'])('長 WAV 的 %s 波形計算中仍能換檔，舊峰值不污染新來源',async kind=>{
+  const bytes=sourcePcm(),nextPeaks=Float32Array.from([-.75,.75]);
+  desktop.fileURL.mockResolvedValue('file:///old.wav');
+  const changed=deferred();
+  vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>{
+    setTimeout(()=>{
+      Wave.registerSourceWaveforms('source-1',{channels:[{sourceChannel:0,file:'new.wav',peaks:nextPeaks}],mixPath:'new.wav',mixPeaks:nextPeaks});
+      changed.resolve();
+    },0);
+    return bytes;
+  }})));
+  if(kind==='channel')Wave.registerSourceWaveforms('source-1',{channels:[{sourceChannel:0,file:'old.wav'}]});
+  else Wave.registerSourceWaveforms('source-1',{mixPath:{paths:['old.wav'],duration:600}});
+  const pending=Wave.loadSourceWaveform('source-1',kind==='channel'?'0:0':'mix');
+  await changed.promise;
+  expect(await pending===null).toBe(true);
+  expect(await Wave.loadSourceWaveform('source-1',kind==='channel'?'0:0':'mix')).toBe(nextPeaks);
+});
+
 it('同一來源的波形檔更換後，舊解碼晚到不會污染新檔且新解碼仍可開始', async () => {
   const oldUrl = deferred();
   const peaks = new Float32Array([-0.5, 0.5]);
   desktop.fileURL.mockReturnValueOnce(oldUrl.promise).mockResolvedValueOnce('file:///B.wav');
   const fetch = vi.fn(async () => ({ arrayBuffer: async () => new ArrayBuffer(8) }));
   vi.stubGlobal('fetch', fetch);
-  vi.spyOn(Wave, 'calcFromWav').mockReturnValue(peaks);
+  vi.spyOn(Wave, 'calcFromWavAsync').mockResolvedValue(peaks);
 
   Wave.registerSourceWaveforms('source-1', { channels: [{ sourceChannel: 0, file: 'A.wav' }] });
   const oldLoad = Wave.loadSourceWaveform('source-1', '0:0');
@@ -87,7 +116,7 @@ it.each([false, true])('已移除聲道的舊解碼晚到，不會重建或覆�
   desktop.fileURL.mockReturnValueOnce(oldUrl.promise);
   const fetch = vi.fn(async () => ({ arrayBuffer: async () => new ArrayBuffer(8) }));
   vi.stubGlobal('fetch', fetch);
-  vi.spyOn(Wave, 'calcFromWav').mockReturnValue(oldPeaks);
+  vi.spyOn(Wave, 'calcFromWavAsync').mockResolvedValue(oldPeaks);
   Wave.registerSourceWaveforms('source-1', { channels: [{ sourceChannel: 0 }, { sourceChannel: 1, file: 'old.wav' }] });
   const oldLoad = Wave.loadSourceWaveform('source-1', '0:1');
   Wave.registerSourceWaveforms('source-1', { channels: [{ sourceChannel: 0 }] });
@@ -105,7 +134,7 @@ it('省略聲道清單只更新 MIX，保留聲道選擇與相同 entry 的待�
   const peaks = new Float32Array([-0.6, 0.6]);
   desktop.fileURL.mockReturnValueOnce(url.promise);
   vi.stubGlobal('fetch', vi.fn(async () => ({ arrayBuffer: async () => new ArrayBuffer(8) })));
-  vi.spyOn(Wave, 'calcFromWav').mockReturnValue(peaks);
+  vi.spyOn(Wave, 'calcFromWavAsync').mockResolvedValue(peaks);
   Wave.registerSourceWaveforms('source-1', { channels: [{ sourceChannel: 0, file: 'A.wav' }] });
   const pending = Wave.loadSourceWaveform('source-1', '0:0');
   Wave.setSourceWaveSelection('source-1', '0:0');

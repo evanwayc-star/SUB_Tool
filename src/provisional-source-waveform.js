@@ -1,5 +1,6 @@
 /* 唯讀來源波形的獨立生命週期；不持有正式 clip、播放位置或 History。 */
 import { sourceWaveformChunkLength } from './media-intake-engine.js';
+import { createSourceWaveformProgress } from './source-waveform-progress.js';
 let displayOwner=null;
 export const registerProvisionalSourceWaveform=owner=>{
   const previous=displayOwner;displayOwner=owner;
@@ -15,7 +16,7 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
   const snapshot=()=>current?.active()&&current.peaks ? {name:current.name,duration:current.duration,peaks:current.peaks} : null;
   function begin({path,name,audio,duration,owns}){
     if(current)clear(current);
-    const entry={path,name,duration,live:true,peaks:null,sourceKey:null,finished:null};
+    const entry={path,name,duration,live:true,peaks:null,sourceKey:null,finished:null,complete:false};
     entry.firstReady=new Promise(resolve=>{entry.resolveFirst=resolve;});
     entry.active=()=>current===entry&&entry.live&&owns();
     entry.cancel=()=>clear(entry);
@@ -38,6 +39,26 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
     entry.timer=setInterval(()=>{if(!entry.active())clear(entry);},100);
     entry.finished=Promise.resolve().then(()=>jobs.prepareWaveform(async({owns:ownsJob,report})=>{
       const active=()=>entry.active()&&ownsJob();
+      if(bridge.sourceWaveformContinuous===true){
+        const progress=createSourceWaveformProgress({duration,resolution,owns:active,publish:peaks=>{
+          entry.sourceKey=progress.sourceKey;entry.peaks=peaks;entry.resolveFirst(true);changed();
+        }});
+        let result;
+        try{
+          result=await jobs.prepareSourceWaveform({path,audio,duration,continuous:true},data=>progress.accept(data));
+          if(!active())return;
+          progress.verifyResult(result);entry.sourceKey=result.sourceKey;
+          if(!progress.complete){
+            const url=await bridge.fileURL(result.wave);if(!active())return;
+            const bytes=await read(url);if(!active())return;
+            const peaks=await decode(bytes,duration,{owns:active});if(!active())return;
+            if(!peaks)throw new Error('完成波形無法解碼或內容不足');
+            entry.peaks=peaks;entry.resolveFirst(true);changed();
+          }
+          entry.complete=true;report({label:'波形已就緒',pct:100,overall:true,queued:false});
+        }finally{if(result?.temporary&&result.wave)try{await bridge.cleanupAudio(result.wave);}catch(_){}}
+        return;
+      }
       let position=0,combined=null,ignoreCached=false;
       while(active()&&position<duration){
         let result;
@@ -52,7 +73,8 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
           entry.sourceKey=result.sourceKey;
           const url=await bridge.fileURL(result.wave);if(!active())return;
           const bytes=await read(url);if(!active())return;
-          const peaks=decode(bytes,result.duration);
+          const peaks=await decode(bytes,result.duration,{owns:active});
+          if(!active())return;
           if(!peaks){
             if(result.cached&&!ignoreCached){ignoreCached=true;continue;}
             throw new Error('來源波形無法解碼或內容不足');

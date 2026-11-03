@@ -887,6 +887,7 @@ const deliveryRunner = createDeliveryRunner({
 /* cache identity / metadata / fragmented-MP4 HTTP registry / ingest commit 由同一個
    runtime 持有；main 只保留 Electron IPC、FileAuthority 與原生工具的組裝點。 */
 const mediaIntakeRuntime = createMediaIntakeRuntime({
+  backgroundWaveforms: true,
   cacheRoot: () => CACHE,
   tempRoot: TMP,
   tempRootAuthority: TMP_OWNER,
@@ -1893,7 +1894,7 @@ ipcMain.handle('ffmpeg:sourceKey', async (_e, source) => {
 ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
   const owner = mediaIntakeOwner(e, request);
   if (owner.sessionId === undefined) throw new TypeError('波形工作缺少 sessionId/requestId');
-  const { path: src, duration, audio, start, length, ignoreCached } = request;
+  const { path: src, duration, audio, start, length, ignoreCached, continuous } = request;
   requireReadablePath('ffmpeg:prepareSourceWaveform', src);
   let prepared;
   const cancel = () => { void mediaWaveformCoordinator.cancel(owner); };
@@ -1901,7 +1902,7 @@ ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
   if (e.sender.isDestroyed?.()) cancel();
   try {
     return await mediaWaveformCoordinator.enqueue(async lease => {
-      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length, ignoreCached }, mediaIntakeSession(e, lease, owner));
+      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length, ignoreCached, continuous }, mediaIntakeSession(e, lease, owner));
       return prepared;
     }, owner);
   } catch (error) {

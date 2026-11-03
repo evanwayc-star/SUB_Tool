@@ -81,6 +81,7 @@ export class ElementPlacementPlayback {
     request?.controller.abort();getPlayerAdapter().cancelElementSeek(group.el);
   }
   syncGroup(group,start=false,time=this.environment().timelineTime()){
+    if(group.preparing)return;
     const env=this.environment(),playback=this.playback(group,time);
     if(!playback||env.transportMuted()||!group.tracks.some(track=>!track._srcHidden)){
       group.running=false;group.pendingStart=false;this.cancelSeek(group);try{group.el.pause();}catch(_){}return;
@@ -118,7 +119,31 @@ export class ElementPlacementPlayback {
     for(const entries of this.groups.values())for(const group of entries.values())if(group.el===element){this.syncGroup(group,true,time);return true;}
     return false;
   }
+  prepare(element,time){
+    for(const entries of this.groups.values())for(const group of entries.values())if(group.el===element){
+      const playback=this.playback(group,time),env=this.environment();
+      if(!playback)return null;
+      this.cancelSeek(group);group.running=true;group.pendingStart=false;group.preparing=true;
+      element.playbackRate=playback.rate||1;
+      if('preservesPitch' in element)element.preservesPitch=element.playbackRate>=.25&&element.playbackRate<=4;
+      return {element,time:playback.sourceTime,
+        owns:()=>this.groups.get(group.original)?.get(group.clip)===group
+          &&group.url===(group.original.currentSrc||group.original.src)&&!env.transportMuted()
+          &&group.tracks.every(track=>env.tracks().includes(track))&&group.tracks.some(track=>!track._srcHidden),
+        onCommit:()=>{group.preparing=false;for(const track of group.tracks)this.gainFor(track,playback,time,{schedule:true});},
+        onCancel:()=>{group.preparing=false;group.running=false;group.pendingStart=false;}};
+    }
+    return null;
+  }
   sync(time){this.prune(time);for(const entries of this.groups.values())for(const group of entries.values())this.syncGroup(group,false,time);}
+  needsAlignment(time){
+    for(const entries of this.groups.values())for(const group of entries.values()){
+      const playback=this.playback(group,time);
+      if(!group.running||group.preparing||group.el.paused||!playback)continue;
+      if(Math.abs(group.el.currentTime-getPlayerAdapter().playerTime(playback.sourceTime,group.url))>.12)return true;
+    }
+    return false;
+  }
   stop(){for(const entries of this.groups.values())for(const group of entries.values()){group.running=false;group.pendingStart=false;this.cancelSeek(group);try{group.el.pause();}catch(_){}}}
   prune(time){
     const tracks=this.environment().tracks();

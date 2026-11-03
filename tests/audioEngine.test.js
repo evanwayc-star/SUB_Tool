@@ -96,7 +96,11 @@ describe('element transport with a late absolute MOV duration',()=>{
     ({engine}=engineWith(env));
   });
   afterEach(()=>{engine.stopElements();resetPlayerAdapter(null);});
-  const expand=async element=>{element.duration=8.5;element.dispatchEvent(new Event('durationchange'));await Promise.resolve();await Promise.resolve();};
+  const expand=async element=>{
+    element.duration=8.5;element.readyState=4;
+    element.dispatchEvent(new Event('durationchange'));element.dispatchEvent(new Event('canplay'));
+    await Promise.resolve();await Promise.resolve();
+  };
 
   it('waits for raw source 8.3 before starting source 2.8',async()=>{
     engine.startElements(2.8,2.8);
@@ -104,8 +108,8 @@ describe('element transport with a late absolute MOV duration',()=>{
     await expand(element);
     expect(element.currentTime).toBe(8.3);expect(element.play).toHaveBeenCalledOnce();
   });
-  it('a pending start follows the latest normalized source time',async()=>{
-    engine.startElements(0,0);env.timelineTime=2.8;engine.syncElements(2.8);
+  it('a newer start replaces a pending normalized source target',async()=>{
+    engine.startElements(0,0);env.timelineTime=2.8;engine.startElements(2.8,2.8);
     await expand(element);
     expect(element.currentTime).toBe(8.3);expect(element.play).toHaveBeenCalledOnce();
   });

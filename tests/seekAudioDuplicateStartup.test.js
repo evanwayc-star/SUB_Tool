@@ -12,7 +12,7 @@ const context={state:'running',currentTime:0,destination:{},resume:vi.fn(),
   createMediaElementSource:()=>node(),createChannelSplitter:()=>node(),createChannelMerger:()=>node(),
   createBufferSource:()=>{const source={...node(),playbackRate:{value:1},start:vi.fn(),stop:vi.fn()};buffers.push(source);return source;}};
 class AudioElement extends EventTarget{
-  constructor(){super();this.src='';this.currentTime=0;this.duration=10;this.readyState=1;this.paused=true;this.playbackRate=1;elements.push(this);}
+  constructor(){super();this.src='';this.currentTime=0;this.duration=10;this.readyState=4;this.paused=true;this.playbackRate=1;elements.push(this);}
   play=vi.fn(async()=>{this.paused=false;});pause=vi.fn(()=>{this.paused=true;});load=vi.fn();
 }
 let Media,State,resetAudioProject,ensureAudioSourceMap,Seq,AudioEngine,resetPlayerAdapter,video;

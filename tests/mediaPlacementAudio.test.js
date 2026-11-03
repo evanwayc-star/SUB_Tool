@@ -23,7 +23,7 @@ const context={state:'running',currentTime:0,destination:{},resume:vi.fn(),
   createBufferSource:()=>{const source={...node(),playbackRate:{value:1},start:vi.fn(),stop:vi.fn()};buffers.push(source);return source;},
 };
 class AudioElement extends EventTarget{
-  constructor(){super();this.src='';this.currentTime=0;this.duration=10;this.readyState=1;this.paused=true;this.playbackRate=1;this.preservesPitch=true;elements.push(this);}
+  constructor(){super();this.src='';this.currentTime=0;this.duration=10;this.readyState=4;this.paused=true;this.playbackRate=1;this.preservesPitch=true;elements.push(this);}
   play=vi.fn(async()=>{this.paused=false;});pause=vi.fn(()=>{this.paused=true;});load=vi.fn();
 }
 let Media,Wave,State,resetAudioProject,ensureAudioSourceMap,Seq,AudioEngine,resetPlayerAdapter,activateMpvTransport,video,History;
@@ -284,15 +284,18 @@ describe('公開 sequence placement 到實際音訊節點',()=>{
       await vi.waitFor(()=>expect(elements.filter(element=>element!==tr.el)).toHaveLength(2));
       const voices=elements.filter(element=>element!==tr.el);
       expect(tr.el.paused).toBe(true);expect(voices.every(element=>element.paused)).toBe(true);
-      // metadata 較晚到達時，起播仍使用當下的時間軸及各片段的來源時間。
-      video.currentTime=7.2;context.currentTime=.1;
+      // 起播 owner 等所有聲道可播後才恢復 presenter；metadata 等待
+      // 期間保持已呈現位置，不能讓先完成的 placement 自行前進。
+      context.currentTime=.1;
       for(const element of voices){element.duration=10;element.readyState=1;element.dispatchEvent(new Event('loadedmetadata'));}
       const settle=()=>{for(let i=0;i<8&&pending.length;i++)pending.shift()();expect(pending).toHaveLength(0);};
       settle();
-      expect(voices.map(element=>[element.currentTime,element.playbackRate,element.paused])).toEqual([[1.1,1,false],[7.2,2,false]]);
+      await vi.waitFor(()=>expect(voices.every(element=>!element.paused)).toBe(true));
+      expect(voices.map(element=>[element.currentTime,element.playbackRate,element.paused])).toEqual([[1,1,false],[7,2,false]]);
       expect(voices.map(element=>element.seeks.length)).toEqual([1,1]);
       expect(voices.map(element=>element.play.mock.calls.length)).toEqual([1,1]);
-      await Media.seek(2);await vi.waitFor(()=>expect(Media.playbackTransitionPending()).toBe(false));settle();
+      await Media.seek(2);await vi.waitFor(()=>expect(pending).toHaveLength(2));settle();
+      await vi.waitFor(()=>expect(Media.playbackTransitionPending()).toBe(false));
       expect(voices.map(element=>element.currentTime)).toEqual([2,9]);
       expect(voices.map(element=>element.seeks.length)).toEqual([2,2]);
       Media.pause({seekOnPause:false});

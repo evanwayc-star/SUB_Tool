@@ -57,19 +57,54 @@ export class MediaPlaybackRuntime {
   }
 
   // 呈現後起播、跨段及 tick 都從此處提交 followers，不由 caller 維護活動 key。
-  startFollowers(sourceTime, time, { owns = this.media.capturePlaybackTargetOwnership(), buffers = true, restartBuffers = false } = {}) {
+  startFollowers(sourceTime, time, { owns = this.media.capturePlaybackTargetOwnership(), buffers = true, restartBuffers = false, elementsPrepared = false } = {}) {
     const media = this.media;
     const current = () => owns() && media.playing && !media.playbackTransitionPending();
     if (!this.#prepareAt(time, current)) return;
     if (restartBuffers) {
-      this.startElements(sourceTime, time);
+      if(!elementsPrepared)this.startElements(sourceTime, time);
       if (!current()) return;
       this.stopBuffers();
     }
     if (!current()) return;
     if (buffers && media.tracks.some(track => track.kind === 'buffer' && !track._srcHidden)) this.startBuffers(sourceTime);
     if (!current()) return;
-    if (!restartBuffers) this.startElements(sourceTime, time);
+    if (!restartBuffers&&!elementsPrepared) this.startElements(sourceTime, time);
+  }
+
+  async prepareFollowers(sourceTime,time,{owns}) {
+    const media=this.media,version=++this.#versions.element;
+    const current=()=>version===this.#versions.element&&owns();
+    if(!this.#prepareAt(time,current))return null;
+    const reversed=[...Seq.clipsAt(time).filter(clip=>clip.reverse&&!clip.audioDetached&&!Seq.isStill(clip)),
+      ...media.externalAudioSources.filter(asset=>asset.reverse&&media.externalAudio.sourceTime(asset.audioSrc,time)!=null)];
+    if(reversed.length){
+      const ready=await Promise.all(reversed.map(clip=>media.prepareClipReverseAudio(clip)));
+      if(!current())return null;
+      if(ready.some(value=>!value))throw new Error('反轉音訊尚未就緒');
+    }
+    const active=media._activeClip(),source=active?(active.audioSrc||(active.primary?'video':`clip:${active.id}`)):'video';
+    if(media.mpvMode&&!media.inGap()&&media.tracks.some(track=>(track.kind==='element'||track.kind==='buffer')&&!track._srcHidden
+      &&(track.source||'video')===source)){
+      await getPlayerAdapter().mute(true);
+      if(!current())return null;
+    }
+    const key=this.#externalAt(time),overlap=this.#overlapAt(time);
+    const prepared=media._audioRouter.prepareElementSources(sourceTime,time,{owns:current});
+    const result=await prepared.ready;
+    if(!current()){prepared.cancel();return null;}
+    if(result.status==='cancelled')throw new Error('音訊來源已變更');
+    if(result.status==='failed')throw result.error;
+    return {cancel:prepared.cancel,
+      matches:(actualSource,actualTime)=>Math.abs(actualSource-sourceTime)<=.12&&Math.abs(actualTime-time)<=.12
+        &&this.#externalAt(actualTime)===key&&this.#overlapAt(actualTime)===overlap,
+      commit:async()=>{
+        if(!current()){prepared.cancel();return false;}
+        const started=await prepared.commit();
+        if(!current())return false;
+        if(!started)throw new Error('音訊聲道已失去起播資格');
+        this.#externalKey=key;this.#elementWork=null;return true;
+      }};
   }
 
   #afterMpvMute(kind, start) {

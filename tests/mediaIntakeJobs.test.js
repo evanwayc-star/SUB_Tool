@@ -15,6 +15,29 @@ function setup(){
 }
 
 describe('renderer media intake ownership',()=>{
+  it('連續波形增量只交給原 request，取消後不再交付且狀態不保留 PCM 峰值',async()=>{
+    const f=setup(),receive=vi.fn();
+    const work=f.jobs.prepareSourceWaveform({path:'source.mov',continuous:true},receive);
+    const request=f.bridge.prepareSourceWaveform.mock.calls[0][0];
+    expect(request).not.toHaveProperty('onWaveform');
+    const waveform={peaks:new Float32Array([-.5,.5])};
+    expect(f.jobs.progress({...request,waveform,pct:5})).toBe(true);
+    expect(receive).toHaveBeenCalledWith(waveform);
+    expect(f.jobs.snapshot().jobs[0].progress).not.toHaveProperty('waveform');
+    const rejected=expect(work).rejects.toMatchObject({name:'AbortError'});
+    await f.jobs.reset();await rejected;
+    expect(f.jobs.progress({...request,waveform,pct:10})).toBe(false);expect(receive).toHaveBeenCalledOnce();
+    f.pending[0].resolve({wave:'shared/wave.wav',temporary:false});
+  });
+  it('波形 consumer 失敗仍等待 native 收尾，再向原 caller 回報錯誤',async()=>{
+    const f=setup(),error=new Error('consumer failed'),receive=vi.fn(()=>{throw error;});
+    const work=f.jobs.prepareSourceWaveform({path:'source.mov',continuous:true},receive);
+    const rejected=expect(work).rejects.toBe(error),request=f.bridge.prepareSourceWaveform.mock.calls[0][0];
+    expect(()=>f.jobs.progress({...request,waveform:{},pct:5})).not.toThrow();
+    expect(f.jobs.snapshot().count).toBe(1);
+    f.jobs.progress({...request,waveform:{},pct:10});expect(receive).toHaveBeenCalledOnce();
+    f.pending[0].resolve({wave:'wave.wav',temporary:false});await rejected;expect(f.jobs.snapshot().count).toBe(0);
+  });
   it.each(['ingest','prepareSourceWaveform','prepareWaveform'])('%s 開始通知時同步換專案，不得再啟動已失權工作',async method=>{
     let jobs,shouldReset=true,serial=0;
     const action=vi.fn(()=>new Promise(()=>{}));

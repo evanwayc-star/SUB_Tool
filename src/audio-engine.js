@@ -59,6 +59,7 @@ class AudioEngineCore {
     this._elementPlacements=null;
     this._placementGains=null;
     this._elementSeeks=new Map();
+    this._elementStartVersion=0;
     this._sourceMetadata=sourceMetadata;
     this._normalizedAudioBuffers=new WeakSet();
   }
@@ -396,16 +397,121 @@ class AudioEngineCore {
     }catch(_){if(this._elementSeeks.get(element)===request)this._elementSeeks.delete(element);}
   }
 
+  _prepareElementGroup(entries,{owns=()=>true}={}) {
+    const version=this._elementStartVersion;
+    let preparing=true,state='preparing',timer=null,resolve;
+    const requests=[],ready=new Promise(done=>{resolve=done;});
+    const current=()=>version===this._elementStartVersion&&owns()&&requests.every(request=>
+      !request.controller.signal.aborted&&request.source===(request.element.currentSrc||request.element.src)&&request.owns());
+    const clear=()=>{
+      clearTimeout(timer);
+      for(const request of requests){
+        for(const event of ['seeked','canplay','loadeddata'])request.element.removeEventListener?.(event,check);
+        request.element.removeEventListener?.('error',fail);
+        request.element.removeEventListener?.('emptied',cancel);
+        request.controller.signal.removeEventListener('abort',cancel);
+        if(this._elementSeeks.get(request.element)===request)this._elementSeeks.delete(request.element);
+      }
+    };
+    const finish=(status,error)=>{
+      if(state==='cancelled'||state==='failed'||state==='committed')return;
+      state=status;clear();
+      for(const request of requests){
+        if(version!==this._elementStartVersion)break;
+        request.controller.abort();request.onCancel?.();
+        if(version!==this._elementStartVersion)break;
+        try{request.element.pause();}catch(_){}
+      }
+      resolve({status,...(error?{error}:{})});
+    };
+    const cancel=()=>finish('cancelled');
+    const fail=error=>finish(current()?'failed':'cancelled',error instanceof Error?error:new Error('音訊聲道載入失敗'));
+    const seek=request=>{
+      request.positioned=false;
+      const pending=getPlayerAdapter().seekElement(request.element,request.time,{signal:request.controller.signal});
+      if(pending?.then)pending.then(()=>{request.positioned=true;check();}).catch(error=>error?.name==='AbortError'?cancel():fail(error));
+      else request.positioned=true;
+    };
+    const playable=request=>request.positioned&&!request.element.seeking
+      &&(!(typeof request.element.readyState==='number')||request.element.readyState>=3);
+    const check=()=>{
+      if(preparing||state!=='preparing')return;
+      if(!current()){cancel();return;}
+      if(!requests.every(playable))return;
+      // Readiness is evidence for this fixed target, not a request to chase a
+      // moving clock. The presentation owner controls when that clock resumes.
+      state='ready';clearTimeout(timer);resolve({status:'ready'});
+    };
+    const plan={ready,cancel,pending:()=>{
+      if(state!=='preparing'&&state!=='ready')return false;
+      if(!current()){cancel();return false;}
+      return true;
+    },commit:()=>{
+      if(state!=='ready'||!current()){if(state==='ready')cancel();return false;}
+      state='committed';clear();
+      const playing=[];
+      for(const request of requests){
+        if(!current()){Promise.all(playing).catch(()=>{});return false;}
+        request.onCommit?.();
+        if(!current()){Promise.all(playing).catch(()=>{});return false;}
+        try{playing.push(Promise.resolve(request.element.play()));}catch(error){playing.push(Promise.reject(error));}
+      }
+      return Promise.all(playing).then(()=>current(),error=>{
+        if(!current())return false;
+        for(const request of requests){
+          if(!current())return false;
+          request.onCancel?.();
+          if(!current())return false;
+          try{request.element.pause();}catch(_){}
+        }
+        if(!current())return false;
+        throw error;
+      });
+    }};
+    this._elementPreparation=plan;
+    try{
+      for(const entry of entries){
+        if(state!=='preparing')break;
+        this._cancelElementSeek(entry.element);
+        const request={...entry,controller:new AbortController(),source:entry.element.currentSrc||entry.element.src,group:true,positioned:false};
+        requests.push(request);this._elementSeeks.set(request.element,request);
+        request.controller.signal.addEventListener('abort',cancel,{once:true});
+        for(const event of ['seeked','canplay','loadeddata'])request.element.addEventListener?.(event,check);
+        request.element.addEventListener?.('error',fail,{once:true});
+        request.element.addEventListener?.('emptied',cancel,{once:true});
+        request.element.pause();
+        if(!current()){cancel();break;}
+        seek(request);
+      }
+    }catch(error){fail(error);}
+    preparing=false;
+    if(state==='preparing'){timer=setTimeout(()=>fail(new Error('等待音訊聲道可播逾時')),10000);check();}
+    return plan;
+  }
+
   /* localT＝目前 clip 的來源時間；tlT＝時間軸時間（ext-* 參考音用）。兩者不可互換，見 §0.5。 */
   startElements(localT, tlT) {
+    const prepared=this.prepareElements(localT,tlT);
+    const started=prepared.commit();
+    return Promise.resolve(started||prepared.ready.then(result=>result.status==='ready'&&prepared.commit()))
+      .catch(error=>{console.warn('音訊起播失敗：',error);return false;});
+  }
+
+  prepareElements(localT,tlT,options={}) {
+    const previousVersion=this._elementStartVersion;
+    this._elementPreparation?.cancel();
+    const cancelled=()=>({ready:Promise.resolve({status:'cancelled'}),cancel(){},commit:()=>false,pending:()=>false});
+    if(previousVersion!==this._elementStartVersion)return cancelled();
+    const version=++this._elementStartVersion;
     this.stopScrubs();
     const env = this._env;
     const seqOn = env.seqOn();
     const playbackRate = env.playbackRate();
     if (tlT === undefined) tlT = seqOn ? env.timelineTime() : localT;
     this.pruneReverseSources();this._reversePlayback?.stop();this._elementPlacements?.prune(tlT);
-    const started=new Set();
+    const started=new Set(),entries=[];
     for (const tr of env.tracks()) {
+      if(version!==this._elementStartVersion)return cancelled();
       const playbacks=this._playbacks(tr,tlT);
       if(tr.el&&(tr._srcHidden||env.transportMuted()||!playbacks.some(item=>!item?.reverse)
         ||playbacks.length>1||playbacks.some(item=>item?.clip?.fadeIn||item?.clip?.fadeOut))){this._cancelElementSeek(tr.el);try{tr.el.pause();}catch(_){}}
@@ -413,11 +519,13 @@ class AudioEngineCore {
       if (playback?.reverse || env.transportMuted()) {
         const entry = this._reversePlayback?.get(tr, playback);
         if (entry?.el && !tr._srcHidden && !env.transportMuted()) {
-          this._placementGains.for(tr,playback,tlT,{schedule:true});
-          entry.el.currentTime = clamp(playback.offset, 0, entry.el.duration || playback.offset);
           entry.el.playbackRate = playback.rate || 1;
           if ('preservesPitch' in entry.el) entry.el.preservesPitch = entry.el.playbackRate >= .25 && entry.el.playbackRate <= 4;
-          entry.el.play()?.catch?.(()=>{});
+          if(!started.has(entry.el)){
+            started.add(entry.el);entries.push({element:entry.el,time:clamp(playback.offset,0,entry.el.duration||playback.offset),
+              owns:()=>env.tracks().includes(tr)&&!tr._srcHidden&&!env.transportMuted()&&this._reversePlayback?.get(tr,playback)===entry,
+              onCommit:()=>this._placementGains.for(tr,playback,tlT,{schedule:true})});
+          }
         } else entry?.el?.pause();
         continue;
       }
@@ -429,7 +537,8 @@ class AudioEngineCore {
       const element=this._elementPlacements?.element(tr,playback,playbacks)||tr.el;
       if(started.has(element)) continue;
       started.add(element);
-      if(this._elementPlacements?.start(element,tlT)) continue;
+      const placement=this._elementPlacements?.prepare(element,tlT);
+      if(placement){entries.push(placement);continue;}
       const s = tr.source || 'video';
       let off;
       if(playback) off=playback.sourceTime;
@@ -455,13 +564,19 @@ class AudioEngineCore {
         if ('preservesPitch' in element) {
           element.preservesPitch = (element.playbackRate >= 0.25 && element.playbackRate <= 4);
         }
-        this._seekElement(element,off,{start:true,owns:()=>env.tracks().includes(tr)&&!tr._srcHidden&&!env.transportMuted()});
+        entries.push({element,time:off,owns:()=>env.tracks().includes(tr)&&!tr._srcHidden&&!env.transportMuted()});
       } catch (e) {}
       }
     }
+    if(version!==this._elementStartVersion)return cancelled();
+    return this._prepareElementGroup(entries,options);
   }
 
   syncElements(timelineTime){
+    if(this._elementPreparation?.pending())return;
+    const restart=()=>this.startElements(this._env.seqOn()
+      ?this._env.sourceTimeFor(this._env.activeSource()||'video',timelineTime)??timelineTime:timelineTime,timelineTime);
+    if(this._elementPlacements?.needsAlignment(timelineTime)){restart();return;}
     this._elementPlacements?.sync(timelineTime);
     const synced=new Set();
     for(const track of this._env.tracks()){
@@ -475,19 +590,27 @@ class AudioEngineCore {
       if(track._srcHidden||this._env.transportMuted()||reference==null){this._cancelElementSeek(element);try{element.pause();}catch(_){}continue;}
       const pending=this._elementSeeks.get(element);
       const owns=()=>this._env.tracks().includes(track)&&!track._srcHidden&&!this._env.transportMuted();
+      if(pending?.group)continue;
       if(pending){if(Math.abs(pending.time-reference)>.12)this._seekElement(element,reference,{start:true,owns});continue;}
       if(element.paused)continue;
       const playerTime=getPlayerAdapter().playerTime(reference,element.currentSrc||element.src);
-      if(Math.abs(element.currentTime-playerTime)>.12)this._seekElement(element,reference,{owns});
+      if(Math.abs(element.currentTime-playerTime)>.12){restart();return;}
     }
   }
 
   stopElements() {
+    const previousVersion=this._elementStartVersion;
+    this._elementPreparation?.cancel();
+    if(previousVersion!==this._elementStartVersion)return;
+    const version=++this._elementStartVersion;
     this.stopScrubs();
+    if(version!==this._elementStartVersion)return;
     for(const element of [...this._elementSeeks.keys()])this._cancelElementSeek(element);
     this._reversePlayback?.stop();
+    if(version!==this._elementStartVersion)return;
     this._elementPlacements?.stop();
     for (const tr of this._env.tracks()) {
+      if(version!==this._elementStartVersion)return;
       if (tr.kind === 'element' && tr.el) {
         try { tr.el.pause(); } catch (e) {}
       }

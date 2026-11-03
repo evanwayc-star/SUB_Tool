@@ -12,7 +12,7 @@ const context={state:'running',currentTime:0,destination:{},resume:vi.fn(),
   createMediaElementSource:()=>node(),createChannelSplitter:()=>node(),createChannelMerger:()=>node(),
   createBufferSource:()=>{const source={...node(),playbackRate:{value:1},start:vi.fn(),stop:vi.fn()};buffers.push(source);return source;}};
 class AudioElement extends EventTarget{
-  constructor(){super();this.src='';this.currentTime=0;this.duration=10;this.readyState=1;this.paused=true;this.playbackRate=1;elements.push(this);}
+  constructor(){super();this.src='';this.currentTime=0;this.duration=10;this.readyState=4;this.paused=true;this.playbackRate=1;elements.push(this);}
   play=vi.fn(async()=>{this.paused=false;});pause=vi.fn(()=>{this.paused=true;});load=vi.fn();
 }
 let Media,State,resetAudioProject,ensureAudioSourceMap,Seq,AudioEngine,resetPlayerAdapter,video;
@@ -146,17 +146,21 @@ it.each([{start:2,actual:3.1,active:true},{start:5.9,actual:6.1,active:false}])
 ('mpv 靜音回覆延到 $actual 秒時，先更新疊合配線且下一 tick 不重啟',async({start,actual,active})=>{
   const {lower}=setupOverlap();
   const {activateMpvTransport}=await import('../src/media-player-adapter.js');
-  let acceptMute;
+  let acceptMute,controlMute=false;
   const muted=new Promise(resolve=>{acceptMute=resolve;});
   const bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'late-mute',duration:10})),
     play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
     present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
-    mute:vi.fn(value=>value?muted:Promise.resolve())};
+    mute:vi.fn(value=>value&&controlMute?muted:Promise.resolve())};
   const runtime=activateMpvTransport({mpv:bridge});
   await runtime.enterMpv({src:'C:/source.mov'});Media._mpvPath='C:/source.mov';Media._mpvTime=start;
   try{
     await Media.requestPresentation(start);Media.play();
     await vi.waitFor(()=>expect(bridge.play).toHaveBeenCalledOnce());
+    await vi.waitFor(()=>expect(Media.playbackTransitionPending()).toBe(false));
+    // 初始起播現在先等共同準備；此處獨立測已播放後的背景接管 ACK。
+    Media.stopElementSources();Media.stopBufferSources();lower.play.mockClear();
+    controlMute=true;Media.startBufferSources(start);Media.startElementSources(start);
     expect(lower.play).not.toHaveBeenCalled();
     Media._mpvTime=actual;acceptMute();
     await vi.waitFor(()=>expect(buffers.some(source=>source.start.mock.calls.length&&!source.stop.mock.calls.length)).toBe(true));
@@ -200,10 +204,10 @@ it.each([
     const element=Media.tracks.find(track=>track.kind==='element');element.source=top.audioSrc;element.audioSourceId=top.audioSourceId;
   }
   const {activateMpvTransport}=await import('../src/media-player-adapter.js');
-  let acceptPlay,controlMute=false;
-  const playing=new Promise(resolve=>{acceptPlay=resolve;}),muteReplies=[];
+  let controlMute=false;
+  const muteReplies=[];
   const bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'split-mute-replies',duration:10})),
-    play:vi.fn(()=>playing),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
+    play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
     present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),mute:vi.fn(value=>{
       if(!value||!controlMute)return Promise.resolve();
       return new Promise(resolve=>{muteReplies.push(resolve);});
@@ -213,7 +217,12 @@ it.each([
   try{
     await Media.requestPresentation(start);Media.play();
     await vi.waitFor(()=>expect(bridge.play).toHaveBeenCalledOnce());
-    controlMute=true;acceptPlay();
+    await vi.waitFor(()=>expect(Media.playbackTransitionPending()).toBe(false));
+    // 已接受的起播完成後，重新排入兩種背景 follower，才有各自的 mute ACK。
+    Media.stopElementSources();Media.stopBufferSources();
+    controlMute=true;
+    if(Media.tracks.some(track=>track.kind==='buffer'&&!track._srcHidden))Media.startBufferSources(start);
+    Media.startElementSources(start);
     const initialCount=swap&&start===2?1:2;
     await vi.waitFor(()=>expect(muteReplies).toHaveLength(initialCount));
     // 背景聲道剛完成時，也可能單獨要求目前仍隱藏的 buffer 接管。
@@ -248,7 +257,7 @@ it.each([
     expect(buffers).toHaveLength(bufferCount);expect(lower.play).toHaveBeenCalledTimes(plays);
     for(const voice of voices)expect(voice.stop).not.toHaveBeenCalled();
   }finally{
-    controlMute=false;acceptPlay();for(const resolve of muteReplies)resolve();
+    controlMute=false;for(const resolve of muteReplies)resolve();
     Media.pause({seekOnPause:false});runtime.stopBoundsFeeder();resetPlayerAdapter(null,video);
   }
 });

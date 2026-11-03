@@ -18,13 +18,13 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       progress:job.progress?{...job.progress}:null}))});
   const publish=()=>changed(snapshot());
   const finish=job=>{if(pending.get(job.requestId)===job){pending.delete(job.requestId);publish();}};
-  function run(method,options,owner=session,action=null){
+  function run(method,options,owner=session,action=null,onWaveform=null){
     if(owner!==session) return Promise.reject(cancelled());
     const requestId=id();
     let abort;
     const aborted=new Promise((_,reject)=>{abort=()=>reject(cancelled());});
     const local=method==='prepareWaveform',sourceWave=method==='prepareSourceWaveform';
-    const job={owner,requestId,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,
+    const job={owner,requestId,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,onWaveform,
       progress:local?{stage:'waveform',label:'準備波形',pct:null}:sourceWave?{stage:'source-waveform',label:'等候優先產生波形',pct:null,queued:true}:null};
     if(!local) owner.used=true;
     pending.set(requestId,job);awaitingReply.add(job);publish();
@@ -58,13 +58,14 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       // finish() synchronously notifies observers; they can replace the
       // workspace before this result is handed over to its original caller.
       if(owner!==session){discard(result);throw cancelled();}
+      if(job.progressError){discard(result);throw job.progressError;}
       return result;
     },error=>{awaitingReply.delete(job);if(owner!==session) discard(delivered);finish(job);throw error;});
   }
   return {
     ingest:options=>run('ingest',options),
     streamIngest:options=>run('streamIngest',options),
-    prepareSourceWaveform:options=>run('prepareSourceWaveform',options),
+    prepareSourceWaveform:(options,onWaveform)=>run('prepareSourceWaveform',options,session,null,onWaveform),
     prepareWaveform:action=>run('prepareWaveform',{},session,action),
     capture(){
       const owner=session;
@@ -75,8 +76,14 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       if(!payload||payload.sessionId!==session.id) return false;
       const job=pending.get(payload.requestId);
       if(!job||job.owner!==session) return false;
+      // Peak batches belong to this request; do not retain them in status snapshots.
+      const {waveform,...status}=payload;
+      if(waveform&&!job.progressError&&typeof job.onWaveform==='function'){
+        try{job.onWaveform(waveform);}catch(error){job.progressError=error;}
+      }
+      if(job.owner!==session||pending.get(payload.requestId)!==job) return false;
       if(payload.done){job.terminal=true;finish(job);}
-      else {job.progress={...payload};publish();}
+      else {job.progress=status;publish();}
       return job.owner===session;
     },
     reset(){
