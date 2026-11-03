@@ -36,7 +36,6 @@ it('讀取時原位改寫又還原，實際轉檔輸入仍必須是原始凍結�
     createTempPath:ext=>ext==='wav'?input:output,
     produceTemporaryFile:(file,work)=>intake.produceTemporaryFile(file,work),
     withTemporaryDescriptor:(file,owner,work)=>intake.withTemporaryDescriptor(file,owner,work),
-    assertTemporaryOutput:(file,owner)=>intake.assertTemporaryOutput(file,owner),
     cleanupGeneratedFile:file=>intake.cleanupGeneratedFile(file),
     execute:async(_args, options)=>{
       if (fs.existsSync(input)) {

@@ -51,7 +51,7 @@ vi.mock('../src/project.js', () => ({ Project: { unrestoredClips: () => [],
 } } }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn() }));
 vi.mock('../src/xlsx-export.js', () => ({ buildXLSX: vi.fn() }));
-vi.mock('../src/notes.js', () => ({ getNotesGeneralFileData: vi.fn(), getNotesEdiusFileData: vi.fn() }));
+vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 vi.mock('../src/audio-routing.js', () => ({
   AudioRouting: {
     openOutputSettings: spies.openOutputSettings,
@@ -467,6 +467,33 @@ describe('匯出交付清單', () => {
     // 交付列的設定視窗只拿深複製草稿，不暫時覆寫正在播放專案的 State。
     expect(State.audioProject.buses).toHaveLength(2);
     expect(State.audioProject.exportLayout.streams).toHaveLength(2);
+  });
+
+  it.each(['h264', 'wav'])('%s 交付列保存後顯示快照的左右聲道，不改其他輸出', async formatName => {
+    ensureAudioBusCount(8);
+    const buses = structuredClone(State.audioProject.buses);
+    await prepareRows(['Stereo', 'Full']);
+    const format = document.querySelector('.ev-format');
+    format.value = formatName;
+    format.dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('.ev-audio-btn').click();
+    const [draft, done] = spies.openDeliveryOutputSettings.mock.lastCall;
+    // 視窗開啟後的即時音軌順序不能污染這次交付的快照。
+    State.audioProject.buses.reverse();
+    done({ saved: true, spec: { ...draft, buses: buses.slice(6),
+      streams: [{ id: 'pair', layout: 'stereo', busIds: buses.slice(6).map(bus => bus.id) }],
+      ...(formatName === 'wav' ? { wavBusIds: buses.slice(6).map(bus => bus.id) } : {}) } });
+    await vi.waitFor(() => expect(document.querySelector('.delivery-audio-info')?.textContent).toContain('左 ← A7、右 ← A8'));
+    expect(document.querySelectorAll('.delivery-audio-info')[1].textContent).not.toContain('左 ← A7');
+    if (formatName === 'h264') {
+      const wav = document.querySelector('.ev-format');
+      wav.value = 'wav'; wav.dispatchEvent(new Event('change', { bubbles: true }));
+      expect(document.querySelector('.delivery-audio-info').textContent).toContain('Stereo（2 軌） · 左 ← A7、右 ← A8');
+    }
+    document.querySelector('.ev-audio-btn').click();
+    expect(spies.openDeliveryOutputSettings.mock.lastCall[0].streams[0].busIds).toEqual(buses.slice(6).map(bus => bus.id));
+    expect(State.audioProject.buses).toHaveLength(8);
+    expect(State.audioProject.exportLayout.streams).toHaveLength(8);
   });
 
   /* 長檔名與目錄需要各自伸縮，規格、檔案位置、音訊與字幕則要有清楚的分區。 */

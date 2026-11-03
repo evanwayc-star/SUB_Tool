@@ -119,12 +119,12 @@ it.each(['apply', 'load', 'loadDesktop', 'open'].flatMap(entry => [
 ].map(target => ({ entry, ...target }))))(
   'public $entry 拒絕錯型 $field 的 $property，既有專案仍可顯示與匯出', async ({ entry, field, property }) => {
   const { renderSubList } = await import('../src/subtitles.js');
-  const { getNotesGeneralFileData } = await import('../src/notes.js');
-  const { getFileData } = await import('../src/subio.js');
+  const { prepareSubtitleFileExport } = await import('../src/subtitle-file-export.js');
   State.notes = [{ id: 'kept-note', time: 2, text: '保留備註' }];
   History.reset();
-  const originalExport = getNotesGeneralFileData();
-  const subtitleExport = () => getFileData('srt', State.cues, State.tracks[0].name);
+  const notesExport = () => prepareSubtitleFileExport(State,{noteFormats:['general']}).files[0];
+  const originalExport = notesExport();
+  const subtitleExport = () => prepareSubtitleFileExport(State,{formats:['srt']}).files[0];
   const originalSubtitles = subtitleExport();
   for (const text of [123, true, [], { value: '損壞欄位' }]) {
     const data = { ...baseDocument(), cues: [{ track: 1, start: 0, end: 1, text: '新專案字幕' }],
@@ -138,11 +138,11 @@ it.each(['apply', 'load', 'loadDesktop', 'open'].flatMap(entry => [
         await Project.open(async () => desktopInput(data), { confirm: false });
 
     expect(() => renderSubList()).not.toThrow();
-    expect(() => getNotesGeneralFileData()).not.toThrow();
+    expect(notesExport).not.toThrow();
     expect(subtitleExport).not.toThrow();
     expect(result).toBe(false);
     expect(document.getElementById('sublist').textContent).toContain('目前專案');
-    expect(getNotesGeneralFileData()).toEqual(originalExport);
+    expect(notesExport()).toEqual(originalExport);
     expect(subtitleExport()).toEqual(originalSubtitles);
     expect(snapshot()).toBe(before);
     expect(owns()).toBe(true);

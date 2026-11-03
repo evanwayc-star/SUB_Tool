@@ -6,6 +6,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 
 function fileEvidence(stat) {
   return [stat.size, stat.mtimeMs, stat.ctimeMs, stat.dev, stat.ino];
@@ -146,4 +147,47 @@ async function motherSourceFingerprint(source, {
   } finally { await file.close(); }
 }
 
-module.exports = { motherSourceFingerprintSync, motherSourceFingerprint, portableSourceFingerprint };
+// 同一 NAS 檔案可由不同 client/mount 開啟；dev 與絕對路徑不是共享身分。
+// 這是有檔案身分的快速 freshness 證據，並非另一種全文 checksum。
+// 非 UNC 路徑只在同一主機／裝置內有效；無法確認的掛載別名安全 miss。
+function sharedSourceFingerprintSync(source, { fileSystem = fs } = {}) {
+  const resolved = path.resolve(source), physical = fileSystem.realpathSync.native(resolved);
+  let normalized = physical.replaceAll('\\', '/');
+  if (normalized.toLowerCase().startsWith('//?/unc/')) normalized = '//' + normalized.slice(8);
+  const unc = /^\/\/([^/]+)\/([^/]+)\//.exec(normalized);
+  const file = fileSystem.openSync(resolved, 'r');
+  try {
+    const stat = fileSystem.fstatSync(file, { bigint: true });
+    if (!stat.isFile()) throw new TypeError('母素材來源不是檔案');
+    const fields = ['size', 'ino', 'mtimeNs', 'ctimeNs', 'birthtimeNs'];
+    if (fields.some(field => typeof stat[field] !== 'bigint') || stat.ino <= 0n
+      || stat.mtimeNs <= 0n || stat.ctimeNs <= 0n || stat.birthtimeNs <= 0n
+      || stat.size < 0n || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    const evidence = ['dev', ...fields].map(field => String(stat[field]));
+    const scope = unc ? ['unc', unc[1].toLowerCase(), unc[2].toLowerCase()]
+      : ['local', os.hostname(), String(stat.dev)];
+    const hash = crypto.createHash('sha256').update(JSON.stringify([
+      'shared-source-file-v1', scope, normalized.split('/').at(-1).toLowerCase(),
+      ...fields.map(field => String(stat[field])),
+    ]));
+    for (const [position, length] of sampleWindows(Number(stat.size))) {
+      const bytes = Buffer.alloc(length);
+      let read = 0;
+      while (read < length) {
+        const count = fileSystem.readSync(file, bytes, read, length - read, position + read);
+        requireSampleRead(count);
+        if (!Number.isInteger(count) || count < 0 || count > length - read) throw new Error('母素材取樣長度無效');
+        read += count;
+      }
+      appendSample(hash, position, bytes);
+    }
+    for (const after of [fileSystem.fstatSync(file, { bigint: true }), fileSystem.statSync(resolved, { bigint: true })]) {
+      if (!after.isFile() || ['dev', ...fields].some((field, index) => String(after[field]) !== evidence[index]))
+        throw new Error('母素材在讀取指紋時變更');
+    }
+    if (fileSystem.realpathSync.native(resolved) !== physical) throw new Error('母素材在讀取指紋時變更');
+    return hash.digest('hex');
+  } finally { fileSystem.closeSync(file); }
+}
+
+module.exports = { motherSourceFingerprintSync, motherSourceFingerprint, portableSourceFingerprint, sharedSourceFingerprintSync };

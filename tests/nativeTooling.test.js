@@ -310,8 +310,8 @@ describe('原生工具候選路徑', () => {
       moduleDir: 'C:\\app\\electron',
       resourcesPath: 'C:\\app\\resources',
       env: { MPV_PATH: 'D:\\tools\\mpv.exe' },
-      spawnSync(candidate, args) {
-        calls.push({ candidate, args });
+      spawnSync(candidate, args, options) {
+        calls.push({ candidate, args, options });
         return candidate.endsWith('mpv.exe') ? { status: 0, signal: null } : { status: null, signal: null };
       },
     });
@@ -322,7 +322,8 @@ describe('原生工具候選路徑', () => {
       'C:\\app\\electron\\mpv\\mpv.exe',
       'C:\\app\\resources\\app.asar.unpacked\\electron\\mpv\\mpv.exe',
     ]));
-    expect(calls[0]).toEqual({ candidate: 'C:\\app\\electron\\mpv\\mpv.exe', args: ['--version'] });
+    expect(calls[0]).toEqual({ candidate: 'C:\\app\\electron\\mpv\\mpv.exe', args: ['--version'],
+      options: { windowsHide: true, timeout: 5000, stdio: 'pipe' } });
     expect(result.path).toBe('C:\\app\\electron\\mpv\\mpv.exe');
   });
 });

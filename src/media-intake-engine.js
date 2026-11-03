@@ -64,6 +64,11 @@ export function maxKnownSourceDuration(...durations) {
   }));
 }
 
+// 先提供五秒可見波形，再補齊來源分鐘邊界；後續維持六十秒快取片段。
+export function sourceWaveformChunkLength(start, duration) {
+  return Math.min(duration - start, start < 5 ? 5 - start : 60 - start % 60);
+}
+
 function disposeAudioElements(elements) {
   for (const element of (Array.isArray(elements) ? elements : [])) {
     if (!element) continue;

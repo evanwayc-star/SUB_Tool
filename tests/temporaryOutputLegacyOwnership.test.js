@@ -66,6 +66,27 @@ it('writer 尚未結束時 cleanup 不可刪除輸出，交接後可正常清理
   expect(forgotten).toContain(target);
 });
 
+it('多階段 writer 可在交接前核對同一 handle，關閉後核對資格失效', async () => {
+  const { tempRoot, runtime } = fixture();
+  const target = path.join(tempRoot, 'staged.wav'), original = path.join(root, 'original.wav');
+  let verifyLater;
+  await runtime.produceTemporaryFile(target, (output, owner) =>
+    runtime.withTemporaryDescriptor(output, owner, async (fd, verify) => {
+      verifyLater = verify;
+      fs.writeSync(fd, Buffer.from('owned bytes'));
+      expect(verify().size).toBe(11n);
+      fs.renameSync(output, original);
+      fs.writeFileSync(output, 'foreign bytes');
+      expect(verify).toThrow(/身分.*變更/);
+      fs.unlinkSync(output);
+      fs.renameSync(original, output);
+      expect(verify().size).toBe(11n);
+    }));
+  expect(verifyLater).toThrow(/handle 已關閉/);
+  expect(fs.readFileSync(target, 'utf8')).toBe('owned bytes');
+  expect(runtime.cleanupGeneratedFile(target)).toBe(true);
+});
+
 it.each([false, true])('已交接檔案清除=%s 後同名路徑不得重用或被舊清理刪除', async cleanFirst => {
   const { tempRoot, runtime } = fixture();
   const target = path.join(tempRoot, 'legacy.mp4'), old = path.join(root, 'old.mp4');

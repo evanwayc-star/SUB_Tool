@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { prepareSubtitleFileExport } from '../src/subtitle-file-export.js';
 
 const workflow=vi.hoisted(()=>({workspace:0,reads:new Map(),record:vi.fn()}));
 vi.mock('../src/project.js',()=>({Project:{captureWorkspaceOwnership:()=>{const generation=workflow.workspace;return ()=>generation===workflow.workspace;}}}));
@@ -9,11 +10,11 @@ vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),layoutTimeline:
 vi.mock('../src/history.js',()=>({History:{stack:[],hi:-1,cancelPreviewsForTargets:vi.fn()},recordHistory:workflow.record}));
 vi.mock('../src/substyle.js',async original=>({...await original(),loadFonts:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../src/audio-routing.js',()=>({AudioRouting:{}}));
-vi.mock('../src/notes.js',()=>({getNotesGeneralFileData:vi.fn(),getNotesEdiusFileData:vi.fn()}));
 
 let State,subio,ui;
 const srt=text=>`1\n00:00:01,000 --> 00:00:02,000\n${text}\n`;
 const bytes=text=>new TextEncoder().encode(text).buffer;
+const fileData=(kind,cues)=>prepareSubtitleFileExport({...State,cues},{formats:[kind],mergeFormats:[kind]}).files[0];
 
 beforeAll(async()=>{
   document.body.innerHTML='<div id="modalBg"><div class="modal"><div id="modalTitle"></div><div id="modalBody"></div><div id="modalFoot"></div></div></div><div id="toast"></div>';
@@ -62,7 +63,7 @@ describe('字幕匯入工作歸屬',()=>{
     const expected=[{start:1,end:2,text:'第一句  文字\n下一行'},{start:3,end:4,text:'第二句'}];
     expect(State.cues.map(({start,end,text})=>({start,end,text}))).toEqual(expected);
     expect(workflow.record).toHaveBeenCalledOnce();
-    const output=subio.getFileData('srt',State.cues,'重新匯出');
+    const output=fileData('srt',State.cues);
     const text=Buffer.from(output.content,'base64').subarray(2).toString('utf16le');
     expect(subio._parseSubtitleText(text,'srt')).toEqual(expected);
   });
@@ -73,7 +74,7 @@ describe('字幕匯入工作歸屬',()=>{
     document.querySelector('#modalFoot button.primary').click();
     const original=State.cues.map(({text,start,end,timed})=>({text,start,end,timed}));
     expect(original.map(cue=>cue.start)).toEqual([0,0.001,0.002]);
-    const ass=subio.getFileData('ass',State.cues,'原稿');
+    const ass=fileData('ass',State.cues);
     const text=Buffer.from(ass.content,'base64').subarray(2).toString('utf16le');
     const parsed=subio._parseSubtitleText(text,'ass');
     expect(parsed.subtool.cues).toHaveLength(3);
@@ -86,7 +87,7 @@ describe('字幕匯入工作歸屬',()=>{
   it.each(['startFrame','endFrame','both'])('ASS 的 %s 與秒數矛盾時退回標準 Dialogue',field=>{
     State.mediaName='video.mov';State.fps=25;
     const source=[{id:'source',start:1,end:2,text:'標準時間',track:0,timed:true}];
-    const file=subio.getFileData('ass',source,'原稿');
+    const file=fileData('ass',source);
     const ass=Buffer.from(file.content,'base64').subarray(2).toString('utf16le');
     const metadata=structuredClone(subio._parseSubtitleText(ass,'ass').subtool);
     if(field==='startFrame') metadata.cues[0].startFrame=26;

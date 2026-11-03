@@ -74,6 +74,16 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
+function sourceWave(seconds, amplitude=16384) {
+  const count=Math.round(4000*seconds),buffer=new ArrayBuffer(44+count*2),view=new DataView(buffer);
+  for(const [offset,value] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
+    for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i));
+  view.setUint32(4,36+count*2,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);
+  view.setUint32(24,4000,true);view.setUint32(28,8000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,count*2,true);
+  for(let i=0;i<count;i++)view.setInt16(44+i*2,i%2?amplitude:-amplitude,true);
+  return buffer;
+}
+
 let Media;
 let Wave;
 let State;
@@ -363,9 +373,9 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
-  it.each(['late','newer','newer-registry','selected-channel','replaced','changed'])('串流先可播放、首段波形後到時 %s 安全交接且不阻塞播放',async mode=>{
+  it.each(['late','newer','newer-registry','selected-channel','replaced','changed'])('波形完成後串流就緒，交接查驗期間 %s 仍由最新來源擁有',async mode=>{
     const {getProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
-    const stream=deferred(),wave=deferred(),key='a'.repeat(16);
+    const stream=deferred(),wave=deferred(),verify=deferred(),key='a'.repeat(16);
     const pcm=new ArrayBuffer(44+8000),view=new DataView(pcm);
     for(const [offset,value] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
       for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i));
@@ -376,14 +386,17 @@ describe('desktop mother-source intake ownership', () => {
     window.subtool.streamIngest=vi.fn(()=>stream.promise);
     window.subtool.prepareSourceWaveform=vi.fn().mockReturnValueOnce(wave.promise)
       .mockResolvedValue({wave:'C:/cache/followup-wave.wav',sourceKey:key,start:0,duration:1,temporary:true});
-    window.subtool.mediaSourceKey=vi.fn(async()=>mode==='changed'?'b'.repeat(16):key);
+    window.subtool.mediaSourceKey=vi.fn(()=>verify.promise);
     vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>pcm})));
     try{
       const loading=Media.loadDesktopMedia('C:/media/A.mov');
       await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      expect(window.subtool.streamIngest).not.toHaveBeenCalled();
+      wave.resolve({wave:'C:/cache/late-wave.wav',sourceKey:key,start:0,duration:1,temporary:true});
+      await vi.waitFor(()=>expect(window.subtool.streamIngest).toHaveBeenCalledOnce());
       stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
       await loading;
-      expect(State.clips).toHaveLength(1); // 首段 WAV 還沒回來，載入不得等待波形。
+      expect(State.clips).toHaveLength(1); // 串流可用後，交接查驗不阻塞已可播放的影片。
       const primary=State.clips[0];
       const newer=Float32Array.from({length:200},(_,i)=>i%2?.9:-.9);
       if(mode==='newer')Media._commitOriginalWave(primary,newer,{mixPath:'new-wave'});
@@ -393,7 +406,7 @@ describe('desktop mother-source intake ownership', () => {
         Wave.setSourceWaveSelection(primary,'0:0');
       }
       if(mode==='replaced')Media.reset();
-      wave.resolve({wave:'C:/cache/late-wave.wav',sourceKey:key,start:0,duration:1,temporary:true});
+      verify.resolve(mode==='changed'?'b'.repeat(16):key);
       await vi.waitFor(()=>expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/late-wave.wav'));
       if(mode==='late'||mode==='selected-channel'){
         await vi.waitFor(()=>expect(primary.peaks?.some(value=>Math.abs(value)>.4)).toBe(true));
@@ -406,86 +419,83 @@ describe('desktop mother-source intake ownership', () => {
       await vi.waitFor(()=>expect(getProvisionalSourceWaveform()).toBeNull());
     }finally{
       stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
-      wave.resolve(null);Media.reset();delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
+      wave.resolve(null);verify.resolve(key);Media.reset();delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
     }
   });
 
-  it('兩分鐘來源首段完成後即交接，第二段仍等待時不阻塞播放或首段波形',async()=>{
-    const stream=deferred(),first=deferred(),later=deferred(),key='a'.repeat(16);
-    const count=4000*60,pcm=new ArrayBuffer(44+count*2),view=new DataView(pcm);
-    for(const [offset,value] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
-      for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i));
-    view.setUint32(4,36+count*2,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);
-    view.setUint32(24,4000,true);view.setUint32(28,8000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,count*2,true);
-    for(let i=0;i<count;i++)view.setInt16(44+i*2,i%2?16384:-16384,true);
+  it('長片先顯示前五秒波形，補齊分鐘邊界與全片後才啟動 Proxy',async()=>{
+    const {getProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
+    const stream=deferred(),segments=[],key='a'.repeat(16),waves=new Map();
     deskMock.probe.mockResolvedValueOnce({duration:120,video:{codec:'prores',fps:25},audio:[{channels:1}]});
     window.subtool.streamIngest=vi.fn(()=>stream.promise);
-    let waveRequests=0;
     window.subtool.prepareSourceWaveform=vi.fn(options=>{
-      if(waveRequests++===0)return first.promise;
-      return later.promise.then(result=>result&&({...result,start:options.start}));
+      const gate=deferred();segments.push({options,...gate});return gate.promise;
     });
     window.subtool.mediaSourceKey=vi.fn(async()=>key);
-    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>pcm})));
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>waves.get(String(url).split('/').at(-1))})));
+    const finish=(index,amplitude)=>{
+      const {start,length}=segments[index].options,wave=`segment-${index}.wav`;
+      waves.set(wave,sourceWave(length,amplitude));
+      segments[index].resolve({wave,sourceKey:key,start,duration:length,temporary:true});
+    };
+    const loading=Media.loadDesktopMedia('C:/media/long.mov');
     try{
-      const loading=Media.loadDesktopMedia('C:/media/long.mov');
-      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      await vi.waitFor(()=>expect(segments).toHaveLength(1));
+      expect(segments[0].options).toMatchObject({start:0,length:5,duration:120});
+      finish(0,16384);
+      await vi.waitFor(()=>expect(getProvisionalSourceWaveform()?.peaks).toHaveLength(1000));
+      expect(getProvisionalSourceWaveform().peaks[1]).toBeCloseTo(.5,3);
+      expect(window.subtool.streamIngest).not.toHaveBeenCalled();
+      await vi.waitFor(()=>expect(segments).toHaveLength(2));
+      expect(segments[1].options).toMatchObject({start:5,length:55,duration:120});
+      finish(1,8192);
+      await vi.waitFor(()=>expect(segments).toHaveLength(3));
+      expect(segments[2].options).toMatchObject({start:60,length:60,duration:120});
+      expect(window.subtool.streamIngest).not.toHaveBeenCalled();
+      finish(2,24576);
+      await vi.waitFor(()=>expect(window.subtool.streamIngest).toHaveBeenCalledOnce());
+      expect(getProvisionalSourceWaveform().peaks).toHaveLength(24000);
+      expect(State.clips).toEqual([]);
       stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
       await loading;
-      const primary=State.clips[0];expect(primary).toBeTruthy();expect(primary.peaks).toBeFalsy();
-      first.resolve({wave:'C:/cache/first.wav',sourceKey:key,start:0,duration:60,temporary:true});
-      await vi.waitFor(()=>expect(primary.peaks?.length).toBe(12000));
-      expect(primary.peaks.some(value=>Math.abs(value)>.4)).toBe(true);
-      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform.mock.calls.length).toBeGreaterThan(1));
-      expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/first.wav');
+      await vi.waitFor(()=>expect(State.clips[0]?.peaks).toHaveLength(24000));
+      const peaks=State.clips[0].peaks;
+      expect(peaks[999]).toBeCloseTo(.5,3);expect(peaks[1001]).toBeCloseTo(.25,3);expect(peaks[12001]).toBeCloseTo(.75,3);
+      expect(segments).toHaveLength(3);
+      expect(deskMock.cleanupAudio).toHaveBeenCalledWith('segment-0.wav');
     }finally{
-      Media.reset();later.resolve({wave:'C:/cache/later.wav',sourceKey:key,start:60,duration:60,temporary:true});
-      await vi.waitFor(()=>expect(deskMock.cleanupAudio).toHaveBeenCalledWith('C:/cache/later.wav'));
-      stream.resolve(null);first.resolve(null);delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
+      Media.reset();for(const segment of segments)segment.resolve(null);stream.resolve(null);await loading;
+      delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
     }
   });
 
-  it('串流完成先發布完整波形後，等待中的舊優先分段不能讓波形退回首段',async()=>{
-    const stream=deferred(),first=deferred(),later=deferred(),key='a'.repeat(16);
-    const wav=(seconds,amplitude)=>{
-      const count=4000*seconds,buffer=new ArrayBuffer(44+count*2),view=new DataView(buffer);
-      for(const [offset,value] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])
-        for(let i=0;i<value.length;i++)view.setUint8(offset+i,value.charCodeAt(i));
-      view.setUint32(4,36+count*2,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);
-      view.setUint32(24,4000,true);view.setUint32(28,8000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,count*2,true);
-      for(let i=0;i<count;i++)view.setInt16(44+i*2,i%2?amplitude:-amplitude,true);
-      return buffer;
-    };
-    const partial=wav(60,16384),full=wav(120,24576);
+  it('串流完成的新波形不被等待查驗的優先波形覆蓋',async()=>{
+    const stream=deferred(),verify=deferred(),key='a'.repeat(16);
+    const original=sourceWave(120,16384),full=sourceWave(120,24576);
     deskMock.probe.mockResolvedValueOnce({duration:120,video:{codec:'prores',fps:25},audio:[{channels:1}]});
     window.subtool.streamIngest=vi.fn(()=>stream.promise);
-    let waveRequests=0;
-    window.subtool.prepareSourceWaveform=vi.fn(options=>{
-      if(waveRequests++===0)return first.promise;
-      return later.promise.then(result=>result&&({...result,start:options.start}));
-    });
-    window.subtool.mediaSourceKey=vi.fn(async()=>key);
-    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>String(url).includes('full-wave')?full:partial})));
+    window.subtool.prepareSourceWaveform=vi.fn(async()=>({wave:'priority.wav',sourceKey:key,start:0,duration:120,cached:true}));
+    window.subtool.mediaSourceKey=vi.fn(()=>verify.promise);
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>String(url).includes('full-wave')?full:original})));
     try{
       const loading=Media.loadDesktopMedia('C:/media/long.mov');
-      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      await vi.waitFor(()=>expect(window.subtool.streamIngest).toHaveBeenCalledOnce());
       stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,
         cached:false,ingestJobId:'job-1',channels:[],wave:'C:/cache/full-wave.wav'});
       await loading;const primary=State.clips[0];
-      first.resolve({wave:'C:/cache/first.wav',sourceKey:key,start:0,duration:60,temporary:true});
-      await vi.waitFor(()=>expect(primary.peaks?.length).toBe(12000));
-      await vi.waitFor(()=>expect(Media._sourceWavePreparations.size).toBe(1));
-      const formal=[...Media._sourceWavePreparations.values()][0].promise;
+      await vi.waitFor(()=>expect(window.subtool.mediaSourceKey).toHaveBeenCalledOnce());
       window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:{jobId:'job-1'}}));
       await vi.waitFor(()=>expect(primary.peaks?.length).toBe(24000));
       const complete=primary.peaks;
       expect(complete.some(value=>Math.abs(value)>.7)).toBe(true);
-      later.resolve({wave:'C:/cache/old-priority.wav',sourceKey:key,start:0,duration:60,temporary:true});
-      await formal;
+      verify.resolve(key);
+      const {getProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
+      await vi.waitFor(()=>expect(getProvisionalSourceWaveform()).toBeNull());
       expect(primary.peaks===complete).toBe(true);
       expect(Wave.getSourceMixPeaks(primary)===complete).toBe(true);
+      expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce();
     }finally{
-      Media.reset();later.resolve(null);first.resolve(null);stream.resolve(null);
+      Media.reset();verify.resolve(key);stream.resolve(null);
       delete window.subtool.prepareSourceWaveform;delete window.subtool.mediaSourceKey;vi.unstubAllGlobals();
     }
   });

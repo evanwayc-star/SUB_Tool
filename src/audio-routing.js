@@ -181,7 +181,7 @@ function openForRoutingSource(source, editor=null){
         <button class="audio-count-preset" type="button" data-count="16">16</button>
         <button class="audio-count-preset" type="button" data-count="18">18</button>
       </div>
-      <div class="audio-route-actions"><button id="audioRouteAuto" type="button">自動順序對應</button><button id="audioRouteClear" type="button">清除這個來源的配線</button><button id="audioRouteOutput" type="button">輸出聲道設定…</button></div>
+      <div class="audio-route-actions"><button id="audioRouteAuto" type="button">自動順序對應</button><button id="audioRouteClear" type="button">清除這個來源的配線</button><button id="audioRouteOutput" type="button">主專案音軌設定…</button></div>
       <div class="audio-route-help">例如：來源 Stream 1 · Ch 1–6 可分別指定到 A3–A8。不同影片各自保存自己的分配。</div>
       ${routeTableHtml(routes,p.buses)}
     </div>`,
@@ -223,7 +223,7 @@ function openForSource(sourceKey){
   if(clip){ openForRoutingSource(clip); return; }
   showToast('找不到這個音訊來源');
 }
-function outputRowHtml(stream,index,buses=project().buses){
+function outputRowHtml(stream,index,buses=project().buses,delivery=false){
   const layout=LAYOUTS[stream.layout]?stream.layout:'mono';
   const width=layoutWidth(layout);
   const firstId=stream.busIds?.[0]||'';
@@ -234,8 +234,15 @@ function outputRowHtml(stream,index,buses=project().buses){
     const label=width===1?busName(bus,busIndex):`${busName(bus,busIndex)} – ${busName(end,busIndex+width-1)}`;
     return `<option value="${escapeHTML(bus.id)}" ${String(bus.id)===String(firstId)?'selected':''}>${escapeHTML(label)}</option>`;
   })].join('');
+  const channelNames=layout==='stereo'?['左聲道 L','右聲道 R']:layout==='5.1'?['左 L','右 R','中央 C','低頻 LFE','左環繞 Ls','右環繞 Rs']:['單聲道'];
+  const assignments=delivery?`<div class="audio-output-channels">${channelNames.map((name,channel)=>{
+    const selected=String(stream.busIds?.[channel]||'');
+    const options=['<option value="">— 未指定 —</option>',...buses.map((bus,busIndex)=>
+      `<option value="${escapeHTML(bus.id)}" ${String(bus.id)===selected?'selected':''}>${escapeHTML(`A${busIndex+1} · ${busName(bus,busIndex)}`)}</option>`)].join('');
+    return `<label><span>${name}</span><select class="audio-output-bus" data-channel="${channel}" aria-label="輸出 ${index+1} ${name}">${options}</select></label>`;
+  }).join('')}</div>`:`<select class="audio-output-start">${busOpts}</select>`;
   const streamName=String(stream.name||'');
-  return `<tr data-stream-id="${escapeHTML(stream.id)}"><td><div class="audio-output-stream"><span class="audio-output-index">${index+1}</span><input class="audio-output-name" aria-label="Stream ${index+1} 名稱" value="${escapeHTML(streamName)}" placeholder="Stream 名稱"></div></td><td><select class="audio-output-layout">${layoutOpts}</select></td><td><select class="audio-output-start">${busOpts}</select></td><td><button type="button" class="audio-output-remove" title="移除此輸出 stream">−</button></td></tr>`;
+  return `<tr data-stream-id="${escapeHTML(stream.id)}"><td><div class="audio-output-stream"><span class="audio-output-index">${index+1}</span><input class="audio-output-name" aria-label="Stream ${index+1} 名稱" value="${escapeHTML(streamName)}" placeholder="Stream 名稱"></div></td><td><select class="audio-output-layout" aria-label="輸出 ${index+1} 聲道格式">${layoutOpts}</select></td><td>${assignments}</td><td><button type="button" class="audio-output-remove" title="移除此輸出 stream">−</button></td></tr>`;
 }
 function outputStreamsFromDialog(buses, existingStreams){
   const streams=[];
@@ -247,18 +254,22 @@ function outputStreamsFromDialog(buses, existingStreams){
     const start=row.querySelector('.audio-output-start')?.value||'';
     const startIndex=buses.findIndex(bus=>String(bus.id)===String(start));
     const width=layoutWidth(layout);
-    const busIds=startIndex>=0?buses.slice(startIndex,startIndex+width).map(bus=>bus.id):[];
+    const selections=[...row.querySelectorAll('.audio-output-bus')];
+    const firstIndex=selections.length?buses.findIndex(bus=>String(bus.id)===selections[0].value):-1;
+    const busIds=selections.length?Array.from({length:width},(_,channel)=>
+      selections[channel]?.value ?? (firstIndex>=0?buses[firstIndex+channel]?.id||'':''))
+      :startIndex>=0?buses.slice(startIndex,startIndex+width).map(bus=>bus.id):[];
     const name=(row.querySelector('.audio-output-name')?.value||'').trim();
     streams.push({id,layout,busIds,...(name?{name}:{})});
   });
   return streams;
 }
-function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
+function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delivery=false}={}){
   if(!editor.isActive()) return;
   const p=editor.current();
   const wavDelivery=deliveryFormat==='wav';
   const streams=p.exportLayout.streams;
-  const rows=streams.map((stream,index)=>outputRowHtml(stream,index,p.buses)).join('')||'<tr><td colspan="4" class="audio-route-empty">尚無可輸出的專案音訊軌。</td></tr>';
+  const rows=streams.map((stream,index)=>outputRowHtml(stream,index,p.buses,delivery)).join('')||'<tr><td colspan="4" class="audio-route-empty">尚無可輸出的專案音訊軌。</td></tr>';
   const presetButtons=DELIVERY_PRESETS.map(preset=>{
     let cls = 'audio-delivery-preset';
     if(preset.label.includes('ME')) cls += ' preset-me';
@@ -270,12 +281,13 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
     return btn;
   }).join('');
   const outputHelp=wavDelivery
-    ? '這份 WAV 會把下列表格選取的專案音訊軌，依表格由上而下的順序寫入同一個多聲道 WAV；未在此列設定過的 WAV 仍會依全部 A 軌順序輸出。'
-    : '影片輸出會依下列 Stream mux 音訊；WAV 則固定把所有專案音訊軌依 A 軌順序寫入同一個多聲道 WAV。';
-  const modalSession=openRoutingModal(editor,wavDelivery?'WAV 音軌設定':'Audio Channel Configuration',
+    ? '從主專案選擇這份 WAV 要輸出的音軌，依群組及聲道順序寫入同一個多聲道 WAV；只影響這份輸出。'
+    : delivery?'從主專案選擇這份檔案要輸出的音軌。Stereo 的左、右聲道可各自指定任意 A 軌；只影響這份輸出。'
+      :'設定主專案的 A 軌數量與預設輸出編組。每份輸出檔案可以另行選擇要使用的音軌。';
+  const modalSession=openRoutingModal(editor,delivery?(wavDelivery?'WAV 輸出音軌設定':'輸出檔案音軌設定'):'主專案音軌設定',
     `<div class="audio-output-dialog">
       <div class="audio-route-help">${outputHelp}</div>
-      ${wavDelivery?'':`<div class="audio-bus-count"><label>專案音訊軌數
+      ${delivery?`<div class="audio-bus-count">主專案可用音軌：<strong>${p.buses.length}</strong></div>`:`<div class="audio-bus-count"><label>專案音訊軌數
         <input id="audioOutputBusCount" type="number" min="0" max="${MAX_AUDIO_BUSES}" value="${p.buses.length}">
       </label><button id="audioOutputBusApply" type="button">套用</button>
         <button class="audio-output-count-preset" type="button" data-count="2">2</button>
@@ -286,10 +298,8 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
         <button class="audio-output-count-preset" type="button" data-count="16">16</button>
         <button class="audio-output-count-preset" type="button" data-count="18">18</button>
       </div>`}
-      ${wavDelivery
-        ? '<div class="audio-delivery-presets"><span>選取要依序寫入這份 WAV 的音軌群組；不會改動專案的 A 軌或來源配線。</span></div>'
-        : `<div class="audio-delivery-presets"><span>常用交付配置</span><button id="audioOutputAllMono" type="button">全部Mono(依照專案總軌道數)</button>${presetButtons}</div>`}
-      <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>${wavDelivery?'WAV 聲道群組':'Stream'}</th><th>${wavDelivery?'群組格式':'Output Channels'}</th><th>Project Channels</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="audio-delivery-presets"><span>${delivery?'輸出配置':'預設輸出配置'}</span><button id="audioOutputAllMono" type="button">全部專案音軌（Mono）</button>${presetButtons}</div>
+      <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>${wavDelivery?'WAV 聲道群組':'輸出音軌'}</th><th>聲道格式</th><th>${delivery?'輸出聲道 ← 專案音軌':'專案音軌'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="audio-output-actions"><button id="audioOutputAdd" type="button">＋ 新增 ${wavDelivery?'群組':'Stream'}</button></div>
     </div>`,
     [{label:'儲存輸出設定',primary:true,act:()=>{
@@ -299,34 +309,34 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
       if(!result.saved){ showToast(result.error); return; }
       closeModal({committed:true});
       if(onBack) onBack(result);
-    }},{label:onBack?'返回配線':'取消',act:()=>{
+    }},{label:onBack?(delivery?'返回匯出清單':'返回配線'):'取消',act:()=>{
       if(onBack){ editor.cancel(); closeModal({committed:true}); onBack({saved:false}); }
       else closeModal();
-    }}],{width:'860px',rerender:()=>openOutputSettingsEditor(editor,onBack,{deliveryFormat})});
+    }}],{width:'860px',rerender:()=>openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery})});
   setTimeout(()=>{
     if(!modalSession.isCurrent()||!editor.isActive()) return;
     const rerender=()=>{
-      // 版面重畫會重新建立「可連續分配」的選項；先保存畫面上的暫存選擇，
+      // 版面重畫會重新建立聲道選單；先保存畫面上的暫存選擇，
       // 才不會在 Mono / Stereo / 5.1 切換時把使用者剛選的編組還原掉。
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      openOutputSettingsEditor(editor,onBack,{deliveryFormat});
+      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
     };
     const countInput=document.getElementById('audioOutputBusCount');
     document.getElementById('audioOutputBusApply')?.addEventListener('click',()=>{
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      if(editor.setBusCount(countInput?.value)) openOutputSettingsEditor(editor,onBack,{deliveryFormat});
+      if(editor.setBusCount(countInput?.value)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
     });
     document.querySelectorAll('.audio-output-count-preset').forEach(button=>button.addEventListener('click',()=>{
       if(countInput) countInput.value=button.dataset.count||'';
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      if(editor.setBusCount(button.dataset.count)) openOutputSettingsEditor(editor,onBack,{deliveryFormat});
+      if(editor.setBusCount(button.dataset.count)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
     }));
     document.getElementById('audioOutputAllMono')?.addEventListener('click',()=>{
       if(!editor.allMono()) return;
-      openOutputSettingsEditor(editor,onBack,{deliveryFormat});
+      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
     });
     document.querySelectorAll('.audio-delivery-preset').forEach(button=>button.addEventListener('click',()=>{
       const preset=DELIVERY_PRESETS.find(item=>item.id===button.dataset.preset);
@@ -334,10 +344,10 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
       const result=editor.preset(preset);
       if(result?.error){ showToast(result.error); return; }
       if(!result) return;
-      openOutputSettingsEditor(editor,onBack,{deliveryFormat});
+      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
     }));
-    document.querySelectorAll('.audio-output-layout,.audio-output-start').forEach(select=>select.addEventListener('change',()=>{
-      // layout 改變時需要重建可選的連續 bus 範圍；只在 layout 欄變動才重畫。
+    document.querySelectorAll('.audio-output-layout,.audio-output-start,.audio-output-bus').forEach(select=>select.addEventListener('change',()=>{
+      // 聲道格式改變時需要重建聲道欄位；只在 layout 欄變動才重畫。
       if(select.classList.contains('audio-output-layout')) rerender();
       else { const current=editor.current(); editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams)); }
     }));
@@ -356,13 +366,17 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null}={}){
         if(numberCell) numberCell.textContent=String(index+1);
         const nameInput=streamRow.querySelector('.audio-output-name');
         if(nameInput) nameInput.setAttribute('aria-label',`Stream ${index+1} 名稱`);
+        streamRow.querySelector('.audio-output-layout')?.setAttribute('aria-label',`輸出 ${index+1} 聲道格式`);
+        streamRow.querySelectorAll('.audio-output-bus').forEach(select=>{
+          select.setAttribute('aria-label',`輸出 ${index+1} ${select.closest('label')?.querySelector('span')?.textContent||'聲道'}`);
+        });
       });
     }));
     document.getElementById('audioOutputAdd')?.addEventListener('click',()=>{
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
       editor.addStream();
-      openOutputSettingsEditor(editor,onBack,{deliveryFormat});
+      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
     });
   },0);
 }
@@ -372,7 +386,7 @@ function openOutputSettings(){
 }
 function openDeliveryOutputSettings(spec,onBack=null,{deliveryFormat=null}={}){
   activeProjectEditor?.dismiss();
-  openOutputSettingsEditor(AudioRoutingModel.editDelivery(spec,{wav:deliveryFormat==='wav'}),onBack,{deliveryFormat});
+  openOutputSettingsEditor(AudioRoutingModel.editDelivery(spec,{wav:deliveryFormat==='wav'}),onBack,{deliveryFormat,delivery:true});
 }
 
 const AudioRouting={openForClip,openForSource,openOutputSettings,openDeliveryOutputSettings,setBusCount};

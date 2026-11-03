@@ -191,11 +191,18 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     }
 
     // (B) 非原生（需 proxy）或原生多音軌
-    // 非原生且有 streamIngest：邊轉邊播（幾秒內可開始播放）
+    // 非原生且有 streamIngest：先完成來源波形，再啟動可邊轉邊播的 Proxy。
     if(!canNative && DESK.streamIngest){
-      setStatus('正在背景轉檔 Proxy 與分析音訊（即將可播放）…','busy');
       const provisional=DESK.prepareSourceWaveform && DESK.mediaSourceKey && audio.length && Number.isFinite(dur) && dur>0
         ? provisionalWaveform.begin({path:p,name:State.mediaName,audio,duration:dur,owns}) : null;
+      if(provisional){
+        setStatus('正在優先產生波形…','busy');
+        // 每段回覆前已獨立保存；整部波形完成後才讓 Proxy 驗證／轉檔讀母素材。
+        // 取消或換工作由原有 intake session 撤銷等待，不影響已保存的片段。
+        await provisional.finished;
+        if(!owns()){ provisional.cancel(); return; }
+      }
+      setStatus('正在背景轉檔 Proxy 與分析音訊（即將可播放）…','busy');
       let res;
       let completed=false, startTracks=null;
       const earlyJobs=new Set();

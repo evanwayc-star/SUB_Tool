@@ -250,7 +250,7 @@ describe('Media presentation runtime', () => {
     Media._transport.seek(1,{duration:4,fps:25});
     if(outcome==='false')bridge.direction.mockResolvedValueOnce(false);
     else bridge.direction.mockRejectedValueOnce(new Error('direction rejected'));
-    const elements=vi.spyOn(Media,'startElementSources');
+    const elements=vi.spyOn(Media._audioRouter,'startElementSources');
     Media.observePlayerPlaybackState(true,{source:'mpv',reason:'play'});elements.mockClear();
     try{
       expect(Media.seqContinueAtEnd()).toBe(true);
@@ -279,7 +279,7 @@ describe('Media presentation runtime', () => {
     State.clips[0].path='C:/program.mov';State.clips.push({id:'next',name:'next',path:'C:/next.mov',in:0,out:10,dur:10,offset:110,vtrack:0});
     Media._mpvPath='C:/program.mov';Media._mpvTime=20;Media.tracks=[];Media.externalAudioSources=[];
     Media.observePlayerPlaybackState(true,{source:'mpv',reason:'play'});
-    const elements=vi.spyOn(Media,'startElementSources');
+    const elements=vi.spyOn(Media._audioRouter,'startElementSources');
     const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
     try{
       expect(Media.seqContinueAtEnd()).toBe(true);
@@ -310,7 +310,7 @@ describe('Media presentation runtime', () => {
     const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
     State.clips[0].path='C:/program.mov';Media._mpvPath='C:/program.mov';Media._mpvTime=15;
     State.duration=110;Media.tracks=[];Media.externalAudioSources=[];
-    const elements=vi.spyOn(Media,'startElementSources');
+    const elements=vi.spyOn(Media._audioRouter,'startElementSources');
     try{
       Media.play();
       Media.observeMpvEvent(reason==='pause'?{event:'property-change',name:'pause',data:true}:
@@ -333,7 +333,7 @@ describe('Media presentation runtime', () => {
     const runtime=activateMpvTransport({mpv:bridge});await runtime.enterMpv({src:'C:/program.mov'});
     State.clips[0].path='C:/program.mov';Media._mpvPath='C:/program.mov';Media.tracks=[];Media.externalAudioSources=[];
     Media.observeMpvEvent({event:'property-change',name:'time-pos',data:15});
-    const elements=vi.spyOn(Media,'startElementSources');
+    const elements=vi.spyOn(Media._audioRouter,'startElementSources');
     try{
       Media.play();Media.pause({seekOnPause:false});
       Media.observeMpvEvent({event:'property-change',name:'pause',data:false});
@@ -451,7 +451,7 @@ describe('Media presentation runtime', () => {
   it('公開播放起播拒絕後停止播放且不提前起音，下一次播放可重試', async () => {
     let reject;
     const starting=new Promise((resolve,fail)=>{reject=fail;});
-    const elements=vi.spyOn(Media,'startElementSources'),buffers=vi.spyOn(Media,'startBufferSources');
+    const elements=vi.spyOn(Media._audioRouter,'startElementSources'),buffers=vi.spyOn(Media._audioRouter,'startBufferSources');
     const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
     domMock.video.play.mockReturnValueOnce(starting);
     try{

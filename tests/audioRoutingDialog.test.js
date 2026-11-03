@@ -14,7 +14,7 @@ import { History, recordHistory } from '../src/history.js';
 import { on } from '../src/events.js';
 import { closeModal, openModal } from '../src/ui.js';
 import { buildProjectAudioPlan } from '../src/project-audio.js';
-import { createDeliveryAudioSpec } from '../src/export-job-engine.js';
+import { createDeliveryAudioSpec, applyDeliveryAudioSpec, composeDeliveryAudioPlan } from '../src/export-job-engine.js';
 
 on('history:record', recordHistory);
 const button = label => [...document.querySelectorAll('#modalFoot button')].find(el => el.textContent === label);
@@ -138,7 +138,7 @@ it('無效輸出不能提交，取消仍恢復預覽且不污染 History', () =>
 it('交付列編輯與 WAV 排序只回傳自己的結果，不改專案或 History', () => {
   const initial=structuredClone(State.audioProject), spec=createDeliveryAudioSpec(initial,{}), back=vi.fn();
   AudioRouting.openDeliveryOutputSettings(spec,back,{deliveryFormat:'wav'}); vi.runAllTimers();
-  const selects=document.querySelectorAll('.audio-output-start');
+  const selects=document.querySelectorAll('.audio-output-bus');
   const left=selects[0].value; selects[0].value=selects[1].value; selects[1].value=left;
   act('儲存輸出設定');
   expect(back).toHaveBeenCalledWith(expect.objectContaining({saved:true,spec:expect.objectContaining({wavBusIds:[initial.buses[1].id,initial.buses[0].id,...initial.buses.slice(2).map(bus=>bus.id)]})}));
@@ -151,10 +151,52 @@ it('交付列編輯與 WAV 排序只回傳自己的結果，不改專案或 Hist
 it('取消交付列更動也不影響來源專案', () => {
   const initial=structuredClone(State.audioProject), spec=createDeliveryAudioSpec(initial,{}), back=vi.fn();
   AudioRouting.openDeliveryOutputSettings(spec,back); vi.runAllTimers();
-  click('.audio-delivery-preset[data-preset="2-fm"]'); act('返回配線');
+  click('.audio-delivery-preset[data-preset="2-fm"]'); act('返回匯出清單');
   expect(back).toHaveBeenCalledWith({saved:false});
   expect(State.audioProject).toEqual(initial);
   expect(History.stack).toHaveLength(1);
+});
+
+it.each(['h264','prores','wav'])('%s 輸出選兩聲道後仍可直接選 A7 左、A8 右，專案配線與其他輸出不變', format => {
+  const initial=structuredClone(State.audioProject), history=structuredClone(History.stack);
+  const spec=createDeliveryAudioSpec(initial,{}), back=vi.fn(), other={format:'h264',audioPlan:{streams:[{id:'other',layout:'stereo',busIds:initial.buses.slice(0,2).map(bus=>bus.id)}]}};
+  const otherBefore=structuredClone(other);
+  AudioRouting.openDeliveryOutputSettings(spec,back,{deliveryFormat:format});vi.runAllTimers();
+  click('.audio-delivery-preset[data-preset="2-fm"]');
+  const row=document.querySelector('.audio-output-table tbody tr[data-stream-id]');
+  // Reach the existing selector too: before the fix the preset removed A7/A8
+  // from its actual options, despite eight available project tracks.
+  const first=row.querySelector('.audio-output-bus,.audio-output-start');
+  expect([...first.options].map(option=>option.value)).toContain(initial.buses[6].id);
+  expect(document.getElementById('audioOutputBusCount')).toBeNull();
+  expect(document.getElementById('modalTitle').textContent).toContain('輸出');
+  for(const [channel,busIndex] of [[0,6],[1,7]]){
+    const select=row.querySelector(`.audio-output-bus[data-channel="${channel}"]`);
+    select.value=initial.buses[busIndex].id;select.dispatchEvent(new Event('change'));vi.runAllTimers();
+  }
+  expect(row.textContent).toContain('左聲道');expect(row.textContent).toContain('右聲道');
+  act('儲存輸出設定');
+  const result=back.mock.calls[0][0];expect(result.saved).toBe(true);
+  expect(result.spec.streams).toEqual([expect.objectContaining({layout:'stereo',busIds:initial.buses.slice(6,8).map(bus=>bus.id)})]);
+  const compiled=composeDeliveryAudioPlan(plan(),applyDeliveryAudioSpec({format},result.spec));
+  expect(compiled.buses.map(bus=>bus.inputs.map(input=>input.sourceChannel))).toEqual([[6],[7]]);
+  expect(compiled.streams[0].busIds).toEqual(initial.buses.slice(6,8).map(bus=>bus.id));
+  expect(State.audioProject).toEqual(initial);expect(History.stack).toEqual(history);
+  expect(spec).toEqual(createDeliveryAudioSpec(initial,{}));expect(other).toEqual(otherBefore);
+  expect(Media.applyGains).not.toHaveBeenCalled();
+});
+
+it.each([[7,6],[6,2]])('輸出聲道的自訂順序 [%i, %i] 開啟再儲存不被改回連續音軌', (left,right) => {
+  const initial=structuredClone(State.audioProject), ids=[initial.buses[left].id,initial.buses[right].id];
+  const record={audioBuses:[initial.buses[left],initial.buses[right]],audioPlan:{streams:[{id:'custom',layout:'stereo',busIds:ids}]}};
+  const back=vi.fn();
+  AudioRouting.openDeliveryOutputSettings(createDeliveryAudioSpec(initial,record),back,{deliveryFormat:'h264'});vi.runAllTimers();
+  const selects=[...document.querySelectorAll('.audio-output-bus')];
+  expect(selects.map(select=>select.value)).toEqual(ids);
+  expect([...selects[0].options].map(option=>option.value)).toContain(initial.buses[0].id);
+  act('儲存輸出設定');
+  expect(back.mock.calls[0][0].spec.streams[0].busIds).toEqual(ids);
+  expect(State.audioProject).toEqual(initial);
 });
 
 it('已替換專案後舊視窗取消不能覆寫新專案', () => {

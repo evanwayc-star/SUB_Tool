@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { motherSourceFingerprintSync, motherSourceFingerprint, portableSourceFingerprint } = require('../electron/mother-source-evidence.js');
+const { motherSourceFingerprintSync, motherSourceFingerprint, portableSourceFingerprint, sharedSourceFingerprintSync } = require('../electron/mother-source-evidence.js');
 const { cacheKeyFor } = require('../electron/media-intake-runtime.js');
 const { vocalSourceFingerprint } = require('../electron/vocal-waveform-fingerprint.js');
 const directories = [];
@@ -45,6 +45,48 @@ afterEach(() => {
     }
     fs.rmSync(resolved, { recursive: true, force: true });
   }
+});
+
+describe('同一共享檔案的快速證據', () => {
+  function sharedFiles(bytes, overrides = {}) {
+    const fields = { size: BigInt(bytes.length), dev: 1n, ino: 62220n, mtimeNs: 1001n, ctimeNs: 1002n,
+      birthtimeNs: 1000n, ...overrides };
+    const files = memoryFiles(bytes, { initialStat: fields });
+    files.fileSystem.realpathSync = { native: value => value };
+    return files;
+  }
+  it('同一 NAS 的 client 裝置及掛載路徑不同，仍以同一檔案證據命中且只讀取固定取樣', () => {
+    const bytes = Buffer.alloc(8 * 1024 * 1024, 17), first = sharedFiles(bytes), second = sharedFiles(bytes, { dev: 999n });
+    second.fileSystem.realpathSync.native = () => '\\\\Storage\\DCP\\folder\\mother.mov';
+    const a = sharedSourceFingerprintSync('\\\\Storage\\DCP\\folder\\mother.mov', { fileSystem: first.fileSystem });
+    expect(a).toMatch(/^[a-f0-9]{64}$/);
+    expect(sharedSourceFingerprintSync('Z:\\folder\\mother.mov', { fileSystem: second.fileSystem })).toBe(a);
+    expect(first.read.mock.calls.reduce((sum, call) => sum + call[2], 0)).toBe(1179648);
+  });
+  it.each(['ino', 'mtimeNs', 'ctimeNs', 'birthtimeNs'])('共享檔案 %s 改變就不沿用，不能靠取樣相同認領', field => {
+    const bytes = Buffer.alloc(4 * 1024 * 1024, 7), first = sharedFiles(bytes), second = sharedFiles(bytes, { [field]: 999n });
+    const source = '\\\\Storage\\DCP\\mother.mov';
+    expect(sharedSourceFingerprintSync(source, { fileSystem: first.fileSystem }))
+      .not.toBe(sharedSourceFingerprintSync(source, { fileSystem: second.fileSystem }));
+  });
+  it('不同 NAS 或 share 不因 inode、時間及取樣碰巧一致而認領', () => {
+    const files = sharedFiles(Buffer.from('same'));
+    const a = sharedSourceFingerprintSync('\\\\Storage\\DCP\\mother.mov', { fileSystem: files.fileSystem });
+    for (const source of ['\\\\Other\\DCP\\mother.mov', '\\\\Storage\\Other\\mother.mov'])
+      expect(sharedSourceFingerprintSync(source, { fileSystem: files.fileSystem })).not.toBe(a);
+  });
+  it('缺少可靠檔案 ID 時不產生共享證據', () => {
+    const files = sharedFiles(Buffer.from('same'), { ino: 0n });
+    expect(sharedSourceFingerprintSync('\\\\Storage\\DCP\\mother.mov', { fileSystem: files.fileSystem })).toBeNull();
+    expect(files.close).toHaveBeenCalledOnce();
+  });
+  it('讀取後路徑換檔就拒絕，即使舊 handle 仍未變', () => {
+    const files = sharedFiles(Buffer.from('same'));
+    const stat = files.fileSystem.statSync;
+    files.fileSystem.statSync = () => ({ ...stat(), ino: 999n });
+    expect(() => sharedSourceFingerprintSync('\\\\Storage\\DCP\\mother.mov', { fileSystem: files.fileSystem })).toThrow(/變更/);
+    expect(files.close).toHaveBeenCalledOnce();
+  });
 });
 
 describe('跨電腦可攜式母素材證據', () => {

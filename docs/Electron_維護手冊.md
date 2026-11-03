@@ -270,11 +270,13 @@ Callback 包裝不把 Electron event 交給頁面。部分 API 替換舊 listene
 
 Runtime 接受 probe 結果，建立 720p 預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。
 
-`ffmpeg:prepareSourceWaveform` 優先供應來源波形，使用獨立 coordinator 與相同 session／request 取消契約，退出時也等待程序 close。嚴格本機來源 key 命中的有效波形可直接沿用，無須等其他快取元件；跨機未驗證的波形不猜用，改由已授權的母素材產生私有暫存 PCM。Renderer 每次請求最多 60 秒，native 依共用來源時鐘與音訊混合規則輸出 4000 Hz Mono PCM，前後核對來源及暫存檔身分。FFmpeg 透過持有的檔案描述元寫入 WAV，並比對預留檔案與開啟檔案的身分，避免路徑被替換時覆寫新物件。輸出先重採樣至最終取樣率，再依請求時長換算的整數 sample 數補靜音及裁切，避免容器時基較粗時極短尾段被時間式裁切成空檔。Renderer 檢查 PCM 長度、容許一個取樣的時長捨入誤差，舊快取不足時不刪原檔，改從母素材重建私有暫存；重建仍不足則不發布。一般多音軌混音的較短音軌仍可補零。這項長度檢查不是內容完整性雜湊。這條路徑不掃描整檔 SHA-256，也不寫入跨機識別或快取完成紀錄。
+`ffmpeg:prepareSourceWaveform` 優先供應來源波形，使用獨立 coordinator 與相同 session／request 取消契約，退出時也等待程序 close。有效的既有完整波形或已完成片段可直接沿用，無須等 Proxy；沒有相符證據時才解碼已授權的母素材。Renderer 首段請求 5 秒，第二段補到來源 60 秒，其後每段最多 60 秒，讓大檔先顯示開頭波形。Native 依共用來源時鐘與音訊混合規則輸出 4000 Hz Mono、16-bit PCM，前後核對來源及暫存檔身分。FFmpeg 透過持有的檔案描述元寫入 WAV，並比對預留檔案與開啟檔案的身分，避免路徑被替換時覆寫新物件。輸出先重採樣至最終取樣率，再依請求時長換算的整數 sample 數補靜音及裁切，避免容器時基較粗時極短尾段被時間式裁切成空檔。Renderer 檢查 PCM 長度、容許一個取樣的時長捨入誤差，舊快取不足時不刪原檔，改從母素材重建；重建仍不足則不發布。一般多音軌混音的較短音軌仍可補零。
+
+`source-waveform-cache.js` 在每段完成後，將規格、PCM 及其 SHA-256 原子保存為 `.subtool_Cache/<key>/source-waveforms/*.swc`；側車不可寫時沿用中央快取退路。規格包含來源證據、混音／時鐘版本、聲道配置、來源起點與長度。讀取核對單檔內容雜湊、PCM 格式及精確 sample 數，交給 renderer 的仍是本工作擁有的私有副本；單次 consumer 清理不刪持久片段。取消 Proxy、退出或啟動孤兒清理均保留已完成片段，下次只解碼缺少的區段。這條波形路徑不讀整份母素材 SHA-256，也不替 Proxy 或逐聲道快取作完整來源認證。
 
 來源 MIX 波形的每個原始聲道等權，跨 stream 合併時依全部聲道總數平均；較短 stream 的尾端視為靜音，不隨剩餘 stream 數量重新正規化。正式快取以 `waveMixVersion` 標示此規格；缺少標記的多 stream 舊波形不再沿用，但保留原檔、Proxy 與逐聲道，優先波形可先從母素材產生，正式 intake 只補建缺少的波形成品。已知聲道配置完整的單 stream 舊波形可繼續使用；聲道識別缺失、重複或不連續時，即使帶版本標記也不能把波形當作已證明的新規格。各 publication 依自己的配置獨立核對。
 
-Renderer 在可用主素材註冊後啟動波形；mpv 的背景 intake 等待同來源優先波形，無 mpv 的串流退路則在等待 Proxy 時並行準備獨立唯讀來源波形。同一來源的切片共用準備工作。每段讀完即發布已完成來源範圍的峰值並回收私有檔，未讀尾端不填成靜音。外層工作顯示累積百分比，單段結束不表示整份素材完成；段與段的來源 key 必須相同，換檔或失敗只撤回仍屬本輪的部分結果。正式快取仍沿用下述完整內容驗證規則。
+Renderer 在可用主素材註冊後啟動波形；mpv 背景 intake 與無 mpv 的串流退路都先完成同來源優先波形，再開始 Proxy 的來源驗證與轉檔。無 mpv 時先顯示獨立唯讀來源波形，不提早提交正式片段。同一來源的切片共用準備工作。每段讀完即發布已完成來源範圍的峰值並回收私有副本，未讀尾端不填成靜音。外層工作顯示累積百分比，單段結束不表示整份素材完成；段與段的來源 key 必須相同，換檔或失敗只撤回仍屬本輪的部分結果。
 
 來源波形私有檔交接後，主程序保留原檔與父目錄身分，跨 IPC 清理前重核；失權或已刪除的路徑保留撤銷紀錄，同一 runtime 不重用該名稱。退出前另核對啟動時的暫存根；根或波形所有權無法確認、writer 尚未關閉時，保留整個暫存根，不遞迴清理。正常情況仍回收私有暫存；身分檢查與刪除不是作業系統的原子操作。
 
@@ -282,11 +284,15 @@ Renderer 在可用主素材註冊後啟動波形；mpv 的背景 intake 等待�
 
 舊式 `ffmpeg:proxy`、`ffmpeg:extractAudio`、`ffmpeg:waveAudio` 的未交接輸出由 `produceTemporaryFile()` 持有：在私有暫存根以 `wx` 保留檔案，記錄 dev／ino，讓 FFmpeg 透過持有的描述元寫入並等待 writer 結束。整項工作失敗時只清除仍屬本次的檔案；extract 的 copy→AAC 退路屬同一交易，不在中間失敗時清檔。成功才交出路徑並保留所有權紀錄供 renderer 清理；退出時只回收仍能確認歸屬的檔案，未知或已替換的內容及非空暫存根會保留。舊式 Proxy 在完整轉檔後才交接，這條描述元寫入路徑不啟用 `faststart`；新式串流路徑不受此變更影響。
 
+音訊平衡、來源波形及辨識壓縮共用 `withTemporaryDescriptor()`，由 `temporary-output-ownership.js` 開啟與關閉輸出 handle，核對父目錄、路徑及 handle 的同一檔案身分。多遍處理可在每一遍前後重核，不能只核對整項工作的起訖；工作結束後撤銷該核對資格，close 失敗不得回報完成。來源證據、取消、聲道、來源時鐘、PCM 長度及交接仍由各領域 caller 持有，輸入 stdin 與讀取 position 不併入輸出 handle 的規則。
+
 來源證據包含完整路徑、size／mtime／ctime／dev／ino 及前／中／尾段取樣。讀取前後核對檔案身分，來源途中替換或截斷即拒絕。這不是整檔 checksum，也不授權路徑。各 owner 仍持有自己的 namespace、規格與 capability／realpath 檢查；`source-v3` 隔離未依影片時鐘對齊的舊 intake。
 
 跨電腦重用保留上述本機 key 與原快取目錄，完成紀錄保存可攜來源證據 `sourceContent`（`source-v3-sha256`、size、完整內容 SHA-256）及已驗證的 `sourceKeys`。`portableSourceFingerprint()` 以固定 1 MiB buffer 非同步讀完整母素材，讀前後核對 handle 與路徑身分，逐段檢查取消，並回報實際已讀 bytes／總 bytes；完成身分核對後才回報驗證 100%。不能把原本的取樣 key 改成只看檔名或部分內容。
 
-每個 writer 在自己的 `generation-<隨機識別>/cache-meta.json` 原子發布完成紀錄，這才是真正提交點；根目錄 `meta.json` 只供相容索引使用，寫入失敗不撤銷已完成產物。補記跨機身分另寫 `source-<本機 key>.json` receipt，不回寫整份產物索引。讀取由同一 owner 合併相同母素材及相容聲道配置的完成元件，避免較晚的 writer 或身分補記抹掉另一行程剛補齊的音訊；不以遠端 PID 或逾時搶鎖判定跨電腦所有權。只有既有 `meta.json` 的舊快取仍可讀取。
+每個 writer 在自己的 `generation-<隨機識別>/cache-meta.json` 原子發布完成紀錄，這才是真正提交點；根目錄 `meta.json` 只供相容索引使用，寫入失敗不撤銷已完成產物。完整來源驗證一完成就獨立保存 `source-<本機 key>.json` receipt，不等轉檔，也不回寫整份產物索引。只有 receipt 代表來源驗證完成，不能假報 Proxy、聲道或完整波形已完成；之後轉檔失敗或取消，重開仍可沿用來源證據。讀取由同一 owner 合併相同母素材及相容聲道配置的完成元件，避免較晚的 writer 或身分補記抹掉另一行程剛補齊的音訊；不以遠端 PID 或逾時搶鎖判定跨電腦所有權。只有既有 `meta.json` 的舊快取仍可讀取。
+
+同一 NAS 檔案另以 `sharedSourceFingerprintSync()` 識別：canonical UNC 的 server／share、檔名、size、inode、mtime／ctime／birthtime 的完整奈秒值及前／中／尾取樣共同雜湊，排除 client 的 dev 與掛載路徑；讀取起訖仍核對本次 handle、路徑與完整本機身分。這份共享證據僅在相鄰 sidecar 使用：波形片段可直接共用；Proxy 必須另有同一來源 snapshot 綁定的完整 SHA-256 receipt，且與採用的完成紀錄相符，才能省略全文重讀。來源、目錄或共享證據失效不能被最佳努力的 receipt 寫入吞掉。複製檔、其他 share、缺少可靠檔案 ID／時間戳或舊收據均回退完整驗證；既有相符 Proxy 仍可在驗證後直接重用。無法解析成 UNC 的掛載路徑只在同主機／裝置範圍共享，不猜測跨平台別名。它是檔案新鮮度證據，不能宣稱偵測到保留全部檔案身分與時間戳、只改未取樣區域的外部修改。
 
 Runtime 只在既有 sidecar／中央快取根目錄內搜尋可攜 metadata；相符內容才沿用原 generation，磁碟代號、檔案時間或裝置差異不影響內容相等。已確認的本機 key 可免重讀全文；已綁定本機來源但缺少元件時也沿用既有內容證據，只補缺件。唯讀快取無法補記 key 時仍可讀，下次再驗證。完整的舊 metadata 在原本機 key 仍命中時直接交付，不為升級跨機識別阻塞讀取；無證據的外來舊快取不能猜認。處理期間仍核對凍結的本機 key，且沿用原本的色彩版本、聲道完整性與路徑圍堵檢查。
 
@@ -355,7 +361,7 @@ Direct 與交付佇列的每次執行都以獨立隨機名稱及 `wx` 建立記�
 
 Intake 進度以 `stage` 區分快取檢查、母素材內容驗證與轉檔；未知分母使用 `pct:null`，不補造百分比，切換階段時重設剩餘時間估算。Renderer 的 `MediaIntakeJobs` 也持有本機波形準備工作，其取消與晚到結果同樣受 session／request 歸屬限制；波形讀取及整理與聲道 metadata 載入並行。狀態列保留仍持有的背景進度，一般訊息及播放操作不能覆蓋；錯誤仍可提示，匯出的進度鎖優先，解鎖後恢復目前背景工作。
 
-優先波形與 Proxy 驗證或轉檔並行時，狀態列並排顯示各自階段及百分比；完整標籤、容量及各自估計時間保留在 tooltip 與無障礙狀態文字，狹窄空間保留取消按鈕。
+同來源先完成優先波形，再顯示 Proxy 驗證或轉檔進度；若不同來源的背景工作同時存在，狀態列仍能並排顯示各自階段及百分比。完整標籤、容量及各自估計時間保留在 tooltip 與無障礙狀態文字，狹窄空間保留取消按鈕。
 
 Execution 的編碼完成不等於交付完成；封裝、內容驗證、成品發布及 lease 清理仍由 artifact／watchdog 裁定。取消不發布假成功。
 
@@ -428,6 +434,8 @@ lease 位於該 queueDir 的 `output-leases/<輸出路徑雜湊>.lock/owner.json
 非同步核對最終檔前後會比較 stage 的身分、大小及時間等 metadata；等待中取消也重核。可觀測到 stage 改變時保留暫存與 lease，重啟後仍保留並提示。清理階段若無法核對已授權 stage，或 unlink 失敗，不再重試：即使 inode 與時間未變，也無法證明失敗期間內容未被其他程序改寫。watchdog 在持有的 lease 中保存受限紀錄，後續 recovery 保留並提示；紀錄寫入失敗時需在重啟前備份。若已確認檔案並移往安全位置，後續 recovery 可檢查原目錄並釋放舊鎖。空預留遭填入非空資料時大小必然不同；但啟動前核對與原生 writer 開檔是不同操作，其他程序仍可能在其間改寫。成品檢查不重讀大型檔案，不能偵測 metadata 相同的原位改寫，也無法排除最後核對至 rename 或 unlink 間的跨程序改動。
 
 這些檢查覆蓋 app 的准入、等待、交接與重啟恢復，不是作業系統的原子檔案能力。批次從 main 預檢後開始核對，單筆及舊版工作重新確認從原生選擇與明確覆寫確認開始建立證據。相同大小及時間的外部破壞也不一定可偵測。Node 的 `lstat`／`realpath` 檢查與後續 open、write、rename、unlink 仍是不同 syscall；同步檢查縮短事件迴圈間隙，也不能封鎖另一個程序在其間替換目錄或檔案，原生 encoder 本身也仍以路徑開檔。沒有取得可跨這些操作持續約束目錄身分的 OS handle，因此不能宣稱消除了任意外部程序競爭下的所有 TOCTOU 窗口。
+
+Windows 原生子程序一律以 `windowsHide: true` 啟動，包含波形、Proxy／ingest、工具版本及 GPU 編碼器偵測、mpv。隱藏的是背景 console，進度、stderr、檔案描述元及取消仍走原有 owner；不為隱藏視窗改走 shell 或切斷程序追蹤。
 
 Windows 的 `spawnExportWatchdog()` 使用 `detached`，讓 watchdog 在主程序遭強制終止後仍可接收 IPC disconnect，停止 FFmpeg 並完成 stage／lease 清理。保留隱藏視窗、stderr pipe、IPC 與 ChildProcess 追蹤，正常退出仍等待 completion；依據見 [Node.js 的 detached 說明](https://nodejs.org/api/child_process.html#optionsdetached)。回歸測試真正終止父程序，確認未呼叫 recover 也會自行完成清理，避免把下次啟動的補救當成本次 owner 已完成。
 

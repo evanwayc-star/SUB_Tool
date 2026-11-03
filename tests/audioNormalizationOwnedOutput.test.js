@@ -35,6 +35,7 @@ function fixture({probe,execute,fingerprintSource}={}){
   });
   const runtime=createAudioNormalizationRuntime({createTempPath:()=>output,execute:write,probe,fingerprintSource,
     produceTemporaryFile:(file,action)=>owner.produceTemporaryFile(file,action),
+    withTemporaryDescriptor:(file,expected,action)=>owner.withTemporaryDescriptor(file,expected,action),
     removeFile:async file=>fs.promises.unlink(file)});
   return {dir,output,reserved,runtime,write};
 }
@@ -80,6 +81,21 @@ describe('音訊平衡化私有輸出的實際檔案歸屬',()=>{
     resume({duration:1});await expect(work).rejects.toThrow(/身分|變更/);
     expect(f.write).not.toHaveBeenCalled();expect(fs.readFileSync(f.output,'utf8')).toBe('foreign replacement');
     expect(fs.readFileSync(moved).length).toBe(0);expect(f.reserved.size).toBe(0);
+  });
+  it('第一遍完成時輸出失去所有權，不能退回單遍或啟動第二遍 writer',async()=>{
+    let f;
+    const execute=vi.fn(async(_args,options)=>{
+      expect(measured(options)).toBe(true);
+      fs.renameSync(f.output,f.output+'.moved');
+      fs.writeFileSync(f.output,'foreign between passes');
+    });
+    f=fixture({execute});
+    await expect(f.runtime.normalize('mother.wav',{isTruePeak:true})).rejects
+      .toMatchObject({code:'UNSAFE_NORMALIZATION_OUTPUT'});
+    expect(execute).toHaveBeenCalledOnce();
+    expect(fs.readFileSync(f.output,'utf8')).toBe('foreign between passes');
+    expect(fs.statSync(f.output+'.moved').size).toBe(0);
+    expect(f.reserved.size).toBe(0);
   });
   it('writer 進行時路徑換成外來檔，不能交付或刪除替代檔',async()=>{
     let f;

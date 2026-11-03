@@ -79,6 +79,21 @@ it.skipIf(!fs.existsSync(ffmpeg)||!fs.existsSync(ffprobe)).each([
     expect(peaks.length).toBe(Math.ceil(segment.duration*Wave.resolution)*2);
     if(audible) expect(peaks.some(value=>Math.abs(value)>.02)).toBe(true);
     else expect(peaks.every(value=>value===0)).toBe(true);
+    expect(runtime.cleanupGeneratedFile(segment.wave)).toBe(true);
+    await runtime.close();
+    const encode=vi.fn((...args)=>execution.execute(...args));
+    const reopened=createMediaIntakeRuntime({fileAuthority:new FileAuthority({internalDirectories:[root]}),
+      ffmpegExecution:{execute:encode},tempRoot:root,cacheRoot:cache,allowSidecarCache:false,
+      describeAudio:async file=>(await probe.describe(file)).audio});
+    try{
+      expect(await reopened.cleanOrphans()).toMatchObject({removed:0,incomplete:false});
+      const warm=await reopened.waveform({src:source,duration,audio:info.audio,start,length});
+      expect(warm).toMatchObject({cached:true,temporary:true,start,duration:length});
+      expect(encode).not.toHaveBeenCalled();
+      expect(fs.readFileSync(warm.wave)).toEqual(bytes);
+      expect(run(['-i',warm.wave,'-map','0:a:0','-ar','4000','-ac','1','-f','s16le','pipe:1'])).toEqual(decoded);
+      expect(reopened.cleanupGeneratedFile(warm.wave)).toBe(true);
+    }finally{await reopened.close();}
   }finally{
     await runtime.close();await execution.cancelAllAndWait();await probe.cancelAllAndWait();
   }

@@ -39,7 +39,6 @@ function compressorFor({root,input,output,execute,withDescriptor,cleanup,allocat
     createTempPath:ext=>{allocations.push(ext);return ext==='wav'?input:output;},
     produceTemporaryFile:(file,work)=>runtime.produceTemporaryFile(file,work),
     withTemporaryDescriptor:(file,owner,work)=>withDescriptor?withDescriptor(runtime,file,owner,work):runtime.withTemporaryDescriptor(file,owner,work),
-    assertTemporaryOutput:(file,owner)=>runtime.assertTemporaryOutput(file,owner),
     cleanupGeneratedFile:file=>cleanup?cleanup(runtime,file):runtime.cleanupGeneratedFile(file),
     execute,
   });
@@ -124,7 +123,6 @@ it('輸出未能預留且沒有輸入暫存；真 main quit 保留外部檔案',
     createTempPath:ext=>{allocations.push(ext);const file=ext==='wav'?files.input:files.output;tempFiles.add(file);return file;},
     produceTemporaryFile:(file,work)=>runtime.produceTemporaryFile(file,work),
     withTemporaryDescriptor:(file,expected,work)=>runtime.withTemporaryDescriptor(file,expected,work),
-    assertTemporaryOutput:(file,expected)=>runtime.assertTemporaryOutput(file,expected),
     cleanupGeneratedFile:file=>runtime.cleanupGeneratedFile(file),execute:async()=>{throw new Error('不應啟動');},
   });
   await expect(compressor.compress(wav())).rejects.toThrow();

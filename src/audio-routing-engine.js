@@ -185,7 +185,7 @@ export class MediaAudioRouter {
 
 export const LAYOUTS = {
   mono: { label: 'Mono', channels: 1 },
-  stereo: { label: 'Stereo (Lt, Rt)', channels: 2 },
+  stereo: { label: 'Stereo (L, R)', channels: 2 },
   '5.1': { label: '5.1 (L, R, C, LFE, Ls, Rs)', channels: 6 }
 };
 export const MAX_AUDIO_BUSES = MAX_DELIVERY_AUDIO_BUSES;
@@ -349,20 +349,38 @@ export class AudioRoutingModel {
 
   static createDeliveryAdapter(deliveryDraft) {
     let draft = structuredClone(deliveryDraft || { buses: [], streams: [] });
+    const saved = new Map((draft.buses || []).map(bus => [String(bus.id), bus]));
+    const available = Array.isArray(draft.availableBuses) ? draft.availableBuses : (draft.buses || []);
+    // Project buses remain selectable even when an older delivery retained only
+    // a subset. Keep per-delivery overrides through editor snapshot round trips.
+    draft.buses = available.map(bus => ({ ...bus, ...saved.get(String(bus.id)) }));
+    draft.availableBuses = structuredClone(draft.buses);
     draft = ensureDeliveryAudioExportDefaults(draft, { appendMissing: false });
+    const selectedBuses = () => {
+      const buses = new Map((draft.buses || []).map(bus => [String(bus.id), bus]));
+      const ids = new Set((draft.streams || []).flatMap(stream => stream.busIds || []).map(String));
+      return [...ids].map(id => buses.get(id)).filter(Boolean);
+    };
     
     return {
       current() { return { mode: 'manual', buses: draft.buses || [], exportLayout: { streams: draft.streams || [] } }; },
-      result() { return structuredClone(draft); },
+      result() {
+        const buses = selectedBuses();
+        // A row can switch formats after saving. An existing WAV selection must
+        // follow the latest channels instead of filtering them out on return.
+        return structuredClone({ ...draft, buses,
+          ...(Array.isArray(draft.wavBusIds) ? { wavBusIds: buses.map(bus => String(bus.id)) } : {}) });
+      },
       
       setBusCount(rawCount) {
-        const beforeCount = (draft.buses || []).length;
-        const before = JSON.stringify(draft.buses || []);
-        draft = resizeDeliveryAudioBuses(draft, rawCount);
-        if ((draft.buses || []).length > beforeCount) {
-          draft = ensureDeliveryAudioExportDefaults(draft, { appendMissing: true });
+        const buses = selectedBuses(), before = JSON.stringify(draft.streams);
+        let selection = resizeDeliveryAudioBuses({ ...draft, buses }, rawCount);
+        if (selection.buses.length > buses.length) {
+          selection = ensureDeliveryAudioExportDefaults(selection, { appendMissing: true });
         }
-        return JSON.stringify(draft.buses || []) !== before;
+        // Legacy callers may resize the selection, never the project candidates.
+        draft = { ...draft, streams: selection.streams };
+        return JSON.stringify(draft.streams) !== before;
       },
       
       setStreams(streams) {
@@ -376,11 +394,10 @@ export class AudioRoutingModel {
       },
       
       applyDeliveryPreset(preset) {
-        const candidate = resizeDeliveryAudioBuses(draft, preset.count);
-        if ((candidate.buses || []).length < preset.count) {
-          return { error: `此專案只有 ${(candidate.availableBuses || candidate.buses || []).length} 條可用音訊軌，無法套用 ${preset.label}。` };
+        if (draft.buses.length < preset.count) {
+          return { error: `此專案只有 ${draft.buses.length} 條可用音訊軌，無法套用 ${preset.label}。` };
         }
-        draft = { ...candidate, streams: deliveryStreamsForPreset(preset, candidate.buses) };
+        draft = { ...draft, streams: deliveryStreamsForPreset(preset, draft.buses) };
         return true;
       },
       

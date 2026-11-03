@@ -39,8 +39,11 @@ function createHarness({ fail = false, readOutput = null } = {}) {
   const compressor = createSpeechAudioCompressor({
     createTempPath: ext => `C:/temp/speech-${sequence++}.${ext}`,
     produceTemporaryFile:async(file,produce)=>{files.set(file,Buffer.alloc(0));await produce(file,{file});return file;},
-    withTemporaryDescriptor:async(file,_owner,work)=>{const fd=nextDescriptor++;descriptors.set(fd,file);try{return await work(fd);}finally{descriptors.delete(fd);}},
-    assertTemporaryOutput:(file,owner)=>{if(owner.file!==file||!files.has(file))throw new Error('暫存失權');},
+    withTemporaryDescriptor:async(file,owner,work)=>{
+      const fd=nextDescriptor++;descriptors.set(fd,file);
+      const verify=()=>{if(owner.file!==file||!files.has(file)||descriptors.get(fd)!==file)throw new Error('暫存失權');};
+      try{verify();const result=await work(fd,verify);verify();return result;}finally{descriptors.delete(fd);}
+    },
     cleanupGeneratedFile:removeFile,
     writeDescriptor:async(fd,bytes)=>{files.set(descriptors.get(fd),Buffer.from(bytes));},
     readDescriptor:async fd=>readOutput?readOutput():files.get(descriptors.get(fd)),

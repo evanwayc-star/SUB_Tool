@@ -5,7 +5,6 @@
 
 'use strict';
 
-const fs = require('node:fs');
 const {
   normalizeLimiterOptions,
   normalizeAudioLimiterSpec,
@@ -32,11 +31,15 @@ function createAudioNormalizationRuntime({
   execute,
   removeFile,
   produceTemporaryFile = null,
+  withTemporaryDescriptor = null,
   fingerprintSource = null,
   probe = null,
 } = {}) {
   if (typeof createTempPath !== 'function' || typeof execute !== 'function') {
     throw new TypeError('音訊平衡化 runtime 缺少必要 adapter');
+  }
+  if (produceTemporaryFile && typeof withTemporaryDescriptor !== 'function') {
+    throw new TypeError('音訊平衡化 runtime 缺少暫存輸出 owner');
   }
   const sourceChanged = cause => Object.assign(new Error('母素材在音訊處理期間變更或無法核對', { cause }),
     { code: 'AUDIO_SOURCE_CHANGED' });
@@ -105,15 +108,12 @@ function createAudioNormalizationRuntime({
       const outWav = createTempPath('wav');
       let ownedOutput = null;
       let sourceEvidence = null;
-      const unsafe = () => Object.assign(new Error('音訊暫存輸出檔案身分已變更'), { code: 'UNSAFE_NORMALIZATION_OUTPUT' });
       const verifyOutput = () => {
         if (!ownedOutput) return;
-        let current, opened;
-        try { current = fs.lstatSync(outWav, { bigint: true }); opened = fs.fstatSync(ownedOutput.fd, { bigint: true }); }
-        catch (_) { throw unsafe(); }
-        if (!current.isFile() || current.isSymbolicLink() || !opened.isFile()
-          || current.dev !== ownedOutput.owner.dev || current.ino !== ownedOutput.owner.ino
-          || opened.dev !== ownedOutput.owner.dev || opened.ino !== ownedOutput.owner.ino) throw unsafe();
+        try { ownedOutput.verify(); }
+        catch (cause) {
+          throw Object.assign(new Error('音訊暫存輸出檔案身分已變更', { cause }), { code: 'UNSAFE_NORMALIZATION_OUTPUT' });
+        }
       };
       const run = async (args, executionOptions) => {
         check();
@@ -291,23 +291,14 @@ function createAudioNormalizationRuntime({
       } };
       let result;
       if (!produceTemporaryFile) result = await perform();
-      else await produceTemporaryFile(outWav, async (_file, owner) => {
-        let fd;
-        try {
-          const before = fs.lstatSync(outWav, { bigint: true });
-          if (!owner || !before.isFile() || before.isSymbolicLink()
-            || before.dev !== owner.dev || before.ino !== owner.ino) throw unsafe();
-          fd = fs.openSync(outWav, 'r+');
-          ownedOutput = { fd, owner };
-          verifyOutput();
-          result = await perform();
-          check();
-          verifyOutput();
-        } finally {
-          ownedOutput = null;
-          if (fd !== undefined) fs.closeSync(fd);
-        }
-      });
+      else await produceTemporaryFile(outWav, (file, owner) =>
+        withTemporaryDescriptor(file, owner, async (fd, verify) => {
+          ownedOutput = { fd, verify };
+          try {
+            result = await perform();
+            check();
+          } finally { ownedOutput = null; }
+        }));
       if (typeof onProgress === 'function') onProgress({ pct: 100, stage: 'done', label: '完成' });
       return result;
     },

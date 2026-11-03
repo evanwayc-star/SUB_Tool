@@ -576,7 +576,17 @@ it.runIf(process.platform === 'win32')('輸出變更而保留成品時，重啟�
     cwd: root, outPath: short, jobId: 'retain', queueDir,
     outputAuthority: captureOutputAuthority(short, captureOutputDirectory(root)) });
   controller.ready.catch(() => {}); controller.completion.catch(() => {});
-  const exited = new Promise(resolve => controller.child.once('exit', resolve));
+  const closed = new Promise(resolve => controller.child.once('close', resolve));
+  const recoverAfterProcessesStop = async () => {
+    let recovery;
+    // IPC 完成與 child close 不取代復原端的 OS PID 可見性檢查；只等待這個暫時狀態。
+    await vi.waitFor(async () => {
+      recovery = await recoverExportLeases(queueDir);
+      if (recovery.warnings.some(warning => warning.code === 'EXPORT_PROCESS_RUNNING'))
+        throw new Error('復原仍觀察到測試 writer 或 watchdog PID');
+    }, { timeout: 5000 });
+    return recovery;
+  };
   try {
     await controller.ready;
     await vi.waitFor(() => expect(fs.existsSync(marker)).toBe(true));
@@ -584,7 +594,7 @@ it.runIf(process.platform === 'win32')('輸出變更而保留成品時，重啟�
     fs.writeFileSync(gate, 'finish');
     const result = await controller.completion;
     expect(result.ok).toBe(false);
-    await exited;
+    await closed;
     const entries = listLeases(queueDir);
     expect(entries).toHaveLength(2);
     const primary = entries.find(entry => entry.owner.retainedResult);
@@ -592,20 +602,21 @@ it.runIf(process.platform === 'win32')('輸出變更而保留成品時，重啟�
     expect(primary.owner.retainedResult.code).toBe('DELIVERY_DESTINATION_CHANGED');
     expect(alias.owner.aliasOf.key).toBe(primary.key);
     expect(fs.readFileSync(primary.owner.stagePath, 'utf8')).toBe('completed stage');
-    const firstRecovery = await recoverExportLeases(queueDir);
+    const firstRecovery = await recoverAfterProcessesStop();
     expect(firstRecovery.warnings).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'DELIVERY_DESTINATION_CHANGED' }),
       expect.objectContaining({ code: 'ALIAS_PRIMARY_RETAINED' }),
     ]));
     expect(listLeases(queueDir)).toHaveLength(2);
     fs.unlinkSync(primary.owner.stagePath);
-    const secondRecovery = await recoverExportLeases(queueDir);
+    const secondRecovery = await recoverAfterProcessesStop();
     expect(secondRecovery.warnings).toEqual([]);
     expect(listLeases(queueDir)).toEqual([]);
     expect(fs.readFileSync(target, 'utf8')).toBe('replacement target');
   } finally {
     controller.stop('test-cleanup');
     await controller.completion.catch(() => null);
+    await closed;
   }
 }, 30000);
 

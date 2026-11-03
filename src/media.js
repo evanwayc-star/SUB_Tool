@@ -210,8 +210,9 @@ import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset, assetRange } from './external-audio.js';
 import { MediaIntakeSession, maxKnownSourceDuration, probeAudioChannelDescriptors, setMediaElementSource, waitForOwnedMediaMetadata } from './media-intake-engine.js';
-import { ResetEpoch, PlaybackSyncEngine, createMediaPresentationSession } from './media-presentation-core.js';
-import { clipSourceFingerprint, liveClipForSource } from './media-intake-engine.js';
+import { ResetEpoch, createMediaPresentationSession } from './media-presentation-core.js';
+import { MediaPlaybackRuntime } from './media-playback-runtime.js';
+import { clipSourceFingerprint, liveClipForSource, sourceWaveformChunkLength } from './media-intake-engine.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
 import { emit, on } from './events.js';
 import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
@@ -575,7 +576,8 @@ const Media = {
           while(completed<duration&&active()){
             let result;
             try{
-              result=await MediaIntakeJobs.prepareSourceWaveform({path,audio,duration,start:completed,length:Math.min(60,duration-completed),...(ignoreCached?{ignoreCached:true}:{})});
+              const length=sourceWaveformChunkLength(completed,duration);
+              result=await MediaIntakeJobs.prepareSourceWaveform({path,audio,duration,start:completed,length,...(ignoreCached?{ignoreCached:true}:{})});
               if(!active()) return false;
               if(!result?.wave||typeof result.sourceKey!=='string'||!result.sourceKey
                 ||!Number.isFinite(result.start)||!Number.isFinite(result.duration)||result.duration<=0)
@@ -583,7 +585,7 @@ const Media = {
               if(sourceKey&&sourceKey!==result.sourceKey) throw new Error('母素材在波形準備期間變更');
               sourceKey=result.sourceKey;
               const whole=result.start===0&&result.duration>=duration;
-              if(!whole&&(Math.abs(result.start-completed)>1e-6||result.duration>Math.min(60,duration-completed)+1e-6))
+              if(!whole&&(Math.abs(result.start-completed)>1e-6||result.duration>length+1e-6))
                 throw new Error('母素材波形片段時間不連續');
               const end=whole?duration:Math.min(duration,result.start+result.duration);
               // 只發布已完成的來源桶；尾端尚未讀取的區域不能被當成靜音或拉伸。
@@ -637,61 +639,10 @@ const Media = {
     })();
     return entry.promise;
   },
-  _syncEngine: null,
-  initSyncEngine() {
-    if(!this._syncEngine) {
-      this._syncEngine = new PlaybackSyncEngine({
-        clock: {
-          isPlaying:()=>this.playing,
-          isSwitching:()=>this._seqSwitching,
-          presenterMoving:()=>this.presenterClockMoving(),
-          captureOwnership:()=>this.capturePlaybackTargetOwnership(),
-          timelineTime:()=>this.tlTime(),
-          sourceTime:()=>this.vTime(),
-          playbackRate:()=>video.playbackRate||1,
-        },
-        sequence: {
-          audioOnly:()=>this.audioOnlyTimeline(),
-          enabled:()=>this.seqOn(),
-          duration:()=>Math.max(0,Number(State.duration)||0),
-          inGap:()=>this._gap,
-          activeClip:()=>this._activeClip(),
-          activeClipId:()=>this.activeClipId,
-          videoClips:()=>State.clips.filter(c=>c.type!=='image'),
-          clipAt:t=>Seq.clipAt(t),
-          clipsAt:t=>Seq.clipsAt(t),
-          nextAfter:t=>Seq.nextAfter(t),
-          clipEnd:c=>Seq.clipEnd(c),
-          sourceTime:(t,c)=>this._transport.sourceTime(t,c),
-        },
-        audio: {
-          tracks:()=>this.tracks,
-          externalSourceTime:(source,t)=>this.externalAudio.sourceTime(source,t),
-          sourceLocalTime:(source,t)=>this._srcLocalT(source,t),
-          playerTime:(track,time)=>getPlayerAdapter().playerTime(time,track.el?.currentSrc||track.el?.src),
-          seekElement:(track,time)=>getPlayerAdapter().seekElement(track.el,time),
-          cancelElementSeek:track=>getPlayerAdapter().cancelElementSeek(track.el),
-        },
-        actions: {
-          pause:()=>this.pause(),
-          seek:t=>this.seek(t),
-          enterGap:(t,owns)=>this._enterGap(t,owns),
-          ensureClip:(clip,sourceTime,resume)=>this._ensureClip(clip,sourceTime,resume),
-          applyClipAudio:(clip,t)=>this._applyClipAudio(clip,t),
-          startElementSources:(sourceTime,t)=>this.startElementSources(sourceTime,t),
-          stopBufferSources:()=>this.stopBufferSources(),
-          startBufferSources:sourceTime=>this.startBufferSources(sourceTime),
-          overlapKey:()=>this._lastOverlapKey,
-          setOverlapKey:key=>{ this._lastOverlapKey=key; },
-        },
-      });
-    }
-    return this._syncEngine;
-  },
-  invalidateExternalActivity() { this._syncEngine?.invalidateExternalActivity?.(); },
-  seqTick() { return this.initSyncEngine().seqTick(); },
-  seqContinueAtEnd() { this.initSyncEngine(); return this._syncEngine.seqContinueAtEnd(); },
-  _syncSeqElements(t) { return this.initSyncEngine().syncSequenceElements(t); },
+  get _playback() { return this._playbackRuntime ||= new MediaPlaybackRuntime(this); },
+  invalidateExternalActivity() { this._playback.invalidateExternalActivity(); },
+  seqTick() { this._playback.tick(); },
+  seqContinueAtEnd() { return this._playback.continueAtEnd(); },
 
   // AudioContext 與引擎封裝在 AudioEngine 中，這裡不再維護 ctx 等細節。
   master:null,         // master gain
@@ -2584,8 +2535,7 @@ const Media = {
       this.stopBufferSources(); // buffer 音軌隸屬 primary：換段先停，resume 時依 _srcHidden 決定是否重啟
       const _tl = Seq.toTimeline(localT, c);
       if(resume===true)this._transport.seek(_tl,{duration:State.duration,fps:State.fps,dropFrame:State.dropFrame});
-      this._applyClipAudio(c, _tl);
-      this._lastOverlapKey = this.initSyncEngine().overlapKeyAt(_tl);
+      if(!this._playback.prepareClip(c,_tl,owns,{force:true})) return;
       if(this.mpvMode){
         if(c.path){
           const adapter=getPlayerAdapter();
@@ -2624,7 +2574,7 @@ const Media = {
           emit('mpv:refreshSubs'); // 換 clip 後字幕需以新映射重擠（app.js 會做 offset 位移）
           if(shouldResume()){
             const started=await this._startPresenterPlayback({owns:()=>owns()&&shouldResume(),clip:c,
-              started:(sourceTime,timelineTime)=>this.startElementSources(sourceTime,timelineTime)});
+              started:(sourceTime,timelineTime)=>this._playback.startFollowers(sourceTime,timelineTime,{owns,buffers:false})});
             if(started!==true){if(started===false)retryIfSuperseded=false;return;}
           }
           else getPlayerAdapter().pause().catch(()=>{});
@@ -2665,10 +2615,8 @@ const Media = {
         }
         if(!ownsSeek())return;
         if(shouldResume()){
-          const started=await this._startPresenterPlayback({owns:ownsSeek,clip:c,started:(sourceTime,timelineTime)=>{
-            this.startElementSources(sourceTime,timelineTime);
-            if(this.tracks.some(t=>t.kind==='buffer'&&!t._srcHidden)) this.startBufferSources(sourceTime);
-          }});
+          const started=await this._startPresenterPlayback({owns:ownsSeek,clip:c,
+            started:(sourceTime,timelineTime)=>this._playback.startFollowers(sourceTime,timelineTime,{owns:ownsSeek})});
           if(started!==true){if(started===false)retryIfSuperseded=false;return;}
         }
         else { try{ video.pause(); }catch(e){} }
@@ -3541,12 +3489,14 @@ const Media = {
   },
   _commitObservedPlaybackState(running,detail={}){
     if(running){
+      const ownsTarget=this.capturePlaybackTargetOwnership();
+      const owns=()=>ownsTarget()&&(!detail.owns||detail.owns());
       this.ensureCtx();
       const sourceTime=this.vTime();
       const timelineTime=this.tlTime();
-      if(this.tracks.some(track=>track.kind==='buffer')) this.startBufferSources(sourceTime);
-      this.startElementSources(sourceTime,timelineTime);
       this.playing=true;
+      this._playback.startFollowers(sourceTime,timelineTime,{owns});
+      if(!owns()||!this.playing) return;
       const playBtn=$('playBtn'); if(playBtn) playBtn.textContent='⏸';
       video.dispatchEvent(new Event('play'));
       return;
@@ -3784,19 +3734,15 @@ const Media = {
         this.ensureCtx();
         this._lastSeekTime=null;
         this._enterGap(requested,ownsTarget);
-        if(ownsTarget()&&this.playing) this.startElementSources(requested,requested);
+        this._playback.startFollowers(requested,requested,{owns:ownsTarget,buffers:false});
         return;
       }
       if(hit.id!==this.activeClipId||this._gap){
         this._failPlaybackPresentation({status:'failed'});
         return;
       }
-      // 同一片段的重新呈現不需 activation，但提交的轉場可能改變音訊載體。
-      // 與 tick 共用同一次已套用的疊合證據，避免起播後把聲音重新定位。
-      const overlapKey=this.initSyncEngine().overlapKeyAt(requested);
-      this._applyClipAudio(hit,requested);
-      if(!ownsTarget()||!this.playing||this._activeClip()!==hit||Seq.clipAt(requested)!==hit) return;
-      this._lastOverlapKey=overlapKey;
+      // 重新呈現也可能改變音訊載體，配線與活動證據由同一 owner 提交。
+      if(!this._playback.prepareClip(hit,requested,()=>ownsTarget()&&this.playing&&Seq.clipAt(requested)===hit,{force:true})) return;
     }
     // 影片片段已全部移除時仍可把外部音訊當成一條完整時間軸播放；保留黑畫面。
     if(this.audioOnlyTimeline()){
@@ -3806,31 +3752,16 @@ const Media = {
       getPlayerAdapter().pause().catch(()=>{});
       if(!this.mpvMode) video.style.visibility='hidden';
       this._lastSeekTime=null;
-      this.startElementSources(t,t);
+      this._playback.startFollowers(t,t,{owns:ownsTarget,buffers:false});
       return;
     }
     this.ensureCtx();
     if(!this.mpvMode&&!video.hasAttribute('src')){
       this._transport.startVirtual(requested,{playbackRate:video.playbackRate||1});
-      if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(requested);
-      this.startElementSources(requested,requested);
+      this._playback.startFollowers(requested,requested,{owns:ownsTarget});
     }else{
-      return void this._startPresenterPlayback({started:(sourceTime,timelineTime)=>{
-        // play ACK 可以晚於片段邊界；用同一刻的來源／時間軸時鐘
-        // 更新音軌，不能在起播後由下一 tick 再重播已發聲的片段。
-        if(this.seqOn()){
-          const hit=Seq.clipAt(timelineTime);
-          if(!hit||this._gap||this._activeClip()!==hit) return;
-          const overlapKey=this.initSyncEngine().overlapKeyAt(timelineTime);
-          if(overlapKey!==this._lastOverlapKey){
-            this._applyClipAudio(hit,timelineTime);
-            if(!ownsTarget()||!this.playing||this._activeClip()!==hit||Seq.clipAt(timelineTime)!==hit) return;
-            this._lastOverlapKey=overlapKey;
-          }
-        }
-        if(this.tracks.some(t=>t.kind==='buffer')) this.startBufferSources(sourceTime);
-        this.startElementSources(sourceTime,timelineTime);
-      }});
+      return void this._startPresenterPlayback({started:(sourceTime,timelineTime)=>
+        this._playback.startFollowers(sourceTime,timelineTime,{owns:ownsTarget})});
     }
     this._lastSeekTime=null;
   },
@@ -4013,68 +3944,11 @@ const Media = {
      這可處理「影片已結束但音檔稍後才開始」與修剪後的音檔尾端，且不會每幀造成播放抖動。 */
   // localT=當前 clip 的來源時間；tlT=時間軸時間（ext-* 參考音用；未給則同 localT）。
   // 序列模式：被 _srcHidden 的（其他 clip / 已切換音源）不播，避免多段音訊同時出聲。
-  _startAfterMpvMute(kind, start){
-    const versions=this._mpvAudioStartVersions||(this._mpvAudioStartVersions={element:0,buffer:0});
-    const version=++versions[kind];
-    const active=this._activeClip();
-    const source=active ? (active.audioSrc || (active.primary ? 'video' : ('clip:'+active.id))) : 'video';
-    const replacesCarrier=this.mpvMode&&!this._gap&&this.tracks.some(track=>
-      (track.kind==='element'||track.kind==='buffer')&&!track._srcHidden&&(track.source||'video')===source);
-    if(!replacesCarrier){ start(false); return; }
-    const adapter=getPlayerAdapter();
-    // 此 Promise 必須是 mpv 的命令回覆，而非 pipe write；失敗時不能啟動第二個聲源。
-    adapter.mute(true).then(()=>{
-      if(versions[kind]!==version||!this.playing||this.playbackTransitionPending()||this._reverseShuttleMuted||
-         !this.mpvMode||getPlayerAdapter()!==adapter||this._activeClip()!==active) return;
-      start(true);
-    }).catch(error=>console.warn('mpv 音訊接管失敗：',error));
-  },
-  startElementSources(localT, tlT){
-    // seek 尚未呈現時，背景聲道接管／來源切換不能搶先播放；只有
-    // presentation session 完成後的 resume 才能再次啟動 follower。
-    if(this.playbackTransitionPending()) return;
-    this._startAfterMpvMute('element',delayed=>this._startElementSourcesReady(
-      delayed?this.vTime():localT,delayed?this.tlTime():tlT));
-  },
-  _startElementSourcesReady(localT, tlT){
-    const timeline=tlT??(this.seqOn()?this.tlTime():localT);
-    // 每次起播意圖都取代先前仍在準備的反轉音訊，即使新的位置沒有反轉片段。
-    const version=this._reverseAudioStartVersion=(this._reverseAudioStartVersion||0)+1;
-    const reversed=[...Seq.clipsAt(timeline).filter(clip=>clip.reverse&&!clip.audioDetached&&!Seq.isStill(clip)),
-      ...this.externalAudioSources.filter(asset=>asset.reverse&&this.externalAudio.sourceTime(asset.audioSrc,timeline)!=null)];
-    if(!reversed.length){
-      this._audioRouter.startElementSources(localT,tlT);
-      this.initSyncEngine().markExternalActivity(timeline);
-      return;
-    }
-    Promise.all(reversed.map(clip=>this.prepareClipReverseAudio(clip))).then(ready=>{
-      if(version!==this._reverseAudioStartVersion||!this.playing||this._reverseShuttleMuted||ready.some(value=>!value)) return;
-      const current=this.tlTime();
-      this._audioRouter.startElementSources(this.vTime(),current);
-      this.initSyncEngine().markExternalActivity(current);
-      if(this.tracks.some(track=>track.kind==='buffer'&&!track._srcHidden)){
-        this.stopBufferSources();this.startBufferSources(this.vTime());
-      }
-    }).catch(error=>console.warn('reverse audio playback:',error));
-  },
-  // 音源切換／clip 切換後，若正在播放需重啟可聽元素（先前隱藏者已被跳過、未在播）
-  _restartElements(){
-    this._audioRouter.restartElements();
-  },
-  stopElementSources(){
-    if(this._mpvAudioStartVersions) this._mpvAudioStartVersions.element++;
-    this._reverseAudioStartVersion=(this._reverseAudioStartVersion||0)+1;
-    this._audioRouter.stopElementSources();
-    this._syncEngine?.invalidateExternalActivity();
-  },
-  startBufferSources(offset){
-    if(this.playbackTransitionPending()) return;
-    this._startAfterMpvMute('buffer',delayed=>this._audioRouter.startBufferSources(delayed?this.vTime():offset));
-  },
-  stopBufferSources(){
-    if(this._mpvAudioStartVersions) this._mpvAudioStartVersions.buffer++;
-    this._audioRouter.stopBufferSources();
-  },
+  startElementSources(localT, tlT){ this._playback.startElements(localT,tlT); },
+  _restartElements(){ this._audioRouter.restartElements(); },
+  stopElementSources(){ this._playback.stopElements(); },
+  startBufferSources(offset){ this._playback.startBuffers(offset); },
+  stopBufferSources(){ this._playback.stopBuffers(); },
   syncAudioDrift(){
     if(this._reverseStartup){
       if(!this._reverseStartup.owns()) this._cancelReverseStartup();
@@ -4649,6 +4523,7 @@ const Media = {
     return true;
   },
   reset(options={}){
+    this._playback.reset();
     this._presenterStart=null;
     if(!options.keepExternalAudio){
       this._pendingExternalAudioRestore.clear();

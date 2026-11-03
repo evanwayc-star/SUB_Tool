@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn(), layoutTimeline: vi.fn() }));
-vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn(), getNotesGeneralFileData: vi.fn(), getNotesEdiusFileData: vi.fn() }));
+vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 
 let Project, Media, State, History, showExportVideoDialog, openModal, closeModal, desk;
 const b64 = data => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(JSON.stringify(data), 'utf16le')]).toString('base64');

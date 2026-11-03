@@ -41,7 +41,6 @@ function setup({onProcess=null}={}){
     createTempPath:ext=>path.join(root,`speech-${seq++}.${ext}`),
     produceTemporaryFile:(file,work)=>intake.produceTemporaryFile(file,work),
     withTemporaryDescriptor:(file,owner,work)=>intake.withTemporaryDescriptor(file,owner,work),
-    assertTemporaryOutput:(file,owner)=>intake.assertTemporaryOutput(file,owner),
     cleanupGeneratedFile:file=>intake.cleanupGeneratedFile(file),
     execute:(args,options)=>execution.execute(args,{...options,onProcess:child=>{options.onProcess?.(child);onProcess?.(child);}}),
   });

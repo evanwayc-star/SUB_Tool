@@ -225,7 +225,7 @@ describe('FFmpeg execution', () => {
     expect(spawned).toEqual([{
       executable: 'ffmpeg-test',
       args: ['-i', 'master.mxf', 'proxy.mp4'],
-      options: { cwd: userDataDir },
+      options: { windowsHide: true, cwd: userDataDir },
     }]);
     expect(owned).toEqual([child]);
     expect(progress).toEqual([expect.objectContaining({

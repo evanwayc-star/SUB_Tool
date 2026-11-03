@@ -552,7 +552,8 @@ it('快照依格網及片長限制暫定終點，不改鎖軌或已確認的長�
   }finally{download.mockRestore();}
 });
 it('I 在片長尾點以無界兩秒收尾，專案與 SRT 不保存一小時暫存值',async()=>{
-  const Transport=await import('../src/transport-controller.js'),SubIO=await import('../src/subio.js');
+  const Transport=await import('../src/transport-controller.js');
+  const {prepareSubtitleFileExport}=await import('../src/subtitle-file-export.js');
   State.cues[1].track=1;State.duration=2;StateModule.setSelection({kind:'sub',ids:['a'],primary:'a'});
   Model.toggleSubMode();vi.spyOn(Media,'displayTime').mockReturnValue(2);await Transport.setIn();
   expect(State.cues[0]).toMatchObject({start:2,end:3602,_tempEnd:true});
@@ -561,7 +562,7 @@ it('I 在片長尾點以無界兩秒收尾，專案與 SRT 不保存一小時暫
     await Project.saveAs();
     const saved=JSON.parse(Buffer.from(download.mock.calls.at(-1)[0]).subarray(2).toString('utf16le'));
     expect(saved.cues.find(c=>c.text==='original')).toMatchObject({start:2,end:4});
-    const srt=SubIO.getFileData('srt',[State.cues[0]],'字幕');
+    const srt=prepareSubtitleFileExport({...State,cues:Model.snapshotProvisionalCueEnds([State.cues[0]])},{formats:['srt']}).files[0];
     expect(Buffer.from(srt.content,'base64').subarray(2).toString('utf16le')).toContain('00:00:02,000 --> 00:00:04,000');
     expect(State.cues[0]).toMatchObject({start:2,end:3602,_tempEnd:true});
     Subtitles.selectCue('b');expect(State.cues.find(c=>c.id==='a').end).toBe(4);

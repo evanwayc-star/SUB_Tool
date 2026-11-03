@@ -44,7 +44,8 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預
       createTempPath:()=>path.join(directory,`preview-${serial++}.wav`),
       execute:(args,options)=>execution.execute(args,{...options,executionKind:'direct'}),
       probe:(file,options)=>probe.describe(file,options),fingerprintSource:motherSourceFingerprint,
-      ...(owned?{produceTemporaryFile:(file,work)=>owner.produceTemporaryFile(file,work)}:{}),
+      ...(owned?{produceTemporaryFile:(file,work)=>owner.produceTemporaryFile(file,work),
+        withTemporaryDescriptor:(file,expected,work)=>owner.withTemporaryDescriptor(file,expected,work)}:{}),
       removeFile:file=>fs.promises.unlink(file),
     });
     try{

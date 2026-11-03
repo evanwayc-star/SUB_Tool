@@ -17,6 +17,10 @@ const outputsOf = args => args.filter(value => /\.(?:mp4|m4a|wav)$/.test(value))
 const cacheDir = file => path.basename(path.dirname(file)).startsWith('generation-')
   ? path.dirname(path.dirname(file)) : path.dirname(file);
 const metadata = file => path.join(cacheDir(file), 'meta.json');
+function removeSourceReceipts(directory) {
+  for (const name of fs.readdirSync(directory)) if (/^source-[a-f0-9]{16}\.json$/.test(name))
+    fs.unlinkSync(path.join(directory, name));
+}
 
 function fixture(bytes = Buffer.from('unchanged original mother source')) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-portable-intake-'));
@@ -236,6 +240,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     fs.unlinkSync(path.join(path.dirname(saved.wave), 'cache-meta.json'));
     const raw = JSON.parse(fs.readFileSync(metadata(saved.wave), 'utf8'));
     delete raw.sourceContent; delete raw.sourceKeys; delete raw.waveMixVersion;
+    removeSourceReceipts(cacheDir(saved.wave));
     const originalMetadata = JSON.stringify(raw);
     fs.writeFileSync(metadata(saved.wave), originalMetadata);
     const open = fsp.open;
@@ -357,6 +362,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     fs.unlinkSync(path.join(path.dirname(saved.proxy), 'cache-meta.json'));
     const stored = JSON.parse(fs.readFileSync(metadata(saved.proxy), 'utf8'));
     delete stored.sourceContent; delete stored.sourceKeys;
+    removeSourceReceipts(cacheDir(saved.proxy));
     fs.writeFileSync(metadata(saved.proxy), JSON.stringify(stored));
     const open = fsp.open;
     const fullReads = vi.spyOn(fsp, 'open').mockImplementation((file, ...args) => {
@@ -392,6 +398,180 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     expect(fs.readFileSync(result.wave)).toEqual(Buffer.from('complete source channel'));
     expect(reopened.run).toHaveBeenCalledOnce();
     expect(reopened.run.mock.calls[0][0]).not.toContain('-c:v');
+  });
+
+  it.each(['ingest', 'stream'].flatMap(mode => [true, false].map(allowSidecarCache => ({ mode, allowSidecarCache }))))
+  ('$mode 已完成來源驗證後轉檔失敗，重開 sidecar=$allowSidecarCache 不重讀整份母素材', async ({ mode, allowSidecarCache }) => {
+    const original = fixture(Buffer.alloc(4 * 1024 * 1024, 27));
+    const open = fsp.open;
+    let readBytes = 0;
+    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (path.resolve(file) === original.source) {
+        const read = handle.read.bind(handle);
+        handle.read = async (...readArgs) => {
+          const result = await read(...readArgs); readBytes += result.bytesRead; return result;
+        };
+      }
+      return handle;
+    });
+    const producer = runtimeFor(original.root, 'interrupted', { allowSidecarCache,
+      execute: async () => { throw new Error('轉檔中斷'); } });
+    await expect(producer.runtime[mode](request(original.source))).rejects.toThrow('轉檔中斷');
+    expect(readBytes).toBe(4 * 1024 * 1024);
+    await producer.runtime.close();
+    const reopened = runtimeFor(original.root, 'interrupted', { allowSidecarCache });
+    await reopened.runtime.cleanOrphans();
+    const work = await reopened.runtime[mode](request(original.source));
+    if (work.completion) await work.completion;
+    const result = work.response || work;
+    expect(readBytes).toBe(4 * 1024 * 1024);
+    expect(reopened.run).toHaveBeenCalledOnce();
+    expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
+    if (mode === 'stream') reopened.runtime.releaseStream(result.streamLeaseId);
+  });
+
+  it.each(['ingest', 'stream'].flatMap(mode => [false, true].map(interrupted => ({ mode, interrupted }))))
+  ('$mode 同一共享檔案換路徑及 profile，已有驗證 interrupted=$interrupted 不讀全文也不重轉已完成 Proxy', async ({ mode, interrupted }) => {
+    const original = fixture(Buffer.alloc(4 * 1024 * 1024, 29));
+    const producer = runtimeFor(original.root, 'shared-producer', interrupted
+      ? { execute: async () => { throw new Error('轉檔中斷'); } } : {});
+    if (interrupted) await expect(producer.runtime.ingest(request(original.source))).rejects.toThrow('轉檔中斷');
+    else await producer.runtime.ingest(request(original.source));
+    const oldKey = cacheKeyFor(original.source);
+    await producer.runtime.close();
+    // Rename the parent only: the same source inode and timestamps survive,
+    // while the client-visible path and strict key change.
+    const movedDirectory = path.join(original.root, 'another-mount');
+    fs.renameSync(original.media, movedDirectory);
+    const source = path.join(movedDirectory, 'mother.mxf');
+    expect(cacheKeyFor(source)).not.toBe(oldKey);
+    const open = fsp.open, sourceReads = [];
+    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+      if (path.resolve(file) === source) sourceReads.push(file);
+      return open(file, ...args);
+    });
+    const reader = runtimeFor(original.root, 'shared-reader');
+    const work = await reader.runtime[mode](request(source));
+    if (work.completion) await work.completion;
+    const result = work.response || work;
+    expect(sourceReads).toEqual([]);
+    expect(reader.run).toHaveBeenCalledTimes(interrupted ? 1 : 0);
+    expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
+    expect(cacheDir(result.proxy)).toBe(path.join(movedDirectory, '.subtool_Cache', oldKey));
+    if (mode === 'stream') reader.runtime.releaseStream(result.streamLeaseId);
+  });
+
+  it.each([false, true])('既有共享證據失配但 strict key 相同，changedBytes=%s 仍重新驗證且不認領舊內容', async changedBytes => {
+    const original = fixture(Buffer.alloc(4 * 1024 * 1024, 30));
+    const producer = runtimeFor(original.root, 'old-witness');
+    const saved = await producer.runtime.ingest(request(original.source, [{ channels: 1 }]));
+    const key = cacheKeyFor(original.source), originalStat = fs.statSync(original.source);
+    const receiptPath = path.join(cacheDir(saved.proxy), 'source-' + key + '.json');
+    const previous = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    await producer.runtime.close();
+    if (changedBytes) {
+      const fd = fs.openSync(original.source, 'r+');
+      try { fs.writeSync(fd, Buffer.from([99]), 0, 1, 1280 * 1024); } finally { fs.closeSync(fd); }
+    }
+    const tracked = new Set(), openSync = fs.openSync, closeSync = fs.closeSync;
+    const statSync = fs.statSync, fstatSync = fs.fstatSync;
+    const changedStat = (stat, options) => options?.bigint
+      ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { birthtimeNs: stat.birthtimeNs + 1n })
+      : originalStat;
+    vi.spyOn(fs, 'openSync').mockImplementation((file, ...args) => {
+      const fd = openSync(file, ...args);
+      if (typeof file === 'string' && path.resolve(file) === original.source) tracked.add(fd);
+      return fd;
+    });
+    vi.spyOn(fs, 'closeSync').mockImplementation(fd => { tracked.delete(fd); return closeSync(fd); });
+    vi.spyOn(fs, 'fstatSync').mockImplementation((fd, options) => {
+      const stat = fstatSync(fd, options); return tracked.has(fd) ? changedStat(stat, options) : stat;
+    });
+    vi.spyOn(fs, 'statSync').mockImplementation((file, options) => {
+      const stat = statSync(file, options);
+      return typeof file === 'string' && path.resolve(file) === original.source ? changedStat(stat, options) : stat;
+    });
+    expect(cacheKeyFor(original.source)).toBe(key);
+    const open = fsp.open, sourceReads = [];
+    vi.spyOn(fsp, 'open').mockImplementation((file, ...args) => {
+      if (path.resolve(file) === original.source) sourceReads.push(file);
+      return open(file, ...args);
+    });
+    const waveReader = runtimeFor(original.root, 'changed-witness-wave', {
+      execute: async () => { throw new Error('must decode fresh waveform'); },
+    });
+    await expect(waveReader.runtime.waveform({ src: original.source, duration: 1, audio: [{ channels: 1 }] }))
+      .rejects.toThrow('must decode fresh waveform');
+    expect(waveReader.run).toHaveBeenCalledOnce();
+    const reader = runtimeFor(original.root, 'changed-witness');
+    expect(reader.runtime.inspectCache(original.source).some(hit => !hit.error)).toBe(false);
+    const result = await reader.runtime.ingest(request(original.source, [{ channels: 1 }]));
+    expect(sourceReads).toEqual([original.source]);
+    expect(result.cached).toBe(!changedBytes);
+    expect(reader.run).toHaveBeenCalledTimes(changedBytes ? 1 : 0);
+    if (changedBytes) {
+      expect(result.proxy).not.toBe(saved.proxy);
+      expect(JSON.parse(fs.readFileSync(receiptPath, 'utf8'))).toEqual(previous);
+    }
+  });
+
+  it('共享 witness 屬於另一份內容收據時不能跳過全文驗證', async () => {
+    const original = fixture(Buffer.alloc(4 * 1024 * 1024, 31));
+    const producer = runtimeFor(original.root, 'mismatched-witness-producer');
+    const saved = await producer.runtime.ingest(request(original.source));
+    const receipt = path.join(cacheDir(saved.proxy), 'source-' + cacheKeyFor(original.source) + '.json');
+    const raw = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+    expect(raw.sharedSourceKey).toMatch(/^[a-f0-9]{64}$/);
+    raw.sourceContent.sha256 = 'f'.repeat(64);
+    fs.writeFileSync(receipt, JSON.stringify(raw));
+    await producer.runtime.close();
+    const moved = path.join(original.root, 'renamed-share'); fs.renameSync(original.media, moved);
+    const source = path.join(moved, 'mother.mxf'), open = fsp.open, reads = [];
+    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+      if (path.resolve(file) === source) reads.push(file);
+      return open(file, ...args);
+    });
+    const reader = runtimeFor(original.root, 'mismatched-witness-reader');
+    const result = await reader.runtime.ingest(request(source));
+    expect(reads).toEqual([source]);
+    expect(result.cached).toBe(true);
+    expect(reader.run).not.toHaveBeenCalled();
+    expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
+  });
+
+  it('全文讀取後共享身分改變，不得被最佳努力收據寫入吞掉而繼續轉檔', async () => {
+    const original = fixture(Buffer.alloc(4 * 1024 * 1024, 33));
+    const sourceFds = new Set(), openSync = fs.openSync, closeSync = fs.closeSync;
+    const statSync = fs.statSync, fstatSync = fs.fstatSync, open = fsp.open;
+    let changed = false;
+    const alter = stat => changed ? { ...stat, birthtimeNs: stat.birthtimeNs + 1n, isFile: () => true } : stat;
+    vi.spyOn(fs, 'openSync').mockImplementation((file, ...args) => {
+      const fd = openSync(file, ...args);
+      if (typeof file === 'string' && path.resolve(file) === original.source) sourceFds.add(fd);
+      return fd;
+    });
+    vi.spyOn(fs, 'closeSync').mockImplementation(fd => { sourceFds.delete(fd); return closeSync(fd); });
+    vi.spyOn(fs, 'fstatSync').mockImplementation((fd, options) => {
+      const stat = fstatSync(fd, options); return sourceFds.has(fd) && options?.bigint ? alter(stat) : stat;
+    });
+    vi.spyOn(fs, 'statSync').mockImplementation((file, options) => {
+      const stat = statSync(file, options);
+      return typeof file === 'string' && path.resolve(file) === original.source && options?.bigint ? alter(stat) : stat;
+    });
+    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (path.resolve(file) === original.source) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => { await close(); changed = true; };
+      }
+      return handle;
+    });
+    const producer = runtimeFor(original.root, 'witness-changed');
+    await expect(producer.runtime.ingest(request(original.source))).rejects.toThrow(/母素材.*變更/);
+    expect(producer.run).not.toHaveBeenCalled();
+    const directory = path.join(original.media, '.subtool_Cache', cacheKeyFor(original.source));
+    expect(fs.readdirSync(directory).filter(name => name.endsWith('.json'))).toEqual([]);
   });
 
   it('必須讀全文驗證的跨機母素材持續回報實際 bytes 百分比', async () => {
@@ -643,6 +823,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
       await replacePreviouslyVerifiedCache('ingest', { direct: true, defer: true });
     const legacy = JSON.parse(fs.readFileSync(path.join(directory, 'meta.json'), 'utf8'));
     for (const field of ['sourceContent', 'sourceKeys', 'publicationVersion', 'artifactSizes']) delete legacy[field];
+    removeSourceReceipts(directory);
     fs.writeFileSync(path.join(directory, 'meta.json'), JSON.stringify(legacy));
     fs.unlinkSync(path.join(path.dirname(saved.proxy), 'cache-meta.json'));
     expect(reader.runtime.inspectCache(moved.source).find(hit => !hit.error).sourceContent).toBeNull();
@@ -804,6 +985,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     fs.unlinkSync(path.join(path.dirname(saved.proxy), 'cache-meta.json'));
     const stored = JSON.parse(fs.readFileSync(metadata(saved.proxy), 'utf8'));
     delete stored.sourceContent; delete stored.sourceKeys;
+    removeSourceReceipts(cacheDir(saved.proxy));
     fs.writeFileSync(metadata(saved.proxy), JSON.stringify(stored));
     const reopened = runtimeFor(original.root, 'profile-A-reopened');
     expect(await reopened.runtime.ingest(request(original.source))).toEqual({ ...saved, cached: true });
@@ -823,6 +1005,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     fs.unlinkSync(path.join(path.dirname(saved.proxy), 'cache-meta.json'));
     const stored = JSON.parse(fs.readFileSync(metadata(saved.proxy), 'utf8'));
     delete stored.sourceContent; delete stored.sourceKeys;
+    removeSourceReceipts(cacheDir(saved.proxy));
     fs.writeFileSync(metadata(saved.proxy), JSON.stringify(stored));
     const moved = transfer(original);
     const second = runtimeFor(original.root, 'profile-B');

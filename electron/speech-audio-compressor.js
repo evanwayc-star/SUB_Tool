@@ -58,12 +58,11 @@ function createSpeechAudioCompressor({
   createTempPath,
   produceTemporaryFile,
   withTemporaryDescriptor,
-  assertTemporaryOutput,
   cleanupGeneratedFile,
   readDescriptor = readDescriptorBytes,
   execute
 } = {}) {
-  if ([createTempPath, produceTemporaryFile, withTemporaryDescriptor, assertTemporaryOutput,
+  if ([createTempPath, produceTemporaryFile, withTemporaryDescriptor,
     cleanupGeneratedFile, readDescriptor, execute].some(fn => typeof fn !== 'function')) {
     throw new TypeError('語音壓縮器缺少必要 adapter');
   }
@@ -76,7 +75,7 @@ function createSpeechAudioCompressor({
       let output;
       try {
         await produceTemporaryFile(outputPath, async (target, outputOwner) => {
-          await withTemporaryDescriptor(target, outputOwner, async outputDescriptor => {
+          await withTemporaryDescriptor(target, outputOwner, async (outputDescriptor, verify) => {
             await execute([
               '-y', '-hide_banner', '-loglevel', 'error',
               '-f', 'wav', '-i', 'pipe:0', '-map', '0:a:0', '-vn',
@@ -89,7 +88,7 @@ function createSpeechAudioCompressor({
               label: '準備辨識用 MP3',
               ...(typeof onProcess === 'function' ? { onProcess } : {})
             });
-            assertTemporaryOutput(target, outputOwner);
+            verify();
             output = toBuffer(await readDescriptor(outputDescriptor));
           });
         });

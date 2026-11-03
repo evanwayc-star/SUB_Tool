@@ -17,7 +17,6 @@ vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   closeModal: vi.fn(),
 }));
 vi.mock('../src/menus.js', () => ({ showCtx: vi.fn() }));
-vi.mock('../src/subio.js', () => ({ executeBatchExport: vi.fn() }));
 
 let State;
 let addNote;
@@ -96,13 +95,13 @@ describe('note time domain', () => {
   });
 
   it.each(['\n', '\r\n', '\r'])('一般 CSV 將 %j 備註換行攤平，保留每筆資料的三個欄位', async newline => {
-    const { getNotesGeneralFileData } = await import('../src/notes.js');
+    const { prepareSubtitleFileExport } = await import('../src/subtitle-file-export.js');
     State.notes = [
       { time: 2, text: `第一段${newline}第二段`, done: false },
       { time: 3, text: '另一筆備註', done: true },
     ];
     try {
-      const file = getNotesGeneralFileData();
+      const file = prepareSubtitleFileExport(State,{noteFormats:['general']}).files[0];
       const bytes = Buffer.from(file.content, 'base64');
       expect([...bytes.subarray(0, 2)]).toEqual([0xff, 0xfe]);
       expect(file.mime).toBe('text/csv;charset=utf-16le');
@@ -119,11 +118,11 @@ describe('note time domain', () => {
     }
   });
 
-  it.each(['getNotesGeneralFileData', 'getNotesEdiusFileData'])('%s 以 UTF-16LE BOM 保存繁體中文、emoji 與 CSV 引號', async exportName => {
-    const notes = await import('../src/notes.js');
+  it.each(['general', 'edius'])('%s 以 UTF-16LE BOM 保存繁體中文、emoji 與 CSV 引號', async kind => {
+    const { prepareSubtitleFileExport } = await import('../src/subtitle-file-export.js');
     State.notes = [{ time: 2, text: '中文😀，備註,"引號"', done: false }];
     try {
-      const file = notes[exportName]();
+      const file = prepareSubtitleFileExport(State,{noteFormats:[kind]}).files[0];
       const bytes = Buffer.from(file.content, 'base64');
       expect([...bytes.subarray(0, 2)]).toEqual([0xff, 0xfe]);
       expect(file.mime).toBe('text/csv;charset=utf-16le');

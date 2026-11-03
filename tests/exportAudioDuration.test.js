@@ -8,6 +8,8 @@ import { createRequire } from 'node:module';
 import { buildDeliveryArgv } from '../electron/export-plan.js';
 import { ExternalAudioLibrary } from '../src/external-audio.js';
 import { buildProjectAudioPlan } from '../src/project-audio.js';
+import { buildExportSnapshot } from '../src/delivery-job.js';
+import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec } from '../src/export-job-engine.js';
 import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const { ffmpeg: FFMPEG, ffprobe: FFPROBE } = nativeTestTools();
@@ -63,6 +65,96 @@ afterEach(() => {
 });
 
 describe('交付音訊完整時間範圍', () => {
+  nativeIt.each(['wav', 'prores'])('%s 交付獨立選 A7 左／A8 右，八聲道母素材經 snapshot／runner 的每個 PCM sample 都不混入 A1–A6', async format => {
+    const directory = mkdtempSync(path.join(realpathSync(tmpdir()), 'subtool-export-audio-duration-')); roots.push(directory);
+    const frames = 2 * SAMPLE_RATE;
+    const motherPcm = Buffer.alloc(frames * 8 * 3);
+    const selectedPcm = Buffer.alloc(frames * 2 * 3);
+    const frequencies = [211, 307, 401, 503, 601, 701, 809, 907];
+    for (let frame = 0; frame < frames; frame++) for (let channel = 0; channel < 8; channel++) {
+      // A1–A6 remain audible throughout. A7/A8 have different tones and
+      // distinct silence windows, so channel swaps and downmix leaks are visible.
+      const silent = channel === 6 ? frame < SAMPLE_RATE / 4 || frame >= SAMPLE_RATE * 1.75
+        : channel === 7 && frame >= SAMPLE_RATE * 0.75 && frame < SAMPLE_RATE * 1.25;
+      const sample = silent ? 0 : Math.round((450000 + channel * 150000)
+        * Math.sin(2 * Math.PI * frequencies[channel] * frame / SAMPLE_RATE));
+      motherPcm.writeIntLE(sample, (frame * 8 + channel) * 3, 3);
+      if (channel >= 6) selectedPcm.writeIntLE(sample, (frame * 2 + channel - 6) * 3, 3);
+    }
+    const raw = path.join(directory, 'eight-channels.s24le');
+    const referenceRaw = path.join(directory, 'selected-reference.s24le');
+    const reference = path.join(directory, 'selected-reference.wav');
+    const source = path.join(directory, 'eight-channels.mov');
+    writeFileSync(raw, motherPcm); writeFileSync(referenceRaw, selectedPcm);
+    runFfmpeg(['-f', 'lavfi', '-i', 'color=black:s=64x48:r=25:d=2',
+      '-f', 's24le', '-ar', String(SAMPLE_RATE), '-ac', '8', '-channel_layout', '7.1', '-i', raw,
+      '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'prores_ks', '-c:a', 'pcm_s24le', source]);
+    // The independent oracle uses the generated A7/A8 samples, never the
+    // production plan/filter graph, and uses the same 24-bit delivery format.
+    runFfmpeg(['-f', 's24le', '-ar', String(SAMPLE_RATE), '-ac', '2', '-i', referenceRaw,
+      '-c:a', 'pcm_s24le', reference]);
+    expect(runFfmpeg(['-i', source, '-map', '0:a:0', '-f', 's24le', '-c:a', 'pcm_s24le', 'pipe:1']).equals(motherPcm)).toBe(true);
+
+    const buses = Array.from({ length: 8 }, (_, index) => ({ id: `a${index + 1}`, name: `A${index + 1}`, volume: 1 }));
+    const audioProject = { buses, sourceMaps: { mother: { channels: buses.map((bus, sourceChannel) => ({
+      sourceStream: 0, sourceChannel, enabled: true, gain: 1, busIds: [bus.id],
+    })) } }, exportLayout: { streams: buses.map(bus => ({ id: `project-${bus.id}`, layout: 'mono', busIds: [bus.id] })) } };
+    const originalProject = structuredClone(audioProject);
+    const snapshot = buildExportSnapshot({ state: { audioProject, videoTracks: [{ visible: true }], clips: [{
+      id: 'mother-clip', audioSourceId: 'mother', path: source, type: 'video', in: 0, out: 2, offset: 0,
+      vtrack: 0, fps: 25, natW: 64, natH: 48,
+    }] }, sequenceEnd: 2 });
+    const draft = createDeliveryAudioSpec(audioProject);
+    draft.buses = draft.buses.filter(bus => ['a7', 'a8'].includes(bus.id));
+    draft.streams = [{ id: 'delivery-stereo', layout: 'stereo', busIds: ['a7', 'a8'] }];
+    draft.wavBusIds = ['a7', 'a8'];
+    const record = applyDeliveryAudioSpec({ format }, draft);
+    const audioPlan = composeDeliveryAudioPlan(snapshot.audioPlan, record);
+    expect(audioPlan.buses.map(bus => bus.id)).toEqual(['a7', 'a8']);
+    expect(audioPlan.buses.map(bus => bus.inputs[0].sourceChannel)).toEqual([6, 7]);
+    expect(audioPlan.streams).toEqual(draft.streams);
+    expect(audioProject).toEqual(originalProject);
+    const outPath = path.join(directory, format === 'wav' ? 'delivery.wav' : 'delivery.mov');
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const progress = [], active = new Map();
+    const queue = { assertJobCapabilities() {}, reportProgress: (_id, data) => { progress.push(data); return true; },
+      registerActiveJob: (id, session) => active.set(id, session), clearActiveJob: id => active.delete(id) };
+    const runner = createDeliveryRunner({ queue, queueDir: () => directory, tempDir: directory, mediaProbe: () => probe,
+      nativeCapabilities: { assertReady: async () => {} },
+      encoder: { proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] },
+      runFfmpeg: async args => { runFfmpeg(args); return { maps: [] }; } });
+    try {
+      await runner.run({ id: `selected-${format}`, outputAuthority: captureDestinationEvidence(captureOutputAuthority(outPath, captureOutputDirectory(directory))),
+        payload: { ...snapshot, format, audioPlan, outPath, width: 64, height: 48, fps: 25 } });
+      expect(progress.find(item => item.error), JSON.stringify(progress)).toBeUndefined();
+      expect(progress.at(-1)).toMatchObject({ done: true, pct: 100 });
+      expect(active.size).toBe(0);
+      const metadata = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_streams', '-of', 'json', outPath],
+        { windowsHide: true, timeout: 15000 });
+      expect(metadata.error || metadata.status, metadata.stderr?.toString()).toBe(0);
+      const streams = JSON.parse(metadata.stdout.toString()).streams;
+      expect(streams).toHaveLength(1);
+      expect(streams[0]).toMatchObject({ codec_name: 'pcm_s24le', channels: 2, channel_layout: 'stereo', sample_rate: '48000', bits_per_sample: 24 });
+      expect(Number(streams[0].duration)).toBeCloseTo(2, 6);
+      const decode = file => runFfmpeg(['-i', file, '-map', '0:a:0', '-f', 's24le', '-c:a', 'pcm_s24le', 'pipe:1']);
+      const actual = decode(outPath), expected = decode(reference);
+      expect(expected.equals(selectedPcm)).toBe(true);
+      expect(actual.length).toBe(frames * 2 * 3);
+      let mismatchedSamples = 0, maximumDifference = 0;
+      for (let byte = 0; byte < actual.length; byte += 3) {
+        const difference = Math.abs(actual.readIntLE(byte, 3) - expected.readIntLE(byte, 3));
+        if (difference) mismatchedSamples++;
+        maximumDifference = Math.max(maximumDifference, difference);
+      }
+      expect({ mismatchedSamples, maximumDifference }).toEqual({ mismatchedSamples: 0, maximumDifference: 0 });
+      // In these windows all six excluded channels carry signal; the selected
+      // channel must remain digital zero, not merely below an audible threshold.
+      for (let frame = 0; frame < SAMPLE_RATE / 4; frame++) expect(actual.readIntLE(frame * 6, 3)).toBe(0);
+      for (let frame = SAMPLE_RATE * 0.75; frame < SAMPLE_RATE * 1.25; frame++) expect(actual.readIntLE(frame * 6 + 3, 3)).toBe(0);
+      expect(audioProject).toEqual(originalProject);
+    } finally { await probe.cancelAllAndWait(); }
+  }, 30000);
+
   nativeIt.each(['wav', 'routed', 'routed-case', 'legacy-channel', 'legacy-raw'].flatMap(mode => [0, 0.5, 1.75].map(inPoint => ({ mode, inPoint }))))
   ('$mode 正向來源延後開聲，trim=$inPoint 的實際 runner/probe/FFmpeg 保留缺口且 seek 後不重加延遲', async ({ mode, inPoint }) => {
     const directory = mkdtempSync(path.join(realpathSync(tmpdir()), 'subtool-export-audio-duration-')); roots.push(directory);

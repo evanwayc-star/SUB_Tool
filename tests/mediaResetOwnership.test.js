@@ -497,11 +497,12 @@ describe('reset-scoped media ownership', () => {
     desktopMock.waveAudio=vi.fn().mockResolvedValue('legacy.wav');
     desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);
     desktopMock.ingest.mockResolvedValue({channels:[]});
-    const first=deferred(),gate=deferred();desktopMock.prepareSourceWaveform=vi.fn()
+    const first=deferred(),middle=deferred(),gate=deferred();desktopMock.prepareSourceWaveform=vi.fn()
       .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(middle.promise)
       .mockReturnValueOnce(gate.promise);
     desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
-    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>url.endsWith('native-first.wav')?readyWave(60):readyWave()})));
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>readyWave(url.endsWith('native-first.wav')?5:url.endsWith('native-middle.wav')?55:1)})));
     domMock.video.readyState=1;domMock.video.duration=61;
     let loaded=false;
     const loading=Media.loadDesktopMedia('C:/native.mkv').then(()=>{loaded=true;});
@@ -509,16 +510,22 @@ describe('reset-scoped media ownership', () => {
       await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledOnce());
       await vi.waitFor(()=>expect(loaded).toBe(true));
       expect(desktopMock.ingest).not.toHaveBeenCalled();
-      first.resolve({wave:'native-first.wav',temporary:true,start:0,duration:60,sourceKey:'native'});
+      expect(desktopMock.prepareSourceWaveform.mock.calls[0][0]).toMatchObject({start:0,length:5});
+      first.resolve({wave:'native-first.wav',temporary:true,start:0,duration:5,sourceKey:'native'});
       await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(2));
-      expect(State.clips[0].peaks).toHaveLength(60*100*2);
+      expect(State.clips[0].peaks).toHaveLength(5*100*2);
       expect(desktopMock.ingest).not.toHaveBeenCalled();
       expect(desktopMock.waveAudio).not.toHaveBeenCalled();
+      expect(desktopMock.prepareSourceWaveform.mock.calls[1][0]).toMatchObject({start:5,length:55});
+      middle.resolve({wave:'native-middle.wav',temporary:true,start:5,duration:55,sourceKey:'native'});
+      await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(3));
+      expect(State.clips[0].peaks).toHaveLength(60*100*2);
+      expect(desktopMock.ingest).not.toHaveBeenCalled();
       gate.resolve({wave:'native-last.wav',temporary:true,start:60,duration:1,sourceKey:'native'});
       await vi.waitFor(()=>expect(State.clips[0].peaks).toHaveLength(61*100*2));
       await vi.waitFor(()=>expect(desktopMock.ingest).toHaveBeenCalledOnce());
     }finally{
-      first.resolve({});gate.resolve({});await loading;
+      first.resolve({});middle.resolve({});gate.resolve({});await loading;
       await Promise.all([...Media._sourceWavePreparations.values()].map(entry=>entry.promise));
       vi.unstubAllGlobals();
       delete desktopMock.stat;delete desktopMock.waveAudio;delete desktopMock.prepareSourceWaveform;delete desktopMock.cleanupAudio;
@@ -594,23 +601,24 @@ describe('reset-scoped media ownership', () => {
     const source={id:'segments',name:'long.mov',path:'C:/long.mov',dur:61,in:0,out:61,offset:0,vtrack:0,
       audioSrc:'clip:segments',audioSourceId:'segments'};State.clips=[source];
     const gate=deferred();desktopMock.prepareSourceWaveform=vi.fn()
-      .mockResolvedValueOnce({wave:'first.wav',temporary:true,start:0,duration:60,complete:false,sourceKey:'original'})
-      .mockReturnValueOnce(gate.promise);
+      .mockResolvedValueOnce({wave:'first.wav',temporary:true,start:0,duration:5,complete:false,sourceKey:'original'})
+      .mockReturnValueOnce(gate.promise)
+      .mockResolvedValueOnce({wave:'last.wav',temporary:true,start:60,duration:1,complete:false,sourceKey:'original'});
     desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);
     desktopMock.ingest.mockResolvedValue({channels:[]});
     desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
-    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>url.endsWith('first.wav')?readyWave(60):readyWave(1,8192)})));
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>url.endsWith('first.wav')?readyWave(5):readyWave(url.endsWith('middle.wav')?55:1,8192)})));
     const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
     const work=Media._clipIngest(source,{audio:[{channels:1}]});
     try{
       await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(2));
-      expect(source.peaks).toHaveLength(60*100*2);
+      expect(source.peaks).toHaveLength(5*100*2);
       expect(Math.max(...source.peaks)).toBeCloseTo(0.5,3);
       expect(desktopMock.ingest).not.toHaveBeenCalled();
-      expect(desktopMock.prepareSourceWaveform.mock.calls[1][0]).toMatchObject({start:60,length:1,duration:61});
+      expect(desktopMock.prepareSourceWaveform.mock.calls[1][0]).toMatchObject({start:5,length:55,duration:61});
       const {MediaIntakeJobs}=await import('../src/media-intake-jobs.js');
-      expect(MediaIntakeJobs.snapshot().jobs.find(job=>job.progress?.overall)?.progress.pct).toBeCloseTo(60/61*100,4);
-      gate.resolve({wave:'last.wav',temporary:true,start:60,duration:1,complete:false,sourceKey:changed?'replacement':'original'});
+      expect(MediaIntakeJobs.snapshot().jobs.find(job=>job.progress?.overall)?.progress.pct).toBeCloseTo(5/61*100,4);
+      gate.resolve({wave:'middle.wav',temporary:true,start:5,duration:55,complete:false,sourceKey:changed?'replacement':'original'});
       await work;
       if(changed){
         expect(source.peaks).toBeNull();
@@ -621,7 +629,8 @@ describe('reset-scoped media ownership', () => {
         expect(source.peaks[60*100*2+1]).toBeCloseTo(0.25,3);
       }
       expect(desktopMock.cleanupAudio).toHaveBeenCalledWith('first.wav');
-      expect(desktopMock.cleanupAudio).toHaveBeenCalledWith('last.wav');
+      expect(desktopMock.cleanupAudio).toHaveBeenCalledWith('middle.wav');
+      if(!changed)expect(desktopMock.cleanupAudio).toHaveBeenCalledWith('last.wav');
       expect(desktopMock.ingest).toHaveBeenCalledOnce();
     }finally{
       gate.resolve({});await work;warn.mockRestore();vi.unstubAllGlobals();
@@ -634,21 +643,21 @@ describe('reset-scoped media ownership', () => {
     const source={id:'split-wave',name:'long.mov',path:'C:/long.mov',dur:121,in:0,out:121,offset:0,vtrack:0,
       audioSrc:'clip:split-wave',audioSourceId:'split-wave'};State.clips=[source];
     const second=deferred(),third=deferred();desktopMock.prepareSourceWaveform=vi.fn()
-      .mockResolvedValueOnce({wave:'one.wav',temporary:true,start:0,duration:60,sourceKey:'original'})
+      .mockResolvedValueOnce({wave:'one.wav',temporary:true,start:0,duration:5,sourceKey:'original'})
       .mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise);
     desktopMock.cleanupAudio=vi.fn().mockResolvedValue(true);desktopMock.ingest.mockResolvedValue({channels:[]});
     desktopMock.fileURL.mockImplementation(file=>Promise.resolve('file:///'+file));
-    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>readyWave(60)})));
+    vi.stubGlobal('fetch',vi.fn(async url=>({arrayBuffer:async()=>readyWave(url.endsWith('one.wav')?5:55)})));
     const warn=vi.spyOn(console,'warn').mockImplementation(()=>{});
     const work=Media._clipIngest(source,{audio:[{channels:1}]});
     try{
       await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(2));
       expect(Media.splitClipAt(30)).toBe(true);
       const right=State.clips.find(clip=>clip!==source),firstPeaks=right.peaks;
-      second.resolve({wave:'two.wav',temporary:true,start:60,duration:60,sourceKey:'original'});
+      second.resolve({wave:'two.wav',temporary:true,start:5,duration:55,sourceKey:'original'});
       await vi.waitFor(()=>expect(desktopMock.prepareSourceWaveform).toHaveBeenCalledTimes(3));
       expect(source.peaks).not.toBe(firstPeaks);expect(right.peaks).toBe(firstPeaks);
-      third.resolve({wave:'new-source.wav',temporary:true,start:120,duration:1,sourceKey:'replacement'});
+      third.resolve({wave:'new-source.wav',temporary:true,start:60,duration:60,sourceKey:'replacement'});
       await work;
       expect(source.peaks===null).toBe(true);expect(right.peaks===null).toBe(true);
       expect(Wave.getSourceWaveform(right,right.peaks).peaks).toBeNull();
@@ -1467,7 +1476,7 @@ describe('reset-scoped media ownership', () => {
     State.clips=[first,next];State.duration=6;
     Media.activeClipId=first.id;Media.playing=true;
     domMock.video.src=first.web.url;domMock.video.currentTime=1;domMock.video.readyState=1;
-    const playback=deferred(),start=vi.spyOn(Media,'startElementSources');
+    const playback=deferred(),start=vi.spyOn(Media._audioRouter,'startElementSources');
     domMock.video.play.mockReturnValueOnce(playback.promise);
     const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
     try{
@@ -1499,7 +1508,7 @@ describe('reset-scoped media ownership', () => {
       State.clips=clips;State.duration=6;Media.activeClipId=clips[0].id;Media.playing=true;
       domMock.video.src=clips[0].web.url;domMock.video.currentTime=1;domMock.video.readyState=1;
     };
-    const oldPlay=deferred(),newPlay=deferred(),start=vi.spyOn(Media,'startElementSources');
+    const oldPlay=deferred(),newPlay=deferred(),start=vi.spyOn(Media._audioRouter,'startElementSources');
     const {setStatus}=await import('../src/ui.js');setStatus.mockClear();
     domMock.video.play.mockReset();domMock.video.play.mockReturnValueOnce(oldPlay.promise).mockReturnValueOnce(newPlay.promise);
     try{

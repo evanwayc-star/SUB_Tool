@@ -157,6 +157,7 @@ sequenceDiagram
   participant M as Media
   participant S as 呈現 session
   participant P as 可見 presenter
+  participant R as 音訊活動 owner
   participant A as 音訊 follower
   I->>M: 時間軸目標
   M->>M: 格網吸附及 UI 目標投影
@@ -167,15 +168,16 @@ sequenceDiagram
   S->>M: 提交呈現位置
   M->>P: 依最新意圖要求播放
   P-->>M: 接受起播，或回報失敗
-  M->>A: 資格仍有效才起播一次
-  M->>M: 記錄目前外音活動狀態
+  M->>R: 資格仍有效才提交起播
+  R->>A: 起播一次
+  R->>R: 記錄同次外音活動狀態
 ```
 
 同時最多一個 in-flight，只保留最新 pending。使用者可在等待期間改為 play／pause；reset、換素材或專案會取消舊請求。presenter 接管時改用目前可見畫面的證據。
 
 播放中跳轉時，`Media.seek()` 在定位外音及發出同步通知前，先停止舊 buffer、element 與疊合 clone；同步重入若產生較新的定位，舊呼叫不得繼續。mpv 的暫停由呈現 session 控制，不在這個提前停止步驟另送暫停命令。
 
-音訊只能在實際畫格完成後起播或校正；有播放器的路徑還須確認起播被接受，兩者是不同證據。`Media.startElementSources()`／`startBufferSources()` 會拒絕播放轉換等待中的背景重啟，避免聲道接管、來源切換先播放一次，畫格抵達後又從相同位置起播。element 起播後同步引擎記下當下的外音活動狀態，避免下一個 tick 把剛播放的音訊重新定位；外音進出片段或配線變更仍須正常偵測。起播與晚到回覆的責任見[技術架構](技術架構說明.md#播放聲音的唯一-owner)，呈現節流的取捨保留在 [ADR-0003](adr/0003-倒帶以實際呈現畫格節流.md)。
+音訊只能在實際畫格完成後起播或校正；有播放器的路徑還須確認起播被接受，兩者是不同證據。`Media.startElementSources()`／`startBufferSources()` 會拒絕播放轉換等待中的背景重啟，避免聲道接管、來源切換先播放一次，畫格抵達後又從相同位置起播。Media 的內部 playback runtime 在 element 起播提交時記下同次外音活動狀態，避免下一個 tick 把剛播放的音訊重新定位；外音進出片段或配線變更仍須正常偵測。起播與晚到回覆的責任見[技術架構](技術架構說明.md#播放聲音的唯一-owner)，呈現節流的取捨保留在 [ADR-0003](adr/0003-倒帶以實際呈現畫格節流.md)。
 
 跳轉前後若最上層仍是同一影片，但底層音訊片段的疊合範圍改變，起播前先依目標時間套用音軌並記錄相同的作用中片段集合，避免第一個 tick 再重播剛起播的聲音。播放器接受起播的回覆可能晚於片段邊界；若回覆時的實際時間軸位置已跨越邊界，先以同一刻的來源與時間軸時間更新音軌，確認原播放目標仍有效後才啟動 follower。同步通知若建立較新的定位，舊工作不得繼續起播。相關回歸以受控音訊節點核對來源位置、倍率及停止時序，不能代替使用者設備上的實際聆聽。
 
@@ -207,6 +209,7 @@ mpv 確認目前來源的連線中斷時，影片播放及等待中的呈現工�
 | `subio.js` | FPS 轉換與批次時長，使用模型的合法上下限 |
 | `media-presentation-core.js` | 請求、取消、pending、播放意圖及畫格 hold |
 | `media.js` | `displayTime()`、presenter 選擇、來源切換與音訊生命週期 |
+| `media-playback-runtime.js` | Media 內部片段接續、配線及音訊起播活動的共同 owner |
 | `media-player-adapter.js` | HTML／mpv 操作、來源時鐘及延後定位 |
 | `transport-controller.js` | 逐格、JKL、倒帶 session、字幕導航及按鍵當下的 In／Out |
 | `timeline-interaction-engine.js` | jump／drag 意圖；不私建播放器時鐘 |

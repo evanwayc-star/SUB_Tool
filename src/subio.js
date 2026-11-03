@@ -3,25 +3,24 @@ import { $ } from './dom.js';
 import { secToEncore, snapTimeToFrame, getExactFps, fmtClock } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { History, recordHistory } from './history.js';
-import { sortCues, trackLocked, cuesTrackLocked, subtitleTimeOnFrame, shiftCueTimes, snapCueToFrames, snapAllCuesToFrames, snapshotProvisionalCueEnds } from './subtitle-model.js';
+import { sortCues, trackLocked, cuesTrackLocked, subtitleTimeOnFrame, shiftCueTimes, snapCueToFrames, snapAllCuesToFrames, snapshotProvisionalCueEnds, snapshotTimelineDuration } from './subtitle-model.js';
 import { renderASS, SubFormats } from './formats.js';
 import { drawTimeline, layoutTimeline } from './timeline-renderer.js';
 import { emit } from './events.js';
-import { getNotesGeneralFileData, getNotesEdiusFileData } from './notes.js';
+import { prepareSubtitleFileExport } from './subtitle-file-export.js';
 import { Seq } from './sequence.js';
 import { AudioRouting } from './audio-routing.js';
-import { applyDeliveryAudioSpec, createDeliveryAudioSpec, videoExportCapability, allocateExportFileNames } from './export-job-engine.js';
+import { applyDeliveryAudioSpec, createDeliveryAudioSpec, videoExportCapability } from './export-job-engine.js';
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission, exportSourceError, formatOverwriteConfirmation } from './delivery-submission.js';
-import { escapeHTML, encodeUTF16LE, bytesToB64, downloadBytes, baseName, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
+import { escapeHTML, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
 import { parseTimecodeInput } from './tcparse.js';
-import { buildXLSX } from './xlsx-export.js';
 import { getAllPresets, loadFonts, presetIdentity, STYLE_DEFAULTS } from './substyle.js';
 import { buildSubtitleImportPlan } from './project-intake-engine.js';
 import { Project } from './project.js';
@@ -166,7 +165,7 @@ function showExportDialog() {
       }
     },
     {
-      label: '匯出', primary: true, act: () => {
+      label: '匯出', primary: true, act: async () => {
       if (!current()) return;
       const fmts = [...document.querySelectorAll('[data-fmt]')].filter(b => b.checked).map(b => b.dataset.fmt);
       const selectedTracks = showTrackChoices
@@ -178,47 +177,24 @@ function showExportDialog() {
       if (!fmts.length && !notesE && !notesG) { showToast('請至少勾選一個格式'); return; }
       if (fmts.length && showTrackChoices && !tks.length) { showToast('請至少勾選一個軌道'); return; }
       if (fmts.length && tks.some(index => index < 0)) { showToast('所選字幕軌已變更，請重新開啟匯出視窗'); return; }
-      const filesToExport = [];
+      let submission;
       try {
-        const committedCues=History.committedSnapshot().cues;
-        for (const fmt of fmts) {
-          if (fmt === 'xlsx') {
-            const list = tks.map(i => ({ name: State.tracks[i]?.name || ('軌道' + (i + 1)), cues: committedCues.filter(c => (c.track || 0) === i) })).filter(t => t.cues.length);
-            const f = getXLSXFileData(list); if (f) filesToExport.push(f);
-          } else {
-            const shouldMerge = document.getElementById(`merge_${fmt}`)?.checked;
-            if (shouldMerge) {
-              const mergedCues = [];
-              const mergedNames = [];
-              for (const i of tks) {
-                const cues = committedCues.filter(c => (c.track || 0) === i);
-                if (cues.length) {
-                  mergedCues.push(...cues);
-                  mergedNames.push(State.tracks[i]?.name || ('軌道' + (i + 1)));
-                }
-              }
-              if (mergedCues.length) {
-                mergedCues.sort((a, b) => a.start - b.start);
-                const f = getFileData(fmt, mergedCues, mergedNames.join('+'));
-                if (f) filesToExport.push(f);
-              }
-            } else {
-              for (const i of tks) {
-                const cues = committedCues.filter(c => (c.track || 0) === i);
-                if (cues.length) { const f = getFileData(fmt, cues, showTrackChoices ? State.tracks[i]?.name : undefined); if (f) filesToExport.push(f); }
-              }
-            }
-          }
-        }
-        if (notesE) { const f = getNotesEdiusFileData(); if (f) filesToExport.push(f); }
-        if (notesG) { const f = getNotesGeneralFileData(); if (f) filesToExport.push(f); }
+        const committed=History.committedSnapshot();
+        submission=prepareSubtitleFileExport({...committed,mediaName:State.mediaName,
+          cues:snapshotProvisionalCueEnds(committed.cues,{fps:committed.fps,dropFrame:committed.dropFrame,
+            duration:snapshotTimelineDuration(committed,State.duration)}),
+        },{formats:fmts,trackIndices:tks,includeTrackNames:showTrackChoices,
+          mergeFormats:fmts.filter(fmt=>document.getElementById(`merge_${fmt}`)?.checked),
+          noteFormats:[...(notesE?['edius']:[]),...(notesG?['general']:[])],
+        });
       } catch (error) {
         const message = error?.message || '無法產生字幕匯出檔案';
         setStatus(message, 'err'); showToast(message);
         return;
       }
       session.close();
-      executeBatchExport(filesToExport);
+      const result=await submission.write();
+      if(result.message){setStatus(result.message,result.kind);showToast(result.toast);}
     }
   }, { label: '取消', act: () => session.close() }]);
 
@@ -231,7 +207,8 @@ function _captureExportDraft(){
   let liveExternalSources=[];
   try{ liveExternalSources = Media.externalAudio?.list?.() || []; }catch(e){}
   const committed=History.committedSnapshot();
-  const cues=snapshotProvisionalCueEnds(committed.cues);
+  const cues=snapshotProvisionalCueEnds(committed.cues,{fps:committed.fps,dropFrame:committed.dropFrame,
+    duration:snapshotTimelineDuration(committed,State.duration)});
   const sequenceEnd=committed.clips.reduce((end,clip)=>Math.max(end,Seq.clipEnd(clip)),0);
   const snapshot = buildExportSnapshot({
     state: { ...State, clips: committed.clips, videoTracks: committed.videoTracks, audioProject: committed.audioProject },
@@ -368,8 +345,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     const ap = r.audioPlan;
     let audioDesc = '依專案音軌順序';
     const streams = ap?.streams || ap?.groups;
-    if (isWav && Array.isArray(r.wavBusIds)) {
-      const count=r.wavBusIds.length;
+    const wavBusIds = isWav ? (Array.isArray(r.wavBusIds) ? r.wavBusIds
+      : Array.isArray(r.audioBuses) ? r.audioBuses.map(bus => bus.id) : null) : null;
+    if (wavBusIds) {
+      const count=wavBusIds.length;
       audioDesc=count===1 ? '已設定 Mono（1 軌）'
         : count===2 ? '已設定 Stereo（2 軌）'
         : `已設定 ${count} 軌（依選擇順序）`;
@@ -382,6 +361,15 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       });
       const tCount = streams.reduce((acc, g) => acc + (g.layout === '5.1' ? 6 : (g.layout === 'mono' ? 1 : 2)), 0);
       audioDesc = gCounts.length ? `${gCounts.join(' + ')} (${tCount} 軌)` : '無';
+    }
+    const projectBuses = data.audioProject?.buses || [];
+    const busNames = new Map(projectBuses.map((bus, index) => [String(bus.id), `A${index + 1}`]));
+    const channelMapping = (ids, stereo = false) => ids.map((id, channel) =>
+      `${stereo ? ['左', '右'][channel] : `Ch ${channel + 1}`} ← ${busNames.get(String(id)) || '未指定'}`).join('、');
+    if (wavBusIds?.length) {
+      audioDesc += ` · ${channelMapping(wavBusIds, wavBusIds.length === 2)}`;
+    } else if (!isWav && Array.isArray(r.audioBuses) && streams?.length) {
+      audioDesc += ` · ${streams.map(stream => channelMapping(stream.busIds || [], stream.layout === 'stereo' || stream.layout === 'stereoLtRt')).join(' / ')}`;
     }
 
     return `
@@ -436,7 +424,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           </div></div>` : ''}
         </div>
         <div class="delivery-card-options">
-          <div class="delivery-audio-line"><span class="delivery-options-label">音訊</span><span class="delivery-audio-info">${escapeHTML(audioDesc)}</span><button type="button" class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="設定此項目的輸出音軌">設定音軌</button></div>
+          <div class="delivery-audio-line"><span class="delivery-options-label">音訊</span><span class="delivery-audio-info">${escapeHTML(audioDesc)}</span><button type="button" class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="獨立設定此輸出檔案的音軌與左右聲道">設定輸出音軌</button></div>
           ${!isWav ? `<div class="delivery-visual-options"><span class="delivery-sub-chip" title="${escapeHTML(activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕')}">${activeSubs.length ? '字幕：'+escapeHTML(activeSubs.join(', ')) : '無字幕'}</span>
             <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 畫面燒入時間碼</label></div>` : ''}
         </div>
@@ -902,42 +890,8 @@ export function applyDurAdjPct() {
 }
 
 /* ==============================================================================
-   字幕檔案匯出 (Subtitle Export)
+   即時 ASS 預覽與診斷（檔案匯出使用 subtitle-file-export.js 的凍結內容）
    ============================================================================== */
-
-export function getFileData(kind, cues, trackName) {
-  if (!cues.length) return null;
-  cues=snapshotProvisionalCueEnds(cues);
-  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
-  const tkName = trackName ? trackName.replace(/[\\/:*?"<>|]/g, '_') : '軌道';
-  let text, ext, fname;
-  if (kind === 'srt') {
-    text = SubFormats.toSRT(cues); ext = 'srt';
-    fname = `ST_${projName}_SUB_${tkName}.srt`;
-  }
-  else if (kind === 'ass') {
-    text = toASSFromState(cues, { includeMetadata: true }); ext = 'ass';
-    fname = `ST_${projName}_SUB_${tkName}.ass`;
-  }
-  else if (kind === 'encore') {
-    text = SubFormats.toEncore(cues, State.fps, State.dropFrame); ext = 'txt';
-    fname = `ST_${projName}_SUB_${tkName}.txt`;
-  }
-  else {
-    text = SubFormats.toTXT(cues); ext = 'txt';
-    fname = `ST_${projName}_SUB_${tkName}-NoTC.txt`;
-  }
-  const bytes = encodeUTF16LE(text);
-  return { name: fname, content: bytesToB64(bytes), ext: ext, mime: 'text/plain;charset=utf-16le' };
-}
-
-export function getXLSXFileData(trackDataList) {
-  if (!trackDataList.length) return null;
-  const bytes = buildXLSX(trackDataList.map(track=>({...track,cues:snapshotProvisionalCueEnds(track.cues)})), State.fps, State.dropFrame);
-  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
-  const fname = `ST_${projName}_SUB.xlsx`;
-  return { name: fname, content: bytesToB64(bytes), ext: 'xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
-}
 
 export function toASSFromState(cues, options = {}) {
   const backgroundLayouts = options.backgroundLayouts ??
@@ -949,48 +903,6 @@ export function toASSFromState(cues, options = {}) {
     tracks: State.tracks,
     dropFrame: State.dropFrame,
   });
-}
-
-export async function executeBatchExport(files) {
-  if (!files.length) return;
-  files = allocateExportFileNames(files);
-  if (!IS_DESKTOP) {
-    files.forEach(f => downloadBytes(b64ToBytes(f.content), f.name, f.mime || 'application/octet-stream'));
-    setStatus(`已下載 ${files.length} 個檔案`, 'ok');
-    showToast(`已下載 ${files.length} 個檔案`);
-    return;
-  }
-  try {
-    if (files.length === 1) {
-      const f = files[0];
-      const pth = await DESK.exportSub(f.name, f.content, f.ext);
-      if (pth) { setStatus(`已匯出：${pth}`, 'ok'); showToast(`已匯出 ${baseName(pth)}`); }
-      return pth;
-    } else {
-      const dir = await DESK.exportDirectory(files);
-      if (dir) { setStatus(`已批次匯出 ${files.length} 個檔案至：${dir}`, 'ok'); showToast(`已批次匯出 ${files.length} 個檔案`); }
-      return dir;
-    }
-  } catch (error) {
-    const message = '匯出失敗：' + (error?.message || String(error));
-    setStatus(message, 'err');
-    showToast(message);
-    return null;
-  }
-}
-
-export function doExportXLSX(trackDataList) {
-  if (!trackDataList.length) { showToast('所選軌道沒有字幕'); return; }
-  const bytes = buildXLSX(trackDataList, State.fps, State.dropFrame);
-  const projName = (State.mediaName ? State.mediaName.replace(/\.[^.]+$/, '') : 'subtitle').split('_')[0];
-  const fname = `ST_${projName}_SUB.xlsx`;
-  if (IS_DESKTOP) {
-    return executeBatchExport([{ name: fname, content: bytesToB64(bytes), ext: 'xlsx' }]);
-  } else {
-    downloadBytes(bytes, fname, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    setStatus('已匯出 XLSX（' + trackDataList.length + ' 個分頁）', 'ok');
-    showToast('已匯出 ' + fname);
-  }
 }
 
 export { showExportDialog, showFpsConvertDialog, showExportVideoDialog };

@@ -1,4 +1,5 @@
 /* 唯讀來源波形的獨立生命週期；不持有正式 clip、播放位置或 History。 */
+import { sourceWaveformChunkLength } from './media-intake-engine.js';
 let displayOwner=null;
 export const registerProvisionalSourceWaveform=owner=>{
   const previous=displayOwner;displayOwner=owner;
@@ -41,12 +42,13 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
       while(active()&&position<duration){
         let result;
         try{
-          result=await jobs.prepareSourceWaveform({path,audio,duration,start:position,length:Math.min(60,duration-position),...(ignoreCached?{ignoreCached:true}:{})});
+          const length=sourceWaveformChunkLength(position,duration);
+          result=await jobs.prepareSourceWaveform({path,audio,duration,start:position,length,...(ignoreCached?{ignoreCached:true}:{})});
           if(!active())return;
           if(!result?.wave||!/^[a-f0-9]{16}$/.test(result.sourceKey)||!Number.isFinite(result.duration)||result.duration<=0
             ||(entry.sourceKey&&entry.sourceKey!==result.sourceKey)) throw new Error('來源波形證據無效或已變更');
           const whole=result.start===0&&result.duration>=duration;
-          if(!whole&&(Math.abs(result.start-position)>1e-6||result.duration>Math.min(60,duration-position)+1e-6)) throw new Error('來源波形時間不連續');
+          if(!whole&&(Math.abs(result.start-position)>1e-6||result.duration>length+1e-6)) throw new Error('來源波形時間不連續');
           entry.sourceKey=result.sourceKey;
           const url=await bridge.fileURL(result.wave);if(!active())return;
           const bytes=await read(url);if(!active())return;

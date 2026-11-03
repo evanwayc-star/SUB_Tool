@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { AudioRoutingModel, DELIVERY_PRESETS, resizeProjectAudioBuses } from '../src/audio-routing-engine.js';
 import { normalizeAudioProject } from '../src/state.js';
 import { buildProjectAudioPlan } from '../src/project-audio.js';
+import { applyDeliveryAudioSpec, composeDeliveryAudioPlan, createDeliveryAudioSpec } from '../src/export-job-engine.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -96,6 +97,31 @@ describe('AudioRoutingModel - Project Adapter', () => {
 });
 
 describe('AudioRoutingModel - Delivery Adapter', () => {
+  it('雙聲道交付預設仍可選 A7/A8，輸出只帶所選音軌且保留來源配線', () => {
+    const project = realProject(8);
+    project.sourceMaps.master = { channels: project.buses.map((bus, sourceChannel) => ({
+      sourceStream: 0, sourceChannel, busIds: [bus.id], enabled: true, gain: 1,
+    })) };
+    const original = structuredClone(project), spec = createDeliveryAudioSpec(project);
+    const edit = AudioRoutingModel.editDelivery(spec);
+    expect(edit.preset(DELIVERY_PRESETS.find(preset => preset.id === '2-fm'))).toBe(true);
+    expect(edit.current().buses).toEqual(project.buses);
+    const stream = edit.current().exportLayout.streams[0];
+    edit.setStreams([{ ...stream, busIds: [project.buses[6].id, project.buses[7].id] }]);
+    const result = edit.commit();
+    expect(result.saved).toBe(true);
+    expect(result.spec.buses.map(bus => bus.id)).toEqual([project.buses[6].id, project.buses[7].id]);
+    expect(result.spec.availableBuses).toEqual(project.buses);
+    const compiled = buildProjectAudioPlan({ audioProject: project, clips: [{
+      audioSourceId: 'master', path: 'C:/master/eight-channel.mov', in: 0, out: 3, offset: 0,
+    }] });
+    const plan = composeDeliveryAudioPlan(compiled, applyDeliveryAudioSpec({}, result.spec));
+    expect(plan.buses.map(bus => bus.inputs.map(input => input.sourceChannel))).toEqual([[6], [7]]);
+    expect(plan.streams[0].busIds).toEqual([project.buses[6].id, project.buses[7].id]);
+    expect(project).toEqual(original);
+    expect(spec).toEqual(createDeliveryAudioSpec(original));
+  });
+
   it('applies mono layout to delivery draft', () => {
     const adapter = AudioRoutingModel.createDeliveryAdapter({
       buses: [{ id: 'bus-1' }, { id: 'bus-2' }],
@@ -107,6 +133,73 @@ describe('AudioRoutingModel - Delivery Adapter', () => {
     expect(res.streams.length).toBe(2);
     expect(res.streams[0].layout).toBe('mono');
     expect(res.streams[1].layout).toBe('mono');
+  });
+
+  it.each([[7, 6], [6, 2]])('重開只有 A1/A2 的舊交付仍可獨立選取音軌索引 %s/%s，往返不丟候選或覆寫', (left, right) => {
+    const project = realProject(8);
+    const spec = createDeliveryAudioSpec(project, {
+      audioBuses: [{ ...project.buses[0], volume: 0.6 }, project.buses[1]],
+      audioPlan: { streams: [{ id: 'old-stereo', layout: 'stereo', busIds: project.buses.slice(0, 2).map(bus => bus.id) }] },
+    });
+    const original = structuredClone(spec), edit = AudioRoutingModel.editDelivery(spec);
+    expect(edit.current().buses.map(bus => bus.id)).toEqual(project.buses.map(bus => bus.id));
+    expect(edit.current().buses[0].volume).toBe(0.6);
+    const ids = [project.buses[left].id, project.buses[right].id];
+    edit.setStreams([{ id: 'selected', layout: 'stereo', busIds: ids }]);
+    const child = edit.output();
+    expect(child.current().buses).toHaveLength(8);
+    child.cancel();
+    expect(edit.current().buses[0].volume).toBe(0.6);
+    const result = edit.commit();
+    expect(result.saved).toBe(true);
+    expect(result.spec.buses.map(bus => bus.id)).toEqual(ids);
+    expect(result.spec.streams[0].busIds).toEqual(ids);
+    const reopened = AudioRoutingModel.editDelivery(result.spec);
+    expect(reopened.current().buses).toHaveLength(8);
+    expect(reopened.current().buses[0].volume).toBe(0.6);
+    expect(reopened.commit().spec.streams[0].busIds).toEqual(ids);
+    expect(spec).toEqual(original);
+    expect(project.buses[0].volume).toBe(1);
+  });
+
+  it('舊數量操作只調整選取；全部 Mono 仍含所有候選，WAV 只保存所選順序', () => {
+    const project = realProject(8), edit = AudioRoutingModel.editDelivery(createDeliveryAudioSpec(project), { wav: true });
+    expect(edit.setBusCount(2)).toBe(true);
+    expect(edit.current().buses).toEqual(project.buses);
+    expect(edit.current().exportLayout.streams.flatMap(stream => stream.busIds)).toEqual(project.buses.slice(0, 2).map(bus => bus.id));
+    expect(edit.allMono()).toBe(true);
+    expect(edit.current().exportLayout.streams.flatMap(stream => stream.busIds)).toEqual(project.buses.map(bus => bus.id));
+    edit.setStreams([
+      { id: 'first', layout: 'mono', busIds: [project.buses[7].id] },
+      { id: 'second', layout: 'mono', busIds: [project.buses[2].id] },
+    ]);
+    const result = edit.commit();
+    expect(result.saved).toBe(true);
+    expect(result.spec.wavBusIds).toEqual([project.buses[7].id, project.buses[2].id]);
+    expect(result.spec.buses.map(bus => bus.id)).toEqual(result.spec.wavBusIds);
+    expect(result.spec.availableBuses).toEqual(project.buses);
+  });
+
+  it('WAV 改成影片並重選 A7/A8 後切回 WAV，仍輸出最新選取而非舊 WAV 篩選', () => {
+    const project = realProject(8);
+    project.sourceMaps.master = { channels: project.buses.map((bus, sourceChannel) => ({
+      sourceStream: 0, sourceChannel, busIds: [bus.id], enabled: true, gain: 1,
+    })) };
+    const wav = AudioRoutingModel.editDelivery(createDeliveryAudioSpec(project), { wav: true });
+    wav.setStreams([{ id: 'wav', layout: 'stereo', busIds: project.buses.slice(0, 2).map(bus => bus.id) }]);
+    let row = applyDeliveryAudioSpec({ format: 'wav' }, wav.commit().spec);
+    const video = AudioRoutingModel.editDelivery(createDeliveryAudioSpec(project, { ...row, format: 'h264' }));
+    video.setStreams([{ id: 'video', layout: 'stereo', busIds: [project.buses[6].id, project.buses[7].id] }]);
+    const saved = video.commit();
+    expect(saved.saved).toBe(true);
+    row = { ...applyDeliveryAudioSpec({ ...row, format: 'h264' }, saved.spec), format: 'wav' };
+    const compiled = buildProjectAudioPlan({ audioProject: project, clips: [{
+      audioSourceId: 'master', path: 'C:/master/eight-channel.mov', in: 0, out: 3, offset: 0,
+    }] });
+    const result = composeDeliveryAudioPlan(compiled, row);
+    expect(result.buses.map(bus => bus.inputs.map(input => input.sourceChannel))).toEqual([[6], [7]]);
+    expect(row.wavBusIds).toEqual([project.buses[6].id, project.buses[7].id]);
+    expect(project.buses).toHaveLength(8);
   });
 });
 

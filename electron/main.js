@@ -152,7 +152,7 @@ function detectVideoEncoder() {
     try {
       const r = spawnSync(FFMPEG, ['-hide_banner', '-loglevel', 'error',
         '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=5:duration=0.2',
-        '-c:v', name, '-f', 'null', '-'], { timeout: 8000 });
+        '-c:v', name, '-f', 'null', '-'], { windowsHide: true, timeout: 8000 });
       return r.status === 0;
     } catch (e) { return false; }
   };
@@ -909,7 +909,6 @@ const speechAudioCompressor = createSpeechAudioCompressor({
   createTempPath: tmpPath,
   produceTemporaryFile: (file, produce) => mediaIntakeRuntime.produceTemporaryFile(file, produce),
   withTemporaryDescriptor: (file, owner, work) => mediaIntakeRuntime.withTemporaryDescriptor(file, owner, work),
-  assertTemporaryOutput: (file, owner) => mediaIntakeRuntime.assertTemporaryOutput(file, owner),
   cleanupGeneratedFile: file => mediaIntakeRuntime.cleanupGeneratedFile(file),
   execute: (args, options) => runFF(args, options)
 });
@@ -924,6 +923,7 @@ const vocalWaveformRuntime = createVocalWaveformRuntime({
 const audioNormalizationRuntime = createAudioNormalizationRuntime({
   createTempPath: tmpPath,
   produceTemporaryFile: (file, produce) => mediaIntakeRuntime.produceTemporaryFile(file, produce),
+  withTemporaryDescriptor: (file, owner, work) => mediaIntakeRuntime.withTemporaryDescriptor(file, owner, work),
   fingerprintSource: motherSourceFingerprint,
   execute: (args, options) => runFF(args, options),
   probe: (source, options) => {

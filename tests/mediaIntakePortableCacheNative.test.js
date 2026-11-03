@@ -1,5 +1,6 @@
 // @subtool-ci windows
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -73,6 +74,29 @@ it.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('真 Proxy 與聲�
     expect(execute).not.toHaveBeenCalled(); expect(secondProbe).not.toHaveBeenCalled();
     expect(run(['-i', reused.proxy, '-vf', 'scale=1:1', '-frames:v', '1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'])).toEqual(pixel);
     expect(run(['-i', reused.channels[0].file, '-ar', '4000', '-ac', '1', '-f', 'f32le', 'pipe:1'])).toEqual(originalPcm);
+    await second.close();
+    const thirdMedia = path.join(root, 'another-mount');
+    fs.renameSync(secondMedia, thirdMedia);
+    const movedSource = path.join(thirdMedia, path.basename(source));
+    const thirdCache = path.join(root, 'profile-C', 'mediacache');
+    const third = createMediaIntakeRuntime({ cacheRoot: thirdCache, tempRoot: root, delay: async () => {},
+      fileAuthority: new FileAuthority({ internalDirectories: [thirdCache] }),
+      ffmpegExecution: { execute }, describeVideo: secondProbe });
+    runtimes.push(third);
+    const open = fsp.open;
+    const noFullRead = vi.spyOn(fsp, 'open').mockImplementation((file, ...args) => {
+      if (path.resolve(file) === movedSource) throw new Error('同一共享檔案不應重新讀全文驗證');
+      return open(file, ...args);
+    });
+    try {
+      const shared = await third.ingest({ src: movedSource, duration: 0.5, needsProxy: true, audio: info.audio });
+      expect(shared.cached).toBe(true);
+      expect(fs.readFileSync(shared.proxy)).toEqual(originalProxy);
+      expect(fs.readFileSync(shared.channels[0].file)).toEqual(originalChannel);
+      expect(execute).not.toHaveBeenCalled(); expect(secondProbe).not.toHaveBeenCalled();
+      expect(run(['-i', shared.proxy, '-vf', 'scale=1:1', '-frames:v', '1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'])).toEqual(pixel);
+      expect(run(['-i', shared.channels[0].file, '-ar', '4000', '-ac', '1', '-f', 'f32le', 'pipe:1'])).toEqual(originalPcm);
+    } finally { noFullRead.mockRestore(); }
   } finally {
     await Promise.all(runtimes.map(runtime => runtime.close()));
     await execution.cancelAllAndWait(); await probe.cancelAllAndWait();

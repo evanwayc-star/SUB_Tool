@@ -75,12 +75,12 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spaw
         this.loadURL = vi.fn(url => url.startsWith('file:') ? guideLoad() : Promise.resolve());
       }
     } : FakeWindow,
-    spawn: vi.fn((exe, args) => {
+    spawn: vi.fn((exe, args, options) => {
       if (spawnFailure) throw spawnFailure;
       const child = new EventEmitter();
       child.kill = vi.fn();
       child.stderr = createLog ? new PassThrough() : null;
-      children.push({ child, exe, args });
+      children.push({ child, exe, args, options });
       return child;
     }),
     createConnection: vi.fn(() => {
@@ -1342,6 +1342,7 @@ describe('Windows mpv host lifecycle', () => {
     expect(hostWindow.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
     expect(guideWindow.setIgnoreMouseEvents).toHaveBeenCalledWith(true, { forward: true });
     expect(children[0].exe).toBe('C:/bundle/mpv.exe');
+    expect(children[0].options).toEqual({ windowsHide: true, detached: false, stdio: ['ignore', 'ignore', 'ignore'] });
     expect(children[0].args).toEqual(expect.arrayContaining([
       '--wid=4660', '--sub-fonts-dir=C:/fonts', '--idle=yes', '--pause',
       '--lavfi-complex=[aid1][aid2]amix=inputs=2:normalize=0[ao]',

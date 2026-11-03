@@ -84,7 +84,7 @@ function detectNativeTool(tool, options = {}) {
   for (const candidate of nativeToolCandidates(tool, options)) {
     let result;
     try {
-      result = spawnSync(candidate, versionArgs, { timeout: 5000, stdio: 'pipe' });
+      result = spawnSync(candidate, versionArgs, { windowsHide: true, timeout: 5000, stdio: 'pipe' });
     } catch (error) {
       result = { status: null, signal: null, error };
     }
@@ -908,6 +908,7 @@ function createFFmpegExecution(options = {}) {
 
       let process;
       try { process = spawnDirect(ffmpegPath, args, {
+        windowsHide: true,
         ...(cwd ? { cwd } : {}),
         ...((inputDescriptor !== undefined || frozenInput || outputDescriptor !== undefined)
           ? { stdio: [frozenInput ? 'pipe' : inputDescriptor ?? 'ignore', outputDescriptor ?? 'pipe', 'pipe'] } : {}),

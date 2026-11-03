@@ -9,12 +9,12 @@ beforeAll(()=>{
   originalSubtool=Object.getOwnPropertyDescriptor(window,'subtool');
   originalElementFromPoint=Object.getOwnPropertyDescriptor(document,'elementFromPoint');
   Object.defineProperty(window,'subtool',{configurable:true,value:{isDesktop:true,exportVideo:vi.fn(async()=> 'job-1'),
-    listDir:vi.fn(async()=>[]),saveProject:vi.fn(async()=> 'C:/test.subtool'),configSave:vi.fn()}});
+    exportSub:vi.fn(async()=>null),listDir:vi.fn(async()=>[]),saveProject:vi.fn(async()=> 'C:/test.subtool'),configSave:vi.fn()}});
   const parsed=new DOMParser().parseFromString(fs.readFileSync(path.resolve('index.html'),'utf8'),'text/html');
   document.body.innerHTML=parsed.body.innerHTML;
 });
 beforeEach(()=>{
-  vi.useFakeTimers();window.subtool.exportVideo.mockClear();
+  vi.useFakeTimers();window.subtool.exportVideo.mockClear();window.subtool.exportSub.mockClear();
   vi.spyOn(HTMLMediaElement.prototype,'pause').mockImplementation(()=>{});
   vi.spyOn(HTMLMediaElement.prototype,'load').mockImplementation(()=>{});
   vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockImplementation(()=>
@@ -77,4 +77,54 @@ it('交付視窗取代尚未儲存的音訊配線時，交付列不能沿用已�
   for(let n=0;n<20;n++)await Promise.resolve();
   expect(window.subtool.exportVideo).toHaveBeenCalledOnce();
   expect(window.subtool.exportVideo.mock.calls[0][0].audioPlan.streams).toEqual(original.streams);
+});
+
+it.each(['字幕檔案','影片交付'])('%s 在變速仍等待播放器時，以已提交片長收尾暫存字幕',async kind=>{
+  const {State}=await import('../src/state.js'),{History}=await import('../src/history.js');
+  const {Media}=await import('../src/media.js'),{Seq}=await import('../src/sequence.js');
+  const {setClipSpeed}=await import('../src/clip-model.js'),SubIO=await import('../src/subio.js');
+  Object.assign(State,{tracks:[{name:'字幕',visible:true}],cues:[
+    {id:'pending-cue',track:0,start:2,end:3,text:'尚未指定 Out',timed:true,_tempEnd:true},
+  ],notes:[],clips:[],videoTracks:[{name:'V1',visible:true,locked:false}],
+    externalAudioState:[],externalAudioEnd:0,duration:3,exportIn:null,exportOut:null,
+    audioProject:{buses:[],sourceMaps:{},exportLayout:{streams:[]}},
+    fps:25,dropFrame:false,videoWidth:1000,videoHeight:500});
+  Media.tracks=[];Media.playing=false;
+  const clip=Seq.add({id:'source',name:'source.mov',path:'C:/source.mov',primary:true,
+    audioDetached:true,in:0,out:3,dur:3,offset:0,vtrack:0});
+  History.reset();vi.spyOn(Media,'displayTime').mockReturnValue(2);
+  let present;
+  const frame=new Promise(resolve=>{present=resolve;});
+  vi.spyOn(Media,'refreshClipPlayback').mockResolvedValue(true).mockReturnValueOnce(frame);
+  const editing=setClipSpeed(clip,.5);
+  let settled=false;editing.then(()=>{settled=true;});
+  try {
+    await Promise.resolve();
+    expect(settled).toBe(false);expect(clip.speed).toBe(.5);expect(State.duration).toBe(6);
+    expect(History.committedSnapshot().clips[0]).not.toHaveProperty('speed');
+    if(kind==='字幕檔案') {
+      SubIO.showExportDialog();
+      for(const checkbox of document.querySelectorAll('[data-fmt]')) checkbox.checked=checkbox.dataset.fmt==='srt';
+      document.querySelector('#modalFoot .primary').click();
+      expect(window.subtool.exportSub).toHaveBeenCalledOnce();
+      const contents=Buffer.from(window.subtool.exportSub.mock.calls[0][1],'base64').subarray(2).toString('utf16le');
+      expect(contents).toContain('00:00:02,000 --> 00:00:03,000');
+      expect(contents).not.toContain('00:00:04,000');
+    } else {
+      // 使用者在 live 6 秒範圍設定 5 秒交付 Out；交付尾端可有空隙，
+      // 不能靠成品裁到原片尾來掩蓋字幕誤採未提交片長的問題。
+      State.exportOut=5;
+      await SubIO.showExportVideoDialog();vi.advanceTimersByTime(30);
+      const out=document.querySelector('.ev-outdir');out.value='D:/delivery';out.dispatchEvent(new Event('input',{bubbles:true}));
+      document.getElementById('evSubmitBtn').click();for(let n=0;n<20;n++) await Promise.resolve();
+      expect(window.subtool.exportVideo).toHaveBeenCalledOnce();
+      const job=window.subtool.exportVideo.mock.calls[0][0];
+      expect(job.duration).toBe(5);expect(job.clips[0]).toMatchObject({speed:1,in:0,out:3});
+      expect(job.assText).toMatch(/Dialogue:.*0:00:02\.00,0:00:03\.00/);
+      expect(job.assText).not.toMatch(/Dialogue:.*0:00:02\.00,0:00:04\.00/);
+    }
+    expect(clip.speed).toBe(.5);expect(State.duration).toBe(6);
+    expect(State.cues[0]).toMatchObject({start:2,end:3,_tempEnd:true});
+    expect(History.stack).toHaveLength(1);expect(settled).toBe(false);
+  } finally {present(true);await editing;}
 });

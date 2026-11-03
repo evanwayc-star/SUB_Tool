@@ -262,6 +262,7 @@ describe('native media intake runtime', () => {
       const metadata = path.join(cacheDirectory(first.proxy), 'meta.json');
       const raw = JSON.parse(fs.readFileSync(metadata, 'utf8')), evidence = raw.sourceContent;
       delete raw.sourceContent; delete raw.sourceKeys;
+      fs.unlinkSync(path.join(cacheDirectory(first.proxy), 'source-' + cacheKeyFor(fixture.source) + '.json'));
       fs.unlinkSync(path.join(path.dirname(first.proxy), 'cache-meta.json'));
       fs.writeFileSync(metadata, JSON.stringify(raw));
       observedGrant = clearAfterNextCacheRead(fixture.runtime, authority);
@@ -551,6 +552,7 @@ describe('native media intake runtime', () => {
     const cacheDir = cacheDirectory(first.proxy);
     const metaPath = path.join(cacheDir, 'meta.json');
     const before = fs.readFileSync(metaPath);
+    const beforeEntries = fs.readdirSync(cacheDir).sort();
     const method = failure === 'write' ? 'writeFileSync' : 'renameSync';
     const original = fs[method];
     const fault = vi.spyOn(fs, method).mockImplementation((file, ...args) => {
@@ -572,7 +574,7 @@ describe('native media intake runtime', () => {
         }
       }
       expect(fs.readFileSync(metaPath)).toEqual(before);
-      expect(fs.readdirSync(cacheDir).sort()).toEqual([path.basename(path.dirname(first.proxy)), 'meta.json'].sort());
+      expect(fs.readdirSync(cacheDir).sort()).toEqual(beforeEntries);
       expect(progress.filter(payload => payload.done)).toEqual([expect.objectContaining({ outcome: 'failed', errorMsg: expect.stringContaining('metadata disk failure') })]);
     } finally { fault.mockRestore(); await fixture.runtime.close(); }
     expect(await fixture.createRuntime().ingest({ src: fixture.source, duration: 1, needsProxy: true, audio: [] })).toEqual({ ...first, cached: true });

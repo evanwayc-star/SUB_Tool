@@ -79,7 +79,7 @@ describe('public FFmpeg execution terminal and pipe records', () => {
     try{
       const args=['-f','wav','-i','fd:','-f','mp3','fd:'];
       await engine.execute(args,{executionKind:'direct',inputDescriptor:input,outputDescriptor:output});
-      expect(spawned).toEqual({args,options:{stdio:[input,output,'pipe']}});
+      expect(spawned).toEqual({args,options:{windowsHide:true,stdio:[input,output,'pipe']}});
       fs.writeSync(input,Buffer.from('still-open'));fs.writeSync(output,Buffer.from('still-open'));
     }finally{fs.closeSync(input);fs.closeSync(output);}
   });
@@ -117,7 +117,7 @@ describe('public FFmpeg execution terminal and pipe records', () => {
       } });
     try {
       await engine.execute(['-f', 'wav', 'fd:'], { executionKind: 'direct', outputDescriptor: fd, cwd: root });
-      expect(spawned).toEqual({ args: ['-f', 'wav', 'fd:'], options: { cwd: root, stdio: ['ignore', fd, 'pipe'] } });
+      expect(spawned).toEqual({ args: ['-f', 'wav', 'fd:'], options: { windowsHide: true, cwd: root, stdio: ['ignore', fd, 'pipe'] } });
       fs.writeSync(fd, Buffer.from('OWNER STILL OPEN'));
       expect(fs.readFileSync(output, 'utf8')).toBe('OWNER STILL OPEN');
     } finally { fs.closeSync(fd); }

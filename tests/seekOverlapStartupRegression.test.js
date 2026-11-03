@@ -142,6 +142,117 @@ it('播放器起播回覆等待期間跨過疊合邊界，聲音先對齊實際�
   }finally{acceptPlay();}
 });
 
+it.each([{start:2,actual:3.1,active:true},{start:5.9,actual:6.1,active:false}])
+('mpv 靜音回覆延到 $actual 秒時，先更新疊合配線且下一 tick 不重啟',async({start,actual,active})=>{
+  const {lower}=setupOverlap();
+  const {activateMpvTransport}=await import('../src/media-player-adapter.js');
+  let acceptMute;
+  const muted=new Promise(resolve=>{acceptMute=resolve;});
+  const bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'late-mute',duration:10})),
+    play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
+    present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
+    mute:vi.fn(value=>value?muted:Promise.resolve())};
+  const runtime=activateMpvTransport({mpv:bridge});
+  await runtime.enterMpv({src:'C:/source.mov'});Media._mpvPath='C:/source.mov';Media._mpvTime=start;
+  try{
+    await Media.requestPresentation(start);Media.play();
+    await vi.waitFor(()=>expect(bridge.play).toHaveBeenCalledOnce());
+    expect(lower.play).not.toHaveBeenCalled();
+    Media._mpvTime=actual;acceptMute();
+    await vi.waitFor(()=>expect(buffers.some(source=>source.start.mock.calls.length&&!source.stop.mock.calls.length)).toBe(true));
+    await vi.waitFor(()=>expect(lower.paused).toBe(!active));
+    if(active){expect(lower.currentTime).toBeCloseTo(.2);expect(lower.playbackRate).toBe(2);}
+    const voice=buffers.findLast(source=>source.start.mock.calls.length&&!source.stop.mock.calls.length);
+    expect(voice.start.mock.calls[0][1]).toBeCloseTo(actual);
+    Media._mpvTime=actual+.04;Media.seqTick();
+    expect(voice.stop).not.toHaveBeenCalled();
+    expect(lower.paused).toBe(!active);
+  }finally{acceptMute();Media.pause({seekOnPause:false});runtime.stopBoundsFeeder();resetPlayerAdapter(null,video);}
+});
+
+it('反轉疊合準備完成時已跨出片段，採完成位置配線且首 tick 不重播',async()=>{
+  const {bottom,lower}=setupOverlap();bottom.reverse=true;
+  let finish;
+  const ready=new Promise(resolve=>{finish=resolve;});
+  const prepare=vi.spyOn(Media,'prepareClipReverseAudio').mockReturnValue(ready);
+  await Media.requestPresentation(4);Media.play();
+  await vi.waitFor(()=>expect(prepare).toHaveBeenCalledOnce());
+  video.currentTime=7;finish(true);await ready;
+  await vi.waitFor(()=>expect(buffers.findLast(source=>source.start.mock.calls.length&&!source.stop.mock.calls.length)?.start.mock.calls[0][1]).toBeCloseTo(7));
+  expect(lower.paused).toBe(true);expect(lower.play).not.toHaveBeenCalled();
+  const voice=buffers.findLast(source=>source.start.mock.calls.length&&!source.stop.mock.calls.length);
+  video.currentTime=7.04;Media.seqTick();
+  expect(voice.stop).not.toHaveBeenCalled();expect(lower.paused).toBe(true);
+});
+
+it.each([
+  {swap:true,start:2,actual:3.1,first:'element'},
+  {swap:true,start:2,actual:3.1,first:'buffer',background:true},
+  {swap:true,start:5.9,actual:6.1,first:'element'},
+  {swap:true,start:5.9,actual:6.1,first:'buffer'},
+  {swap:false,start:2,actual:3.1,first:'element'},
+  {swap:false,start:2,actual:3.1,first:'buffer'},
+])('延遲 mute 的 $first 先回覆，buffer 位於短片段=$swap，$start→$actual 兩種 follower 一起更新',async({swap,start,actual,first,background})=>{
+  const {top,bottom,lower}=setupOverlap();
+  if(swap){
+    top.primary=false;top.audioSrc='clip:top';bottom.primary=true;bottom.audioSrc='video';
+    const buffer=Media.tracks.find(track=>track.kind==='buffer');buffer.audioSourceId=bottom.audioSourceId;
+    const element=Media.tracks.find(track=>track.kind==='element');element.source=top.audioSrc;element.audioSourceId=top.audioSourceId;
+  }
+  const {activateMpvTransport}=await import('../src/media-player-adapter.js');
+  let acceptPlay,controlMute=false;
+  const playing=new Promise(resolve=>{acceptPlay=resolve;}),muteReplies=[];
+  const bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'split-mute-replies',duration:10})),
+    play:vi.fn(()=>playing),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
+    present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),mute:vi.fn(value=>{
+      if(!value||!controlMute)return Promise.resolve();
+      return new Promise(resolve=>{muteReplies.push(resolve);});
+    })};
+  const runtime=activateMpvTransport({mpv:bridge});
+  await runtime.enterMpv({src:'C:/source.mov'});Media._mpvPath='C:/source.mov';Media._mpvTime=start;
+  try{
+    await Media.requestPresentation(start);Media.play();
+    await vi.waitFor(()=>expect(bridge.play).toHaveBeenCalledOnce());
+    controlMute=true;acceptPlay();
+    const initialCount=swap&&start===2?1:2;
+    await vi.waitFor(()=>expect(muteReplies).toHaveLength(initialCount));
+    // 背景聲道剛完成時，也可能單獨要求目前仍隱藏的 buffer 接管。
+    if(background){Media.startBufferSources(start);expect(muteReplies).toHaveLength(2);}
+    const initial=muteReplies.splice(0);
+    Media._mpvTime=actual;
+    if(initial.length===1)initial[0]();
+    else{
+      const bufferIndex=background?1:0,firstIndex=first==='buffer'?bufferIndex:1-bufferIndex;
+      initial[firstIndex]();
+      // 先完成其中一條真實 adapter 回覆，再交另一條；其間可建立新 follower。
+      for(let i=0;i<8;i++)await Promise.resolve();
+      if(background){
+        const voices=buffers.filter(source=>source.start.mock.calls.length&&!source.stop.mock.calls.length);
+        expect(voices).toHaveLength(1);expect(voices[0].start.mock.calls[0][1]).toBeCloseTo(.2);
+      }
+      initial[1-firstIndex]();
+    }
+    const bufferActive=!swap||actual<6,elementActive=swap||actual<6;
+    await vi.waitFor(()=>{
+      for(const resolve of muteReplies.splice(0))resolve();
+      const voices=buffers.filter(source=>source.start.mock.calls.length&&!source.stop.mock.calls.length);
+      expect(voices).toHaveLength(bufferActive?1:0);
+      expect(lower.paused).toBe(!elementActive);
+    });
+    const voices=buffers.filter(source=>source.start.mock.calls.length&&!source.stop.mock.calls.length);
+    if(bufferActive)expect(voices[0].start.mock.calls[0][1]).toBeCloseTo(swap ? .2 : actual);
+    if(elementActive)expect(lower.currentTime).toBeCloseTo(swap?actual:.2);
+    const bufferCount=buffers.length,plays=lower.play.mock.calls.length;
+    Media._mpvTime=actual+.04;Media.seqTick();
+    for(let i=0;i<8;i++)await Promise.resolve();
+    expect(buffers).toHaveLength(bufferCount);expect(lower.play).toHaveBeenCalledTimes(plays);
+    for(const voice of voices)expect(voice.stop).not.toHaveBeenCalled();
+  }finally{
+    controlMute=false;acceptPlay();for(const resolve of muteReplies)resolve();
+    Media.pause({seekOnPause:false});runtime.stopBoundsFeeder();resetPlayerAdapter(null,video);
+  }
+});
+
 it.each([{start:2,target:3.1,active:true},{start:5.9,target:6.1,active:false}])
 ('外音與疊合片段同時跨界至 $target 秒時，只依更新後的配線定位一次',async({start,target,active})=>{
   const {lower}=setupOverlap();
@@ -214,6 +325,11 @@ it.each([{hasNext:false,method:'tick'},{hasNext:true,method:'tick'},
   await vi.waitFor(()=>expect(external.paused).toBe(false));
   expect(external.currentTime).toBeCloseTo(0);
   expect(Media.inGap()).toBe(true);
+  // ended 與 tick 的提交都必須留下同一份活動證據；下一 tick 不得再定位。
+  external.currentTime=.08;
+  Media.seqTick();
+  expect(starts).toHaveBeenCalledTimes(1);
+  expect(external.currentTime).toBeCloseTo(.08);
 });
 
 it('進入 gap 停止外音時同步觸發較新 seek，舊轉場不可再起播外音',async()=>{

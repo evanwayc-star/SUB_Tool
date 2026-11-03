@@ -164,3 +164,46 @@ it('ASS 無法完整保存原稿時保留匯出選項與原內容，不下載同
   expect(bytes.subarray(2).toString('utf16le')).toBe(text + '\n');
   expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
 });
+
+it.each(['字幕','備註'])('%s 對話框等實際寫出完成才顯示成功，失敗仍顯示原因',async kind=>{
+  openExport(kind);
+  let finish;
+  desktop.exportSub.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+  UI.setStatus('等待寫出驗證');
+  confirmButton().click();
+  expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+  expect(document.getElementById('stMsg').textContent).toBe('等待寫出驗證');
+  finish('C:/picked/completed.txt');
+  await vi.waitFor(()=>expect(document.getElementById('stMsg').textContent).toBe('已匯出：C:/picked/completed.txt'));
+  openExport(kind);
+  desktop.exportSub.mockRejectedValueOnce(new Error('EACCES: 拒絕寫入'));
+  confirmButton().click();
+  await vi.waitFor(()=>expect(document.getElementById('stMsg').textContent).toContain('匯出失敗：EACCES'));
+  expect(document.getElementById('toast').textContent).toContain('拒絕寫入');
+});
+
+it('字幕與備註同批匯出採用同份快照，不把 live 軌道樣式預覽寫進 ASS',async()=>{
+  const {History}=await import('../src/history.js');
+  const {SubFormats}=await import('../src/formats.js');
+  State.tracks[0].fontSize=48;
+  const originalNote=State.notes[0].text;
+  History.reset();
+  const release=History.beginPreview([
+    {target:State.tracks[0],fields:['fontSize']},
+  ]);
+  try {
+    State.tracks[0].fontSize=99;
+    showExportDialog();
+    for(const checkbox of document.querySelectorAll('[data-fmt]')) checkbox.checked=checkbox.dataset.fmt==='ass';
+    document.querySelector('[data-tk="1"]').checked=false;
+    document.getElementById('expNotesGeneral').checked=true;
+    confirmButton().click();
+    expect(desktop.exportDirectory).toHaveBeenCalledOnce();
+    const files=desktop.exportDirectory.mock.calls[0][0];
+    const decode=file=>Buffer.from(file.content,'base64').subarray(2).toString('utf16le');
+    const ass=SubFormats.parseASS(decode(files.find(file=>file.ext==='ass')));
+    expect(ass.subtool.tracks[0].fontSize).toBe(48);
+    expect(decode(files.find(file=>file.ext==='csv'))).toContain(originalNote);
+    expect(State.tracks[0].fontSize).toBe(99);expect(State.notes[0].text).toBe(originalNote);
+  } finally {release();}
+});

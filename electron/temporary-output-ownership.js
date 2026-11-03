@@ -67,13 +67,16 @@ function createTemporaryOutputOwnership({ tempRoot, rootAuthority = null } = {})
 
   async function withDescriptor(target, owner, work, { truncate = false, assertParent = () => {} } = {}) {
     let descriptor;
+    let active = false;
     const verify = () => {
+      if (!active) throw new Error('媒體暫存輸出 handle 已關閉');
       assertParent();
       const current = fs.lstatSync(target, { bigint: true });
       const opened = fs.fstatSync(descriptor, { bigint: true });
       if (!owner || !current.isFile() || current.isSymbolicLink() || !opened.isFile()
         || current.dev !== owner.dev || current.ino !== owner.ino
         || opened.dev !== owner.dev || opened.ino !== owner.ino) throw new Error('媒體暫存檔案身分已變更');
+      return opened;
     };
     try {
       assertParent();
@@ -81,12 +84,16 @@ function createTemporaryOutputOwnership({ tempRoot, rootAuthority = null } = {})
       if (!owner || !before.isFile() || before.isSymbolicLink() || before.dev !== owner.dev || before.ino !== owner.ino)
         throw new Error('媒體暫存檔案身分已變更');
       descriptor = fs.openSync(target, 'r+');
+      active = true;
       verify();
       if (truncate) fs.ftruncateSync(descriptor, 0);
-      const result = await work(descriptor);
+      // Multi-pass writers can recheck this same handle between awaits. The
+      // owner keeps path/fd/parent evidence and closes only after work settles.
+      const result = await work(descriptor, verify);
       verify();
       return result;
     } finally {
+      active = false;
       if (descriptor !== undefined) fs.closeSync(descriptor);
     }
   }

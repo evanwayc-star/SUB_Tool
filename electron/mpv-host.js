@@ -927,7 +927,7 @@ function createMpvHost(deps) {
         sourceAudioGraph = `${aids.join('')}amix=inputs=${audio.length}:normalize=0[ao]`;
         args.push('--lavfi-complex=' + sourceAudioGraph);
       }
-      const spawned = spawn(exe, args, { detached: false, stdio: ['ignore', 'ignore', logOwner ? 'pipe' : 'ignore'] });
+      const spawned = spawn(exe, args, { windowsHide: true, detached: false, stdio: ['ignore', 'ignore', logOwner ? 'pipe' : 'ignore'] });
       proc = spawned;
       const childClosed = new Promise(resolve => spawned.once('close', resolve));
       liveChildren.add(childClosed);

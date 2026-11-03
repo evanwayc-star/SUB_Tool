@@ -645,6 +645,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .audio-output-table td:last-child{width:38px;text-align:center}.audio-output-remove{padding:1px 7px;min-width:25px;color:#e98b8b;border-color:rgba(224,85,85,.35)}
 .audio-output-actions{justify-content:flex-end}.audio-output-actions button{border-color:#355166;color:#b8e7df;background:#142426}
 .audio-output-stream{display:flex;align-items:center;gap:6px}.audio-output-index{display:inline-flex;align-items:center;justify-content:center;flex:0 0 20px;color:#8ec8ec}.audio-output-name{min-width:0;width:100%;font:inherit;font-size:14px;padding:5px 7px;background:#11191d;border:1px solid #355166;color:var(--text)}
+.audio-output-channels{display:grid;gap:6px}.audio-output-channels label{display:grid;grid-template-columns:minmax(72px,auto) minmax(140px,1fr);align-items:center;gap:10px}.audio-output-channels label>span{font-size:13px;color:var(--text-dim)}
 .audio-delivery-presets{display:flex;align-items:center;flex-wrap:wrap;gap:14px 10px;padding:0 0 10px}.audio-delivery-presets>span{flex-basis:100%;color:var(--text-dim);font-size:13px}.audio-delivery-presets button{padding:6px 10px;border-color:#355166;background:#142426;color:#b8e7df;font-size:13px}.audio-delivery-presets #audioOutputAllMono{color:#dce8ee;border-color:#52656d;background:#1d272b}
 .audio-delivery-presets button.preset-me{color:#ffde6a;border-color:#7a6b29;background:#2a2512}
 .audio-delivery-presets button.preset-me:hover{color:#ffe589;border-color:#998634;background:#383218}

@@ -6,12 +6,15 @@ const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
-const { motherSourceFingerprint, motherSourceFingerprintSync, portableSourceFingerprint } = require('./mother-source-evidence');
+const { motherSourceFingerprint, motherSourceFingerprintSync, portableSourceFingerprint,
+  sharedSourceFingerprintSync } = require('./mother-source-evidence');
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
 const { buildIngestArgs, previewPipelineCandidates, previewFallbackAllowed } = require('./ffmpeg-execution-engine');
 const { sourceAudioClockFilter, sourceClockSeek, timestampOffset } = require('./media-source-clock');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 const { createTemporaryOutputOwnership } = require('./temporary-output-ownership');
+const { readSourceWaveformChunk, saveSourceWaveformChunk, inspectSourceWaveformCache,
+  isSourceWaveformCachePath, validSourceWaveformPcm, MAX_SOURCE_WAVEFORM_BYTES } = require('./source-waveform-cache');
 const SOURCE_CACHE_VERSION = 'source-v3';
 const PORTABLE_SOURCE_FORMAT = SOURCE_CACHE_VERSION + '-sha256';
 
@@ -564,12 +567,12 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   // 身分 receipt 與產物 publication 分開；補記身分不能回寫過期的產物索引。
-  function bindPortableCache(dir, sourceContent, sourceKey) {
+  function bindPortableCache(dir, sourceContent, sourceKey, verify = () => {}, sharedSourceKey = null) {
     try {
       const realDirectory = realCacheDirectory(dir);
       const receipt = path.join(dir, 'source-' + sourceKey + '.json');
       checkCacheComponent(realDirectory, receipt);
-      writeRawMeta(receipt, { sourceContent, sourceKey });
+      writeRawMeta(receipt, { sourceContent, sourceKey, ...(sharedSourceKey ? { sharedSourceKey } : {}) }, verify);
     } catch (error) {
       // 唯讀的共享快取仍可直接播放；下次跨工作階段再驗證，不複製或重轉 Proxy。
       try { options.log?.('[cache] portable binding not saved:', error.code || error.message); } catch (ignored) {}
@@ -619,6 +622,11 @@ function createMediaIntakeRuntime(options = {}) {
         .flatMap(record => record.kind === 'binding' ? [record.raw.sourceKey]
           : Array.isArray(record.raw.sourceKeys) ? record.raw.sourceKeys : [])
         .filter(key => typeof key === 'string' && /^[a-f0-9]{16}$/.test(key)))];
+      const verifiedSource = records.some(record => record.kind === 'binding'
+        && sameSourceContent(record.raw.sourceContent, sourceContent));
+      const sharedSourceKeys = records.filter(record => record.kind === 'binding'
+        && sameSourceContent(record.raw.sourceContent, sourceContent))
+        .map(record => record.raw.sharedSourceKey).filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/.test(key));
       const resolved = [], sizes = new Map();
       for (const record of records) {
         if (record.kind === 'binding' || (record.kind !== 'index' && !sameSourceContent(record.raw.sourceContent, sourceContent))) continue;
@@ -645,7 +653,12 @@ function createMediaIntakeRuntime(options = {}) {
           inspected.meta.wave = null;
         return inspected;
       });
-      if (!variants.length) return { dir, files: [], error: 'CACHE_METADATA_MISSING', metadataMissing: !uncertain };
+      if (!variants.length) {
+        if (!verifiedSource) return { dir, files: [], error: 'CACHE_METADATA_MISSING', metadataMissing: !uncertain };
+        // 完整來源驗證與轉檔是兩份成果。只有 receipt 時仍能重用驗證，
+        // 但不宣稱任何 Proxy／聲道／波形已完成。
+        variants.push({ files: [], retained: true, audioLayout: [], meta: { proxy: null, wave: null, channels: [] } });
+      }
       const expected = flattenSourceChannels(audio);
       const chosen = (expected.length && variants.find(variant => sameAudioLayout(variant.audioLayout, expected)))
         || variants.reduce((best, variant) => variant.audioLayout.length > best.audioLayout.length ? variant : best);
@@ -654,10 +667,10 @@ function createMediaIntakeRuntime(options = {}) {
         matching.find(variant => variant.meta.channels.some(valid => valid.file === variant.audioLayout[index].file))?.audioLayout[index] || channel);
       const validChannels = new Set(matching.flatMap(variant => variant.meta.channels.map(channel => channel.file)));
       const files = [...new Map(variants.flatMap(variant => variant.files).map(entry => [entry.file, entry])).values()];
-      const result = { dir, files, retained: uncertain || variants.some(variant => variant.retained), audioLayout,
+      const result = { dir, files, retained: uncertain || verifiedSource || variants.some(variant => variant.retained), audioLayout,
         meta: { proxy: variants.find(variant => variant.meta.proxy)?.meta.proxy || null,
           wave: matching.find(variant => variant.meta.wave)?.meta.wave || null,
-          channels: audioLayout.filter(channel => validChannels.has(channel.file)) }, sourceContent, sourceKeys };
+          channels: audioLayout.filter(channel => validChannels.has(channel.file)) }, sourceContent, sourceKeys, sharedSourceKeys };
       if (!sameCacheDirectory(owner, cacheDirectoryOwner(dir))) throw cacheDirectoryChanged();
       inspectedCacheOwners.set(result, owner);
       return result;
@@ -668,16 +681,27 @@ function createMediaIntakeRuntime(options = {}) {
 
   function inspectCache(src) {
     const key = cacheKeyFor(src), portable = portableHits.get(key);
-    return cacheCandidates(src, key).map(dir => inspectSourceCache(dir, [], key, portable));
+    return cacheCandidates(src, key).map(dir => inspectSourceCache(dir, [], key, portable, false, src));
   }
 
-  function inspectSourceCache(dir, audio, key, portable, bounded = false) {
+  function inspectSourceCache(dir, audio, key, portable, bounded = false, src = null) {
     const hit = inspectCacheDirectory(dir, audio, bounded);
     if (hit.error) return hit;
     const mapped = portable && canonicalCachePath(dir) === canonicalCachePath(portable.dir);
     if (mapped && !sameSourceContent(hit.sourceContent, portable.sourceContent)) {
       if (portableHits.get(key) === portable) portableHits.delete(key);
       return { dir, files: [], error: 'CACHE_SOURCE_MISMATCH' };
+    }
+    if (src && isSidecarCandidate(src, dir) && hit.sharedSourceKeys.length) {
+      const shared = sharedSourceFingerprintSync(src);
+      // A previously recorded shared witness is stronger than the local key.
+      // Its mismatch must not silently upgrade an old SHA or complete waveform.
+      // A fresh full-hash mapping can still read a read-only old receipt.
+      const verified = mapped ? portable.sharedSourceKey === shared : shared && hit.sharedSourceKeys.includes(shared);
+      if (!verified) {
+        if (portableHits.get(key) === portable) portableHits.delete(key);
+        return { dir, files: [], error: 'CACHE_SOURCE_UNVERIFIED' };
+      }
     }
     // 新格式已明示來源證據時，不能僅憑本機 key 的目錄名稱認領別的母素材。
     // 沒有新證據的舊 metadata 保留 strict-key 相容；未綁定的新內容先全文驗證。
@@ -696,7 +720,7 @@ function createMediaIntakeRuntime(options = {}) {
       if (isSidecarCandidate(src, dir) && !sidecar) continue;
       const verify = () => { if (sidecar) captureOutputAuthority(path.join(sidecar.requestedPath, '.sidecar-root-check'), sidecar); };
       // 候選只是路徑提示；實際讀到的這份 metadata 仍須符合當次來源證據。
-      const hit = inspectSourceCache(dir, audio, key, portable);
+      const hit = inspectSourceCache(dir, audio, key, portable, false, src);
       if (hit.error) continue;
       if (coversAudioRequest(hit.meta, audio) && (!needsProxy || hit.meta.proxy)) {
         try { grantManagedCleanupRoot(dir, verify); return hit; } catch (_) { continue; }
@@ -716,13 +740,38 @@ function createMediaIntakeRuntime(options = {}) {
       ensureCurrent();
       if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
     };
+    let sharedSourceKey;
+    const sharedKey = () => {
+      if (sharedSourceKey === undefined) { sharedSourceKey = sharedSourceFingerprintSync(src); check(); }
+      return sharedSourceKey;
+    };
+    const bindSource = (dir, sourceContent) => {
+      const shared = isSidecarCandidate(src, dir) ? sharedKey() : null;
+      const owner = cacheDirectoryOwner(dir);
+      const verify = () => {
+        check();
+        if (shared && sharedSourceFingerprintSync(src) !== shared) throw new Error('母素材在內容驗證期間變更');
+        checkPublicationDirectory(dir, owner, sourceContent, false);
+      };
+      verify();
+      bindPortableCache(dir, sourceContent, sourceKey, verify, shared);
+      // Read-only receipt persistence is best effort; source/directory fences
+      // are not. Recheck outside its catch before adopting any cached content.
+      verify();
+    };
     check();
     const direct = readCache(src, audio, needsProxy);
     const knownContent = direct?.sourceContent?.size === fs.statSync(src).size ? direct.sourceContent : null;
     const directComplete = direct && coversAudioRequest(direct.meta, audio) && (!needsProxy || direct.meta.proxy);
     // 嚴格本機 key 已證明來源未變；完整舊快取不必先讀完整母素材，
     // 才能交付原本可用的音訊／波形。未具有內容證據者仍不得跨機猜用。
-    if (directComplete && (!requireContent || knownContent)) return { sourceKey, sourceContent: knownContent };
+    if (directComplete && (!requireContent || knownContent)) {
+      // Upgrade only a receipt whose full content is already bound to this
+      // unchanged strict source. An unrelated old SHA cannot acquire a witness.
+      if (knownContent && isSidecarCandidate(src, direct.dir) && !direct.sharedSourceKeys.includes(sharedKey()))
+        bindSource(direct.dir, knownContent);
+      return { sourceKey, sourceContent: knownContent };
+    }
     const candidates = [];
     if (!directComplete) {
       const roots = [cacheRoot()];
@@ -766,29 +815,38 @@ function createMediaIntakeRuntime(options = {}) {
         }
       }
       check();
-      // 這台電腦已完整驗證過且來源 strict key 未變，免重讀整支大型素材。
+      // 本機 strict key 或同一 NAS 檔案的共享證據可沿用已完成全文驗證。
+      // 僅相鄰 sidecar 能使用共享證據；複製檔、其他 NAS 與舊收據仍讀全文。
       let verifiedPartial = null;
       for (const candidate of candidates) {
         try { candidate.verifyRoot(); } catch (_) { continue; }
-        if (!Array.isArray(candidate.sourceKeys) || !candidate.sourceKeys.includes(sourceKey)) continue;
         const hit = inspectCacheDirectory(candidate.dir, audio);
-        if (hit.error || !sameSourceContent(hit.sourceContent, candidate.sourceContent)
-          || !hit.sourceKeys.includes(sourceKey)) continue;
+        if (hit.error || !sameSourceContent(hit.sourceContent, candidate.sourceContent)) continue;
+        const shared = isSidecarCandidate(src, candidate.dir) && sharedKey();
+        if (isSidecarCandidate(src, candidate.dir) && hit.sharedSourceKeys.length
+          && !(shared && hit.sharedSourceKeys.includes(shared))) continue;
+        if (!hit.sourceKeys.includes(sourceKey) && !(shared && hit.sharedSourceKeys.includes(shared))) continue;
+        check(); candidate.verifyRoot();
         if (!coversAudioRequest(hit.meta, audio) || (needsProxy && !hit.meta.proxy)) {
           verifiedPartial ||= candidate;
           continue;
         }
-        portableHits.set(sourceKey, { dir: candidate.dir, sourceContent: candidate.sourceContent });
+        bindSource(candidate.dir, candidate.sourceContent);
+        portableHits.set(sourceKey, { dir: candidate.dir, sourceContent: candidate.sourceContent, sharedSourceKey: sharedKey() });
         return { sourceKey, sourceContent: candidate.sourceContent };
       }
       // 缺少元件不撤銷先前對母素材的完整驗證；只補缺件，仍在 plan/commit 重核目錄與來源。
       if (verifiedPartial) {
-        portableHits.set(sourceKey, { dir: verifiedPartial.dir, sourceContent: verifiedPartial.sourceContent });
+        bindSource(verifiedPartial.dir, verifiedPartial.sourceContent);
+        portableHits.set(sourceKey, { dir: verifiedPartial.dir, sourceContent: verifiedPartial.sourceContent, sharedSourceKey: sharedKey() });
         return { sourceKey, sourceContent: verifiedPartial.sourceContent };
       }
     }
     let sha256 = knownContent?.sha256;
     if (!sha256) {
+      // Freeze shared file identity before the full read, then recheck it at
+      // receipt publication. A new sample cannot certify an older SHA.
+      if (allowSidecarCache) sharedKey();
       let lastPercent = -1, lastReport = -Infinity;
       const hash = portableSourceFingerprint(src, { shouldContinue: current, onProgress: ({ processedBytes, totalBytes, completed }) => {
         const pct = totalBytes ? processedBytes / totalBytes * 100 : completed ? 100 : null;
@@ -803,7 +861,7 @@ function createMediaIntakeRuntime(options = {}) {
     check();
     const sourceContent = { format: PORTABLE_SOURCE_FORMAT, size: fs.statSync(src).size, sha256 };
     if (direct && (!sameSourceContent(direct.sourceContent, sourceContent) || !direct.sourceKeys.includes(sourceKey))) {
-      if (!isSidecarCandidate(src, direct.dir) || sidecarAuthority(src)) bindPortableCache(direct.dir, sourceContent, sourceKey);
+      if (!isSidecarCandidate(src, direct.dir) || sidecarAuthority(src)) bindSource(direct.dir, sourceContent);
     }
     if (!directComplete) {
       let partial = null;
@@ -816,9 +874,15 @@ function createMediaIntakeRuntime(options = {}) {
         partial ||= hit;
       }
       if (partial) {
-        portableHits.set(sourceKey, { dir: partial.dir, sourceContent });
-        if (!partial.sourceKeys.includes(sourceKey)) bindPortableCache(partial.dir, sourceContent, sourceKey);
+        if (!partial.sourceKeys.includes(sourceKey)
+          || (isSidecarCandidate(src, partial.dir) && !partial.sharedSourceKeys.includes(sharedKey()))) bindSource(partial.dir, sourceContent);
+        portableHits.set(sourceKey, { dir: partial.dir, sourceContent, sharedSourceKey: sharedKey() });
       }
+    }
+    if (!direct && !portableHits.has(sourceKey)) {
+      // 先保存已完成的全文驗證；之後取消／轉檔失敗不能讓大型 NAS
+      // 母素材在重開時又被完整讀取。receipt 不等於產物完成紀錄。
+      bindSource(writeCacheDir(src), sourceContent);
     }
     return { sourceKey, sourceContent };
   }
@@ -864,7 +928,7 @@ function createMediaIntakeRuntime(options = {}) {
       catch (_) {}
     }
     const admitted = dir => {
-      const hit = inspectSourceCache(dir, [], key, portable);
+      const hit = inspectSourceCache(dir, [], key, portable, false, src);
       return !hit.error || hit.metadataMissing;
     };
     for (const dir of cacheCandidates(src, key)) {
@@ -1273,6 +1337,11 @@ function createMediaIntakeRuntime(options = {}) {
           check();
         } catch (_) { incomplete = true; continue; }
         const inspected = inspectCacheDirectory(dir, [], true);
+        const waveformCache = inspectSourceWaveformCache(dir);
+        if (waveformCache.retained || waveformCache.uncertain) {
+          if (waveformCache.uncertain) incomplete = true;
+          continue;
+        }
         const remove = inspected.metadataMissing || (!inspected.error && !inspected.retained);
         if (!remove) {
           if (inspected.error || (inspected.files.some(file => file.state === 'unknown')
@@ -1291,6 +1360,8 @@ function createMediaIntakeRuntime(options = {}) {
             if ([...activeCacheDirs.keys(), ...activeCacheSources.keys()].some(writer => withinCachePath(physicalDir, fs.realpathSync.native(writer)))) throw cacheDirectoryChanged();
           };
           const removedEntry = await removeCentralEntry(owner, root, authority, snapshot, staged => {
+            const waveformCache = inspectSourceWaveformCache(staged);
+            if (waveformCache.retained || waveformCache.uncertain) return false;
             const current = inspectCacheDirectory(staged, [], true);
             const sameContent = (!inspected.sourceContent && !current.sourceContent)
               || sameSourceContent(inspected.sourceContent, current.sourceContent);
@@ -1489,7 +1560,7 @@ function createMediaIntakeRuntime(options = {}) {
             directoryIdentity = before;
             const snapshot = await captureCleanupSnapshot(dir, check);
             check();
-            const accepted = inspectSourceCache(dir, [], key, portable, true);
+            const accepted = inspectSourceCache(dir, [], key, portable, true, currentSrc);
             if (accepted.error && !accepted.metadataMissing) { incomplete = true; return 0; }
             if (!sameDirectory(before, fs.lstatSync(dir, { bigint: true })) || captureCleanupTree(dir).proof !== snapshot.proof) { incomplete = true; return 0; }
             // 先原子取得將刪除的目錄物件，再核對身分與來源；不對先前候選路徑直接刪除。
@@ -1627,6 +1698,8 @@ function createMediaIntakeRuntime(options = {}) {
   function cleanupGeneratedFile(file) {
     let target;
     try { target = path.resolve(file); } catch (error) { return false; }
+    // 完成片段由整份快取清理管理；單次 renderer 的暫存清理沒有刪除它的資格。
+    if (isSourceWaveformCachePath(target)) return false;
     if (!fileAuthority.canManageInternalFile(target)) {
       options.log?.('[sec] ffmpeg:cleanup blocked (outside cache):', file);
       return false;
@@ -2099,8 +2172,8 @@ function createMediaIntakeRuntime(options = {}) {
     } catch (ignored) {}
   }
 
-  // 這份波形只證明本次已授權母素材的內容；未知跨機快取仍由 ingest 完整驗證。
-  // 獨立暫存不寫 portable index/binding，也不參與 Proxy／逐聲道 publication。
+  // 優先波形按本機或同一共享檔案的母素材證據重用完成片段，不參與 portable index/binding
+  // 或 Proxy／逐聲道 publication。caller 永遠拿私有副本，可沿用原本的清理契約。
   async function waveform({ src, duration, audio = [], start = 0, length, ignoreCached = false }, session = {}) {
     if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(start) || start < 0 || start >= duration
       || (length !== undefined && (!Number.isFinite(length) || length <= 0 || length > 60))
@@ -2137,6 +2210,58 @@ function createMediaIntakeRuntime(options = {}) {
       check();
       if (!validAudio(audio)) throw new TypeError('無法確認波形來源音訊描述');
     }
+    const localWaveKey = crypto.createHash('sha256').update('strict-source-wave-v1\0' + sourceKey).digest('hex');
+    // 共享證據仍含 NAS 檔案身分與完整時間戳；不把同樣取樣內容的另一份檔案當成同一來源。
+    const sharedWaveKey = allowSidecarCache ? sharedSourceFingerprintSync(src) : null;
+    const checkPreparedSource = () => {
+      check();
+      if (sharedWaveKey && sharedSourceFingerprintSync(src) !== sharedWaveKey)
+        throw new Error('母素材的共享檔案身分在波形讀取期間變更，請重新載入');
+    };
+    checkPreparedSource();
+    const localChunkSpec = { version: 1, sharedSourceKey: localWaveKey, start, length: segmentDuration, samples: segmentSamples,
+      audio: audio.map(stream => ({ channels: stream.channels, timestampOffset: timestampOffset(stream) })) };
+    const sharedChunkSpec = sharedWaveKey ? { ...localChunkSpec, sharedSourceKey: sharedWaveKey } : localChunkSpec;
+    const chunkSpecFor = dir => isSidecarCandidate(src, dir) ? sharedChunkSpec : localChunkSpec;
+    let cachedChunk = null;
+    if (!ignoreCached) {
+      const visited = new Set();
+      const readChunk = dir => {
+        const key = canonicalCachePath(dir);
+        if (visited.has(key) || !canUseCacheCandidate(dir)) return null;
+        visited.add(key);
+        const sidecar = isSidecarCandidate(src, dir) ? sidecarAuthority(src) : null;
+        if (isSidecarCandidate(src, dir) && !sidecar) return null;
+        try {
+          return readSourceWaveformChunk(dir, chunkSpecFor(dir), { verify: () => {
+            ensureCurrent(); assertCleanupAncestors(path.join(dir, '.wave-cache-check'));
+            if (sidecar) captureOutputAuthority(path.join(sidecar.requestedPath, '.sidecar-root-check'), sidecar);
+          } });
+        } catch (_) { /* 完成紀錄讀不到時直接解來源，不能把缺件當成可刪除。 */ }
+        return null;
+      };
+      for (const dir of cacheCandidates(src, sourceKey)) {
+        cachedChunk = readChunk(dir);
+        if (cachedChunk) break;
+      }
+      // UNC／磁碟代號與另一台電腦可有不同 strict key；只在同一相鄰 sidecar 查共享檔案證據。
+      if (!cachedChunk && sharedWaveKey) {
+        const sidecar = sidecarAuthority(src), root = sidecarRoot(src);
+        if (sidecar) {
+          try {
+            captureOutputAuthority(path.join(root, '.sidecar-root-check'), sidecar);
+            for (const entry of readCleanupEntries(root)) {
+              if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[a-f0-9]{16}$/.test(entry.name)) continue;
+              captureOutputAuthority(path.join(root, '.sidecar-root-check'), sidecar);
+              cachedChunk = readChunk(path.join(root, entry.name));
+              if (cachedChunk) break;
+            }
+            captureOutputAuthority(path.join(root, '.sidecar-root-check'), sidecar);
+          } catch (_) { cachedChunk = null; /* 未知的共享目錄不授權重用，保留重新解碼退路。 */ }
+        }
+      }
+      checkPreparedSource();
+    }
     const seek = sourceClockSeek(start, audio[0]);
     const clocks = audio.map(stream => ({ ...stream, timestampOffset: timestampOffset(stream) + seek.seek - start }));
     const plan = buildAudioIngestPlan(clocks, { waveOnly: true });
@@ -2161,64 +2286,87 @@ function createMediaIntakeRuntime(options = {}) {
       try { assertOutputAuthority(authority, sourceWavePath); }
       catch (cause) { throw Object.assign(new Error('來源波形暫存目錄身分已變更', { cause }), { code: 'SOURCE_WAVE_PARENT_CHANGED' }); }
     };
-    let completedOwner;
+    let completedOwner, completedBytes, completedEvidence;
+    const assertCompletedWave = wave => {
+      assertParent(); assertTemporaryOwner(wave, completedOwner);
+      const current = fs.lstatSync(wave, { bigint: true });
+      if (completedEvidence && (current.size !== completedEvidence.size
+        || current.mtimeNs !== completedEvidence.mtimeNs || current.ctimeNs !== completedEvidence.ctimeNs))
+        throw new Error('已完成波形的內容在交接前變更');
+    };
     try {
       const wave = await produceTemporaryFile(file, async (out, owner) => {
         completedOwner = owner;
         sourceWave.owner = owner;
-        let fd;
-        const unsafe = () => new Error('波形暫存缺少完整內容或檔案身分已變更');
-        const verifyOutput = (requireContent = false) => {
-          let current, opened;
-          try { assertParent(); current = fs.lstatSync(out, { bigint: true }); opened = fs.fstatSync(fd, { bigint: true }); }
-          catch (_) { throw unsafe(); }
-          if (!owner || !current.isFile() || current.isSymbolicLink() || !opened.isFile()
-            || current.dev !== owner.dev || current.ino !== owner.ino
-            || opened.dev !== owner.dev || opened.ino !== owner.ino || (requireContent && opened.size <= 0n)) throw unsafe();
-        };
-        try {
-          const before = fs.lstatSync(out, { bigint: true });
-          if (!owner || !before.isFile() || before.isSymbolicLink() || before.dev !== owner.dev || before.ino !== owner.ino) throw unsafe();
-          fd = fs.openSync(out, 'r+');
-          verifyOutput();
-          check();
+        await withTemporaryDescriptor(out, owner, async (fd, verify) => {
+          checkPreparedSource();
           // 時間式 atrim 在容器粗 timebase 與極短尾段可能裁出零 samples；
           // 先轉成最終取樣率，再以同一整數 sample 數補零與裁切。
           const filters = [...plan.filters, `${plan.waveLabel}aresample=4000,apad=whole_len=${segmentSamples},atrim=end_sample=${segmentSamples},asetpts=N/SR/TB[sourcewave]`];
           const args = ['-y', '-ss', String(seek.seek), '-i', src, '-vn', '-sn', '-dn',
             '-filter_complex', filters.join(';'), '-map', '[sourcewave]',
             '-ac', '1', '-ar', '4000', '-c:a', 'pcm_s16le', '-f', 'wav', 'fd:'];
-          await ffmpegExecution.execute(args, { executionKind: 'direct', deferTerminal: true,
-            outputDescriptor: fd,
-            duration: segmentDuration, jobId: 'source-wave', label: '優先產生波形',
-            onProcess: child => session.ownProcess?.(child),
-            onProgress: payload => progress({ ...payload, pct: Number.isFinite(payload.pct)
-              ? (start + segmentDuration * Math.max(0, Math.min(100, payload.pct)) / 100) / duration * 100 : null }),
-          });
-          check();
-          verifyOutput(true);
-        } finally {
-          if (fd !== undefined) fs.closeSync(fd);
-        }
+          if (cachedChunk) fs.writeFileSync(fd, cachedChunk);
+          else await ffmpegExecution.execute(args, { executionKind: 'direct', deferTerminal: true,
+              outputDescriptor: fd,
+              duration: segmentDuration, jobId: 'source-wave', label: '優先產生波形',
+              onProcess: child => session.ownProcess?.(child),
+              onProgress: payload => progress({ ...payload, pct: Number.isFinite(payload.pct)
+                ? (start + segmentDuration * Math.max(0, Math.min(100, payload.pct)) / 100) / duration * 100 : null }),
+            });
+          checkPreparedSource();
+          completedEvidence = verify();
+          if (completedEvidence.size <= 0n) throw new Error('波形暫存缺少完整內容');
+        });
       }, { assertParent, reservation: sourceWave });
       try {
-        check(); assertParent(); assertTemporaryOwner(wave, completedOwner);
+        checkPreparedSource(); assertCompletedWave(wave);
         progress({ pct: (start + segmentDuration) / duration * 100, done: true, outcome: 'success',
           label: complete ? '波形已就緒' : '波形片段已備妥' });
         // 通知觀察者可同步換工作，也可在 microtask 更換來源或暫存路徑。
         await Promise.resolve();
-        check(); assertParent(); assertTemporaryOwner(wave, completedOwner);
+        checkPreparedSource(); assertCompletedWave(wave);
+        if (!cachedChunk) {
+          // 重新開啟受 owner 保護的 descriptor，避免 FFmpeg 共用的 fd offset 影響讀取。
+          await withTemporaryDescriptor(wave, completedOwner, (fd, verify) => {
+            const size = verify().size;
+            if (size > 0n && size <= BigInt(MAX_SOURCE_WAVEFORM_BYTES)) completedBytes = fs.readFileSync(fd);
+            verify(); assertCompletedWave(wave);
+          });
+          checkPreparedSource(); assertCompletedWave(wave);
+          if (completedBytes && validSourceWaveformPcm(completedBytes, segmentSamples)) {
+            let unprotect = () => {};
+            try {
+              const dir = writeCacheDir(src), directoryOwner = cacheDirectoryOwner(dir);
+              const sidecar = isSidecarCandidate(src, dir) ? sidecarAuthority(src) : null;
+              if (isSidecarCandidate(src, dir) && !sidecar) throw cacheDirectoryChanged();
+              unprotect = protectCacheDir(dir, src);
+              const verify = () => {
+                checkPreparedSource(); assertCompletedWave(wave);
+                if (sidecar) captureOutputAuthority(path.join(sidecar.requestedPath, '.sidecar-root-check'), sidecar);
+                assertCleanupAncestors(path.join(dir, '.wave-cache-check'));
+                if (!sameCacheDirectory(directoryOwner, cacheDirectoryOwner(dir))) throw cacheDirectoryChanged();
+              };
+              saveSourceWaveformChunk(dir, chunkSpecFor(dir), completedBytes, { verify });
+            } catch (error) {
+              // 快取是可重建的加速資料；寫入失敗仍可交付本次已完成的私有波形。
+              checkPreparedSource(); assertCompletedWave(wave);
+              try { options.log?.('[cache] source waveform chunk not saved:', error.code || error.message); } catch (_) {}
+            } finally { unprotect(); }
+          }
+        }
+        checkPreparedSource(); assertCompletedWave(wave);
       }
       catch (error) {
         // 等待交接時若目錄項已變更，只撤回清理登記，不刪除新物件。
         try {
-          assertParent(); assertTemporaryOwner(wave, completedOwner);
+          assertCompletedWave(wave);
           fs.unlinkSync(wave);
         } catch (ignored) {}
         try { options.forgetTemporaryFile?.(wave); } catch (ignored) {}
         throw error;
       }
-      return { wave, channels: [], cached: false, temporary: true, start, duration: segmentDuration, complete, sourceKey };
+      return { wave, channels: [], cached: !!cachedChunk, temporary: true, start, duration: segmentDuration, complete, sourceKey };
     } catch (error) {
       sourceWave.retired = true;
       progress({ done: true, outcome: 'failed', errorCode: error.code || 'SOURCE_WAVE_FAILED', errorMsg: error.message });

@@ -37,6 +37,7 @@ it('受控 stdin 背壓期間只讀取呼叫時複本，完成寫入且 child cl
   let settled = false;
   const work = f.engine.execute(args,{ executionKind:'direct', inputBytes:bytes, outputDescriptor:7 }).finally(()=>{ settled=true; });
   expect(f.spawned.options.stdio).toEqual(['pipe',7,'pipe']);
+  expect(f.spawned.options.windowsHide).toBe(true);
   bytes.fill(99);
   while (!f.spawned.child.stdin.writableFinished) {
     if (callbacks.length) callbacks.shift()();
