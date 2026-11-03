@@ -123,6 +123,10 @@ const actionCategories = [
 
 let tempKeymap = null;
 let activeSettingsClose = null;
+let lastSettingsOrigin = null;
+if (typeof document !== 'undefined') document.addEventListener('focusin', event => {
+  if (!event.target.closest?.('#settingsModal') && event.target !== document.body) lastSettingsOrigin = event.target;
+});
 
 function renderSettingsTable(tbody, isCurrent, onChange) {
   tbody.innerHTML = '';
@@ -175,6 +179,8 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
         input.type = 'text';
         input.className = 'key-input';
         input.id = `settings-input-${action}-${i}`;
+        input.setAttribute('aria-label', `${label}，第 ${i+1} 組快捷鍵`);
+        input.setAttribute('aria-describedby', 'settingsKeyboardHelp');
         input.value = fixedDisplay[action] && i === 0 ? fixedDisplay[action] : formatBind(binds[i]);
         
         const isFixed = fixedActions.includes(action);
@@ -195,6 +201,8 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
         if (!isFixed) {
           input.addEventListener('keydown', (e) => {
             if (!isCurrent()) return;
+            // Tab 專供鍵盤導航，不能因巡覽設定表就改寫草稿。
+            if (e.key === 'Tab' || e.isComposing || e.keyCode === 229) return;
             e.preventDefault();
             e.stopPropagation();
           
@@ -261,12 +269,16 @@ export function showSettingsModal() {
   tempKeymap = JSON.parse(JSON.stringify(State.keymap));
   let draftRevision = 0;
   let saving = false;
+  // 工具列的 action dispatcher 會先 blur 按鈕；保留其最後一次實際焦點。
+  const previousFocus = document.activeElement === document.body && lastSettingsOrigin?.isConnected
+    ? lastSettingsOrigin : document.activeElement;
 
   const modal = document.createElement('div');
   modal.id = 'settingsModal';
   modal.innerHTML = `
-    <div class="settings-modal-content">
-      <h2>快捷鍵設定</h2>
+    <div class="settings-modal-content" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" tabindex="-1">
+      <h2 id="settingsTitle">快捷鍵設定</h2>
+      <p id="settingsKeyboardHelp" class="settings-keyboard-help">Tab 切換欄位；在欄位按下要設定的按鍵，Escape 結束本次設定。</p>
       <div class="settings-table-container">
         <table class="settings-table">
           <thead>
@@ -280,6 +292,7 @@ export function showSettingsModal() {
           <tbody id="settingsTbody"></tbody>
         </table>
       </div>
+      <div id="settingsError" class="settings-error" role="alert" hidden></div>
       <div class="settings-footer">
         <button id="settingsRestoreBtn" class="btn" style="margin-right:auto;">還原預設</button>
         <button id="settingsExportBtn" class="btn" title="把目前這份快捷鍵設定存成 .json 檔">⭳ 匯出</button>
@@ -291,6 +304,9 @@ export function showSettingsModal() {
     </div>
   `;
   document.body.appendChild(modal);
+  const background = [...document.body.children].filter(element=>element!==modal&&!['SCRIPT','STYLE'].includes(element.tagName))
+    .map(element=>({element,inert:element.inert}));
+  background.forEach(({element})=>{element.inert=true;});
   emit('mpv:sync'); // mpv 是 OS 層子視窗會蓋住本對話框，開啟期間讓 mpv 讓位
 
   const isCurrent = () => activeSettingsClose === close && document.getElementById('settingsModal') === modal;
@@ -299,8 +315,11 @@ export function showSettingsModal() {
     // 已送出的儲存不能由關窗撤銷；等待結果才能丟棄草稿或開下一個視窗。
     if (saving) return false;
     document.removeEventListener('keydown', onEsc, true);
+    document.removeEventListener('focusin', containFocus, true);
     if (activeSettingsClose === close) activeSettingsClose = null;
     modal.remove();
+    background.forEach(({element,inert})=>{element.inert=inert;});
+    if(previousFocus?.isConnected) previousFocus.focus({preventScroll:true});
     emit('mpv:sync');
     return true;
   };
@@ -309,6 +328,24 @@ export function showSettingsModal() {
   const tbody = document.getElementById('settingsTbody');
   const renderDraft = () => renderSettingsTable(tbody, canEdit, () => { draftRevision++; });
   renderDraft();
+  const dialog = modal.querySelector('[role="dialog"]');
+  const focusables = () => [...modal.querySelectorAll('button, input')]
+    .filter(element=>!element.disabled&&!element.hidden&&element.type!=='file'&&element.tabIndex!==-1);
+  const focusFirst = () => (focusables()[0]||dialog).focus({preventScroll:true});
+  const containFocus = event => { if(isCurrent()&&!modal.contains(event.target)) focusFirst(); };
+  document.addEventListener('focusin', containFocus, true);
+  modal.addEventListener('keydown',event=>{
+    if(event.key!=='Tab'||!isCurrent()) return;
+    const items=focusables(),first=items[0],last=items[items.length-1];
+    if(!items.length){event.preventDefault();dialog.focus();return;}
+    if(event.shiftKey&&(document.activeElement===first||!items.includes(document.activeElement))){event.preventDefault();last.focus();}
+    else if(!event.shiftKey&&(document.activeElement===last||!items.includes(document.activeElement))){event.preventDefault();first.focus();}
+  },true);
+  const showError = message => {
+    const error = modal.querySelector('#settingsError');
+    error.textContent=message;error.hidden=!message;
+    if(message) setStatus(message,'err');
+  };
 
   document.getElementById('settingsRestoreBtn').onclick = () => {
     if (!canEdit()) return;
@@ -329,7 +366,7 @@ export function showSettingsModal() {
         const p = await DESK.exportSub(name, bytesToB64(bytes), 'json');
         if (p && isCurrent()) showToast('已匯出快捷鍵：' + p.split(/[\\/]/).pop());
       } else { downloadBytes(bytes, name, 'application/json;charset=utf-16le'); showToast('已匯出快捷鍵設定'); }
-    } catch (e) { if (isCurrent()) setStatus('匯出失敗：' + (e?.message || e), 'err'); }
+    } catch (e) { if (isCurrent()) showError('匯出失敗：' + (e?.message || e)); }
   };
 
   // 匯入：讀 json → 驗證 → 併到預設 keymap（缺項用預設補、未知動作忽略）→ 重繪表格（需按「儲存」才寫入）
@@ -347,7 +384,7 @@ export function showSettingsModal() {
       tempKeymap = merged;
       renderDraft();
       showToast(`已匯入 ${applied} 項快捷鍵；按「儲存」才會生效`);
-    } catch (e) { if (ownsImport()) { setStatus('匯入失敗：' + (e?.message || e), 'err'); showToast('匯入失敗：' + (e?.message || e)); } }
+    } catch (e) { if (ownsImport()) showError('匯入失敗：' + (e?.message || e)); }
   };
 
   /* 取消＝丟棄 tempKeymap 直接關掉（尚未寫進 State.keymap）。
@@ -384,7 +421,9 @@ export function showSettingsModal() {
     const keymap = stripEmptyBinds(structuredClone(tempKeymap));
     const controls = [...modal.querySelectorAll('input, button')].map(control => ({ control, disabled:control.disabled }));
     saving = true;
+    showError('');
     for (const { control } of controls) control.disabled = true;
+    dialog.focus({preventScroll:true});
     setStatus('正在儲存快捷鍵…', 'busy');
     let saved = false, error;
     try { saved = await saveKeys(keymap); }
@@ -395,12 +434,14 @@ export function showSettingsModal() {
     }
     if (!isCurrent()) return;
     if (!saved) {
-      setStatus('快捷鍵設定儲存失敗，請重試' + (error ? '：' + (error.message || error) : ''), 'err');
+      showError('快捷鍵設定儲存失敗，請重試' + (error ? '：' + (error.message || error) : ''));
+      document.getElementById('settingsSaveBtn').focus();
       return;
     }
     State.keymap = keymap;
     close();
     setStatus('快捷鍵設定已儲存', 'ok');
   };
+  focusFirst();
 }
 

@@ -116,7 +116,7 @@ function readPcmEvidence(file, spec, samples, sha256, complete) {
   } finally { fs.closeSync(fd); }
 }
 
-function readCandidate(store, name, expected, verify) {
+function readCandidate(store, name, expected, verify, metadataOnly = false) {
   const generation = generationAt(store, name), recordFile = path.join(generation.folder, 'checkpoint.json');
   const proof = readRecord(recordFile), raw = proof.raw, spec = recipe(raw.spec);
   if (raw.version !== 1 || !name.startsWith(digest(JSON.stringify(spec)) + '-')
@@ -128,7 +128,9 @@ function readCandidate(store, name, expected, verify) {
   // A crash between final rename and the completion receipt leaves the same
   // verified full prefix available for a new writer, without claiming complete.
   if (!raw.complete && !fs.existsSync(file)) file = path.join(generation.folder, 'wave.wav');
-  const evidence = readPcmEvidence(file, spec, raw.completedSamples, raw.sha256, raw.complete);
+  const evidence = metadataOnly ? { stat: regular(file) } : readPcmEvidence(file, spec, raw.completedSamples, raw.sha256, raw.complete);
+  if (evidence.stat.size < BigInt(44 + raw.completedSamples * 2)
+    || (raw.complete && evidence.stat.size !== BigInt(44 + spec.totalSamples * 2))) throw changed();
   if (String(evidence.stat.ino) !== raw.owner.ino || String(evidence.stat.birthtimeNs) !== raw.owner.birthtimeNs) throw changed();
   const check = () => {
     verify(); generation.verify(); assertRecord(recordFile, proof);
@@ -139,7 +141,7 @@ function readCandidate(store, name, expected, verify) {
     blocks: evidence.blocks, stat: evidence.stat, verify: check };
 }
 
-function scan(directory, expected, verify = () => {}) {
+function scan(directory, expected, verify = () => {}, metadataOnly = false) {
   verify();
   let store;
   try { store = storeAt(directory); }
@@ -153,13 +155,25 @@ function scan(directory, expected, verify = () => {}) {
       if (++count > 4096) { uncertain = true; break; }
       if (!GENERATION.test(entry.name) || (expected && !entry.name.startsWith(digest(JSON.stringify(expected)) + '-'))) continue;
       if (!entry.isDirectory() || entry.isSymbolicLink()) { uncertain = true; continue; }
-      try { const candidate = readCandidate(store, entry.name, expected, verify); if (candidate) candidates.push(candidate); }
+      try { const candidate = readCandidate(store, entry.name, expected, verify, metadataOnly); if (candidate) candidates.push(candidate); }
       catch (_) { uncertain = true; }
     }
   } finally { handle.closeSync(); }
   verify(); store.verify();
   candidates.sort((a, b) => Number(b.complete) - Number(a.complete) || b.samples - a.samples);
   return { candidates, uncertain };
+}
+
+// Display-only records: never authorize resume / playback or claim PCM integrity.
+// The ordinary cache reader above still hashes every confirmed prefix.
+function describeContinuousWaveformCache(directory, { sourceKey, verify = () => {} } = {}) {
+  try {
+    const result = scan(directory, null, verify, true);
+    const best = result.candidates.find(candidate => candidate.spec.sharedSourceKey === sourceKey);
+    return best ? { state: best.complete ? 'complete' : 'partial', completedSamples: best.samples,
+      totalSamples: best.spec.totalSamples, bytes: Number(best.stat.size), verified: false }
+      : { state: result.uncertain ? 'unknown' : 'missing', verified: false };
+  } catch (_) { return { state: 'unknown', verified: false }; }
 }
 
 function inspectContinuousWaveformCache(directory, { spec, verify = () => {} } = {}) {
@@ -315,5 +329,5 @@ function isContinuousWaveformCachePath(file) {
   try { return inside(path.resolve(file)) || inside(fs.realpathSync.native(file)); } catch (_) { return false; }
 }
 
-module.exports = { openContinuousWaveformCache, readCompleteContinuousWaveformCache, inspectContinuousWaveformCache,
+module.exports = { openContinuousWaveformCache, readCompleteContinuousWaveformCache, inspectContinuousWaveformCache, describeContinuousWaveformCache,
   isContinuousWaveformCachePath, MAX_TOTAL_SAMPLES, MAX_TRANSFER_BYTES };

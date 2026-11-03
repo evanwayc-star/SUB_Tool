@@ -15,6 +15,32 @@ function setup(){
 }
 
 describe('renderer media intake ownership',()=>{
+  it('停止後只採原來源的保存紀錄，晚到查詢不能覆蓋重試或新工作區',async()=>{
+    const f=setup(),gate=deferred(),retry=vi.fn();
+    f.bridge.cacheInfo=vi.fn(()=>gate.promise);
+    f.jobs.registerRecovery({path:'A',owns:()=>true,retry});
+    await f.jobs.reset({retainRecovery:true});
+    const refresh=f.jobs.refreshRecoveryInfo();
+    await f.jobs.reset();
+    gate.resolve({source:{path:'A',locations:[{waveform:{state:'partial',completedSamples:20000,totalSamples:40000}}]}});
+    await refresh;expect(f.jobs.snapshot().recoveries).toEqual([]);expect(retry).not.toHaveBeenCalled();
+  });
+  it('快速連按重試只啟動一次，失敗仍保留原因，真正reset移除入口',async()=>{
+    const f=setup(),gate=deferred(),retry=vi.fn(()=>gate.promise);
+    const registration=f.jobs.registerRecovery({path:'A',owns:()=>true,retry});registration.fail(new Error('disk full'));
+    const id=f.jobs.snapshot().recoveries[0].id,first=f.jobs.retry(id);
+    expect(await f.jobs.retry(id)).toBe(false);expect(retry).toHaveBeenCalledOnce();
+    gate.reject(new Error('permission denied'));expect(await first).toBe(false);
+    expect(f.jobs.snapshot().recoveries[0].message).toBe('permission denied');await f.jobs.reset();
+    expect(f.jobs.snapshot().recoveries).toEqual([]);
+  });
+  it('重試 caller 以 failRecovery 回報後 return false，仍保留可再次重試的失敗紀錄',async()=>{
+    const f=setup();
+    const registration=f.jobs.registerRecovery({path:'A',owns:()=>true,retry:async()=>{f.jobs.failRecovery('A',new Error('第二次保存失敗'));return false;}});
+    registration.fail(new Error('第一次失敗'));
+    expect(await f.jobs.retry(f.jobs.snapshot().recoveries[0].id)).toBe(false);
+    expect(f.jobs.snapshot().recoveries[0].message).toBe('第二次保存失敗');
+  });
   it('連續波形增量只交給原 request，取消後不再交付且狀態不保留 PCM 峰值',async()=>{
     const f=setup(),receive=vi.fn();
     const work=f.jobs.prepareSourceWaveform({path:'source.mov',continuous:true},receive);

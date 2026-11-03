@@ -37,7 +37,7 @@ async function run() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-wave-task-'));
   const tempAuthority = captureOutputDirectory(tempRoot);
   const fileAuthority = new FileAuthority({ internalDirectories: [tempRoot, cacheRoot] });
-  fileAuthority.grantTrustedFile(request.src);
+  if (request.src) fileAuthority.grantTrustedFile(request.src);
   if (cacheAuthority) captureOutputAuthority(path.join(cacheRoot, '.wave-worker-check'), cacheAuthority);
   const runtime = createMediaIntakeRuntime({ tempRoot, tempRootAuthority: tempAuthority, cacheRoot, allowSidecarCache, fileAuthority,
     describeAudio: () => call('describe'),
@@ -50,6 +50,10 @@ async function run() {
   });
   let prepared;
   try {
+    if (workerData.operation === 'cache-info') {
+      const result = runtime.cacheInfo(request.src, { isCancelled: cancelled });
+      await call('publish', { result });send({ type: 'complete' });return;
+    }
     const shared = allowSidecarCache ? sharedSourceFingerprintSync(request.src) : null;
     prepared = await runtime.waveform(request, { isCancelled: cancelled });
     const check = () => {

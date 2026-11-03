@@ -116,8 +116,26 @@ function routesForSource(source){
   }
   return [];
 }
+function confirmBusReduction(current,rawCount){
+  const count=Math.max(0,Math.min(MAX_AUDIO_BUSES,Math.floor(Number(rawCount)||0)));
+  if(count>=current.buses.length) return true;
+  const removed=new Set(current.buses.slice(count).map(bus=>bus.id));
+  const affected=Object.values(current.sourceMaps||{}).map(map=>(map.channels||[])
+    .filter(route=>(route.busIds||[]).some(id=>removed.has(id))).length).filter(Boolean);
+  const streams=(current.exportLayout?.streams||[]).filter(stream=>(stream.busIds||[]).some(id=>removed.has(id))).length;
+  const labels=current.buses.slice(count).map((_,index)=>`A${count+index+1}`).join('、');
+  return window.confirm(`將把整個專案由 ${current.buses.length} 軌減少為 ${count} 軌。\n移除：${labels}\n影響 ${affected.length} 個來源、${affected.reduce((sum,n)=>sum+n,0)} 條來源配線及 ${streams} 個預設輸出編組。\n\n所有來源共用這些 A 軌。若只要減少某份交付的聲道，請保留專案音軌，改用匯出清單的「設定輸出音軌」。\n\n要繼續縮減整個專案嗎？`);
+}
+function setEditorBusCount(editor,rawCount){
+  const current=editor.current();
+  if(!confirmBusReduction(current,rawCount)||!editor.isActive()
+    ||JSON.stringify(editor.current())!==JSON.stringify(current)) return false;
+  return editor.setBusCount(rawCount);
+}
 function setBusCount(rawCount){
-  const transition=resizeProjectAudioBuses(project(),rawCount);
+  const current=project();
+  if(!confirmBusReduction(current,rawCount)||State.audioProject!==current) return false;
+  const transition=resizeProjectAudioBuses(current,rawCount);
   if(!transition.changed) return false;
   State.audioProject=transition.project;
   return true;
@@ -196,8 +214,13 @@ function openForRoutingSource(source, editor=null){
     const rerender=()=>openForRoutingSource(source,editor);
     const sync=()=>syncRouteDraftFromDialog(editor,sourceId);
     const countInput=document.getElementById('audioBusCount');
-    document.getElementById('audioBusCountApply')?.addEventListener('click',()=>{ sync(); if(editor.setBusCount(countInput?.value)) rerender(); });
-    document.querySelectorAll('.audio-count-preset').forEach(button=>button.addEventListener('click',()=>{ sync(); if(editor.setBusCount(button.dataset.count)) rerender(); }));
+    const applyCount=value=>{
+      sync();
+      if(setEditorBusCount(editor,value)) rerender();
+      else if(countInput) countInput.value=editor.current().buses.length;
+    };
+    document.getElementById('audioBusCountApply')?.addEventListener('click',()=>applyCount(countInput?.value));
+    document.querySelectorAll('.audio-count-preset').forEach(button=>button.addEventListener('click',()=>applyCount(button.dataset.count)));
     document.querySelectorAll('.audio-route-target').forEach(select=>select.addEventListener('change',()=>{ select.dataset.dirty='1'; sync(); }));
     document.getElementById('audioRouteAuto')?.addEventListener('click',()=>{
       const available=editor.current().buses.filter(bus=>!bus.locked);
@@ -309,7 +332,7 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
       if(!result.saved){ showToast(result.error); return; }
       closeModal({committed:true});
       if(onBack) onBack(result);
-    }},{label:onBack?(delivery?'返回匯出清單':'返回配線'):'取消',act:()=>{
+    }},{label:onBack?(delivery?'取消修改並返回匯出清單':'取消修改並返回配線'):'取消',act:()=>{
       if(onBack){ editor.cancel(); closeModal({committed:true}); onBack({saved:false}); }
       else closeModal();
     }}],{width:'860px',rerender:()=>openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery})});
@@ -326,13 +349,15 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
     document.getElementById('audioOutputBusApply')?.addEventListener('click',()=>{
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      if(editor.setBusCount(countInput?.value)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
+      if(setEditorBusCount(editor,countInput?.value)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
+      else if(countInput) countInput.value=editor.current().buses.length;
     });
     document.querySelectorAll('.audio-output-count-preset').forEach(button=>button.addEventListener('click',()=>{
       if(countInput) countInput.value=button.dataset.count||'';
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      if(editor.setBusCount(button.dataset.count)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
+      if(setEditorBusCount(editor,button.dataset.count)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
+      else if(countInput) countInput.value=editor.current().buses.length;
     }));
     document.getElementById('audioOutputAllMono')?.addEventListener('click',()=>{
       if(!editor.allMono()) return;

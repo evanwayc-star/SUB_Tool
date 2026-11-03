@@ -26,6 +26,31 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers(); delete window.subtool; });
 
 describe('modal lifecycle ownership', () => {
+  it('快取視窗列目前素材的共享保存進度，清楚區分中央用量與待重驗紀錄',async()=>{
+    const {State}=await import('../src/state.js');State.mediaPath='C:/NAS/movie.mov';
+    window.subtool={cacheInfo:vi.fn(async()=>({root:'C:/local',folders:0,bytes:0,source:{path:State.mediaPath,locations:[{
+      directory:'C:/NAS/.subtool_Cache/abc',kind:'sidecar',waveform:{state:'partial',completedSamples:20000,totalSamples:40000,verified:false},proxy:false,channels:0,
+    }]}}))};
+    await ui.openCacheDialog();
+    expect(window.subtool.cacheInfo).toHaveBeenCalledWith('C:/NAS/movie.mov');
+    const text=document.getElementById('modalBody').textContent;
+    expect(text).toContain('同資料夾快取');expect(text).toContain('5.0 / 10.0 秒');
+    expect(text).toContain('使用前重新驗證');expect(text).toContain('C:/NAS/.subtool_Cache/abc');
+    expect(text).not.toContain('此處管理的是本機的中央快取');
+  });
+  it('查詢期間換來源時不顯示舊素材快取或提供清除資格',async()=>{
+    const {State}=await import('../src/state.js');State.mediaPath='C:/old.mov';
+    const gate=deferred();window.subtool={cacheInfo:()=>gate.promise};
+    const opening=ui.openCacheDialog();State.mediaPath='C:/new.mov';gate.resolve({folders:0,bytes:0});await opening;
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+    expect(document.getElementById('toast').textContent).toContain('影片已變更');
+  });
+  it('目前素材快取查詢整體失敗不顯示未找到紀錄',async()=>{
+    const {State}=await import('../src/state.js');State.mediaPath='C:/movie.mov';
+    window.subtool={cacheInfo:vi.fn(async()=>{throw new Error('worker unavailable');})};
+    await ui.openCacheDialog();const text=document.getElementById('modalBody').textContent;
+    expect(text).toContain('無法確認目前素材');expect(text).not.toContain('尚未找到屬於目前素材');
+  });
   it('does not clear a newly opened source through an older cache confirmation', async () => {
     const { State } = await import('../src/state.js');
     State.mediaPath = 'C:/media/original.mp4';

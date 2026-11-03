@@ -150,7 +150,7 @@ contextBridge.exposeInMainWorld('subtool', {
   writeScreenshot: (p, b64, token) => { if(typeof p!=='string'||typeof token!=='string') throw new TypeError('path and token must be strings'); return ipcRenderer.invoke('fs:writeScreenshot', { path: p, b64, token }); },
   openPath:     (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('app:openPath', p); },
   openExternal: (url) => { if(typeof url!=='string') throw new TypeError('url must be a string'); return ipcRenderer.invoke('app:openExternal', url); },
-  cacheInfo:    () => ipcRenderer.invoke('cache:info'),
+  cacheInfo:    sourcePath => ipcRenderer.invoke('cache:info', sourcePath),
   cacheCleanOrphans: () => ipcRenderer.invoke('cache:cleanOrphans'),
   configLoad:   () => ipcRenderer.invoke('config:load'),
   configSave:   (data) => ipcRenderer.invoke('config:save', data),

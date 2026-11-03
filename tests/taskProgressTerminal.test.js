@@ -63,7 +63,7 @@ describe('registered native task-progress terminal consumer', () => {
     expect(document.getElementById('stMedia').style.display).toBe('none');
     expect(ui.setMediaIntakeStatus).toHaveBeenLastCalledWith('轉檔… 10%');
     consume({ ...owner,jobId: 'stream-1', label: '轉檔', done: true, outcome: 'failed', errorMsg: 'codec unsupported' });
-    expect(setStatus).toHaveBeenLastCalledWith('轉檔失敗', 'err');
+    expect(setStatus).toHaveBeenLastCalledWith('轉檔失敗：codec unsupported', 'err');
     expect(ui.setMediaIntakeStatus).toHaveBeenLastCalledWith(null);
     expect(document.getElementById('stMedia').style.display).toBe('');
     expect(completed).toEqual([]);

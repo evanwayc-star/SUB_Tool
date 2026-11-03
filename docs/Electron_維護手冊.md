@@ -35,8 +35,12 @@ flowchart LR
 | `file-commit-coordinator.js` | 程式內按實體目的檔排序專案、字幕、樣式及截圖提交 |
 | `screenshot-output.js` | 截圖路徑 reservation、寫入、發布及退出收尾 |
 | `media-probe.js` | metadata、音訊及 bitrate 探測、並行與 close 屏障 |
-| `mother-source-evidence.js` | 本機 stat／內容取樣證據與跨電腦完整內容證據 |
+| `mother-source-evidence.js` | 本機取樣、同一共享檔案身分及跨複製檔的完整內容證據，三者不混用 |
 | `media-intake-runtime.js` | Proxy／音訊／波形快取、串流及 intake coordinator |
+| `source-waveform-worker.js`、`source-waveform-task.js` | main 持有 native 程序，worker 執行波形 I/O；PCM 背壓、取消與退出屏障 |
+| `continuous-source-waveform.js` | 單次 PCM 解碼、續算接點核對、已持久峰值及完整波形交接 |
+| `continuous-waveform-cache.js` | 單檔 PCM 前綴、checkpoint、獨立 writer 世代及正式 WAV 發布 |
+| `source-waveform-cache.js` | 舊分段 `.swc` 快取、內容證據與私有 WAV 副本 |
 | `media-source-clock.js` | FFmpeg seek 捨入及音訊 PTS filter；純原點映射使用 shared |
 | `clip-frame-cache.js`、`clip-audio-cache.js` | 固定畫面 PNG、反向片段 WAV 的格式完整性及母素材證據 |
 | `clip-cache-artifact.js` | 片段快取的目錄世代、輸出 handle、發布及失敗清理 |
@@ -136,11 +140,11 @@ API 前綴皆為 `window.subtool`。`isDesktop` 是值；`getFilePath(file)` 只
 | `readB64(path)` | `fs:readB64` | 已授權單檔內容 |
 | `writeProject(path, b64)` | `fs:writeProject` | 已准入專案寫入 |
 | `reserveScreenshotPath(directory, suffix)` | `fs:reserveScreenshotPath` | 原子保留下一個 Shot 檔名 |
-| `releaseScreenshotPath(path)` | `fs:releaseScreenshotPath` | 釋放未消耗 reservation |
-| `writeScreenshot(path, b64)` | `fs:writeScreenshot` | 消耗 reservation 並發布 JPEG |
+| `releaseScreenshotPath(path, token)` | `fs:releaseScreenshotPath` | 以原 reservation 憑證釋放未消耗預留 |
+| `writeScreenshot(path, b64, token)` | `fs:writeScreenshot` | 消耗同一 reservation 憑證並發布 JPEG |
 | `openPath(path)` | `app:openPath` | 開啟允許的路徑 |
 | `openExternal(url)` | `app:openExternal` | 允許的外部 URL |
-| `cacheInfo()` | `cache:info` | 管理快取資訊 |
+| `cacheInfo(src?)` | `cache:info` | 中央統計及已授權目前來源的 sidecar 保存紀錄；省略來源只查中央統計 |
 | `cacheCleanOrphans()` | `cache:cleanOrphans` | 保守清除孤兒 |
 | `cacheClearAll(src)` | `cache:clearAll` | 清中央快取及指定母素材的 sidecar，保留使用中的 writer／reader |
 | `configLoad()` | `config:load` | 讀設定 |
@@ -159,13 +163,15 @@ API 前綴皆為 `window.subtool`。`isDesktop` 是值；`getFilePath(file)` 只
 
 ### 主頁面：媒體、音訊與交付
 
+`sourceWaveformContinuous` 是能力布林值，不是 IPC；只有明確為 `true` 才使用單次連續波形請求，舊 bridge 沿用分段請求。
+
 | API | 通道 | 輸入或用途 |
 |---|---|---|
 | `probe(path)` | `ffprobe` | 已授權來源 metadata |
 | `ingest(opts)` | `ffmpeg:ingest` | path／duration／needsProxy／audio／queue／sessionId／requestId |
 | `streamIngest(opts)` | `ffmpeg:streamIngest` | path／duration／audio／sessionId／requestId |
 | `mediaSourceKey(path)` | `ffmpeg:sourceKey` | 已授權母素材的本機 `source-v3` 取樣證據 |
-| `prepareSourceWaveform(opts)` | `ffmpeg:prepareSourceWaveform` | path／duration／audio／start／length／sessionId／requestId；優先準備來源波形 |
+| `prepareSourceWaveform(opts)` | `ffmpeg:prepareSourceWaveform` | path／duration／audio／continuous／ignoreCached／sessionId／requestId；舊分段模式另收 start／length |
 | `cancelMediaIntake(scope)` | `ffmpeg:cancelIntake` | sessionId，及可選 requestId；sender 由 main 綁定 |
 | `releaseStream(streamLeaseId)` | `ffmpeg:releaseStream` | 只釋放同 sender 的串流 reader |
 | `makeProxy(path, duration)` | `ffmpeg:proxy` | 獨立預覽 Proxy |
@@ -185,7 +191,11 @@ API 前綴皆為 `window.subtool`。`isDesktop` 是值；`getFilePath(file)` 只
 | `compressSpeechAudio(bytes, requestId)` | `speech:compressAudio` | 44–20,000,000 bytes WAV／typed array |
 | `cancelSpeechAudioCompression(requestId)` | `speech:cancelCompression` | 同工作辨識壓縮取消 |
 | `exportVideo(opts)` | `ffmpeg:exportVideo` | 凍結交付快照的逐份准入 |
-| `prepareDeliveryTargets(paths)`、`releaseDeliveryTargets(id)` | `delivery:prepareTargets`、`delivery:releaseTargets` | 建立及釋放同視窗的批次目的檔預檢收據 |
+| `beginDeliveryTargetRequest(requestId)` | `delivery:beginTargetRequest` | 為同 sender 的準備請求取得單次 ticket |
+| `prepareDeliveryTargets(paths, requestId, ticket)` | `delivery:prepareTargets` | 以原請求與 ticket 建立批次目的檔預檢收據 |
+| `cancelDeliveryTargetRequest(requestId, ticket)` | `delivery:cancelTargetRequest` | 撤銷該次準備，等待中的舊結果不得取得新資格 |
+| `finishDeliveryTargetRequest(requestId, ticket)` | `delivery:finishTargetRequest` | 結束原準備請求及其剩餘收據 |
+| `releaseDeliveryTargets(id)` | `delivery:releaseTargets` | 釋放同視窗持有的批次預檢收據 |
 | `stopExport(jobId)` | `ffmpeg:stopExport` | 停止指定交付，與 intake 取消分開 |
 | `openQueueMonitor()` | `queue:openMonitor` | 顯示佇列視窗 |
 | `queueResume()` | `queue:resume` | 恢復排程 |
@@ -235,6 +245,7 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `stopJob(id)` | `queue:stopJob` | 停止 |
 | `retryJob(id)` | `queue:retryJob` | 重試 |
 | `retryWithOutputDirectory(id)` | `queue:retryWithOutputDirectory` | 系統選取原輸出資料夾、重新授權並重試；回 `retried`／`cancelled`／`failed` 與訊息 |
+| `retryWithOutputConfirmation(id)` | `queue:retryWithOutputConfirmation` | 舊交付重新選定輸出檔，核對內容、覆寫同意及既有 lease 後重試 |
 | `clearJob(id)` | `queue:clearJob` | 移除可清工作 |
 | `clearCompleted()` | `queue:clearCompleted` | 清完成紀錄 |
 | `reorderJob(id, newIndex)` | `queue:reorderJob` | 排隊順序 |
@@ -272,17 +283,27 @@ Callback 包裝不把 Electron event 交給頁面。部分 API 替換舊 listene
 
 Runtime 接受 probe 結果，建立 720p 預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。
 
+Renderer 的 `MediaIntakeJobs` 分別持有在途請求與可重試的失敗／停止紀錄。停止立即撤銷原 session 的結果資格，保留可核對的保存紀錄；重試建立新請求，先比對原母素材證據及工作區／片段來源資格。載入後的來源指紋在註冊當下凍結，不能在重試時把已原地換檔的片段當成原來源。串流 IPC 先回可播網址、之後轉檔失敗時仍保留重試入口；網址、metadata、初始定位或音訊載入失敗也須回報終態，不能留下永久 `working` 的恢復紀錄。公開入口與競態回歸見[產品驗收](開發與驗證.md#46-產品驗收與證據)。
+
 `ffmpeg:prepareSourceWaveform` 優先供應來源波形，使用獨立 coordinator 與相同 session／request 取消契約，退出時也等待程序 close。桌面 bridge 以 `sourceWaveformContinuous` 宣告連續處理能力，renderer 傳 `continuous:true`、整份來源時長及音訊配置，不能同時傳分段範圍。有效完整波形可直接沿用；沒有時由一次 FFmpeg 連續解碼成 4000 Hz Mono、16-bit PCM，經有背壓的 stdout 交給 worker。混音、來源時鐘與尾端整數 sample 補零／裁切沿用既有規則。低優先序、單 decoder／filter thread 及隱藏 console 不改變音訊內容或取消關閉屏障。
 
-`continuous-waveform-cache.js` 在 `.subtool_Cache/<key>/continuous-waveforms/<規格與工作識別>/` 保存一個 `partial.wav` 與原子更新的 `checkpoint.json`。每五秒來源 PCM 寫入並同步保存後，才把該範圍的峰值交給 renderer；未提交的尾端不算已完成。完成時核對全部樣本與 SHA-256，關閉 writer、重核同一檔案，原子改名為 `wave.wav` 並發布完成紀錄；Proxy intake 沿用這份波形，不再次產生混音 WAV。側車不可寫時沿用中央快取退路；這不把本機退路宣稱為跨電腦共享。
+`continuous-waveform-cache.js` 在 `.subtool_Cache/<key>/continuous-waveforms/<規格與工作識別>/` 保存一個 `partial.wav` 與原子更新的 `checkpoint.json`。每五秒來源 PCM 寫入並同步保存後，才把該範圍的峰值交給 renderer；未提交的尾端不算已完成。partial 的 WAV header 預告最終總樣本數，讀取只能採信 checkpoint 確認的前綴，不能當成完整 WAV。完成時關閉 writer，重核同一檔案及完整 PCM SHA-256，原子改名為 `wave.wav` 並發布完成紀錄。
 
-保存規格綁定共享來源證據、混音／時鐘版本、音訊配置及總 sample 數。新工作核對已保存前綴的完整 SHA-256，再複製到自己的 writer 世代；不接管或覆寫另一台電腦的 writer。續算先從完成點前的短範圍解碼並逐樣本比對接點；若 decoder／resampler 的歷史造成不一致，回到來源起點核對既有前綴後再追加，不能拼接錯位 PCM。因而不同格式的續算成本可能不同。取消、正常退出或程序中斷均保留已提交進度，啟動孤兒清理也保留；使用者明確清除全部快取時仍依既有語意清除，並等待在途 writer 收尾。所有完整內容驗證與有界 PCM 讀寫都在 worker，波形證據不替 Proxy 或逐聲道快取作整份母素材認證。
+一般 `ingest` 與 `streamIngest` 的共同計畫都必須帶 `duration`；沿用波形時核對 `round(duration * 4000)`、音訊配置、原共享來源證據及 wave 檔案快照。worker 完成結果將原證據交回 main，不以之後新取得的來源指紋替舊 wave 認證。同目錄直接引用正式 wave，必要時在持有來源資格下複製；完成 metadata 保存相對路徑，下一個 runtime 可沿用。完整波形已命中時不再輸出第二份混音 WAV；這不省略仍缺少的 Proxy 或逐聲道音訊。
+
+側車不可寫時沿用中央快取退路；key 目錄可寫但連續波形子目錄開啟遇到 `EACCES`／`EPERM`／`EROFS`／`ENOSPC`，也只在開始寫入前重試中央快取。來源或目錄身分失效不適用退路；開始保存後的寫入失敗明確回報並保留既有 checkpoint，不假報完成。中央退路不是跨電腦共享。`ignoreCached:true` 建立新的 writer 世代，不沿用舊前綴或完成檔，也不刪除舊成果。
+
+保存規格綁定共享來源證據、混音／時鐘版本、音訊配置及總 sample 數。完整命中驗證 PCM SHA-256 後唯讀交接，不另建 writer；partial 命中則核對已保存前綴，再複製到自己的 writer 世代，不接管或覆寫另一台電腦的 writer。續算以整數 sample 決定完成點前三秒的整秒解碼起點，逐樣本比對已保存的最後一秒；若 decoder／resampler 歷史造成不一致，最多回來源起點一次，核對全部既有前綴後再追加，不能拼接錯位 PCM。不同格式的續算成本因此可能不同。
+
+取消、正常退出或程序中斷均保留已提交進度，啟動孤兒清理也保留；使用者明確清除全部快取時仍依既有語意清除，並等待在途 writer 收尾。波形準備期間的完整內容驗證與有界 PCM 讀寫在 worker；主程序仍負責准入、交接及快取清理，不能把 worker 架構解讀為主程序完全沒有同步檔案核對。波形證據不替 Proxy 或逐聲道快取作整份母素材認證。
 
 舊 bridge 的分段 interface 與 `source-waveform-cache.js` 保留相容：首段 5 秒、第二段補到 60 秒，後續每段最多 60 秒，以 `.swc` 保存完成片段及其 SHA-256。新連續工作不再按分鐘建立 `.swc`；既有完整 ingest 波形仍可直接重用。清理私有交接檔不能刪除持久的分段或連續波形。
 
 來源 MIX 波形的每個原始聲道等權，跨 stream 合併時依全部聲道總數平均；較短 stream 的尾端視為靜音，不隨剩餘 stream 數量重新正規化。正式快取以 `waveMixVersion` 標示此規格；缺少標記的多 stream 舊波形不再沿用，但保留原檔、Proxy 與逐聲道，優先波形可先從母素材產生，正式 intake 只補建缺少的波形成品。已知聲道配置完整的單 stream 舊波形可繼續使用；聲道識別缺失、重複或不連續時，即使帶版本標記也不能把波形當作已證明的新規格。各 publication 依自己的配置獨立核對。
 
-Renderer 在可用主素材註冊後啟動波形；mpv 背景 intake 與無 mpv 的串流退路都先完成同來源優先波形，再開始 Proxy 的來源驗證與轉檔。無 mpv 時先顯示獨立唯讀來源波形，不提早提交正式片段。同一來源的切片共用準備工作。`MediaIntakeJobs` 只把增量峰值交給仍持有同一 session／request 的 consumer，不把大批峰值留在狀態列快照；`source-waveform-progress.js` 核對連續 sample、100 Hz 桶界線、總長度及來源 key，換檔或失敗只撤回仍屬本輪的結果。已顯示全片峰值仍須等 WAV 正式保存成功，才能啟動 Proxy；連續波形保存失敗時保留可續算成果並回報，不接著啟動重轉檔。
+mpv／原生直讀可在主素材註冊後啟動背景波形；需要先做 intake 的 HTML 路徑則先顯示獨立唯讀來源波形，不提早提交正式片段。這包含非原生串流退路、單 stream 多聲道與沒有 `streamIngest` 的一般退路，均先完成同來源波形再做 Proxy／聲道 intake；同來源切片共用準備工作。`MediaIntakeJobs` 只把增量峰值交給仍持有同一 session／request 的 consumer，不把大批峰值留在狀態列快照。`source-waveform-progress.js` 核對連續 sample、100 Hz 桶界線、總長度及來源 key，換檔或失敗只撤回本輪結果。已顯示全片峰值仍須等 WAV 正式保存成功，不能提前啟動 Proxy；保存失敗時回報並保留可續算前綴。
+
+`task-progress.waveform` 帶 `sourceKey`、`startSample`、`sampleRate:4000`、`resolution:100`、min/max 成對的 `peaks`、`completedSamples` 及 `totalSamples`。每桶 40 個 sample；除最後尾段外，起訖都對齊桶界線。恢復先從 sample 0 重送已確認前綴，再追加新峰值；完整快取可不發增量，renderer 由正式 WAV 有界分段計算峰值。`completedSamples === totalSamples` 是資料進度，不是成功終態；最後仍需完成結果與同一 request 的資格。
 
 來源波形私有檔交接後，主程序保留原檔與父目錄身分，跨 IPC 清理前重核；失權或已刪除的路徑保留撤銷紀錄，同一 runtime 不重用該名稱。退出前另核對啟動時的暫存根；根或波形所有權無法確認、writer 尚未關閉時，保留整個暫存根，不遞迴清理。正常情況仍回收私有暫存；身分檢查與刪除不是作業系統的原子操作。
 
@@ -290,7 +311,7 @@ Renderer 在可用主素材註冊後啟動波形；mpv 背景 intake 與無 mpv 
 
 舊式 `ffmpeg:proxy`、`ffmpeg:extractAudio`、`ffmpeg:waveAudio` 的未交接輸出由 `produceTemporaryFile()` 持有：在私有暫存根以 `wx` 保留檔案，記錄 dev／ino，讓 FFmpeg 透過持有的描述元寫入並等待 writer 結束。整項工作失敗時只清除仍屬本次的檔案；extract 的 copy→AAC 退路屬同一交易，不在中間失敗時清檔。成功才交出路徑並保留所有權紀錄供 renderer 清理；退出時只回收仍能確認歸屬的檔案，未知或已替換的內容及非空暫存根會保留。舊式 Proxy 在完整轉檔後才交接，這條描述元寫入路徑不啟用 `faststart`；新式串流路徑不受此變更影響。
 
-音訊平衡、來源波形及辨識壓縮共用 `withTemporaryDescriptor()`，由 `temporary-output-ownership.js` 開啟與關閉輸出 handle，核對父目錄、路徑及 handle 的同一檔案身分。多遍處理可在每一遍前後重核，不能只核對整項工作的起訖；工作結束後撤銷該核對資格，close 失敗不得回報完成。來源證據、取消、聲道、來源時鐘、PCM 長度及交接仍由各領域 caller 持有，輸入 stdin 與讀取 position 不併入輸出 handle 的規則。
+音訊平衡、舊式私有來源波形及辨識壓縮共用 `withTemporaryDescriptor()`，由 `temporary-output-ownership.js` 開啟與關閉輸出 handle，核對父目錄、路徑及 handle 的同一檔案身分；連續波形的持久 writer 則由 `continuous-waveform-cache.js` 管理。多遍處理可在每一遍前後重核，不能只核對整項工作的起訖；工作結束後撤銷該核對資格，close 失敗不得回報完成。來源證據、取消、聲道、來源時鐘、PCM 長度及交接仍由各領域 caller 持有，輸入 stdin 與讀取 position 不併入輸出 handle 的規則。
 
 來源證據包含完整路徑、size／mtime／ctime／dev／ino 及前／中／尾段取樣。讀取前後核對檔案身分，來源途中替換或截斷即拒絕。這不是整檔 checksum，也不授權路徑。各 owner 仍持有自己的 namespace、規格與 capability／realpath 檢查；`source-v3` 隔離未依影片時鐘對齊的舊 intake。
 
@@ -310,7 +331,9 @@ Runtime 只在既有 sidecar／中央快取根目錄內搜尋可攜 metadata；�
 
 中央快取根在可信啟動建立後記錄實體目錄身分；側車根於首次准入或建立後核對來源父目錄並保存身分。根被替換、側車根為 junction／symlink，或已登記祖先失權時，不以後來的同名目錄重新授權。舊式逐檔清理也核對原根與父層；來源波形另核工作檔身分與撤銷紀錄，不能以 8.3 別名繞過。
 
-中央快取與共享 sidecar 清理在原根內隔離候選，以有界並行的非同步分塊讀取核對完整內容；整棵候選准入後逐檔再核內容、身分與資格並刪除，不等待其他大檔讀完才處理已核對的小檔。啟動孤兒清理在背景執行；同素材匯入、串流與波形工作會等待相衝突的清理，不同來源不因無關清理等待。來源尚無 sidecar 時也從清理開始保護該來源，不能讓晚到掃描刪除新建波形。匯入與清理均跨 await 重核來源、根及 writer 資格。
+`cache:info` 的可選來源參數先經讀取權限守衛；桌面查詢使用既有 waveform worker 的唯讀 `cache-info` 工作，無素材的中央統計也不在 main 同步掃描。sidecar 描述只核對來源、目錄、checkpoint 與檔案大小，回報 `verified:false`，不為開資訊視窗掃描完整 PCM。它不取代續算時的內容驗證，也不授權刪除；查詢失敗與沒有紀錄分開顯示。工作登記在 runtime 的關閉／取消屏障，不能留下退出後才回覆的 worker。
+
+中央快取與共享 sidecar 清理在原根內隔離候選，以有界並行的非同步分塊讀取核對完整內容；整棵候選准入後逐檔再核內容、身分與資格並刪除，不等待其他大檔讀完才處理已核對的小檔。啟動孤兒清理在背景執行，一般 ingest／串流等待與來源相衝突的清理。背景波形開始前則凍結並等待當時全部清理；後來開始的清理等待當時在途的波形工作，避免 main 與 worker 交錯讀寫。來源尚無 sidecar 時也保護該來源，不能讓晚到掃描刪除新建波形。匯入與清理均跨 await 重核來源、根及 writer 資格。
 
 清理快照最多 20,000 項、2,048 個目錄、48 層；超限、讀取不確定、身分變更或活躍項目予以保留並回報部分完成，釋放位元組數只計實際刪除的內容。隔離項還原前核對原實體與目標位置，無法安全還原時保留隔離資料；讀取 handle 關閉失敗由 runtime 持續追蹤並可重試。關閉中及關閉後拒絕新清理；resume 須先等待或重試 handle 收尾，較新的 close 撤銷等待中的舊 resume。核對、隔離與刪除仍是分開的檔案系統操作，不能保證消除外部程序在最後核對與 unlink 間寫入的競態。快取資訊無法核對時回報不可用，不假報零容量。
 
@@ -365,7 +388,7 @@ Direct 與交付佇列的每次執行都以獨立隨機名稱及 `wx` 建立記�
 
 終態事件可能先於 IPC 回覆：狀態列可以結束顯示，但尚未交接的回覆仍須留在 session 的取消集合。開始、進度、終態與交接通知可能同步觸發換專案；發送通知後再核對工作資格，失權時不得啟動或交出舊工作，也不能派發舊完成事件。狀態列接通知時讀取目前工作快照，避免巢狀通知倒退顯示。
 
-Intake 進度以 `stage` 區分快取檢查、母素材內容驗證與轉檔；未知分母使用 `pct:null`，不補造百分比，切換階段時重設剩餘時間估算。Renderer 的 `MediaIntakeJobs` 也持有本機波形準備工作，其取消與晚到結果同樣受 session／request 歸屬限制；波形讀取及整理與聲道 metadata 載入並行。狀態列保留仍持有的背景進度，一般訊息及播放操作不能覆蓋；錯誤仍可提示，匯出的進度鎖優先，解鎖後恢復目前背景工作。
+Intake 進度以 `stage` 區分快取檢查、母素材內容驗證與轉檔；未知分母使用 `pct:null`，不補造百分比，切換階段時重設剩餘時間估算。Renderer 的 `MediaIntakeJobs` 也持有本機波形準備工作，其取消與晚到結果同樣受 session／request 歸屬限制；實際先後由各載入 owner 決定，連續來源波形必須在同來源 intake 前完成。狀態列保留仍持有的背景進度，一般訊息及播放操作不能覆蓋；錯誤仍可提示，匯出的進度鎖優先，解鎖後恢復目前背景工作。
 
 同來源先完成優先波形，再顯示 Proxy 驗證或轉檔進度；若不同來源的背景工作同時存在，狀態列仍能並排顯示各自階段及百分比。完整標籤、容量及各自估計時間保留在 tooltip 與無障礙狀態文字，狹窄空間保留取消按鈕。
 
@@ -471,7 +494,7 @@ Windows filtergraph 路徑由既有兩層跳脫處理，包含逗號、單引號
 
 #### Proxy 的 GPU 路徑
 
-背景 `ingest` 與 `streamIngest` 依實際選中的 encoder 及同一來源的 probe 描述選路徑。NVENC 可用時，將相容 SDR YUV 的縮放交給 CUDA；音訊拆聲道、AAC 及波形仍在同一次 FFmpeg 中完成，沒有另開一輪影片轉檔。
+背景 `ingest` 與 `streamIngest` 依實際選中的 encoder 及同一來源的 probe 描述選路徑。NVENC 可用時，將相容 SDR YUV 的縮放交給 CUDA；仍缺少的逐聲道 AAC 與 Proxy 在同一次 FFmpeg 中完成。已由優先工作保存的來源波形直接沿用，只有未命中相容波形才加入 WAV 輸出，不另開一輪影片轉檔。
 
 | 來源／條件 | 優先路徑 |
 |---|---|
@@ -586,6 +609,8 @@ mpv 的 `screenshot-to-file` 會覆寫既有同名檔；main 不把 renderer 提
 
 每份交付使用凍結快照、自己的 FFmpeg 程序；同輸出路徑只有一個 live job，跨程序由 `output-leases/*.lock/owner.json` 保護。決策與代價見 [ADR-0001](adr/0001-每份交付各自一個-ffmpeg-程序.md)。重啟先確認舊程序停止、復原 journal／lease、清本工作私有半成品，再恢復佇列。
 
+佇列的音訊摘要由該工作凍結的 `audioPlan` 與已驗證的 `projectBusOrder` 產生，跨 prepare、持久化、恢復及完成歷史保留提交時的 A 軌編號；不讀目前專案的配線補造摘要。舊紀錄缺少此資料時明示未記錄。畫面上的「暫停後續工作」只停止派發新 runner，已執行工作繼續至自己的終態。
+
 沒有 `outputAuthority` 的舊工作仍保留凍結 payload／ASS，但不憑原路徑自動授予目前同名目錄的寫入權。`retryWithOutputDirectory` 只收 job id，由 main 取得原父目錄；選擇後核同一 job 物件、attempt、status、payload／outPath 與退出狀態，再比較所選目錄和原父目錄的 canonical 路徑及 `dev`／`ino`。因此 8.3 短名／junction 與同一實體長路徑可相容，但不能藉此搬移工作。成功重試才將新證據隨新 attempt 持久化；取消保留原工作。queue renderer 跨重繪保留 pending 互斥，失權的晚到結果不覆寫新 attempt，普通 retry false 也須顯示失敗。
 
 一般重試必須先核對工作原有的完整目錄身分；上層資料夾授權不能自動接納同名替換的子目錄。缺少或失去原證據時，需透過原資料夾選擇器明確重授權；重選資料夾不等於同意覆寫其中較新的目的檔，仍保留原目的檔證據。
@@ -620,6 +645,10 @@ mpv 的 `screenshot-to-file` 會覆寫既有同名檔；main 不把 renderer 提
 | App 無法啟動 | native 檔案、shared 封裝、main 啟動錯誤 |
 | 工具找不到 | status、mpv.detect、平台路徑及實際打包內容 |
 | 素材反覆重轉 | 指紋、前／中／尾取樣、cache 完整性與暫時 I/O 錯誤 |
+| 波形中斷後重算 | `checkpoint.json` 的來源規格與已確認 sample／SHA、續算 overlap 是否失配；安全回起點與快取遺失須分開判讀 |
+| 波形完成後又產生 WAV | wave 交接原來源證據、一般／串流 request 的 duration、音訊配置，以及實際 FFmpeg argv 是否仍映射 wave 輸出 |
+| 波形或驗證讓畫面卡頓 | worker／main 責任、source 指紋讀取次數、stdout 背壓及 renderer 分段計算；區分 native 解碼與診斷工具自身負載 |
+| NAS 驗證很久 | `sourceContent.format`、shared-file 與完整 SHA 分支、receipt 及實際 processedBytes；完整波形 SHA 不等於重讀整份母素材 |
 | 換專案仍等舊 Proxy | renderer 新 session／取消 IPC、coordinator owner、native close 及晚到准入 |
 | Proxy 取消誤報失敗 | 本地撤銷資格、INGEST_SUPERSEDED、progress session/request |
 | 串流黑畫面 | readiness、HTTP Range／lease、writer／reader、實際 presenter |
@@ -627,6 +656,8 @@ mpv 的 `screenshot-to-file` 會覆寫既有同名檔；main 不把 renderer 提
 | 字幕三路不同 | effStyle、PlayResY 高度縮放、ASS alignment／family／跳脫 |
 | 圖框可見不能拖 | guide 是否錯接滑鼠、renderer imageLayer 與讓位 |
 | 音訊或尾音不符 | 母素材、來源時鐘、source→bus→stream、成品 PCM |
+| 跳轉後短暫疊音 | native mute ACK、全部 element／overlap voice 的共同 readiness 與 commit，見 [FPS 排查](FPS_時碼一致性.md#proxy-跳轉後短暫回音原地暫停再播恢復) |
+| 自動備份留下 `.tmp` | 原目錄資格、write／sync／close 後身分與完整 SHA；SMB 正常關檔時間更新及外部修改須分別判定，保留失敗證據 |
 | 成品路徑無法重試 | 原輸出資料夾授權與 dev／ino、live job、stopping journal、native PID、output lease；舊 lease 缺身分時保留並依使用說明改檔名重送 |
 | 關閉後有半成品 | watchdog／artifact log、owner.json、close 及復原狀態 |
 | 本機資源被阻擋 | capability／token／Range，不關 webSecurity |

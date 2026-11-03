@@ -981,6 +981,7 @@ export function toggleOverwriteMode({ force } = {}) {
   });
   document.querySelectorAll('.ow-keep-btn').forEach(btn => {
     btn.classList.toggle('inactive-mode', !State.overwriteMode);
+    btn.disabled = !State.overwriteMode;
   });
   setStatus(`覆蓋模式：${State.overwriteMode ? '解鎖 (可自由重疊)' : '鎖定 (不可覆蓋)'}`, 'ok');
   saveConfig();
@@ -989,13 +990,14 @@ export function toggleOverwriteMode({ force } = {}) {
 /**
  * 切換字幕重疊時的行為（保留起點推移 vs 裁切直接截斷）。
  * 
- * 附帶防禦：上字幕模式（subMode）期間強制維持保留後方字幕。
+ * 附帶防禦：未開啟覆蓋時不接受使用者切換；上字幕模式期間強制維持保留後方字幕。
  * 
  * @param {object} [options]
- * @param {boolean} [options.force=false] 是否忽略 subMode 限制強制切換
+ * @param {boolean} [options.force=false] 是否供上字幕模式保存／還原時略過限制
  */
 export function toggleOverwriteKeep({ force } = {}) {
   if (State.subMode && !force) { setStatus('上字幕模式中強制保留後方字幕', 'err'); return; }
+  if (!State.overwriteMode && !force) return;
   State.overwriteKeep = !State.overwriteKeep;
   document.querySelectorAll('.ow-keep-btn').forEach(btn => {
     btn.textContent = State.overwriteKeep ? '保留' : '裁切';

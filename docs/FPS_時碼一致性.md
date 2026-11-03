@@ -92,6 +92,8 @@ PCM 音訊另有自己的解碼起點。`AudioEngine.decodeSourceAudioData()`／
 
 AAC active edit 已丟棄的編碼樣本、Opus 已消耗的 pre-skip 不能再次位移；Opus 解碼原點與 HTML block／CodecDelay 時鐘分開。已對齊 buffer 及其 Mono 副本保留原點標記，避免重複換算。驗證比較解碼樣本與原生 PCM，不能只看長度或是否有聲音。
 
+連續來源波形以 `round(duration * 4000)` 個整數 sample 定義完整範圍，每 40 個 sample 形成一個 100 Hz min/max 桶；這是來源顯示資料，不使用專案影格格網裁切或作播放時鐘。續算仍沿各 stream 的來源原點與固定混音權重，必須比對保存前綴與接點的實際 PCM；單純以秒數 seek 成功不能證明 resampler 相位相同。保存與退路的完整契約見 [Electron 維護手冊：媒體 intake](Electron_維護手冊.md#媒體-intake)。
+
 #### MOV 延後片長與定位所有權
 
 MOV 的 HTML duration 可能讀到後段 PTS 後才延長。HTML adapter 保留初期被截斷的 seek 目標，在可達範圍真正擴大時重送；尚未完全到達也須讓解碼器繼續讀 metadata。同值事件不重複定位，最終仍由實際畫格 callback 確認；換來源、transport 或取消後撤銷重試，逾時不能回報成功。
@@ -166,10 +168,14 @@ sequenceDiagram
   S->>P: 暫停 presenter，映射來源時間並要求畫格
   P-->>S: 配對的實際呈現證據
   S->>M: 提交呈現位置
+  M->>R: 固定同一次來源與時間軸目標
+  R->>A: 定位整組 element 與 overlap voice
+  A-->>R: 全部可播，仍不發聲
+  R-->>M: 準備完成或明確失敗
   M->>P: 依最新意圖要求播放
   P-->>M: 接受起播，或回報失敗
-  M->>R: 資格仍有效才提交起播
-  R->>A: 起播一次
+  M->>R: 重核實際時鐘、來源與播放資格
+  R->>A: 提交整組起播一次
   R->>R: 記錄同次外音活動狀態
 ```
 
@@ -178,6 +184,8 @@ sequenceDiagram
 播放中跳轉時，`Media.seek()` 在定位外音及發出同步通知前，先停止舊 buffer、element 與疊合 clone；同步重入若產生較新的定位，舊呼叫不得繼續。mpv 的暫停由呈現 session 控制，不在這個提前停止步驟另送暫停命令。
 
 音訊只能在實際畫格完成後起播或校正；有播放器的路徑還須確認起播被接受，兩者是不同證據。`Media.startElementSources()`／`startBufferSources()` 會拒絕播放轉換等待中的背景重啟，避免聲道接管、來源切換先播放一次，畫格抵達後又從相同位置起播。Media 的內部 playback runtime 在 element 起播提交時記下同次外音活動狀態，避免下一個 tick 把剛播放的音訊重新定位；外音進出片段或配線變更仍須正常偵測。起播與晚到回覆的責任見[技術架構](技術架構說明.md#播放聲音的唯一-owner)，呈現節流的取捨保留在 [ADR-0003](adr/0003-倒帶以實際呈現畫格節流.md)。
+
+畫格已到達、音訊全部可播及 presenter 接受起播是三份證據。音訊準備固定目標，不能逐聲道追逐仍前進的時鐘；延遲 ACK 跨過作用中片段或同步容差時，最多依同一次實際來源／時間軸時鐘重建整組準備一次。`prepareElements().ready` 不觸發播放，準備或 commit 失敗也不能當成成功續播。pause、新 seek、換來源或 reset 撤銷整次資格，包括晚到的 play Promise。
 
 跳轉前後若最上層仍是同一影片，但底層音訊片段的疊合範圍改變，起播前先依目標時間套用音軌並記錄相同的作用中片段集合，避免第一個 tick 再重播剛起播的聲音。播放器接受起播的回覆可能晚於片段邊界；若回覆時的實際時間軸位置已跨越邊界，先以同一刻的來源與時間軸時間更新音軌，確認原播放目標仍有效後才啟動 follower。同步通知若建立較新的定位，舊工作不得繼續起播。相關回歸以受控音訊節點核對來源位置、倍率及停止時序，不能代替使用者設備上的實際聆聽。
 
@@ -210,16 +218,17 @@ mpv 確認目前來源的連線中斷時，影片播放及等待中的呈現工�
 | `media-presentation-core.js` | 請求、取消、pending、播放意圖及畫格 hold |
 | `media.js` | `displayTime()`、presenter 選擇、來源切換與音訊生命週期 |
 | `media-playback-runtime.js` | Media 內部片段接續、配線及音訊起播活動的共同 owner |
+| `audio-engine.js`、`audio-placement-playback.js` | 固定來源／時間軸目標的整組聲道準備、commit、取消及獨立 overlap voice |
 | `media-player-adapter.js` | HTML／mpv 操作、來源時鐘及延後定位 |
 | `transport-controller.js` | 逐格、JKL、倒帶 session、字幕導航及按鍵當下的 In／Out |
 | `timeline-interaction-engine.js` | jump／drag 意圖；不私建播放器時鐘 |
 | `media-loader.js` | 載入與 mpv listener 的工作資格 |
 | `media.js` 的 `observeMpvEvent()` | mpv 來源讀數、暫停抖動與播放狀態裁定 |
-| `decode/demux.js`、`source-frame-index.js` | 實際 CTS 呈現區間及有界索引 |
+| `decode/demux.js`、`decode/source-frame-index.js` | 實際 CTS 呈現區間及有界索引 |
 | `decode/player.js` | 各可見層畫格證據及完整 Canvas 發布 |
 | `timeline-renderer.js` | 時間軸刻度與播放點的同源顯示 |
 | `delivery-list.js`、`delivery-job.js` | 凍結起點、逐列格率及交付範圍 |
-| `electron/main.js`、`queue-preload.js`、`queue.html` | 佇列片長的精確格率純值 adapter |
+| `electron/main.js`、`electron/queue-preload.js`、`electron/queue.html` | 佇列片長的精確格率純值 adapter |
 | `electron/export-plan.js` | 輸出有理數格率與轉碼；H264-MP4 不猜測來源 copy 資格 |
 
 ## 5. 常見失敗
@@ -240,6 +249,10 @@ mpv 確認目前來源的連線中斷時，影片播放及等待中的呈現工�
 
 檢查 session 的最新播放意圖、`playback-restart` 配對及背景音訊起播資格。等待期間的 pause ack 不得清掉較新的 play，背景來源也不得提前起播。
 
+### Proxy 跳轉後短暫回音，原地暫停再播恢復
+
+先核對同源 native 是否完成靜音交接，再量各聲道與 overlap voice 的定位完成、可播資料及同組起播時刻。`currentTime` 相同但其中一軌尚在 seek／buffering，仍可能讓聲道錯開；不能用原地重播正常來證明長距離跳轉正確。測試應延遲其中一軌的資料，核對所有聲道都有非零 PCM、相對位置一致且能持續播放。
+
 ### 純字幕專案播放點變了，預覽沒變
 
 沒有影片時仍須發布統一 seeked／playhead invalidation；消費端依 `displayTime()` 重繪，不能依是否存在 HTML video／mpv 決定要不要更新。
@@ -257,6 +270,7 @@ mpv 確認目前來源的連線中斷時，影片播放及等待中的呈現工�
 | PCM 原點及實際聲音位置 | `decodedSourceAudioClock.test.js`、`decodedSourceAudioClockNative.test.js` |
 | seek／背景起播及聲音數量 | `mediaPlacementAudio.test.js`、`audioScrubOwnership.test.js` |
 | Proxy 聲道跳轉回音、共同就緒與取消 | `proxyAudioHandoffEcho.test.js`、`audioElementStartReadiness.test.js` |
+| 波形 sample 原點、續算接縫與串流 Proxy 沿用 PCM | `continuousSourceWaveformNative.test.js` |
 
 保留三支真實素材矩陣：`V_MAMAMOO_FTR_24fps_51FM.mov`、`V_拼桌_FTR_24FPS_51FM+20FM_30P.mxf`、`V_心機特務_FTR.mp4`。核對中尾段長距離 seek、單格及快速交替、長按、seek 後立即 play／pause、JKL 多倍率、倒帶回母素材，以及畫面、播放點與監看 TC 的持續漂移。
 

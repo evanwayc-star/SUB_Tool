@@ -190,7 +190,14 @@ function _normalizeAudioPlan(raw, { requireStreams = true } = {}) {
     }
     return { id, name: _streamMetadataName(stream?.name), layout, busIds, spec };
   });
-  return { buses, streams, ...(raw.loudness ? { loudness: raw.loudness } : {}) };
+  // Read-only display evidence must survive admission and the runner's second
+  // normalization. It does not participate in channel selection or argv.
+  const order = raw.projectBusOrder;
+  const validOrder = Array.isArray(order) && order.length > 0 && order.length <= 32
+    && order.every(id => typeof id === 'string' && id.length > 0)
+    && new Set(order).size === order.length && buses.every(bus => order.includes(bus.id));
+  return { buses, streams, ...(raw.loudness ? { loudness: raw.loudness } : {}),
+    ...(validOrder ? { projectBusOrder: order.slice() } : {}) };
 }
 function _planDuration(plan) {
   let end = 0;

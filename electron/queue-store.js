@@ -436,6 +436,45 @@ function finiteOr(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function audioSummary(payload) {
+  const plan = payload?.audioPlan;
+  if (!plan) {
+    const saved = payload?.audioSummary;
+    return typeof saved === 'string' && saved.length > 0 && saved.length <= 8192 ? saved : undefined;
+  }
+  const order = plan.projectBusOrder;
+  if (!Array.isArray(order) || !order.length || order.length > 32
+    || order.some(id => typeof id !== 'string' || !id) || new Set(order).size !== order.length) return undefined;
+  const buses = plan.buses;
+  if (!Array.isArray(buses) || !buses.length || buses.length > 32) return undefined;
+  const ids = buses.map(bus => bus?.id);
+  if (new Set(ids).size !== ids.length || ids.some(id => !order.includes(id))) return undefined;
+  const mapping = (selected, labels) => selected.map((id, index) => `${labels?.[index] || `Ch ${index + 1}`} ← A${order.indexOf(id) + 1}`).join('、');
+  if (payload.format === 'wav') {
+    const title = ids.length === 1 ? 'Mono' : ids.length === 2 ? 'Stereo' : `${ids.length} 聲道`;
+    return `${title} WAV · ${mapping(ids, ids.length === 2 ? ['左', '右'] : null)}`;
+  }
+  const layouts = {
+    mono: { title: 'Mono', labels: ['Ch 1'] },
+    stereo: { title: 'Stereo', labels: ['左', '右'] },
+    stereoLtRt: { title: 'LtRt', labels: ['Lt', 'Rt'] },
+    '5.1': { title: '5.1', labels: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'] },
+  };
+  if (!Array.isArray(plan.streams) || !plan.streams.length || plan.streams.length > 32) return undefined;
+  const assigned = new Set();
+  const parts = [];
+  for (const stream of plan.streams) {
+    const layout = typeof stream?.layout === 'string' && Object.hasOwn(layouts, stream.layout) ? layouts[stream.layout] : null;
+    const selected = stream?.busIds;
+    if (!layout || !Array.isArray(selected) || selected.length !== layout.labels.length
+      || selected.some(id => !ids.includes(id) || assigned.has(id)) || new Set(selected).size !== selected.length) return undefined;
+    selected.forEach(id => assigned.add(id));
+    const name = typeof stream.name === 'string' ? stream.name.trim().slice(0, 120) : '';
+    parts.push(`${layout.title}${name ? `（${name}）` : ''} · ${mapping(selected, layout.labels)}`);
+  }
+  return parts.join(' / ');
+}
+
 function toHistoryEntry(job) {
   if (!job || typeof job.id !== 'string' || !job.id) return null;
   const outPath = job.payload?.outPath;
@@ -458,6 +497,7 @@ function toHistoryEntry(job) {
         ? job.payload.subtitleTracks.filter(n => typeof n === 'string')
         : undefined,
       timecodeWatermark: job.payload?.timecodeWatermark ? { start: null } : null,
+      audioSummary: audioSummary(job.payload),
     },
   };
 }
@@ -540,6 +580,7 @@ const QueueHistory = Object.freeze({
   MAX_ENTRIES,
   historyPath,
   toEntry: toHistoryEntry,
+  audioSummary,
   load: loadHistory,
   save: saveHistory,
   append: appendHistory,

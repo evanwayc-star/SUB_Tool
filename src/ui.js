@@ -318,26 +318,42 @@ function _fmtBytes(n) {
 async function openCacheDialog() {
   const DESK = window.subtool;
   if (!DESK || !DESK.cacheInfo) { showToast('快取管理僅在桌面版可用'); return; }
+  const displayedSource=State.mediaPath||null;
   const loading = openModal('🗂 轉檔快取', '<div style="padding:6px 2px">讀取中…</div>', [{ label: '關閉', primary: true, act: closeModal }]);
   
   let info;
   try {
-    info = await DESK.cacheInfo();
+    info = await DESK.cacheInfo(displayedSource);
   } catch (e) {
     info = { unavailable: true };
   }
   
   if (!loading.isCurrent()) return;
+  if((State.mediaPath||null)!==displayedSource){loading.close();showToast('目前影片已變更，請重新開啟快取管理');return;}
   
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const summary = !info || info.unavailable === true
     ? '<div>無法確認中央快取狀態，請檢查快取目錄與權限。</div>'
     : `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>`;
+  const locations=info?.source?.path===displayedSource?info.source.locations||[]:[];
+  const sourceSummary=!displayedSource?'':`<div class="cache-source-summary"><b>目前素材</b><div>${esc(displayedSource)}</div>`+
+    (!info?.source||info.source.path!==displayedSource||info.source.unavailable?'<p>無法確認目前素材的快取紀錄，請檢查來源與目錄權限。</p>':locations.length?locations.map(location=>{
+      const wave=location.waveform||{};
+      const progress=Number.isSafeInteger(wave.completedSamples)&&Number.isSafeInteger(wave.totalSamples)
+        ?` ${ (wave.completedSamples/4000).toFixed(1)} / ${(wave.totalSamples/4000).toFixed(1)} 秒`:'';
+      const waveText=wave.state==='complete'?'紀錄已完成':wave.state==='partial'?'部分保存紀錄'+progress:wave.state==='unknown'?'無法確認':'未找到完成紀錄';
+      return `<div class="cache-source-location"><b>${location.kind==='sidecar'?'同資料夾快取':'本機中央快取'}</b>`+
+        `<div>${esc(location.directory)}</div><div>波形：${esc(waveText)}</div>`+
+        (Number.isSafeInteger(wave.bytes)?`<div>波形檔：${_fmtBytes(wave.bytes)}</div>`:'')+
+        `<div>Proxy：${location.proxy?'已有完整紀錄':'未找到完整紀錄'} · 聲道：${Number(location.channels)||0} 條</div></div>`;
+    }).join(''):'<p>尚未找到屬於目前素材的保存紀錄。</p>')+
+    '<p>此處只查保存紀錄與檔案大小；使用前重新驗證來源與內容，不代表已完成內容查核。</p></div>';
   const html =
     `<div style="padding:4px 2px;line-height:1.9">` +
+    sourceSummary+
     summary +
     `<div style="font-size:11px;color:var(--muted);word-break:break-all;margin-top:2px">${esc(info?.root || '')}</div>` +
-    `<div style="font-size:12px;color:var(--muted);margin-top:8px">說明：Proxy、聲道與波形優先保存在「影片同資料夾的 <code>.subtool_Cache</code>」內，無法寫入時使用本機中央快取。同一來源識別可沿用已完成的檔案；搬移、改名、換電腦或素材變更可能需要重建。快取不會因放了幾天而過期；缺件只補建缺少部分。此處管理的是本機的中央快取。</div>` +
+    `<div style="font-size:12px;color:var(--muted);margin-top:8px">Proxy、聲道與波形優先保存在素材同資料夾的 <code>.subtool_Cache</code>，無法寫入時使用本機中央快取。同一 NAS 來源可在核對後跨電腦沿用；中斷的波形可從有效檢查點續算。快取不因放置天數過期。「清理孤兒檔」只處理本機中央快取；「清除快取」包含所有中央快取及目前素材的同資料夾快取。</div>` +
     `</div>`;
     
   const buttons = [

@@ -98,6 +98,120 @@ let stepFrame;
 let jklReset;
 
 describe('desktop mother-source intake ownership', () => {
+  it('外部音訊停止後可續做原聲道工作，保留既有 asset 與 placement',async()=>{
+    const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
+    const path='C:/audio/external.wav',asset={id:'external',path,audioSrc:'ext-external',name:'external',dur:12,in:2,out:9,offset:4};
+    Media.externalAudioSources=[asset];window.subtool.mediaSourceKey=vi.fn(async()=>'a'.repeat(16));
+    let work,retry;
+    try{
+      work=Media.cacheExternalRoutingAudio(asset,path,12,[{channels:1}]);
+      await Media.cancelProxyJobs();await work;
+      const entry=jobs.snapshot().recoveries[0];expect(entry.path).toBe(path);
+      retry=jobs.retry(entry.id);await vi.waitFor(()=>expect(deskMock.ingest).toHaveBeenCalledTimes(2));
+      pending.get(path).resolve({channels:[]});await retry;
+      expect(Media.externalAudioSources).toContain(asset);expect(asset).toMatchObject({in:2,out:9,offset:4});
+      expect(jobs.snapshot().recoveries).toEqual([]);
+    }finally{Media.reset();for(const gate of pending.values())gate.resolve(null);await work;await retry;delete window.subtool.mediaSourceKey;}
+  });
+  it.each(['waveform','ingest'])('追加片段停止在 %s 後重試會完成波形與 Proxy，不只重算波形',async stage=>{
+    const {Seq}=await import('../src/sequence.js');
+    const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
+    const key='a'.repeat(16),waves=[],path='C:/media/secondary.mxf';
+    Media._registerPrimary({name:'main',path:'C:/main.mov',dur:2});
+    const clip=Seq.add({name:'secondary',path,dur:2,in:.2,out:1.8,offset:4});
+    window.subtool.sourceWaveformContinuous=true;window.subtool.mediaSourceKey=vi.fn(async()=>key);
+    window.subtool.prepareSourceWaveform=vi.fn(request=>{const gate=deferred();waves.push({request,...gate});return gate.promise;});
+    const finishWave=index=>{
+      jobs.progress({...waves[index].request,stage:'source-waveform',waveform:{sourceKey:key,startSample:0,completedSamples:8000,totalSamples:8000,
+        sampleRate:4000,resolution:100,peaks:Float32Array.from({length:400},(_,i)=>i%2?.5:-.5)},pct:100});
+      waves[index].resolve({wave:'saved-wave.wav',sourceKey:key,start:0,duration:2,complete:true,temporary:false});
+    };
+    let work,retry;
+    try{
+      work=Media._clipIngest(clip,{audio:[{channels:1}]});await vi.waitFor(()=>expect(waves).toHaveLength(1));
+      if(stage==='ingest'){finishWave(0);await vi.waitFor(()=>expect(pending.has(path)).toBe(true));}
+      await Media.cancelProxyJobs();await work;
+      const recovery=jobs.snapshot().recoveries.find(entry=>entry.path===path);expect(recovery).toBeDefined();
+      retry=jobs.retry(recovery.id);await vi.waitFor(()=>expect(waves).toHaveLength(2));finishWave(1);
+      await vi.waitFor(()=>expect(deskMock.ingest).toHaveBeenCalledTimes(stage==='ingest'?2:1));
+      pending.get(path).resolve({proxy:'C:/cache/secondary.mp4',channels:[]});await retry;
+      expect(State.clips).toContain(clip);expect(clip).toMatchObject({in:.2,out:1.8,offset:4,proxyUrl:'file:///C:/cache/secondary.mp4'});
+      expect(jobs.snapshot().recoveries).toEqual([]);
+    }finally{Media.reset();waves.forEach(wave=>wave.resolve(null));for(const gate of pending.values())gate.resolve(null);await work;await retry;
+      delete window.subtool.sourceWaveformContinuous;delete window.subtool.mediaSourceKey;delete window.subtool.prepareSourceWaveform;}
+  });
+  it.each(['retry','changed-source','new-workspace'])('公開載入停止後重新驗證再續算：%s',async mode=>{
+    const key='a'.repeat(16),waves=[];
+    deskMock.probe.mockResolvedValueOnce({duration:2,video:{codec:'h264',fps:25},audio:[{channels:6}]});
+    window.subtool.sourceWaveformContinuous=true;
+    window.subtool.mediaSourceKey=vi.fn(async()=>key);
+    window.subtool.prepareSourceWaveform=vi.fn(request=>{const gate=deferred();waves.push({request,...gate});return gate.promise;});
+    const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
+    let load,retry;
+    try{
+      load=Media.loadDesktopMedia('C:/media/resumable.mov');
+      await vi.waitFor(()=>expect(waves).toHaveLength(1));
+      expect(await Media.cancelProxyJobs()).toBe(true);await load;
+      const recovery=jobs.snapshot().recoveries[0];expect(recovery.path).toBe('C:/media/resumable.mov');
+      if(mode==='changed-source')window.subtool.mediaSourceKey.mockResolvedValue('b'.repeat(16));
+      if(mode==='new-workspace'){Media.reset();State.mediaPath='C:/new.mov';}
+      retry=jobs.retry(recovery.id);
+      if(mode!=='retry'){
+        expect(await retry).toBe(false);expect(waves).toHaveLength(1);expect(deskMock.ingest).not.toHaveBeenCalled();
+        if(mode==='changed-source')expect(jobs.snapshot().recoveries[0].message).toContain('母素材已變更');
+      }else{
+        await vi.waitFor(()=>expect(waves).toHaveLength(2));
+        expect(deskMock.ingest).not.toHaveBeenCalled();
+        // A fresh request owns resume. Old native completion cannot supply it.
+        waves[0].resolve({wave:'old.wav',sourceKey:key,complete:true,start:0,duration:2,temporary:false});
+        await Promise.resolve();expect(deskMock.ingest).not.toHaveBeenCalled();
+        expect(jobs.snapshot().recoveries).toEqual([]);
+        await Media.cancelProxyJobs();await retry;
+      }
+    }finally{
+      Media.reset();waves.forEach(wave=>wave.resolve(null));await load;await retry;
+      delete window.subtool.sourceWaveformContinuous;delete window.subtool.mediaSourceKey;delete window.subtool.prepareSourceWaveform;
+    }
+  });
+  it.each(['ready','newer-seek','new-workspace','source-replaced','url-rejected'])('重試完成的 Proxy 接回既有 HTML primary，保留編輯與播放目標：%s',async mode=>{
+    const {getPlayerAdapter}=await import('../src/media-player-adapter.js');
+    const {recordHistory}=await import('../src/history.js');
+    const path='C:/media/retry.mxf',url='http://127.0.0.1:8080/old-stream',gate=deferred();
+    const primary=Media._registerPrimary({name:'retry',path,web:{url},dur:12,in:1,out:11,offset:3,audioSourceId:'retry-source'});
+    primary.offset=3;
+    Media._setActiveStreamLease('old-retry-lease');
+    State.mediaPath=path;State.duration=13;domMock.video.src=url;
+    window.subtool.mediaSourceKey=vi.fn(async()=>'a'.repeat(16));
+    const adapter=getPlayerAdapter(),present=vi.spyOn(adapter,'present').mockImplementation(async time=>({backend:'html5',presentedSourceTime:time}));
+    const history=recordHistory.mock.calls.length;
+    try{
+      await Media.seek(4);
+      deskMock.fileURL.mockImplementationOnce(()=>gate.promise);
+      const work=Media._bgAudioIngest(path,[],12,primary,{needsProxy:true,restorePreview:true});
+      pending.get(path).resolve({proxy:'C:/cache/complete.mp4',channels:[]});
+      await vi.waitFor(()=>expect(deskMock.fileURL).toHaveBeenCalledWith('C:/cache/complete.mp4'));
+      if(mode==='newer-seek')await Media.seek(7);
+      if(mode==='new-workspace'){Media.reset();State.clips=[];State.mediaPath='C:/other.mov';}
+      if(mode==='source-replaced')primary.path='C:/replacement.mov';
+      if(mode==='url-rejected')gate.reject(new Error('無法授權 Proxy URL'));else gate.resolve('file:///C:/cache/complete.mp4');await work;
+      if(mode==='new-workspace'){
+        expect(primary.web.url).toBe(url);expect(State.mediaPath).toBe('C:/other.mov');
+      }else if(mode==='source-replaced'||mode==='url-rejected'){
+        expect(primary.web.url).toBe(url);expect(domMock.video.src).toBe(url);
+        expect(deskMock.releaseStream).not.toHaveBeenCalled();
+        if(mode==='url-rejected'){
+          const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
+          expect(jobs.snapshot().recoveries[0].message).toContain('無法授權 Proxy URL');
+        }
+      }else{
+        expect(State.clips[0]).toBe(primary);expect(primary).toMatchObject({in:1,out:11,offset:3,path});
+        expect(primary.web.url).toBe('file:///C:/cache/complete.mp4');
+        expect(domMock.video.src).toBe(primary.web.url);expect(Media.displayTime()).toBe(mode==='newer-seek'?7:4);
+        expect(deskMock.releaseStream).toHaveBeenCalledWith('old-retry-lease');
+      }
+      expect(recordHistory.mock.calls).toHaveLength(history);
+    }finally{present.mockRestore();Media.reset();delete window.subtool.mediaSourceKey;deskMock.fileURL.mockImplementation(async path=>`file:///${String(path).replaceAll('\\','/')}`);}
+  });
   beforeAll(async () => {
     Object.defineProperty(window, 'subtool', {
       configurable: true,
@@ -379,7 +493,8 @@ describe('desktop mother-source intake ownership', () => {
         return;
       }
       if(mode==='newer'){
-        await vi.waitFor(()=>expect(window.subtool.mediaSourceKey).toHaveBeenCalledOnce());
+        // Original recovery evidence and provisional handoff each own a lookup.
+        await vi.waitFor(()=>expect(window.subtool.mediaSourceKey).toHaveBeenCalledTimes(2));
         const newer=Float32Array.from({length:200},(_,i)=>i%2?.9:-.9);
         Media._commitOriginalWave(State.clips[0],newer,{mixPath:'new-wave'});
         verify.resolve(key);
@@ -534,7 +649,7 @@ describe('desktop mother-source intake ownership', () => {
       stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,
         cached:false,ingestJobId:'job-1',channels:[],wave:'C:/cache/full-wave.wav'});
       await loading;const primary=State.clips[0];
-      await vi.waitFor(()=>expect(window.subtool.mediaSourceKey).toHaveBeenCalledOnce());
+      await vi.waitFor(()=>expect(window.subtool.mediaSourceKey).toHaveBeenCalledTimes(2));
       window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:{jobId:'job-1'}}));
       await vi.waitFor(()=>expect(primary.peaks?.length).toBe(24000));
       const complete=primary.peaks;

@@ -403,7 +403,7 @@ describe('專案 bus 數量只有一個 transition', () => {
     const body = source.slice(source.indexOf('function setBusCount'));
     const fn = body.slice(0, body.indexOf('\nfunction routeTableHtml'));
 
-    expect(fn).toMatch(/resizeProjectAudioBuses\(project\(\),rawCount\)/);
+    expect(fn).toMatch(/resizeProjectAudioBuses\(current,rawCount\)/);
     expect(fn).not.toMatch(/ensureAudioBusCount\(/);
     expect(fn).not.toMatch(/pruneRemovedAudioBuses\(/);
   });

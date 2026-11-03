@@ -68,11 +68,13 @@ if (typeof window !== 'undefined') {
   });
 
   window.addEventListener('keydown', e => {
-    if (e.isComposing || e.keyCode === 229) return;
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
     _keysPressed.add(e.key.toLowerCase());
     if (typeof $ === 'function' && $('modalBg')?.classList?.contains('show')) { if (e.key === 'Escape') closeModal(); return; }
     // 快捷鍵設定是獨立於 modalBg 的自訂對話框：開啟期間全域快捷鍵一律不作用（避免 Enter/Space 在背後觸發播放）
     if (document.getElementById('settingsModal')) return;
+    // 原生控制持有自己的啟用鍵；工作區的 Space／Enter 才是播放快捷鍵。
+    if ((e.key === ' ' || e.key === 'Enter') && e.target.closest?.('button, a[href], summary, [role="button"], [role="menuitem"]')) return;
     if (e.isComposing || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
     if (document.activeElement?.isContentEditable) {
     // 任何 contenteditable 編輯中（字幕列表 .txt、修改字幕視窗、軌道名稱、備註等）

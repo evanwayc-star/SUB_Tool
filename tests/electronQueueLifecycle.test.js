@@ -845,7 +845,9 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       payload: { outPath },
     });
 
-    await secondMainClient.evaluate('window.subtool.closeApp(); true');
+    // Observe the actual IPC result; a fire-and-forget invocation hides native
+    // rejection behind a later visibility timeout during crash recovery.
+    expect(await secondMainClient.evaluate('window.subtool.closeApp()')).toBe(true);
     await waitFor(
       async () => await secondMainClient.evaluate('document.visibilityState') === 'hidden',
       'crash 重開後主視窗隱藏',

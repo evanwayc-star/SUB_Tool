@@ -34,14 +34,27 @@ function progressText(data,requestId){
 }
 
 export function bindMediaIntakeView(cancel){
+  let retryButton=$('stIntakeRetryBtn');
+  if(!retryButton&&$('stProxyCancelBtn')?.parentNode){
+    retryButton=document.createElement('button');retryButton.id='stIntakeRetryBtn';retryButton.type='button';
+    retryButton.className='intake-retry';retryButton.style.display='none';
+    $('stProxyCancelBtn').after(retryButton);
+  }
   // Nested synchronous notifications can make the event's snapshot stale;
   // always render the intake owner's current state at delivery time.
   const render=()=>{
     const state=MediaIntakeJobs.snapshot();
+    const recovery=state.recoveries?.[0];
+    if(retryButton){
+      retryButton.style.display=recovery&&!state.count?'inline-block':'none';
+      retryButton.textContent=recovery?.status==='failed'?'重試背景處理':'繼續背景處理';
+      retryButton.title='重新核對目前素材後，沿用可用的波形與 Proxy 快取';
+      retryButton.onclick=()=>recovery&&MediaIntakeJobs.retry(recovery.id);
+    }
     const button=$('stProxyCancelBtn');
     if(button){
       button.style.display=state.count?'inline-block':'none';
-      button.textContent=state.hasProxy?'取消 Proxy':'取消音訊處理';
+      button.textContent='停止背景處理';
       button.title='停止目前專案的 Proxy 與音訊快取工作，保留母素材與已完成快取';
     }
     if($('stMedia')) $('stMedia').style.display=state.count?'none':'';
@@ -56,7 +69,10 @@ export function bindMediaIntakeView(cancel){
       const data=visible.progress||{stage:'cache-check',label:visible.proxy?'檢查 Proxy 與音訊快取':'檢查音訊快取',pct:null};
       const other=(['waveform','source-waveform'].includes(data.stage)&&!visible.proxy)
         ? jobs.findLast(job=>job!==visible&&job.proxy&&active(job)) : null;
-      const extra=state.count>(other?2:1)?`（另有 ${state.count-(other?2:1)} 項背景工作）`:'';
+      const group=job=>job.path||job.requestId;
+      const shown=new Set([visible,...(other?[other]:[])].map(group));
+      const extraCount=new Set(jobs.filter(job=>!shown.has(group(job))).map(group)).size;
+      const extra=extraCount?`（另有 ${extraCount} 項背景工作）`:'';
       if(other){
         const percent=pct=>typeof pct==='number'&&Number.isFinite(pct)?`${Math.floor(Math.max(0,Math.min(100,pct)))}% `:'';
         const stage=other.progress.stage;
@@ -67,6 +83,12 @@ export function bindMediaIntakeView(cancel){
         const detail=progressText(data,visible.requestId)+'；'+progressText(other.progress,other.requestId)+extra;
         setMediaIntakeStatus(parts.join(''),'busy',detail,parts);
       }else setMediaIntakeStatus(progressText(data,visible.requestId)+extra);
+    }else if(recovery){
+      const name=String(recovery.path||'素材').split(/[\\/]/).pop();
+      const waves=(recovery.saved?.locations||[]).map(location=>location.waveform).filter(wave=>wave&&Number.isSafeInteger(wave.completedSamples));
+      const saved=waves.sort((a,b)=>b.completedSamples-a.completedSamples)[0];
+      const summary=saved?` 保存紀錄：${(saved.completedSamples/4000).toFixed(1)} / ${(saved.totalSamples/4000).toFixed(1)} 秒，繼續時重驗。`:'';
+      setMediaIntakeStatus(`${name}：${recovery.message}${summary}`,recovery.status==='failed'?'err':'',null);
     }else setMediaIntakeStatus(null);
   };
   on('media:intakeJobs',render);
@@ -88,7 +110,7 @@ export function handleMediaIntakeProgress(data){
     const succeeded=data.outcome==='success';
     // 這只是來源的一段波形完成；整體進度由外層工作持有，也不是 Proxy ingest 完成事件。
     if(succeeded&&data.stage==='source-waveform') return true;
-    setStatus((data.label||'轉檔')+(succeeded?'完成':'失敗'),succeeded?'ok':'err');
+    setStatus((data.label||'轉檔')+(succeeded?'完成':'失敗')+(!succeeded&&data.errorMsg?'：'+data.errorMsg:''),succeeded?'ok':'err');
     if(!MediaIntakeJobs.snapshot().count&&$('stMedia')) $('stMedia').style.display='';
     if(succeeded) window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:data}));
     return true;

@@ -356,6 +356,9 @@
       color: var(--text-dim);
       font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
     }
+    .job-audio { margin: 5px 0 0; color: var(--text-dim); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    #queuePauseHint { flex-basis: 100%; color: var(--text-muted); font-size: 12px; text-align: right; }
+    #queuePauseHint[hidden] { display: none; }
     .job-subs {
       flex: 0 1 auto;
       min-width: 5.5em;
@@ -630,7 +633,8 @@
           </select>
         </label>
         <button id="clearCompletedBtn">清除完成紀錄</button>
-        <button id="pauseToggleBtn">暫停序列</button>
+        <button id="pauseToggleBtn" title="只暫停啟動後續工作，正在執行的工作會繼續完成">暫停後續工作</button>
+        <span id="queuePauseHint" role="status" hidden>已暫停後續工作；目前工作會繼續完成。</span>
       </div>
     </div>
   </header>
@@ -974,6 +978,7 @@
               ${airlineOutput ? `<span class="job-chip job-chip--output">${legacyAirlineOutput ? '舊版分流檔 · 請從交付清單重送以產生 .mpg' : '自動合成 .mpg · MPEG-TS'}</span>` : ''}
               ${enqueuedAt ? `<span class="job-enqueued" title="加入佇列時間">${escapeHTML(enqueuedAt)}</span>` : ''}
             </p>
+            <p class="job-audio">音訊：${escapeHTML(job.payload?.audioSummary || '未記錄聲道對應')}</p>
             ${(job.status === 'queued' || !metaText) ? '' : `<p class="job-meta">${escapeHTML(metaText)}</p>`}
             <p class="job-retry-feedback" role="status" aria-live="polite"></p>
           </div>
@@ -1290,13 +1295,14 @@
       _isPaused = data.isPaused;
       
       if (_isPaused) {
-        UI.pauseBtn.textContent = '繼續序列';
+        UI.pauseBtn.textContent = '繼續後續工作';
         UI.pauseBtn.classList.add('primary');
       } else {
-        UI.pauseBtn.textContent = '暫停序列';
+        UI.pauseBtn.textContent = '暫停後續工作';
         UI.pauseBtn.classList.remove('primary');
       }
       
+      document.getElementById('queuePauseHint').hidden = !_isPaused;
       UI.concurrencySel.value = data.concurrency;
       renderJobs();
     }

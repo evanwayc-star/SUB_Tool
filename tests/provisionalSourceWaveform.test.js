@@ -11,6 +11,13 @@ function fixture(){
   return {jobs,bridge,changed,decode,owner};
 }
 describe('獨立來源波形交接',()=>{
+  it('保存失敗保留原因供可重試提示，不能偽裝成單純取消',async()=>{
+    const f=fixture(),failure=new Error('ENOSPC: 磁碟空間不足');
+    f.jobs.prepareSourceWaveform.mockRejectedValueOnce(failure);
+    const entry=f.owner.begin({path:'A',name:'A',audio:[{channels:1}],duration:1,owns:()=>true});
+    await entry.finished;
+    expect(entry.error).toBe(failure);expect(entry.complete).toBe(false);
+  });
   it('連續工作只啟動一次，完成前已顯示保存的峰值，完成後不重讀 WAV',async()=>{
     const f=fixture(),gate=deferred();let send;
     f.bridge.sourceWaveformContinuous=true;

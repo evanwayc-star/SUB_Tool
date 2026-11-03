@@ -15,10 +15,14 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildProjectAudioPlan } from '../src/project-audio.js';
+import { composeDeliveryAudioPlan } from '../src/export-job-engine.js';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { QueueHistory } = require(path.join(ROOT, 'electron/queue-store.js'));
+const QueueStore = require(path.join(ROOT, 'electron/queue-store.js'));
+const { QueueHistory } = QueueStore;
+const { _normalizeAudioPlan, prepareDeliveryPayload, buildDeliveryArgv } = require(path.join(ROOT, 'electron/export-plan.js'));
 
 const dirs = new Set();
 function makeDir() {
@@ -39,6 +43,49 @@ const doneJob = (over = {}) => ({
   elapsedMs: 1500,
   payload: { outPath: 'C:/out/a.mp4', duration: 12.5, format: 'h264' },
   ...over,
+});
+
+it('凍結交付的 A7/A8 摘要跨重開保存，名稱與交付重排不改原專案軌號', () => {
+  const buses=Array.from({length:8},(_,index)=>({id:`opaque-${index*13+5}`,name:`自訂 ${index+1}`}));
+  const project={buses,sourceMaps:{},exportLayout:{streams:[]}};
+  const compiled=buildProjectAudioPlan({audioProject:project});
+  const audioPlan=composeDeliveryAudioPlan(compiled,{audioBuses:[buses[7],buses[6]],audioPlan:{streams:[
+    {id:'stereo',layout:'stereo',name:'FM',busIds:[buses[6].id,buses[7].id]},
+  ]}});
+  const payload={outPath:'C:/out/A7-A8.mov',format:'prores',audioPlan};
+  const oldPlan=structuredClone(audioPlan); delete oldPlan.projectBusOrder;
+  const {projectBusOrder,...executionPlan}=_normalizeAudioPlan(audioPlan);
+  expect(projectBusOrder).toEqual(compiled.projectBusOrder);
+  expect(executionPlan).toEqual(_normalizeAudioPlan(oldPlan));
+  expect(QueueHistory.audioSummary({...payload,audioSummary:'不可信的舊摘要'})).toBe('Stereo（FM） · 左 ← A7、右 ← A8');
+  project.buses.reverse(); project.buses[0].name='後來改名';
+  const dir=makeDir(); QueueHistory.append(dir,doneJob({payload}));
+  const [entry]=QueueHistory.load(dir);
+  expect(entry.payload.audioSummary).toBe('Stereo（FM） · 左 ← A7、右 ← A8');
+  expect(entry.payload.audioPlan).toBeUndefined();
+  expect(entry.payload.clips).toBeUndefined();
+  expect(JSON.stringify(entry)).not.toContain('opaque-');
+});
+
+it.each(['prores','h264','wav'])('%s 經正式 prepare、queue 保存重開及完成歷史仍顯示原 A7/A8，編碼 argv 不變', format => {
+  const buses=Array.from({length:8},(_,index)=>({id:`frozen-${index}`,name:`自訂 ${index}`}));
+  const compiled=buildProjectAudioPlan({audioProject:{buses,sourceMaps:{},exportLayout:{streams:[]}}});
+  const audioPlan=composeDeliveryAudioPlan(compiled,{audioBuses:[buses[7],buses[6]],audioPlan:{streams:[
+    {id:'mix',layout:'stereo',busIds:[buses[6].id,buses[7].id]},
+  ]}});
+  const raw={format,outPath:`C:/out/job.${format==='wav'?'wav':format==='prores'?'mov':'mp4'}`,
+    width:640,height:360,canvasW:640,canvasH:360,fps:25,duration:1,audioPlan,
+    clips:[{id:'clip',path:'C:/source.mov',in:0,out:1,offset:0,track:0}],videoTracks:[{visible:true}]};
+  const prepared=prepareDeliveryPayload(raw);
+  const dir=makeDir();QueueStore.persistJob(dir,{id:'pipeline',status:'queued',createdAt:1,payload:prepared});
+  const restored=QueueStore.loadJobs(dir).jobs[0];
+  const expected=format==='wav'?'Stereo WAV · 左 ← A8、右 ← A7':'Stereo · 左 ← A7、右 ← A8';
+  expect(QueueHistory.audioSummary(restored.payload)).toBe(expected);
+  expect(QueueHistory.audioSummary(prepareDeliveryPayload(restored.payload))).toBe(expected);
+  QueueHistory.append(dir,{...restored,status:'done'});
+  expect(QueueHistory.load(dir)[0].payload.audioSummary).toBe(expected);
+  const legacy=structuredClone(raw);delete legacy.audioPlan.projectBusOrder;
+  expect(buildDeliveryArgv(raw).args).toEqual(buildDeliveryArgv(legacy).args);
 });
 
 describe('寫入與讀回', () => {
@@ -123,7 +170,7 @@ describe('紀錄不可執行（queue-store terminal tombstone 的安全性質不
        可執行內容，多帶一個欄位就可能把它們洩進紀錄。
        v6.1.7 新增的五個是純顯示用的值（解析度／fps／碼率／字幕名稱／有沒有燒 TC）。 */
     expect(Object.keys(entry.payload).sort()).toEqual([
-      'duration', 'format', 'fps', 'height', 'outPath',
+      'audioSummary', 'duration', 'format', 'fps', 'height', 'outPath',
       'subtitleTracks', 'timecodeWatermark', 'videoKbps', 'width',
     ]);
     expect(entry.assRef).toBeUndefined();
@@ -320,5 +367,33 @@ describe('完成紀錄帶著顯示所需的欄位', () => {
     const p = { ...finished.payload };
     delete p.subtitleTracks;
     expect(toEntry({ ...finished, payload: p }).payload.subtitleTracks).toBeUndefined();
+  });
+
+  it('舊完成紀錄或無原專案軌序的舊計畫不猜 A 軌編號', () => {
+    expect(toEntry(finished).payload.audioSummary).toBeUndefined();
+    const legacy={outPath:'C:/old.wav',format:'wav',audioPlan:{buses:[{id:'abus7',name:'A7'}]}};
+    expect(toEntry(doneJob({payload:legacy})).payload.audioSummary).toBeUndefined();
+    expect(QueueHistory.audioSummary({audioSummary:'x'.repeat(8193)})).toBeUndefined();
+  });
+
+  it('WAV 摘要採實際 bus 輸出順序，影片摘要採各 stream 聲道順序', () => {
+    const audioPlan={projectBusOrder:['left','middle','right'],buses:[{id:'right'},{id:'left'}],
+      streams:[{layout:'stereo',busIds:['left','right']}]};
+    expect(QueueHistory.audioSummary({format:'wav',audioPlan})).toBe('Stereo WAV · 左 ← A3、右 ← A1');
+    expect(QueueHistory.audioSummary({format:'prores',audioPlan})).toBe('Stereo · 左 ← A1、右 ← A3');
+    expect(QueueHistory.audioSummary({format:'prores',audioPlan:{...audioPlan,projectBusOrder:['left','left','right']}})).toBeUndefined();
+    expect(QueueHistory.audioSummary({format:'prores',audioPlan:{...audioPlan,streams:[{layout:'stereo',busIds:['left','missing']}]}})).toBeUndefined();
+    expect(QueueHistory.audioSummary({format:'prores',audioPlan:{...audioPlan,streams:[{layout:'__proto__',busIds:['left','right']}]}})).toBeUndefined();
+  });
+
+  it('多份交付的 5.1 和 LtRt 顯示完整聲道位置，純摘要不改 frozen plan', () => {
+    const order=Array.from({length:8},(_,i)=>`bus-${i}`);
+    const payload={format:'prores',audioPlan:{projectBusOrder:order,buses:order.map(id=>({id,inputs:[]})),streams:[
+      {layout:'5.1',name:'FM',busIds:order.slice(0,6)},
+      {layout:'stereoLtRt',name:'ME',busIds:order.slice(6)},
+    ]}};
+    const before=structuredClone(payload);
+    expect(QueueHistory.audioSummary(payload)).toBe('5.1（FM） · L ← A1、R ← A2、C ← A3、LFE ← A4、Ls ← A5、Rs ← A6 / LtRt（ME） · Lt ← A7、Rt ← A8');
+    expect(payload).toEqual(before);
   });
 });

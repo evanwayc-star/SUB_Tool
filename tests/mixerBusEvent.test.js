@@ -289,7 +289,10 @@ describe('音訊軌初始化與呈現的所有權',()=>{
       AudioRouting.openOutputSettings();
       await new Promise(resolve=>setTimeout(resolve,0));
       document.getElementById('audioOutputBusCount').value='0';
+      const confirm = vi.spyOn(window,'confirm').mockReturnValueOnce(true);
       document.getElementById('audioOutputBusApply').click();
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining('由 2 軌減少為 0 軌'));
+      confirm.mockRestore();
       expect(document.getElementById('audioOutputBusCount').value).toBe('0');
       expect(State.audioProject.buses).toHaveLength(0);
       expect(document.querySelectorAll('#atList .project-bus')).toHaveLength(0);

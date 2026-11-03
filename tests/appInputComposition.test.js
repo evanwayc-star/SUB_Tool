@@ -48,6 +48,54 @@ afterEach(() => {
   delete HTMLElement.prototype.scrollIntoView;
 });
 
+it('覆蓋關閉時保留／裁切原生停用，滑鼠與 C 都不改草稿；開啟後可操作並保留模式還原', async () => {
+  await finishStatus(); startup.resolve(null); await vi.advanceTimersByTimeAsync(100);
+  const {toggleOverwriteMode,toggleOverwriteKeep,toggleSubMode}=await import('../src/subtitle-model.js');
+  const button=document.getElementById('overwriteKeepBtnStatus');
+  expect(State.overwriteMode).toBe(false);expect(button.disabled).toBe(true);
+  const original=State.overwriteKeep;
+  button.click();document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'c',bubbles:true,cancelable:true}));
+  expect(State.overwriteKeep).toBe(original);
+  toggleOverwriteMode();expect(button.disabled).toBe(false);
+  button.click();expect(State.overwriteKeep).toBe(!original);
+  toggleOverwriteMode();expect(button.disabled).toBe(true);
+  toggleOverwriteKeep();expect(State.overwriteKeep).toBe(!original);
+  toggleOverwriteKeep({force:true});expect(State.overwriteKeep).toBe(original);
+  toggleOverwriteKeep({force:true});
+  toggleSubMode();expect(State.overwriteKeep).toBe(true);expect(button.disabled).toBe(true);
+  toggleSubMode();expect(State.overwriteKeep).toBe(!original);expect(State.overwriteMode).toBe(false);expect(button.disabled).toBe(true);
+});
+
+it.each(['player','subtitle'].flatMap(kind=>['貼上','取消'].map(action=>[kind,action])))('真正 %s 時碼的右鍵鍵盤%s保留 inline editor 與原游標，不先提交', async (kind,action) => {
+  await finishStatus();startup.resolve(null);await vi.advanceTimersByTimeAsync(100);
+  State.fps=25;State.dropFrame=false;State.duration=20;
+  const seek=vi.spyOn(Media,'seek').mockResolvedValue(true);
+  Object.defineProperty(navigator,'clipboard',{configurable:true,value:{readText:vi.fn().mockResolvedValue('12'),writeText:vi.fn()}});
+  if(kind==='subtitle'){
+    const {ensureProjectSaved}=await import('../src/project.js');const guard=ensureProjectSaved();
+    [...document.querySelectorAll('#modalFoot button')].find(button=>button.textContent==='稍後再說')?.click();await guard;
+    addCue(1,2,'字幕',0);
+    const {renderSubList}=await import('../src/subtitles.js');renderSubList();
+  }
+  const cues=structuredClone(State.cues);
+  const target=kind==='player'?document.getElementById('tcCur'):document.querySelector('.sub-row .tin');
+  target.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));
+  await Promise.resolve();
+  const input=target.querySelector('input');input.value='1234';input.setSelectionRange(1,3);
+  input.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+  input.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
+  expect(document.activeElement).toBe(input);expect(input.isConnected).toBe(true);
+  expect(seek).not.toHaveBeenCalled();
+  input.dispatchEvent(new KeyboardEvent('keydown',{key:action==='貼上'?'Enter':'Escape',bubbles:true,cancelable:true}));
+  await Promise.resolve();await Promise.resolve();
+  expect(input.isConnected).toBe(true);expect(document.activeElement).toBe(input);
+  expect(input.value).toBe(action==='貼上'?'1124':'1234');expect(seek).not.toHaveBeenCalled();
+  expect(State.cues).toEqual(cues);
+  expect(document.getElementById('ctxmenu').classList.contains('show')).toBe(false);
+  input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+  expect(input.isConnected).toBe(false);expect(seek).not.toHaveBeenCalled();
+});
+
 
 it.each([
   ['note', { isComposing: true }], ['note', { keyCode: 229 }],

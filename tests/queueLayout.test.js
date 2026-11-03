@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import deliveryFormats from '../shared/delivery-formats.cjs';
 import frameRates from '../shared/delivery-frame-rate.cjs';
 import { secToEncore } from '../src/time.js';
+import queueStore from '../electron/queue-store.js';
 
 const queueHtml = readFileSync(new URL('../electron/queue.html', import.meta.url), 'utf8');
 const openWindows = [];
@@ -47,6 +48,36 @@ async function openQueueWindow(jobs) {
 
 afterEach(() => {
   while (openWindows.length) openWindows.pop().close();
+});
+
+it('暫停後續工作明示目前轉碼繼續，按鈕只切換排程而不停止工作', async () => {
+  const jobs=[{id:'running',status:'running',pct:25,payload:{outPath:'C:/out/a.mp4'}}];
+  const {document,queueAPI}=await openQueueWindow(jobs);
+  const button=document.getElementById('pauseToggleBtn');
+  expect(button.textContent).toBe('暫停後續工作');
+  expect(button.title).toContain('正在執行的工作會繼續');
+  queueAPI.getAll.mockResolvedValue({jobs,isPaused:true,concurrency:1});
+  button.click();
+  await vi.waitFor(()=>expect(button.textContent).toBe('繼續後續工作'));
+  expect(queueAPI.setPause).toHaveBeenCalledWith(true);
+  expect(document.getElementById('queuePauseHint').textContent).toContain('目前工作會繼續完成');
+  expect(document.getElementById('queuePauseHint').hidden).toBe(false);
+  expect(document.querySelector('.job-status').textContent).toContain('執行中');
+  expect(queueAPI.stopJob).not.toHaveBeenCalled();
+});
+
+it('佇列顯示每份 frozen 音訊摘要，完成紀錄也可核對，舊紀錄不猜聲道', async () => {
+  const payload={outPath:'C:/out/stereo.mov',format:'prores',audioPlan:{
+    projectBusOrder:['b1','b2','b3','b4','b5','b6','b7','b8'],
+    buses:[{id:'b8'},{id:'b7'}],streams:[{layout:'stereo',busIds:['b7','b8'],name:'FM <img id="injected-audio">'}],
+  }};
+  const queued={id:'stereo',status:'queued',payload:{...payload,audioSummary:queueStore.QueueHistory.audioSummary(payload)}};
+  const done=queueStore.QueueHistory.toEntry({id:'complete',status:'done',payload:{...payload,format:'wav'}});
+  const {document}=await openQueueWindow([queued,done,{id:'legacy',status:'done',payload:{outPath:'C:/old.mov'}}]);
+  expect(document.querySelector('[data-job-id="stereo"] .job-audio').textContent).toContain('左 ← A7、右 ← A8');
+  expect(document.querySelector('[data-job-id="complete"] .job-audio').textContent).toContain('Stereo WAV · 左 ← A8、右 ← A7');
+  expect(document.querySelector('[data-job-id="legacy"] .job-audio').textContent).toContain('未記錄聲道對應');
+  expect(document.getElementById('injected-audio')).toBeNull();
 });
 
 describe('佇列原輸出目錄重新授權', () => {

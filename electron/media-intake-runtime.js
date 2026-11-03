@@ -16,7 +16,7 @@ const { createTemporaryOutputOwnership } = require('./temporary-output-ownership
 const { runSourceWaveformWorker, ownWaveformProcess } = require('./source-waveform-worker');
 const { readSourceWaveformChunk, saveSourceWaveformChunk, inspectSourceWaveformCache,
   isSourceWaveformCachePath, validSourceWaveformPcm, MAX_SOURCE_WAVEFORM_BYTES } = require('./source-waveform-cache');
-const { openContinuousWaveformCache, inspectContinuousWaveformCache, isContinuousWaveformCachePath } = require('./continuous-waveform-cache');
+const { openContinuousWaveformCache, inspectContinuousWaveformCache, describeContinuousWaveformCache, isContinuousWaveformCachePath } = require('./continuous-waveform-cache');
 const { runContinuousSourceWaveform } = require('./continuous-source-waveform');
 const SOURCE_CACHE_VERSION = 'source-v3';
 const PORTABLE_SOURCE_FORMAT = SOURCE_CACHE_VERSION + '-sha256';
@@ -1008,27 +1008,94 @@ function createMediaIntakeRuntime(options = {}) {
     return fallback;
   }
 
-  function dirSize(dir) {
+  function dirSize(dir, budget, depth = 0) {
+    if (depth > 48 || ++budget.directories > 2048) throw new Error('快取統計超過範圍');
+    budget.verify();
     let total = 0;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (++budget.entries > 20000) throw new Error('快取統計超過範圍');
+      budget.verify();
       const entryPath = path.join(dir, entry.name);
       const stat = fs.lstatSync(entryPath);
       if (stat.isSymbolicLink()) throw cachePathEscape();
-      if (stat.isDirectory()) total += dirSize(entryPath);
+      if (stat.isDirectory()) total += dirSize(entryPath, budget, depth + 1);
       else if (stat.isFile()) total += stat.size;
       else throw cachePathEscape();
     }
     return total;
   }
 
-  function cacheInfo() {
+  function cacheInfo(currentSrc = null, session = {}) {
+    if (options.backgroundWaveforms) {
+      const task = runSourceWaveformWorker({ operation: 'cache-info', request: { src: currentSrc }, cacheRoot: cacheRoot(), allowSidecarCache,
+        cacheAuthority: cleanupRoots.get(sourceWaveKey(cacheRoot())) }, {
+        execute: () => { throw new Error('快取資訊不能啟動轉檔'); }, progress: () => {}, publish: result => result,
+        session: { ...session, isCancelled: () => closed || cancelled(session) },
+      });
+      waveformTasks.add(task); task.then(() => waveformTasks.delete(task), () => waveformTasks.delete(task));
+      return task;
+    }
+    const central = centralCacheInfo(session);
+    if (!currentSrc) return central;
+    try { return { ...central, source: sourceCacheInfo(currentSrc, session) }; }
+    catch (_) { return { ...central, source: { path: currentSrc, unavailable: true, locations: [] } }; }
+  }
+
+  function sourceCacheInfo(src, session) {
+    const key = cacheKeyFor(src), shared = allowSidecarCache ? sharedSourceFingerprintSync(src) : null;
+    const local = crypto.createHash('sha256').update('strict-source-wave-v1\0' + key).digest('hex');
+    const sourceSnapshot = fs.statSync(src, { bigint: true });
+    const verifySource = () => {
+      if (closed || cancelled(session)) throw new IngestSupersededError();
+      const stat = fs.statSync(src, { bigint: true });
+      if (['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'birthtimeNs'].some(field => stat[field] !== sourceSnapshot[field]))
+        throw new Error('查詢快取期間母素材已變更');
+    };
+    const directories = new Set(cacheCandidates(src, key)), sidecar = allowSidecarCache && sidecarAuthority(src);
+    if (sidecar) for (const entry of readCleanupEntries(sidecarRoot(src), 2048))
+      if (entry.isDirectory() && !entry.isSymbolicLink() && /^[a-f0-9]{16}$/.test(entry.name)) directories.add(path.join(sidecarRoot(src), entry.name));
+    const locations = [];
+    for (const directory of directories) {
+      verifySource();
+      try { if (!fs.lstatSync(directory).isDirectory()) continue; }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      const isSidecar = isSidecarCandidate(src, directory);
+      if (isSidecar && !sidecar) continue;
+      const verify = () => {
+        verifySource(); assertCleanupAncestors(path.join(directory, '.cache-info-check'));
+        if (isSidecar) captureOutputAuthority(path.join(directory, '.cache-info-check'), sidecar);
+      };
+      verify();
+      const hit = inspectCacheDirectory(directory, [], true);
+      const matching = !hit.error && (isSidecar && shared && hit.sharedSourceKeys.includes(shared)
+        || path.basename(directory) === key && (!hit.sourceContent || hit.sourceKeys.includes(key))
+          && (!hit.sharedSourceKeys.length || hit.sharedSourceKeys.includes(shared)));
+      const waveform = describeContinuousWaveformCache(directory, { sourceKey: shared || local, verify });
+      if (matching || ['partial', 'complete'].includes(waveform.state)) {
+        locations.push({ directory, kind: isSidecar ? 'sidecar' : 'central',
+          waveform: waveform.state === 'missing' && matching && hit.meta.wave ? { state: 'complete', verified: false } : waveform,
+          proxy: !!(matching && hit.meta.proxy), channels: matching ? hit.meta.channels.length : 0 });
+      }
+      verify();
+    }
+    verifySource();
+    if (cacheKeyFor(src) !== key || (shared && sharedSourceFingerprintSync(src) !== shared)) throw new Error('母素材已變更');
+    verifySource();
+    return { path: src, locations };
+  }
+
+  function centralCacheInfo(session) {
     const root = cacheRoot();
     let folders = 0;
     let bytes = 0;
     try {
       const authority = cleanupRoots.get(sourceWaveKey(root));
       if (!authority) throw cacheDirectoryChanged();
-      const verify = () => captureOutputAuthority(path.join(root, '.cache-info-check'), authority);
+      const verify = () => {
+        if (closed || cancelled(session)) throw new IngestSupersededError();
+        captureOutputAuthority(path.join(root, '.cache-info-check'), authority);
+      };
+      const budget = { entries: 0, directories: 0, verify };
       verify();
       for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
         verify();
@@ -1036,7 +1103,7 @@ function createMediaIntakeRuntime(options = {}) {
         if (stat.isSymbolicLink()) throw cachePathEscape();
         if (!stat.isDirectory()) continue;
         folders++;
-        bytes += dirSize(path.join(root, entry.name));
+        bytes += dirSize(path.join(root, entry.name), budget);
       }
       verify();
     } catch (error) { return { root, unavailable: true }; }

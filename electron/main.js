@@ -1110,7 +1110,9 @@ ipcMain.on('queue:exactFrameRate', (event, value) => {
 });
 
 ipcMain.handle('queue:getAll', () => ({
-  jobs: QueueManager.jobs(),
+  jobs: QueueManager.jobs().map(job => ({ ...job,
+    payload: { ...job.payload, audioSummary: QueueHistory.audioSummary(job.payload) },
+  })),
   isPaused: QueueManager.isPaused,
   concurrency: QueueManager.concurrency,
   deliveryFormatPresets: DELIVERY_FORMAT_PRESETS,
@@ -1487,7 +1489,10 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
 });
 
 /* ---- 快取管理 ---- */
-ipcMain.handle('cache:info', () => mediaIntakeRuntime.cacheInfo());
+ipcMain.handle('cache:info', (e, sourcePath) => {
+  if (sourcePath != null) requireReadablePath('cache:info', sourcePath);
+  return mediaIntakeRuntime.cacheInfo(sourcePath);
+});
 ipcMain.handle('cache:cleanOrphans', () => mediaIntakeRuntime.cleanOrphans());
 ipcMain.handle('cache:clearAll', (e, currentSrc) => mediaIntakeRuntime.clearAll(currentSrc));
 

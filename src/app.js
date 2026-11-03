@@ -686,6 +686,7 @@ function updateConfigUI() {
   });
   document.querySelectorAll('.ow-keep-btn').forEach(btn => {
     btn.classList.toggle('inactive-mode', !State.overwriteMode);
+    btn.disabled = !State.overwriteMode;
     btn.textContent = State.overwriteKeep ? '保留' : '裁切';
     btn.classList.toggle('keep', State.overwriteKeep);
     btn.classList.toggle('del', !State.overwriteKeep);

@@ -90,7 +90,7 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
           position=end;entry.resolveFirst(true);changed();report({label:'優先產生波形',pct:position/duration*100,overall:true,queued:false});
         }finally{if(result?.temporary&&result.wave)try{await bridge.cleanupAudio(result.wave);}catch(_){}}
       }
-    })).catch(()=>{clear(entry);}).finally(()=>{if(!entry.active()||!entry.peaks)clear(entry);});
+    },{path})).catch(error=>{entry.error=error;clear(entry);}).finally(()=>{if(!entry.active()||!entry.peaks)clear(entry);});
     return entry;
   }
   return {begin,snapshot};

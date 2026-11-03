@@ -30,6 +30,7 @@ const plan = () => buildProjectAudioPlan({audioProject:State.audioProject,clips:
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.spyOn(window,'confirm').mockReturnValue(true);
   closeModal({committed:true});
   State.cues=[]; State.tracks=[{name:'字幕',visible:true,locked:false}]; State.notes=[];
   State.clips=[{id:'master-clip',audioSourceId:'master',audioSrc:'video',primary:true,path:'C:/master.mov',name:'八聲道',in:0,out:3,offset:0,dur:3}];
@@ -41,7 +42,42 @@ beforeEach(() => {
   History.reset();
   vi.clearAllMocks();
 });
-afterEach(() => { closeModal(); vi.runAllTimers(); vi.useRealTimers(); });
+afterEach(() => { closeModal(); vi.runAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+it.each(['來源配線','專案編組','工具列'])('%s 縮減 A 軌先顯示跨來源影響，拒絕不改配線或 History', page => {
+  const initial=structuredClone(State.audioProject), history=structuredClone(History.stack);
+  window.confirm.mockReturnValue(false);
+  if(page==='來源配線'){ source(); click('.audio-count-preset[data-count="2"]'); }
+  else if(page==='專案編組'){ open(); click('.audio-output-count-preset[data-count="2"]'); }
+  else expect(AudioRouting.setBusCount(2)).toBe(false);
+  expect(window.confirm).toHaveBeenCalledOnce();
+  const message=window.confirm.mock.calls[0][0];
+  expect(message).toContain('整個專案'); expect(message).toContain('A3'); expect(message).toContain('A8');
+  expect(message).toContain('2 個來源'); expect(message).toContain('7 條來源配線');
+  expect(message).toContain('設定輸出音軌');
+  expect(State.audioProject).toEqual(initial); expect(History.stack).toEqual(history);
+});
+
+it('拒絕縮減保留當前配線草稿，確認縮減後仍可取消整段編輯', () => {
+  const initial=structuredClone(State.audioProject), history=structuredClone(History.stack);
+  source(); route(0,State.audioProject.buses[7].id);
+  const draft=structuredClone(State.audioProject), input=document.getElementById('audioBusCount');
+  window.confirm.mockReturnValueOnce(false); input.value='2'; click('#audioBusCountApply');
+  expect(input.value).toBe('8'); expect(State.audioProject).toEqual(draft);
+  click('.audio-count-preset[data-count="2"]');
+  expect(State.audioProject.buses).toHaveLength(2);
+  expect(State.audioProject.sourceMaps.second.channels[0].busIds).toEqual([]);
+  act('取消'); expect(State.audioProject).toEqual(initial); expect(History.stack).toEqual(history);
+});
+
+it('縮減確認期間若專案被取代，不套用舊頁的縮減結果', () => {
+  source();
+  let replacement;
+  window.confirm.mockImplementation(()=>{ resetAudioProject(); replacement=structuredClone(State.audioProject); return true; });
+  click('.audio-count-preset[data-count="2"]');
+  expect(State.audioProject).toEqual(replacement);
+  expect(History.stack).toHaveLength(1);
+});
 
 it('多次 bus 預覽即時生效，取消恢復全來源配線且不留下 History', () => {
   const initial=structuredClone(State.audioProject), history=structuredClone(History.stack);
@@ -105,7 +141,7 @@ it('子頁返回只還原該頁，父頁保存來源配線與後續輸出變更�
   source(); route(0,State.audioProject.buses[7].id);
   const parent=structuredClone(State.audioProject);
   click('#audioRouteOutput'); click('.audio-output-count-preset[data-count="4"]');
-  act('返回配線'); expect(State.audioProject).toEqual(parent);
+  act('取消修改並返回配線'); expect(State.audioProject).toEqual(parent);
   click('#audioRouteOutput'); click('.audio-delivery-preset[data-preset="8-fm"]');
   act('儲存輸出設定'); act('儲存配線');
   const saved=structuredClone(State.audioProject);
@@ -151,10 +187,22 @@ it('交付列編輯與 WAV 排序只回傳自己的結果，不改專案或 Hist
 it('取消交付列更動也不影響來源專案', () => {
   const initial=structuredClone(State.audioProject), spec=createDeliveryAudioSpec(initial,{}), back=vi.fn();
   AudioRouting.openDeliveryOutputSettings(spec,back); vi.runAllTimers();
-  click('.audio-delivery-preset[data-preset="2-fm"]'); act('返回匯出清單');
+  click('.audio-delivery-preset[data-preset="2-fm"]'); act('取消修改並返回匯出清單');
   expect(back).toHaveBeenCalledWith({saved:false});
   expect(State.audioProject).toEqual(initial);
   expect(History.stack).toHaveLength(1);
+});
+
+it('交付音軌返回按鈕明示取消修改，取消後保留原交付與專案', () => {
+  const initial=structuredClone(State.audioProject), spec=createDeliveryAudioSpec(initial,{}), back=vi.fn();
+  const original=structuredClone(spec), history=structuredClone(History.stack);
+  AudioRouting.openDeliveryOutputSettings(spec,back); vi.runAllTimers();
+  click('.audio-delivery-preset[data-preset="2-fm"]');
+  expect(button('取消修改並返回匯出清單')).toBeDefined();
+  act('取消修改並返回匯出清單');
+  expect(back).toHaveBeenCalledWith({saved:false});
+  expect(spec).toEqual(original); expect(State.audioProject).toEqual(initial);
+  expect(History.stack).toEqual(history);
 });
 
 it.each(['h264','prores','wav'])('%s 輸出選兩聲道後仍可直接選 A7 左、A8 右，專案配線與其他輸出不變', format => {

@@ -273,13 +273,48 @@ it('shows a working Proxy cancellation button separately from the export stop co
   const rejected=expect(work).rejects.toMatchObject({name:'AbortError'});
   const button=document.getElementById('stProxyCancelBtn');
   expect(getComputedStyle(button).display).not.toBe('none');
-  expect(button.textContent).toBe('取消 Proxy');
+  expect(button.textContent).toBe('停止背景處理');
   button.click();await rejected;
   expect(cancel).toHaveBeenCalledOnce();
   expect(window.subtool.cancelMediaIntake).toHaveBeenCalledWith({sessionId:requests[0].sessionId});
   expect(getComputedStyle(button).display).toBe('none');
   expect(document.getElementById('stMedia').style.display).toBe('');
   expect(exportStop).not.toHaveBeenCalled();
+});
+
+it('同一素材的本機波形與原生工作只算一項，其他素材才列為額外工作',async()=>{
+  let finish;
+  window.subtool.prepareSourceWaveform=vi.fn(options=>{requests.push(options);return new Promise(done=>{finish=done;});});
+  const wave=jobs.prepareWaveform(()=>jobs.prepareSourceWaveform({path:'demo.mxf'}),{path:'demo.mxf'});
+  progress({...requests[0],stage:'source-waveform',label:'優先產生波形',pct:7,queued:false});
+  expect(document.getElementById('stMsg').textContent).toBe('優先產生波形… 7%');
+  const other=jobs.ingest({path:'other.mxf'});
+  expect(document.getElementById('stMsg').textContent).toContain('另有 1 項背景工作');
+  finish({});resolve({});await Promise.all([wave,other]);
+});
+
+it('停止後保留可見的續算入口與原因，換專案撤銷舊按鈕資格',async()=>{
+  let current=true;
+  const retry=vi.fn(async()=>{});
+  const recovery=jobs.registerRecovery({path:'C:/movie.mxf',owns:()=>current,retry});
+  recovery.fail(new Error('磁碟空間不足，無法保存波形'));
+  const button=document.getElementById('stIntakeRetryBtn');
+  expect(button).not.toBeNull();
+  expect(getComputedStyle(button).display).not.toBe('none');
+  expect(document.getElementById('stMsg').textContent).toContain('磁碟空間不足');
+  const staleClick=button.onclick;
+  current=false;await jobs.reset();staleClick();await Promise.resolve();
+  expect(retry).not.toHaveBeenCalled();expect(getComputedStyle(button).display).toBe('none');
+});
+
+it('stream IPC 已回可播網址後的失敗終態仍顯示原因及重試入口',async()=>{
+  window.subtool.streamIngest=vi.fn(async options=>{requests.push(options);return {streamUrl:'http://127.0.0.1/stream',cached:false};});
+  jobs.registerRecovery({path:'movie.mxf',owns:()=>true,retry:vi.fn()});
+  await jobs.streamIngest({path:'movie.mxf'});
+  expect(jobs.snapshot().count).toBe(1);
+  progress({...requests[0],stage:'transcoding',done:true,outcome:'failed',label:'Proxy',errorMsg:'磁碟已滿'});
+  expect(document.getElementById('stMsg').textContent).toContain('磁碟已滿');
+  expect(getComputedStyle(document.getElementById('stIntakeRetryBtn')).display).not.toBe('none');
 });
 
 it('ignores old project progress and never unlocks or overwrites an active export status',async()=>{

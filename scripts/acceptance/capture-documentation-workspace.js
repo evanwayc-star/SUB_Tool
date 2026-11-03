@@ -24,9 +24,8 @@ const {
   verifiedCleanup,
 } = require('./cdp-electron-harness.js');
 
-const outputPath = path.resolve(process.argv[2] || path.join(ROOT, 'docs', 'images', 'workspace-overview.png'));
-
-(async () => {
+async function captureDocumentationWorkspace(outputPath, inspect) {
+  outputPath = path.resolve(outputPath);
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('找不到 dist/index.html，請先執行 npm run build');
   }
@@ -38,6 +37,7 @@ const outputPath = path.resolve(process.argv[2] || path.join(ROOT, 'docs', 'imag
     `--user-data-dir=${profileDir}`,
     '--subtool-transport-acceptance',
     '--no-sandbox',
+    '--disable-features=CalculateNativeWinOcclusion',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
     '--disable-backgrounding-occluded-windows',
@@ -59,7 +59,6 @@ const outputPath = path.resolve(process.argv[2] || path.join(ROOT, 'docs', 'imag
     await client.connect();
     await client.send('Runtime.enable');
     await client.send('Page.enable');
-    await client.send('Page.bringToFront');
     await client.send('Emulation.setDeviceMetricsOverride', {
       width: 1600,
       height: 960,
@@ -149,6 +148,7 @@ const outputPath = path.resolve(process.argv[2] || path.join(ROOT, 'docs', 'imag
     await delay(300);
 
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    if (inspect) await inspect(client, path.dirname(outputPath));
     const screenshot = await client.send('Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: false,
@@ -160,7 +160,10 @@ const outputPath = path.resolve(process.argv[2] || path.join(ROOT, 'docs', 'imag
     await stopElectron(child);
     verifiedCleanup(profileDir, 'subtool-docs-cdp-');
   }
-})().catch(error => {
-  console.error(error.stack || error.message || String(error));
-  process.exitCode = 1;
-});
+}
+
+module.exports = { captureDocumentationWorkspace };
+if (require.main === module) {
+  captureDocumentationWorkspace(process.argv[2] || path.join(ROOT, 'docs', 'images', 'workspace-overview.png'))
+    .catch(error => { console.error(error.stack || String(error)); process.exitCode = 1; });
+}

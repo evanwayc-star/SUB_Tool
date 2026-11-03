@@ -305,6 +305,9 @@ class ProjectAudioInterpretation {
 
     return {
       buses,
+      // Delivery may select/reorder a subset; keep the frozen project A-track
+      // positions for display without deriving them from mutable bus names.
+      projectBusOrder: project.buses.map(bus => bus.id),
       unresolvedSources: [...unresolvedSources.entries()]
         .map(([audioSourceId, name]) => ({ audioSourceId, name })),
       streams: (Array.isArray(project.exportLayout.streams) ? project.exportLayout.streams : [])

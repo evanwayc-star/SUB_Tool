@@ -36,13 +36,41 @@ import {
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
-function hideCtx(){
+let ctxReturnFocus=null,ctxSelection=null,ctxPreservesFocus=false,ctxActiveIndex=-1,ctxReturnAria=null,ctxGeneration=0;
+function selectCtxItem(items,index){
+  ctxActiveIndex=index;
+  items.forEach((item,i)=>{item.tabIndex=i===index?0:-1;item.classList.toggle('keyboard-active',ctxPreservesFocus&&i===index);});
+  if(ctxPreservesFocus) ctxReturnFocus?.setAttribute('aria-activedescendant',items[index].id);
+  else items[index].focus({preventScroll:true});
+}
+function hideCtx({restoreFocus=true}={}){
   const was=ctx.classList.contains('show');
+  const previous=ctxReturnFocus,selection=ctxSelection,aria=ctxReturnAria;
+  ctxReturnFocus=null;ctxSelection=null;ctxPreservesFocus=false;ctxActiveIndex=-1;ctxReturnAria=null;
+  if(aria&&previous) for(const [name,value] of Object.entries(aria)){
+    if(value===null) previous.removeAttribute(name);else previous.setAttribute(name,value);
+  }
   ctx.classList.remove('show'); ctx.innerHTML='';
+  if(was&&restoreFocus&&previous?.isConnected){
+    previous.focus({preventScroll:true});
+    if(selection?.input) previous.setSelectionRange?.(...selection.input);
+    else if(selection?.range){const current=window.getSelection();current?.removeAllRanges();current?.addRange(selection.range);}
+  }
   if(was) { window._ctxOpen=false; emit('mpv:sync'); emit('render:videoSub'); } // 選單若曾讓 mpv 讓位，關閉時恢復（僅在真的有開過才發，避免每次 mousedown 都打 IPC）
 }
 function showCtx(x,y,items,{preserveFocus=false}={}){
+  if(ctx.classList.contains('show')) hideCtx();
+  ctxReturnFocus=document.activeElement;
+  ctxPreservesFocus=preserveFocus;
+  if(preserveFocus){
+    const active=ctxReturnFocus,selection=window.getSelection();
+    ctxReturnAria=Object.fromEntries(['aria-controls','aria-activedescendant'].map(name=>[name,active.getAttribute(name)]));
+    active.setAttribute('aria-controls',ctx.id);
+    if(typeof active?.selectionStart==='number') ctxSelection={input:[active.selectionStart,active.selectionEnd,active.selectionDirection]};
+    else if(selection?.rangeCount) ctxSelection={range:selection.getRangeAt(0).cloneRange()};
+  }
   ctx.innerHTML='';
+  const generation=++ctxGeneration;
   for(const it of items){
     let d;
     if(it.sep){ d=document.createElement('div'); d.className='msep'; }
@@ -52,7 +80,7 @@ function showCtx(x,y,items,{preserveFocus=false}={}){
       const { icon, text } = splitMenuLabel(it.label);
       d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`;
     }
-    else { d=document.createElement('div'); d.className='ci'; d.setAttribute('role','menuitem');
+    else { d=document.createElement('div'); d.className='ci'; d.setAttribute('role','menuitem');d.tabIndex=-1;d.id=`ctx-item-${generation}-${ctx.children.length}`;
       const { icon, text } = splitMenuLabel(it.label);
       d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`+(it.checked?'<span class="chk">✓</span>':'');
       // 輸入框的複製／貼上選單需保留游標及 inline editor；其他選單維持原焦點行為。
@@ -68,13 +96,36 @@ function showCtx(x,y,items,{preserveFocus=false}={}){
   const w=ctx.offsetWidth,h=ctx.offsetHeight;
   ctx.style.left=Math.max(6,Math.min(x,window.innerWidth-w-6))+'px';
   ctx.style.top=Math.max(6,Math.min(y,window.innerHeight-h-6))+'px';
+  ctx.tabIndex=-1;
+  const enabled=[...ctx.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')];
+  if(enabled.length) selectCtxItem(enabled,0);
+  else if(!preserveFocus) ctx.focus({preventScroll:true});
   window._ctxOpen=true;
   emit('mpv:sync'); // 定位完成後重算：選單若與影片重疊，讓 mpv 讓位（否則 mpv 為 OS 子視窗會蓋住選單）
   emit('render:videoSub');
 }
 if (typeof document !== 'undefined') {
   document.addEventListener('mousedown',e=>{ if(e.button===2)return; if(ctx && !ctx.contains(e.target))hideCtx(); },true);
-  window.addEventListener('blur',hideCtx);
+  document.addEventListener('keydown',e=>{
+    if(!ctx?.classList.contains('show')||e.isComposing||e.keyCode===229) return;
+    if(e.target.closest?.('#modalBg.show, #settingsModal')){hideCtx({restoreFocus:false});return;}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCtx();return;}
+    if(e.key==='Tab'){e.stopPropagation();hideCtx();return;}
+    const items=[...ctx.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')];
+    const index=ctxPreservesFocus?ctxActiveIndex:items.indexOf(document.activeElement);
+    if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){
+      e.preventDefault();e.stopPropagation();
+      if(!items.length) return;
+      const next=e.key==='Home'?0:e.key==='End'?items.length-1:e.key==='ArrowDown'?(index+1)%items.length:(index<=0?items.length:index)-1;
+      selectCtxItem(items,next);
+      return;
+    }
+    if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();(items[index]||items[0])?.click();return;}
+    // 複製／貼上的游標仍屬於編輯器；開始輸入便結束選單，不還原過時的選取範圍。
+    if(ctxPreservesFocus&&!ctx.contains(e.target)){hideCtx({restoreFocus:false});return;}
+    e.stopPropagation();
+  },true);
+  window.addEventListener('blur',()=>hideCtx({restoreFocus:false}));
   window.addEventListener('resize',hideCtx);
 }
 

@@ -1,6 +1,5 @@
-/* Mac 1470px 寬實機曾出現三種同源問題：頂列最後兩顆掉行、時間軸按鈕被壓成
-   逐字換行、字幕樣式面板多出橫向捲軸。jsdom 不做排版，這裡守住已經用安裝版
-   CDP 量過的 responsive CSS／HTML 結構。 */
+/* 窄視窗應允許整顆控制項換行，不裁掉功能、不把按鈕文字逐字折行。
+   這裡只守 CSS／HTML 結構；真實命中與像素由 verify-workspace-ui.js 驗證。 */
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -27,9 +26,10 @@ function standaloneDeclarations(selector) {
 }
 
 describe('Mac 工具列 responsive 版面', () => {
-  it('頂部工具列維持單列，窄視窗只隱藏按鈕文字', () => {
+  it('頂部工具列空間不足時換行，不能縮高裁掉第二列', () => {
     const menu = declarations('.menubar');
-    expect(menu).toContain('flex-wrap:nowrap');
+    expect(menu).toContain('flex-wrap:wrap');
+    expect(menu).toContain('flex-shrink:0');
     /* 水平方向仍然要裁——這一條守的是「窄視窗時工具列不可以撐爆版面」。
        但【不可以是 overflow:hidden】：hidden 會連帶把垂直軸變成 auto，
        把工具列裡的下拉選單一起裁掉（v6.1.12 的真實事故，見
@@ -53,6 +53,10 @@ describe('Mac 工具列 responsive 版面', () => {
     const toolbar = declarations('.tl-toolbar');
     expect(toolbar).toContain('gap:4px');
     expect(toolbar).toContain('white-space:nowrap');
+    expect(toolbar).toContain('flex-wrap:wrap');
+    expect(toolbar).toContain('flex-shrink:0');
+    expect(declarations('.tl-toolbar-options')).toContain('flex-wrap:wrap');
+    expect(declarations('.tl-toolbar-options')).not.toContain('overflow:hidden');
     expect(declarations('.tl-toolbar>*')).toContain('flex-shrink:0');
     expect(css).toContain('.tl-toolbar .compact-icon{display:inline}');
     expect(html).toMatch(/data-act="zoom-fit"[\s\S]*class="compact-icon"/);
