@@ -3667,8 +3667,18 @@ const Media = {
       const initialSource=this.vTime(),initialTimeline=active?Seq.toTimeline(initialSource,active):initialSource;
       let prepared=await this._playback.prepareFollowers(initialSource,initialTimeline,{owns});
       if(!prepared||!owns())return null;
-      await adapter.play();
+      // A paused native seek can acknowledge its target while video is still
+      // buffering. Only real playback readiness may release cached followers;
+      // otherwise drift correction repeatedly replays audio against that clock.
+      const waitForReady=this.mpvMode&&prepared.requiresPlayingClock&&!this._nativeReverse&&!active?.reverse;
+      const accepted=await adapter.play(waitForReady?{waitForReady:true}:undefined);
       if(!owns()) return null;
+      if(waitForReady){
+        if(accepted?.ready!==true||!Number.isFinite(accepted.sourceTime)){
+          prepared.cancel();throw new Error('原生播放器未確認可播放');
+        }
+        if(accepted.sourceTime>this._mpvTime)this._mpvTime=accepted.sourceTime;
+      }
       let sourceTime=this.vTime(),timelineTime=active?Seq.toTimeline(sourceTime,active):sourceTime;
       // A slow native play ACK can already have crossed an activity boundary.
       // Rebuild the whole group once from that accepted clock; never chase it

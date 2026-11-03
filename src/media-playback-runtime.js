@@ -96,6 +96,7 @@ export class MediaPlaybackRuntime {
     if(result.status==='cancelled')throw new Error('音訊來源已變更');
     if(result.status==='failed')throw result.error;
     return {cancel:prepared.cancel,
+      requiresPlayingClock:prepared.hasElements||media.tracks.some(track=>track.kind==='buffer'&&!track._srcHidden),
       matches:(actualSource,actualTime)=>Math.abs(actualSource-sourceTime)<=.12&&Math.abs(actualTime-time)<=.12
         &&this.#externalAt(actualTime)===key&&this.#overlapAt(actualTime)===overlap,
       commit:async()=>{

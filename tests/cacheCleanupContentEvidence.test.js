@@ -333,6 +333,7 @@ it.each(['original','quarantine','final'])('中央快取 %s 的 handle 無法關
   const cacheRoot=path.join(root,'cache'),tempRoot=path.join(root,'temp'),candidate=path.join(cacheRoot,'candidate');
   fs.mkdirSync(candidate,{recursive:true});fs.mkdirSync(tempRoot);
   const file=path.join(candidate,'wave.bin');fs.writeFileSync(file,'cache content');
+  const identity=fs.lstatSync(file,{bigint:true});
   const runtime=createMediaIntakeRuntime({cacheRoot,tempRoot,allowSidecarCache:false,
     fileAuthority:new FileAuthority({internalDirectories:[cacheRoot,tempRoot]}),ffmpegExecution:{async execute(){}}});
   const realOpen=fs.promises.open;let blocked=false,attempts=0,allow=false,observed,quarantineOpens=0;
@@ -347,13 +348,22 @@ it.each(['original','quarantine','final'])('中央快取 %s 的 handle 無法關
     }
     return handle;
   });
+  const expectRetained=()=>{
+    // POSIX can restore the original path with an open handle; Windows may retain quarantine.
+    const retained=[...new Set([file,observed])].filter(target=>fs.existsSync(target));
+    expect(retained).toHaveLength(1);
+    const stat=fs.lstatSync(retained[0],{bigint:true});
+    expect(stat.isFile()&&!stat.isSymbolicLink()).toBe(true);
+    expect(stat).toMatchObject({dev:identity.dev,ino:identity.ino});
+    expect(fs.readFileSync(retained[0],'utf8')).toBe('cache content');
+  };
   try{
     expect(await runtime.cleanOrphans()).toMatchObject({incomplete:true});
-    expect(blocked).toBe(true);expect(fs.readFileSync(observed,'utf8')).toBe('cache content');
+    expect(blocked).toBe(true);expectRetained();
     await expect(runtime.close()).rejects.toThrow('temporary close failure');
-    expect(attempts).toBe(2);expect(fs.readFileSync(observed,'utf8')).toBe('cache content');
+    expect(attempts).toBe(2);expectRetained();
     allow=true;await runtime.close();expect(attempts).toBe(3);
-    expect(fs.readFileSync(observed,'utf8')).toBe('cache content');
+    expectRetained();
   }finally{allow=true;await runtime.close();spy.mockRestore();}
 });
 

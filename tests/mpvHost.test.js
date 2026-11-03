@@ -116,6 +116,213 @@ function make({ duration = 123.5, guideLoad, setTimer = () => 0, createLog, spaw
 }
 
 describe('Windows mpv host lifecycle', () => {
+  function playingSocket() {
+    const socket = socketThatReportsDuration(), write = socket.write.getMockImplementation();
+    socket.playState = { seeking: true, 'core-idle': true, 'eof-reached': false, 'time-pos': 4 };
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw), [command, name] = message.command || [];
+      if (command === 'get_property' && Object.hasOwn(socket.playState, name)) {
+        queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id,
+          data: socket.playState[name], error: 'success' }) + '\n')));
+      } else write(raw);
+    });
+    socket.notify = (name, data) => {
+      socket.playState[name] = data;
+      socket.emit('data', Buffer.from(JSON.stringify({ event: 'property-change', name, data, id: socket.observerIds[name] }) + '\n'));
+    };
+    return socket;
+  }
+  const flushReady = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+
+  it('ready play 不以 pause ACK 或舊 restart 放行，等當前核心真正播放並回來源時間', async () => {
+    const { host, sockets } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    let accepted = false;
+    const playing = host.play({ intentId: 'play-1', waitForReady: true }).then(result => { accepted = true; return result; });
+    try {
+      await flushReady(); expect(accepted).toBe(false);
+      sockets[0].emit('data', Buffer.from('{"event":"playback-restart"}\n'));
+      await flushReady(); expect(accepted).toBe(false);
+      sockets[0].notify('seeking', false);
+      await flushReady(); expect(accepted).toBe(false);
+      sockets[0].playState['time-pos'] = 4.04;
+      sockets[0].notify('core-idle', false);
+      await expect(playing).resolves.toEqual({ ready: true, sourceTime: 4.04 });
+    } finally { host.quit(); await playing.catch(() => {}); }
+  });
+
+  it('同位置 resume 可由現況證明 ready，不要求新的 restart 或先播放固定秒數', async () => {
+    const { host, sockets } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    try {
+      Object.assign(sockets[0].playState, { seeking: false, 'core-idle': false });
+      await expect(host.play({ waitForReady: true })).resolves.toEqual({ ready: true, sourceTime: 4 });
+    } finally { host.quit(); }
+  });
+
+  it('ready 回覆換算母素材來源原點，不能將容器時間當成聲道 offset', async () => {
+    const { host, sockets } = make({ socketFactory: playingSocket, describeSource: async () => ({ video: { timestampOffset: -.5 } }) });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    try {
+      Object.assign(sockets[0].playState, { seeking: false, 'core-idle': false });
+      await expect(host.play({ waitForReady: true })).resolves.toEqual({ ready: true, sourceTime: 3.5 });
+    } finally { host.quit(); }
+  });
+
+  it('ready waiter 不攔截未屬於其 observer 的一般 property 事件', async () => {
+    const { host, sockets, events } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const playing = host.play({ waitForReady: true });
+    const rejection = playing.catch(() => {});
+    try {
+      await flushReady();
+      const event = { event: 'property-change', name: 'media-title', data: '中文素材' };
+      sockets[0].emit('data', Buffer.from(JSON.stringify(event) + '\n'));
+      expect(events.at(-1)).toEqual(event);
+    } finally { host.quit(); await rejection; }
+  });
+
+  it('ready 查詢途中 seek 失效，舊的可播回覆不能完成新 play', async () => {
+    const { host, sockets } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0], write = socket.write.getMockImplementation(), delayed = [];
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command?.[0] === 'get_property') delayed.push(message);
+      else write(raw);
+    });
+    const old = host.play({ waitForReady: true });
+    const rejected = expect(old).rejects.toThrow(/取消|取代/);
+    try {
+      await flushReady(); expect(delayed).toHaveLength(5);
+      await host.seek(8); await rejected;
+      socket.write.mockImplementation(write);
+      let accepted = false;
+      const current = host.play({ waitForReady: true }).then(result => { accepted = true; return result; });
+      for (const message of delayed) socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id,
+        error: 'success', data: message.command[1] === 'time-pos' ? 4 : false }) + '\n'));
+      await flushReady(); expect(accepted).toBe(false);
+      Object.assign(socket.playState, { seeking: false, 'time-pos': 8.04 }); socket.notify('core-idle', false);
+      await expect(current).resolves.toEqual({ ready: true, sourceTime: 8.04 });
+    } finally { host.quit(); }
+  });
+
+  it('查詢中的核心狀態變動會撤銷該輪證據，下一輪必須重讀', async () => {
+    const { host, sockets } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0], write = socket.write.getMockImplementation(), delayed = [];
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command?.[0] === 'get_property') delayed.push(message);
+      else write(raw);
+    });
+    let accepted = false;
+    const playing = host.play({ waitForReady: true }).then(result => { accepted = true; return result; });
+    try {
+      await flushReady(); expect(delayed).toHaveLength(5);
+      socket.notify('seeking', true);
+      socket.write.mockImplementation(write);
+      for (const message of delayed) socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id,
+        error: 'success', data: message.command[1] === 'time-pos' ? 4 : false }) + '\n'));
+      await flushReady(); expect(accepted).toBe(false);
+      socket.notify('seeking', false); socket.notify('core-idle', false);
+      await expect(playing).resolves.toEqual({ ready: true, sourceTime: 4 });
+    } finally { host.quit(); await playing.catch(() => {}); }
+  });
+
+  it('持續前進的 time-pos 不會餓死較慢的 ready 狀態查詢', async () => {
+    const { host, sockets } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0], write = socket.write.getMockImplementation(), delayed = [];
+    Object.assign(socket.playState, { seeking: false, 'core-idle': false });
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command?.[0] === 'get_property') delayed.push(message);
+      else write(raw);
+    });
+    let accepted = false;
+    const playing = host.play({ waitForReady: true }).then(result => { accepted = true; return result; });
+    try {
+      await flushReady();
+      for (let round = 0; round < 3 && !accepted; round++) {
+        const queries = delayed.splice(0); expect(queries).toHaveLength(5);
+        socket.notify('time-pos', 4 + (round + 1) * .04);
+        for (const message of queries) socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id,
+          error: 'success', data: message.command[1] === 'time-pos' ? socket.playState['time-pos'] : false }) + '\n'));
+        await flushReady();
+      }
+      expect(accepted).toBe(true);
+      await expect(playing).resolves.toEqual({ ready: true, sourceTime: 4.04 });
+    } finally { host.quit(); await playing.catch(() => {}); }
+  });
+
+  it.each(['pause', 'seek', 'present', 'load', 'play', 'direction', 'quit'])('等待 ready 遇到較新 %s 立即失效，晚到事件不可起播', async action => {
+    const { host, sockets } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const playing = host.play({ intentId: 'old', waitForReady: true });
+    const rejected = expect(playing).rejects.toThrow(/取消|取代|中斷/);
+    try {
+      await flushReady();
+      if (action === 'load') await host.loadFile('D:/media/next.mxf');
+      else if (action === 'seek') await host.seek(8);
+      else if (action === 'present') void host.present(8);
+      else await host[action]();
+      sockets[0].notify('seeking', false); sockets[0].notify('core-idle', false);
+      await rejected;
+    } finally { host.quit(); }
+  });
+
+  it.each(['eof', 'end-file'])('極短素材已 %s，ready 明確失敗而不掛到逾時', async terminal => {
+    const { host, sockets } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const playing = host.play({ waitForReady: true });
+    const rejected = expect(playing).rejects.toThrow(/結束/);
+    try {
+      await flushReady();
+      if (terminal === 'eof') sockets[0].notify('eof-reached', true);
+      else sockets[0].emit('data', Buffer.from('{"event":"end-file","playlist_entry_id":1,"reason":"eof"}\n'));
+      await rejected;
+    } finally { host.quit(); }
+  });
+
+  it('ready 逾時明確拒絕，不把靜止 time-pos 當成功', async () => {
+    const timers = [];
+    const { host } = make({ socketFactory: playingSocket, setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; } });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const playing = host.play({ waitForReady: true });
+    const rejected = expect(playing).rejects.toThrow(/逾時/);
+    try {
+      await flushReady();
+      const deadline = timers.findLast(timer => timer.ms === 10000);
+      expect(deadline).toBeDefined(); deadline.fn(); await rejected;
+    } finally { host.quit(); }
+  });
+
+  it.each(['command', 'observe', 'query', 'disconnect'])('ready 的 %s 失敗會拒絕並撤下專屬 observers', async failure => {
+    const { host, sockets } = make({ socketFactory: playingSocket });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    socket.write.mockClear();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw), [command, name, value] = message.command || [];
+      const fails = failure === 'command' && command === 'set_property' && name === 'pause' && value === false
+        || failure === 'observe' && command === 'observe_property' && value === 'seeking'
+        || failure === 'query' && command === 'get_property' && name === 'seeking';
+      if (fails) queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'property unavailable' }) + '\n')));
+      else write(raw);
+    });
+    const playing = host.play({ waitForReady: true });
+    const rejected = expect(playing).rejects.toThrow(failure === 'disconnect' ? /取消|中斷/ : /property unavailable/);
+    try {
+      if (failure === 'disconnect') { await flushReady(); socket.emit('close'); }
+      await rejected;
+      const commands = socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+      const registered = commands.filter(command => command[0] === 'observe_property').map(command => command[1]);
+      expect(registered).toHaveLength(5);
+      expect(commands.filter(command => command[0] === 'unobserve_property').map(command => command[1])).toEqual(registered);
+    } finally { host.quit(); }
+  });
+
   it('play 等到相符成功 ACK 才完成，其他 request 的回覆不能接受起播', async () => {
     const { host, sockets } = make();
     await host.launch({ src: 'D:/media/initial.mxf' });

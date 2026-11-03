@@ -215,7 +215,7 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `cancelPresent()` | `mpv:cancelPresent` | 撤銷待完成呈現 |
 | `loadfile(path)` | `mpv:loadfile` | 已授權來源切換；以命令回覆的 playlist entry ID 配對載入事件及路徑，舊來源事件不能完成新切換；回覆不代表首幀已呈現 |
 | `screenshot(path)` | `mpv:screenshot` | main 驗證請求的截圖目錄，在私有暫存擷取並回傳 base64 畫格 |
-| `play()` | `mpv:play` | 等待播放命令成功 ACK；命令錯誤、逾時或斷線會拒絕，ACK 不代表畫格已呈現 |
+| `play(options)` | `mpv:play` | 預設等待播放命令 ACK；`waitForReady: true` 另核對同來源、定位與播放意圖的即時狀態，回覆 `{ ready: true, sourceTime }`。ACK 不能代替可播放證據；命令錯誤、取消、片尾、逾時或斷線會拒絕 |
 | `pause()` | `mpv:pause` | 暫停 |
 | `direction(value)` | `mpv:direction` | 播放方向 |
 | `mute(value)` | `mpv:mute` | 等待靜音命令成功 ACK；失敗／斷線不能宣稱聲音已交接 |
@@ -452,7 +452,7 @@ PCM 取樣前按影片來源原點對齊，resampler 與指定聲道的 pan 在�
 
 lease 位於該 queueDir 的 `output-leases/<輸出路徑雜湊>.lock/owner.json`，記錄 jobId、token、PID、pipe 與輸出證據。後續更新及釋放沿取得時的 lease key 核對 outPath／token，不因所選別名改向而重新計算另一把鎖。stage 名稱由 canonical outPath 與 token 派生，不接受 caller 指定刪除路徑。
 
-同一作業系統使用者、同一 appData 實體視圖的新版本另以可信共用目錄鎖住實體目錄項，避免不同 profile 或 Windows 長短名稱同時寫入；原佇列鎖與 stage key 不改變。Windows 套件虛擬化改變路徑文字時，仍須核對原目錄與實體目錄的身分，不能因此接受 junction。共用鎖不主動復原其他 profile 的工作，原鎖仍在或無法核對時保留；writer 啟動後、PID 尚未持久化便中斷時也保留鎖與 stage，須先確認程序狀態並檢查成品。不同使用者、跨機、不同 appData 實體視圖及未實作此協定的舊版不受共用鎖保障；不同封裝或程序安全環境是否共用同一視圖，不能由單一環境測試推定。
+同一作業系統使用者、同一 appData 實體視圖的新版本另以可信共用目錄鎖住實體目錄項，避免不同 profile 或 Windows 長短名稱同時寫入；原佇列鎖與 stage key 不改變。Windows 套件虛擬化改變路徑文字時，仍須核對原目錄與實體目錄的身分，不能因此接受未准入的子目錄 junction。建立子目錄使用根目錄已准入的 `requestedPath` 拼接，範圍與實體目錄各依自己的證據核對；不能將實體長路徑拿去計算相對於 8.3 短路徑的範圍。根目錄別名每次使用仍須重新解析，指向不同實體目錄即拒絕。共用鎖不主動復原其他 profile 的工作，原鎖仍在或無法核對時保留；writer 啟動後、PID 尚未持久化便中斷時也保留鎖與 stage，須先確認程序狀態並檢查成品。不同使用者、跨機、不同 appData 實體視圖及未實作此協定的舊版不受共用鎖保障；不同封裝或程序安全環境是否共用同一視圖，不能由單一環境測試推定。
 
 | 成品階段 | 實際所有權檢查 |
 |---|---|

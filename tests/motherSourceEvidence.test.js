@@ -48,17 +48,18 @@ afterEach(() => {
 });
 
 describe('同一共享檔案的快速證據', () => {
-  function sharedFiles(bytes, overrides = {}) {
+  function sharedFiles(bytes, overrides = {}, physicalPath = '\\\\Storage\\DCP\\mother.mov') {
     const fields = { size: BigInt(bytes.length), dev: 1n, ino: 62220n, mtimeNs: 1001n, ctimeNs: 1002n,
       birthtimeNs: 1000n, ...overrides };
     const files = memoryFiles(bytes, { initialStat: fields });
-    files.fileSystem.realpathSync = { native: value => value };
+    // realpath returns the physical UNC name, independently of the host's path.resolve rules.
+    files.fileSystem.realpathSync = { native: () => physicalPath };
     return files;
   }
   it('同一 NAS 的 client 裝置及掛載路徑不同，仍以同一檔案證據命中且只讀取固定取樣', () => {
-    const bytes = Buffer.alloc(8 * 1024 * 1024, 17), first = sharedFiles(bytes), second = sharedFiles(bytes, { dev: 999n });
-    second.fileSystem.realpathSync.native = () => '\\\\Storage\\DCP\\folder\\mother.mov';
-    const a = sharedSourceFingerprintSync('\\\\Storage\\DCP\\folder\\mother.mov', { fileSystem: first.fileSystem });
+    const physicalPath = '\\\\Storage\\DCP\\folder\\mother.mov', bytes = Buffer.alloc(8 * 1024 * 1024, 17);
+    const first = sharedFiles(bytes, {}, physicalPath), second = sharedFiles(bytes, { dev: 999n }, physicalPath);
+    const a = sharedSourceFingerprintSync(physicalPath, { fileSystem: first.fileSystem });
     expect(a).toMatch(/^[a-f0-9]{64}$/);
     expect(sharedSourceFingerprintSync('Z:\\folder\\mother.mov', { fileSystem: second.fileSystem })).toBe(a);
     expect(first.read.mock.calls.reduce((sum, call) => sum + call[2], 0)).toBe(1179648);
@@ -70,10 +71,12 @@ describe('同一共享檔案的快速證據', () => {
       .not.toBe(sharedSourceFingerprintSync(source, { fileSystem: second.fileSystem }));
   });
   it('不同 NAS 或 share 不因 inode、時間及取樣碰巧一致而認領', () => {
-    const files = sharedFiles(Buffer.from('same'));
+    const bytes = Buffer.from('same'), files = sharedFiles(bytes);
     const a = sharedSourceFingerprintSync('\\\\Storage\\DCP\\mother.mov', { fileSystem: files.fileSystem });
-    for (const source of ['\\\\Other\\DCP\\mother.mov', '\\\\Storage\\Other\\mother.mov'])
-      expect(sharedSourceFingerprintSync(source, { fileSystem: files.fileSystem })).not.toBe(a);
+    for (const source of ['\\\\Other\\DCP\\mother.mov', '\\\\Storage\\Other\\mother.mov']) {
+      const foreign = sharedFiles(bytes, {}, source);
+      expect(sharedSourceFingerprintSync(source, { fileSystem: foreign.fileSystem })).not.toBe(a);
+    }
   });
   it('缺少可靠檔案 ID 時不產生共享證據', () => {
     const files = sharedFiles(Buffer.from('same'), { ino: 0n });

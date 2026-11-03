@@ -23,7 +23,7 @@ it('播放中跳轉的同步通知期間，先前 buffer 聲音已停止',async(
     }};
   const sample=()=>[...active].reduce((sum,voice)=>sum+(voice.buffer?.getChannelData(0)[Math.floor(voice.offset*10)]||0),0);
   window.AudioContext=function(){return context;};
-  const mpv={launch:vi.fn(async()=>({ok:true,duration:12,sourceSessionId:'source-session'})),play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),
+  const mpv={launch:vi.fn(async()=>({ok:true,duration:12,sourceSessionId:'source-session'})),play:vi.fn(async()=>({ready:true,sourceTime:Media.vTime()})),pause:vi.fn(async()=>{}),
     present:vi.fn(time=>Promise.resolve({backend:'mpv',presentedSourceTime:time})),mute:vi.fn(async()=>{}),quit:vi.fn(async()=>{})};
   const desktop={isDesktop:true,mpv};Object.defineProperty(window,'subtool',{configurable:true,value:desktop});
   const {Media}=await import('../src/media.js');const {State,resetAudioProject,ensureAudioSourceMap}=await import('../src/state.js');

@@ -51,6 +51,8 @@ import {
 } from './transport-controller.js';
 
 const _keysPressed = new Set();
+const ACTIVATION_CONTROL = 'button, a[href], summary, [role="button"], [role="menuitem"]';
+let _pointerActivatedControls = new WeakSet();
 function exportBracketChord(e) {
   if (!['[',']'].includes(e.key) || !_keysPressed.has('[') || !_keysPressed.has(']')) return false;
   const { ctrlKey, metaKey, shiftKey, altKey } = e;
@@ -59,6 +61,15 @@ function exportBracketChord(e) {
     && matchAction(State.keymap, { ...modifiers, key:']', code:'BracketRight' }) === 'exp_out';
 }
 if (typeof window !== 'undefined') {
+  window.addEventListener('click', e => {
+    if ($('modalBg')?.classList?.contains('show') || document.getElementById('settingsModal')) return;
+    const control = e.target.closest?.(ACTIVATION_CONTROL);
+    if (!control) return;
+    // Modal close may restore the clicked toolbar button after app.js blurs it.
+    // Keep that pointer intent until explicit keyboard activation or navigation.
+    if (e.detail > 0) _pointerActivatedControls.add(control);
+    else _pointerActivatedControls.delete(control);
+  }, true);
   window.addEventListener('blur', () => _keysPressed.clear());
   window.addEventListener('keyup', e => {
     _keysPressed.delete(e.key.toLowerCase());
@@ -73,8 +84,12 @@ if (typeof window !== 'undefined') {
     if (typeof $ === 'function' && $('modalBg')?.classList?.contains('show')) { if (e.key === 'Escape') closeModal(); return; }
     // 快捷鍵設定是獨立於 modalBg 的自訂對話框：開啟期間全域快捷鍵一律不作用（避免 Enter/Space 在背後觸發播放）
     if (document.getElementById('settingsModal')) return;
-    // 原生控制持有自己的啟用鍵；工作區的 Space／Enter 才是播放快捷鍵。
-    if ((e.key === ' ' || e.key === 'Enter') && e.target.closest?.('button, a[href], summary, [role="button"], [role="menuitem"]')) return;
+    // Only workspace Tab navigation resets pointer intent; Tab inside a modal
+    // must not turn its restored mouse origin into a keyboard activation target.
+    if (e.key === 'Tab') _pointerActivatedControls = new WeakSet();
+    const control = e.target.closest?.(ACTIVATION_CONTROL);
+    if ((e.key === ' ' || e.key === 'Enter') && control
+      && !(e.key === ' ' && _pointerActivatedControls.has(control))) return;
     if (e.isComposing || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
     if (document.activeElement?.isContentEditable) {
     // 任何 contenteditable 編輯中（字幕列表 .txt、修改字幕視窗、軌道名稱、備註等）

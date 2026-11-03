@@ -5,21 +5,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),setStatus:vi.fn(),showToast:vi.fn(),showOsd:vi.fn(),openModal:vi.fn(),closeModal:vi.fn()}));
 vi.mock('../src/timeline-renderer.js',()=>({drawTimeline:vi.fn(),updatePlayhead:vi.fn()}));
 
-const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
+const deferred=()=>{let resolve,reject;const promise=new Promise((done,fail)=>{resolve=done;reject=fail;});return {promise,resolve,reject};};
 const node=()=>({connect:vi.fn(),disconnect:vi.fn()});
 const flush=async()=>{for(let index=0;index<8;index++)await Promise.resolve();};
 
 describe('Proxy 聲道接手後的定位與起播同步',()=>{
   afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 
-  it.each([[0,'continue'],[80,'continue'],[250,'continue'],[80,'pause'],[80,'reset'],[80,'seek'],[250,'late-ack'],[250,'late-ack-slow'],[80,'ack-error']])(
+  it.each([[0,'continue'],[80,'continue'],[250,'continue'],[80,'pause'],[80,'reset'],[80,'seek'],[250,'late-ack'],[250,'late-ack-slow'],[80,'ack-error'],
+    [0,'video-buffering'],[0,'video-pause'],[0,'video-reset'],[0,'video-seek'],[0,'video-failure'],[0,'video-reply-after-progress'],
+    [0,'video-invalid-true'],[0,'video-invalid-false'],[0,'video-invalid-undefined'],[0,'video-invalid-clock'],[0,'video-buffering-16']])(
     '同一來源兩個聲道定位準備相差 %i ms，%s 後不應回音或重播舊工作',async(readinessDelay,action)=>{
     vi.resetModules();
     document.body.innerHTML=readFileSync('index.html','utf8');
     const video=document.getElementById('video');
     video.pause=vi.fn();video.play=vi.fn(async()=>{});video.load=vi.fn();
-    const ingest=deferred(),elements=[],trace=[];
-    let Media,nativeMuted=false,nativePlaying=false,deferReadiness=false,nextPlayAck=null;
+    const ingest=deferred(),elements=[],trace=[],channelCount=action==='video-buffering-16'?16:2;
+    let Media,nativeMuted=false,nativePlaying=false,deferReadiness=false,nextPlayAck=null,nextPresentation=null,nextPlaybackReady=null;
     const capture=event=>trace.push({event,nativeAudible:nativePlaying&&!nativeMuted,
       channels:elements.filter(element=>element.audible).map(element=>({src:element.src,time:element.currentTime}))});
     class AudioElement extends EventTarget{
@@ -63,25 +65,92 @@ describe('Proxy 聲道接手後的定位與起播同步',()=>{
       createMediaElementSource:()=>node(),createChannelSplitter:()=>node(),createChannelMerger:()=>node()};
     window.AudioContext=function(){return context;};vi.stubGlobal('Audio',AudioElement);
     const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({ok:true,duration:12,sourceSessionId:'mother'})),
-      play:vi.fn(async()=>{nativePlaying=true;capture('native-play');if(nextPlayAck)await nextPlayAck.promise;}),
+      play:vi.fn(async options=>{
+        nativePlaying=true;capture('native-play');if(nextPlayAck)await nextPlayAck.promise;
+        if(nextPlaybackReady&&options?.waitForReady)return await nextPlaybackReady.promise;
+        if(options?.waitForReady)return {ready:true,sourceTime:Media.vTime()};
+      }),
       pause:vi.fn(async()=>{nativePlaying=false;capture('native-pause');}),
-      present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
+      present:vi.fn(async time=>{if(nextPresentation)await nextPresentation.promise;return {backend:'mpv',presentedSourceTime:time};}),
       quit:vi.fn(async()=>{}),onEvent:vi.fn(),mute:vi.fn(async value=>{nativeMuted=value;capture('native-mute');})};
     Object.defineProperty(window,'subtool',{configurable:true,value:{isDesktop:true,mpv,
       stat:vi.fn(async()=>({exists:true,size:6_000_000_000})),
-      probe:vi.fn(async()=>({duration:12,video:{codec:'mpeg2video',fps:25,width:1920,height:1080},audio:[{channels:2}]})),
+      probe:vi.fn(async()=>({duration:12,video:{codec:'mpeg2video',fps:25,width:1920,height:1080},audio:[{channels:channelCount}]})),
       ingest:vi.fn(()=>ingest.promise),fileURL:vi.fn(async path=>`file:///${path}`)}});
     ({Media}=await import('../src/media.js'));
     try{
       await Media.loadDesktopMedia('C:/mother.mxf');
       Media.play();
-      ingest.resolve({proxy:'C:/cache/preview.mp4',channels:[0,1].map(sourceChannel=>({
+      ingest.resolve({proxy:'C:/cache/preview.mp4',channels:Array.from({length:channelCount},(_,sourceChannel)=>({
         file:`C:/cache/channel-${sourceChannel}.m4a`,label:`A${sourceChannel+1}`,sourceStream:0,sourceChannel,
       }))});
-      await vi.waitFor(()=>expect(Media.tracks.filter(track=>track.kind==='element')).toHaveLength(2));
-      await vi.waitFor(()=>expect(elements.filter(element=>element.audible)).toHaveLength(2));
+      await vi.waitFor(()=>expect(Media.tracks.filter(track=>track.kind==='element')).toHaveLength(channelCount));
+      await vi.waitFor(()=>expect(elements.filter(element=>element.audible)).toHaveLength(channelCount));
       expect(nativeMuted).toBe(true);
       Media.pause({seekOnPause:false});
+      if(action.startsWith('video-')){
+        // A paused seek can return its target before unpause has enough video
+        // data to advance. Command acceptance alone must not release followers.
+        nextPresentation=deferred();nextPlaybackReady=deferred();
+        const sought=Media.seek(4);
+        Media.play();await flush();
+        expect(elements.some(element=>element.audible)).toBe(false);
+        for(const element of elements)element.play.mockClear();
+        nextPresentation.resolve();await sought;await flush();
+        const positions=[];
+        for(let tick=0;tick<5;tick++){
+          for(const element of elements)element.advance(.2);
+          context.currentTime+=.2;
+          Media.syncAudioDrift();await flush();
+          positions.push(elements.map(element=>element.currentTime));
+        }
+        expect(elements.map(element=>element.play.mock.calls.length),JSON.stringify({positions,trace})).toEqual(Array(channelCount).fill(0));
+        expect(mpv.play).toHaveBeenLastCalledWith(expect.objectContaining({waitForReady:true}));
+        expect(nativeMuted).toBe(true);
+        if(action.startsWith('video-invalid-')){
+          nextPlaybackReady.resolve({'video-invalid-true':true,'video-invalid-false':false,
+            'video-invalid-undefined':undefined,'video-invalid-clock':{ready:true}}[action]);
+          await vi.waitFor(()=>expect(Media.playing).toBe(false));
+          expect(elements.some(element=>element.audible)).toBe(false);expect(nativePlaying).toBe(false);
+          expect(elements.map(element=>element.play.mock.calls.length)).toEqual([0,0]);return;
+        }
+        if(action==='video-failure'){
+          nextPlaybackReady.reject(new Error('native playback readiness timeout'));
+          await vi.waitFor(()=>expect(Media.playing).toBe(false));
+          expect(elements.some(element=>element.audible)).toBe(false);expect(nativePlaying).toBe(false);
+          return;
+        }
+        if(action==='video-pause'||action==='video-reset'){
+          if(action==='video-pause')Media.pause({seekOnPause:false});else Media.reset();
+          nextPlaybackReady.resolve({ready:true,sourceTime:4.04});await flush();
+          expect(elements.some(element=>element.audible)).toBe(false);
+          expect(Media.playing).toBe(false);return;
+        }
+        if(action==='video-seek'){
+          const oldReady=nextPlaybackReady;nextPlaybackReady=deferred();
+          const starts=mpv.play.mock.calls.length;
+          await Media.seek(8);
+          await vi.waitFor(()=>expect(mpv.play).toHaveBeenCalledTimes(starts+1));
+          oldReady.resolve({ready:true,sourceTime:4.04});await flush();
+          expect(elements.some(element=>element.audible)).toBe(false);
+          nextPlaybackReady.resolve({ready:true,sourceTime:8});
+          await vi.waitFor(()=>expect(elements.every(element=>element.audible)).toBe(true));
+          expect(elements.map(element=>element.currentTime)).toEqual([8,8]);return;
+        }
+        if(action==='video-reply-after-progress')Media.observeMpvEvent({event:'property-change',name:'time-pos',data:4.3});
+        nextPlaybackReady.resolve({ready:true,sourceTime:4.04});
+        await vi.waitFor(()=>expect(elements.every(element=>element.audible)).toBe(true));
+        if(action==='video-reply-after-progress'){
+          expect(elements.map(element=>element.currentTime)).toEqual([4.3,4.3]);return;
+        }
+        expect(elements.map(element=>element.play.mock.calls.length)).toEqual(Array(channelCount).fill(1));
+        for(const element of elements)element.advance(.2);
+        Media.observeMpvEvent({event:'property-change',name:'time-pos',data:4.24});
+        Media.syncAudioDrift();await flush();
+        expect(elements.map(element=>element.play.mock.calls.length)).toEqual(Array(channelCount).fill(1));
+        expect(elements.map(element=>element.currentTime)).toEqual(Array(channelCount).fill(4.2));
+        return;
+      }
       await Media.seek(4);
       const [first,second]=elements;
       const completeStaggeredStart=async target=>{

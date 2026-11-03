@@ -253,6 +253,8 @@ mpv 確認目前來源的連線中斷時，影片播放及等待中的呈現工�
 
 先核對同源 native 是否完成靜音交接，再量各聲道與 overlap voice 的定位完成、可播資料及同組起播時刻。`currentTime` 相同但其中一軌尚在 seek／buffering，仍可能讓聲道錯開；不能用原地重播正常來證明長距離跳轉正確。測試應延遲其中一軌的資料，核對所有聲道都有非零 PCM、相對位置一致且能持續播放。
 
+另一種回音是同一聲道被反覆拉回：遠距 seek 已回報目標，mpv 也接受 `pause=false`，但視訊仍在 buffering、時鐘尚未前進，提早播放的外音被 drift correction 一再重置。正向起播有音訊 follower 時，須等目前 host 的實際可播放回覆，不能拿命令 ACK 當成功。驗收分開核對命令回覆、核心就緒與來源時鐘前進，並檢查等待期間靜音、同組只起播一次；暫停或新的 seek 撤銷舊等待。
+
 ### 純字幕專案播放點變了，預覽沒變
 
 沒有影片時仍須發布統一 seeked／playhead invalidation；消費端依 `displayTime()` 重繪，不能依是否存在 HTML video／mpv 決定要不要更新。

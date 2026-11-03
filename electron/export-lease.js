@@ -61,7 +61,9 @@ function captureOutputAuthority(outPath, root, io = fs) {
 // a real directory; recursive mkdir must not follow an untrusted junction.
 function prepareSharedLeaseRoot(appDataDir) {
   const appRoot = captureOutputDirectory(appDataDir);
-  const applicationDir = path.join(appRoot.path, 'SUB_Tool');
+  // Keep the admitted spelling for containment; authority still binds the
+  // physical directory when the root uses an 8.3 name or an authorized alias.
+  const applicationDir = path.join(appRoot.requestedPath, 'SUB_Tool');
   const appParentEvidence = captureOutputAuthority(applicationDir, appRoot);
   assertOutputAuthority(appParentEvidence, applicationDir);
   try { fs.mkdirSync(applicationDir); }

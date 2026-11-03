@@ -442,7 +442,7 @@ class AudioEngineCore {
       // moving clock. The presentation owner controls when that clock resumes.
       state='ready';clearTimeout(timer);resolve({status:'ready'});
     };
-    const plan={ready,cancel,pending:()=>{
+    const plan={ready,cancel,get hasElements(){return requests.length>0;},pending:()=>{
       if(state!=='preparing'&&state!=='ready')return false;
       if(!current()){cancel();return false;}
       return true;

@@ -193,7 +193,7 @@ describe('delivery runner public interface', () => {
     await f.runner.run(job);
     expect(hasAudio).not.toHaveBeenCalledWith(image,expect.anything());
     expect(f.runFfmpeg).toHaveBeenCalledWith(expect.any(Array),expect.objectContaining({
-      sourcePaths:expect.arrayContaining([image,oldSource,path.normalize('D:/source/master.mxf')]),
+      sourcePaths:expect.arrayContaining([image,oldSource,path.resolve(job.payload.clips[0].path)]),
     }));
   });
 
@@ -715,7 +715,7 @@ describe('delivery runner public interface', () => {
     expect(setup.queue.assertJobCapabilities).toHaveBeenCalledTimes(4);
     expect(setup.runFfmpeg).toHaveBeenCalledWith(
       expect.arrayContaining(['-c:v', 'libx264', job.payload.outPath]),
-      expect.objectContaining({ jobId: 'delivery-1', cwd: setup.tempDir, sourcePaths: [path.normalize('D:/source/master.mxf')] }),
+      expect.objectContaining({ jobId: 'delivery-1', cwd: setup.tempDir, sourcePaths: [path.resolve(job.payload.clips[0].path)] }),
     );
     expect(setup.queue.registerActiveJob).toHaveBeenCalledOnce();
     expect(setup.queue.clearActiveJob).toHaveBeenCalledWith('delivery-1');

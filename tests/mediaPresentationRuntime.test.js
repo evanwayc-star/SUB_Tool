@@ -416,7 +416,7 @@ describe('Media presentation runtime', () => {
       const sourceTime=entry==='handoff'?2.4:16,timelineTime=entry==='handoff'?110.4:106;
       if(backend==='mpv')Media.observeMpvEvent({event:'property-change',name:'time-pos',data:sourceTime});
       else domMock.video.currentTime=sourceTime;
-      resolve(null);
+      resolve(backend==='mpv'?{ready:true,sourceTime}:null);
       await vi.waitFor(()=>{expect(original.paused).toBe(false);expect(outside.paused).toBe(false);});
       expect(original.currentTime).toBeCloseTo(sourceTime,8);
       expect(outside.currentTime).toBeCloseTo(timelineTime-100+4,8);

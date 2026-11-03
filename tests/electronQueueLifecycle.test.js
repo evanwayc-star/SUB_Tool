@@ -614,7 +614,8 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       20000,
     );
 
-    expect(finished.status, finished.errorMsg).toBe('done');
+    expect(finished.status, `${finished.errorMsg || ''}\nprofile=${profile}\n`
+      + `systemTemp=${path.join(profile, 'system-temp')}\n${app.stderr.join('')}`).toBe('done');
     expect(finished.completedAt).toEqual(expect.any(Number));
     expect(existsSync(outPath)).toBe(true);
     expect(statSync(outPath).size).toBeGreaterThan(0);
@@ -718,8 +719,8 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       controller.ready.then(() => {
         const { watchdogPid, ffmpegPid, stagePath } = listLeases(${JSON.stringify(queueDir)})[0].owner;
         process.send({ watchdogPid, ffmpegPid, stagePath });
-      }).catch(error => process.send({ error: error.message }));
-      })().catch(error => process.send({ error: error.message }));
+      }).catch(error => process.send({ error: require('node:util').inspect(error, { depth: 6 }) }));
+      })().catch(error => process.send({ error: require('node:util').inspect(error, { depth: 6 }) }));
     `);
     const parent = spawn(process.execPath, [parentScript], {
       windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
@@ -730,7 +731,7 @@ describeElectron('Electron 匯出佇列生命週期', () => {
         const timer = setTimeout(() => reject(new Error('crash parent did not start the writer')), 6000);
         parent.once('message', message => {
           clearTimeout(timer);
-          if (message.error) reject(new Error(message.error));
+          if (message.error) reject(new Error(`profile=${profile}\n${message.error}`));
           else resolve(message);
         });
         parent.once('error', error => { clearTimeout(timer); reject(error); });
@@ -810,7 +811,10 @@ describeElectron('Electron 匯出佇列生命週期', () => {
       },
       'ffmpeg 已啟動並建立 output lease',
       15000,
-    );
+    ).catch(error => {
+      throw new Error(`${error.message}\nprofile=${profile}\n`
+        + `systemTemp=${path.join(profile, 'system-temp')}\n${firstApp.stderr.join('')}`, { cause: error });
+    });
     expect(owner.ffmpegPid).toBeGreaterThan(0);
 
     firstApp.child.kill('SIGKILL');

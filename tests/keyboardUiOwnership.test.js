@@ -34,6 +34,7 @@ beforeEach(() => {
   State.clips = []; State.duration = 10;
   setSelection({kind:'sub',ids:[]});
   Media.playing = false;
+  key(document.body, 'Tab');
 });
 afterAll(() => { Menus.hideCtx(); UI.closeModal(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -46,6 +47,44 @@ it.each([' ', 'Enter'])('聚焦工具列按鈕時 %s 保留原生啟用，不開
   expect(Media.play).not.toHaveBeenCalled();
   // jsdom 不執行瀏覽器的原生鍵盤 click；確認它沒有被 keydown 取消後再模擬。
   button.click(); expect(click).toHaveBeenCalledOnce();
+});
+
+it.each([['exp-dialog',false],['exp-dialog',true],['exp-video',false],['exp-video',true]])('滑鼠開啟 %s 並結束對話框（committed=%s）後，Space 播放而不再次啟用按鈕', async (action,committed) => {
+  const button = document.querySelector(`[data-act="${action}"]`);
+  button.addEventListener('click', () => {
+    button.blur();
+    UI.openModal('匯出', '<button>設定</button>');
+  }, {once:true});
+  button.focus();
+  button.dispatchEvent(new MouseEvent('click', {bubbles:true,detail:1}));
+  key(document.getElementById('modalBody').querySelector('button'), 'Tab');
+  UI.closeModal({committed}); await vi.runOnlyPendingTimersAsync();
+  expect(document.activeElement).toBe(button);
+  const event = key(button, ' '); await Promise.resolve();
+  expect(event.defaultPrevented).toBe(true);
+  expect(Media.play).toHaveBeenCalledOnce();
+});
+
+it.each([' ', 'Enter'])('滑鼠點過按鈕後，明確 Tab 導覽回來仍可用 %s 原生啟用', async value => {
+  const button = document.querySelector('[data-act="exp-dialog"]');
+  button.focus(); button.dispatchEvent(new MouseEvent('click', {bubbles:true,detail:1}));
+  key(button, 'Tab');
+  // jsdom does not perform the browser's default Tab focus movement.
+  const next = document.getElementById('fpsSel'); next.focus();
+  key(next, 'Tab', {shiftKey:true}); button.focus();
+  const event = key(button, value); await Promise.resolve();
+  expect(event.defaultPrevented).toBe(false); expect(Media.play).not.toHaveBeenCalled();
+});
+
+it('滑鼠按鈕的 Space 不繞過對話框、IME 或文字編輯的快捷鍵圍籬', async () => {
+  const button = document.querySelector('[data-act="exp-dialog"]');
+  button.focus(); button.dispatchEvent(new MouseEvent('click', {bubbles:true,detail:1}));
+  key(button, ' ', {isComposing:true}); key(button, ' ', {keyCode:229});
+  UI.openModal('輸入', '<input id="keyboardOwnerInput">');
+  key(button, ' '); key(document.getElementById('keyboardOwnerInput'), ' ');
+  UI.closeModal(); await vi.runOnlyPendingTimersAsync();
+  const input = document.getElementById('searchInput'); input.focus(); key(input, ' ');
+  await Promise.resolve(); expect(Media.play).not.toHaveBeenCalled();
 });
 
 it('工作區仍可用 Space 播放，已被局部控制處理的事件不再播放', async () => {

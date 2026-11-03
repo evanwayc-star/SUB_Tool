@@ -149,7 +149,7 @@ it.each([{start:2,actual:3.1,active:true},{start:5.9,actual:6.1,active:false}])
   let acceptMute,controlMute=false;
   const muted=new Promise(resolve=>{acceptMute=resolve;});
   const bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'late-mute',duration:10})),
-    play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
+    play:vi.fn(async()=>({ready:true,sourceTime:Media.vTime()})),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
     present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
     mute:vi.fn(value=>value&&controlMute?muted:Promise.resolve())};
   const runtime=activateMpvTransport({mpv:bridge});
@@ -207,7 +207,7 @@ it.each([
   let controlMute=false;
   const muteReplies=[];
   const bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'split-mute-replies',duration:10})),
-    play:vi.fn(async()=>{}),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
+    play:vi.fn(async()=>({ready:true,sourceTime:Media.vTime()})),pause:vi.fn(async()=>{}),rate:vi.fn(async()=>{}),direction:vi.fn(async()=>true),
     present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),mute:vi.fn(value=>{
       if(!value||!controlMute)return Promise.resolve();
       return new Promise(resolve=>{muteReplies.push(resolve);});

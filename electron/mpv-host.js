@@ -97,6 +97,7 @@ function createMpvHost(deps) {
   let requestId = 0;
   const callbacks = new Map();
   let pendingPresentation = null;
+  let pendingPlaybackReady = null;
   let pendingFileLoad = null;
   let fileLoadSession = null;
   let fileLoadPhase = null;
@@ -260,6 +261,77 @@ function createMpvHost(deps) {
 
   function cancelPresent() {
     return settlePresentation(pendingPresentation, null);
+  }
+
+  function settlePlaybackReady(request, error, value) {
+    if (!request || request !== pendingPlaybackReady) return;
+    pendingPlaybackReady = null;
+    clearTimer(request.timer);
+    if (request.client === client && request.generation === generation) {
+      for (const id of Object.values(request.observers)) void send(['unobserve_property', id]).catch(() => {});
+    }
+    if (error) request.reject(error);
+    else request.resolve(value);
+  }
+
+  function cancelPlaybackReady() {
+    settlePlaybackReady(pendingPlaybackReady, new Error('mpv 播放準備已取消或被新操作取代'));
+  }
+
+  function ownsPlaybackReady(request) {
+    return request === pendingPlaybackReady && request.client === client && request.generation === generation
+      && request.session === fileLoadSession && !request.session?.loading
+      && request.positioningGeneration === (fileLoadSession?.positioningGeneration || 0)
+      && request.commandGeneration === playbackCommandGeneration;
+  }
+
+  function refreshPlaybackReady(request = pendingPlaybackReady, controlChanged = true) {
+    if (!request || !ownsPlaybackReady(request) || !request.acknowledged || !request.observing) return;
+    if (request.reading) {
+      // A progressing clock is compatible with the in-flight playback-state
+      // proof. Invalidating on every frame can starve replies on a busy pipe.
+      if (controlChanged) request.revision++;
+      return;
+    }
+    request.reading = true;
+    const revision = ++request.revision;
+    // pause=false only acknowledges intent. mpv documents core-idle=false as
+    // actual playback, while seeking also covers decoder restart. Notifications
+    // only wake this source/seek/play-owned query; their payload cannot qualify it.
+    void Promise.all(['pause', 'seeking', 'core-idle', 'eof-reached', 'time-pos']
+      .map(name => send(['get_property', name], true, { requireSuccess: true })))
+      .then(([paused, seeking, idle, ended, position]) => {
+        if (!ownsPlaybackReady(request) || revision !== request.revision) return;
+        if (ended === true) return settlePlaybackReady(request, new Error('mpv 播放已結束'));
+        if (paused === false && seeking === false && idle === false && ended === false
+          && typeof position === 'number' && Number.isFinite(position)) {
+          settlePlaybackReady(request, null, { ready: true, sourceTime: sourceTime(position) });
+        }
+      }).catch(error => { if (ownsPlaybackReady(request)) settlePlaybackReady(request, error); })
+      .finally(() => {
+        request.reading = false;
+        if (ownsPlaybackReady(request) && revision !== request.revision) refreshPlaybackReady(request);
+      });
+  }
+
+  function beginPlaybackReady(session, commandGeneration) {
+    const request = {
+      session, commandGeneration, client, generation,
+      positioningGeneration: session?.positioningGeneration || 0,
+      observers: {}, observing: false, acknowledged: false, reading: false, revision: 0,
+    };
+    const promise = new Promise((resolve, reject) => { request.resolve = resolve; request.reject = reject; });
+    pendingPlaybackReady = request;
+    request.timer = setTimer(() => settlePlaybackReady(request, new Error('mpv 等待實際播放逾時')), 10000);
+    for (const name of ['pause', 'seeking', 'core-idle', 'eof-reached', 'time-pos']) request.observers[name] = nextSourceObserverId++;
+    void Promise.all(Object.entries(request.observers)
+      .map(([name, id]) => send(['observe_property', id, name], true, { requireSuccess: true })))
+      .then(() => {
+        if (!ownsPlaybackReady(request)) return;
+        request.observing = true;
+        refreshPlaybackReady(request);
+      }).catch(error => { if (ownsPlaybackReady(request)) settlePlaybackReady(request, error); });
+    return { request, promise };
   }
 
   function settleFileLoad(ready) {
@@ -466,6 +538,7 @@ function createMpvHost(deps) {
   }
 
   function detachClient({ destroy = true, emitDisconnected = false } = {}) {
+    cancelPlaybackReady();
     playbackCommandGeneration++;
     directionGeneration++;
     sourceAudioGraph = '';
@@ -621,6 +694,7 @@ function createMpvHost(deps) {
   }
 
   function present(time, { exact = false, tolerance = 1.5 / 30, frameTarget = time, frameStart = null, frameDuration = 0, waitForFrame = false } = {}) {
+    cancelPlaybackReady();
     cancelPresent();
     const startedAt = now();
     const targetTime = Math.max(0, Number(time) || 0);
@@ -676,6 +750,7 @@ function createMpvHost(deps) {
   }
 
   async function setDirection(value) {
+    cancelPlaybackReady();
     const backward = value === 'backward';
     const token = ++directionGeneration;
     const directionClient = client;
@@ -750,6 +825,13 @@ function createMpvHost(deps) {
             maybeFinishFileLoad(pendingFileLoad);
             sendEvent(message);
           } else if (message.event === 'property-change' || message.event === 'end-file' || message.event === 'playback-restart') {
+            const ready = pendingPlaybackReady;
+            if (message.event === 'property-change' && ready && Object.hasOwn(ready.observers, message.name)
+              && ready.observers[message.name] === message.id) {
+              refreshPlaybackReady(ready, message.name !== 'time-pos');
+              continue;
+            }
+            if (message.event === 'playback-restart') refreshPlaybackReady(ready);
             if (message.event === 'playback-restart' && fileLoadPhase?.loaded && !fileLoadPhase.ended) {
               fileLoadPhase.restarted = true;
               maybeFinishFileLoad(pendingFileLoad);
@@ -781,6 +863,7 @@ function createMpvHost(deps) {
               if (!session || session.client !== client || session.generation !== generation
                 || session.entryId == null || message.playlist_entry_id !== session.entryId) continue;
               message.sourceSessionId = session.sourceSessionId;
+              settlePlaybackReady(pendingPlaybackReady, new Error('mpv 播放已結束：' + (message.reason || 'end-file')));
             }
             observePresentationEvent(message);
             sendEvent(message);
@@ -1090,6 +1173,7 @@ function createMpvHost(deps) {
   }
 
   async function loadFile(filePath) {
+    cancelPlaybackReady();
     if (!client) return null;
     directionGeneration++;
     settleFileLoad(false);
@@ -1171,6 +1255,7 @@ function createMpvHost(deps) {
     // time-pos 讓最新目標立即取代舊目標，適合一般連續逐格；少數 HEVC MP4 在
     // frame boundary 會把 time-pos 呈現到下一格，改用 mpv 的 absolute+exact command。
     seek: async (time, { exact = false } = {}) => {
+      cancelPlaybackReady();
       const session=fileLoadSession;
       const positioningGeneration=session?(session.positioningGeneration=(session.positioningGeneration||0)+1):0;
       const command=exact?['seek',playerTime(time),'absolute+exact']:['set_property','time-pos',playerTime(time)];
@@ -1184,18 +1269,31 @@ function createMpvHost(deps) {
     screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles'], true, { requireSuccess: true })
       .then(() => ({ ok: true })),
     play: (options = {}) => {
+      cancelPlaybackReady();
       const commandGeneration=++playbackCommandGeneration,session=fileLoadSession,previousPaused=playerPaused;
+      if (options?.waitForReady === true && (!client || !session || session.loading)) {
+        return Promise.reject(new Error('mpv 尚未連線或來源尚未完成載入'));
+      }
       if(fileLoadSession) fileLoadSession.playbackIntentId=typeof options?.intentId==='string'?options.intentId:null;
       // Keep the ordered play/pause intent for presentation; a late ACK must
-      // not overwrite a newer pause. The Promise proves command acceptance,
-      // not frame presentation, and rejects pipe/command/timeout failures.
+      // not overwrite a newer pause. Normal play proves command acceptance;
+      // external audio followers opt into actual playback-core readiness.
       playerPaused = false;
-      return send(['set_property', 'pause', false], true, { requireSuccess: true }).catch(error=>{
+      const ready = options?.waitForReady === true ? beginPlaybackReady(session, commandGeneration) : null;
+      const accepted = send(['set_property', 'pause', false], true, { requireSuccess: true }).catch(error=>{
         if(commandGeneration===playbackCommandGeneration&&session===fileLoadSession) playerPaused=previousPaused;
         throw error;
       });
+      if (!ready) return accepted;
+      void accepted.then(() => {
+        if (!ownsPlaybackReady(ready.request)) return;
+        ready.request.acknowledged = true;
+        refreshPlaybackReady(ready.request);
+      }).catch(error => settlePlaybackReady(ready.request, error));
+      return ready.promise;
     },
     pause: (options = {}) => {
+      cancelPlaybackReady();
       const commandGeneration=++playbackCommandGeneration,session=fileLoadSession,previousPaused=playerPaused;
       if(fileLoadSession) fileLoadSession.playbackIntentId=typeof options?.intentId==='string'?options.intentId:null;
       playerPaused = true;

@@ -29,7 +29,7 @@ it.each(['single','rapid'])('mpv 播放中 %s 跳轉前先停止外部音訊，�
     createAnalyser:()=>({...node(),fftSize:2048,getFloatTimeDomainData:buf=>buf.fill(0)}),
     createMediaElementSource:()=>node(),createChannelSplitter:()=>node(),createChannelMerger:()=>node()};
   window.AudioContext=function(){return context;};vi.stubGlobal('Audio',AudioElement);
-  const mpv={launch:vi.fn(async()=>({ok:true,duration:12,sourceSessionId:'mpv-test-source'})),play:vi.fn(async()=>{}),
+  const mpv={launch:vi.fn(async()=>({ok:true,duration:12,sourceSessionId:'mpv-test-source'})),play:vi.fn(async()=>({ready:true,sourceTime:Media.vTime()})),
     pause:vi.fn(async()=>trace.push({type:'mpv-pause'})),present:vi.fn(time=>time===6?latest.promise:presented.promise),
     mute:vi.fn(async()=>{}),quit:vi.fn(async()=>{})};
   const desktop={isDesktop:true,mpv};

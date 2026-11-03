@@ -16,6 +16,34 @@ afterEach(() => {
   }
 });
 
+it.each(['prepareSharedLeaseRoot', 'prepareAcceptanceSharedLeaseRoot'])
+('%s 保留已准入根目錄的原請求別名，仍核對實體目錄及別名替換', prepare => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-shared-root-')); roots.push(root);
+  const physical = path.join(root, 'physical'), alias = path.join(root, 'requested-alias');
+  const replacement = path.join(root, 'replacement');
+  fs.mkdirSync(physical); fs.mkdirSync(replacement);
+  fs.symlinkSync(physical, alias, 'junction');
+  const lease = require('../electron/export-lease');
+  const admitted = lease.captureOutputDirectory(alias);
+  expect(admitted.requestedPath).toBe(alias);
+  expect(admitted.path).toBe(fs.realpathSync.native(physical));
+  expect(admitted.requestedPath).not.toBe(admitted.path);
+
+  const shared = lease[prepare](alias);
+  lease.assertOutputAuthority(shared.sharedAuthority, shared.sharedAuthority.requestedPath);
+  const prefix = prepare === 'prepareAcceptanceSharedLeaseRoot' ? ['.subtool-acceptance-shared'] : [];
+  expect(fs.realpathSync.native(shared.sharedQueueDir))
+    .toBe(path.join(fs.realpathSync.native(physical), ...prefix, 'SUB_Tool', 'shared-output-leases'));
+  expect(shared.sharedAuthority.rootPath).toBe(path.join(alias, ...prefix, 'SUB_Tool'));
+  const parent = shared.sharedAuthority.parents[0], stat = fs.lstatSync(parent.path, { bigint: true });
+  expect(parent).toMatchObject({ dev: String(stat.dev), ino: String(stat.ino) });
+
+  fs.unlinkSync(alias);
+  fs.symlinkSync(replacement, alias, 'junction');
+  expect(() => lease.assertOutputAuthority(shared.sharedAuthority, shared.sharedAuthority.requestedPath)).toThrow();
+  expect(fs.readdirSync(replacement)).toEqual([]);
+});
+
 it('Windows 資料夾虛擬化使非連結的 appData 子目錄 realpath 不同時，仍綁定原請求與實體目錄', () => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-shared-root-')); roots.push(root);
   const appData = path.join(root, 'appdata'), physical = path.join(root, 'redirected');

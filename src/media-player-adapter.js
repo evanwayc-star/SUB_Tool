@@ -517,10 +517,10 @@ export function createNativePreviewRuntime({
       return bridge?.setImageGuide ? bridge.setImageGuide(guide || null) : false;
     },
     async clearGuides() { return clearGuides(); },
-    async play() {
+    async play({waitForReady=false}={}) {
       if(mode!=='mpv') return activeTransport.play();
       nativePlaybackIntent=`${nativeSourceRequest}:${++nativePlaybackSequence}`;
-      return activeTransport.play({intentId:nativePlaybackIntent});
+      return activeTransport.play({intentId:nativePlaybackIntent,...(waitForReady?{waitForReady:true}:{})});
     },
     async pause() {
       if(mode!=='mpv') return activeTransport.pause();
