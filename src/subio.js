@@ -24,6 +24,7 @@ import { parseTimecodeInput } from './tcparse.js';
 import { getAllPresets, loadFonts, presetIdentity, STYLE_DEFAULTS } from './substyle.js';
 import { buildSubtitleImportPlan } from './project-intake-engine.js';
 import { Project } from './project.js';
+import { projectCanvasSize } from './project-canvas.js';
 import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 
 function showFpsConvertDialog() {
@@ -224,8 +225,8 @@ function _captureExportDraft(){
     fps: State.fps,
     dropFrame: State.dropFrame,
     mediaName: State.mediaName,
-    canvasW: State.videoWidth || 1920,
-    canvasH: State.videoHeight || 1080,
+    canvasW: projectCanvasSize({...State,projectCanvas:committed.projectCanvas}).width,
+    canvasH: projectCanvasSize({...State,projectCanvas:committed.projectCanvas}).height,
     audioProject: committed.audioProject,
     defaultAudioLayout: committed.audioProject?.exportLayout || {},
     hasCustomRange: State.exportIn != null || State.exportOut != null,
@@ -234,7 +235,7 @@ function _captureExportDraft(){
 
 const _VENC_LABEL = { h264_nvenc: 'NVIDIA NVENC', h264_qsv: 'Intel QuickSync', h264_amf: 'AMD AMF' };
 
-function _suggestMbps(w = State.videoWidth || 1920, h = State.videoHeight || 1080) {
+function _suggestMbps(w = projectCanvasSize().width, h = projectCanvasSize().height) {
   const fps = State.fps || 30;
   const mbps = (w * h * fps * 0.12) / 1e6;
   return Math.round(Math.max(4, Math.min(120, mbps)));
@@ -390,7 +391,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
             <label class="delivery-field"><span>畫面尺寸</span>
               <select class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 此格率為 ${displayMode.width}×${displayMode.height}，${displayMode.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
                 ${preset ? `<option value="${displayMode.height}" selected>${displayMode.width}×${displayMode.height}${displayMode.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
-                <option value="0" ${r.targetH===0?'selected':''}>來源解析度</option>
+                <option value="0" ${r.targetH===0?'selected':''}>專案畫布（${data.canvasW}×${data.canvasH}）</option>
                 <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
                 <option value="1080" ${r.targetH===1080?'selected':''}>1080p</option>
                 <option value="720" ${r.targetH===720?'selected':''}>720p</option>

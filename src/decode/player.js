@@ -16,6 +16,7 @@
 import { $, video } from '../dom.js';
 import { clamp } from '../util.js';
 import { State } from '../state.js';
+import { projectCanvasSize } from '../project-canvas.js';
 import { Seq } from '../sequence.js';
 import { Media } from '../media.js';
 import { getPlayerAdapter } from '../media-player-adapter.js';
@@ -387,6 +388,7 @@ export const WCPreview = {
     const dpr = window.devicePixelRatio || 1;
     const bw = Math.round(w*dpr), bh = Math.round(h*dpr);
     const resized = (this.canvas.width !== bw || this.canvas.height !== bh);
+    const stage=projectCanvasSize();
 
     const t = Media.tlTime();
     const plan=visualStackPlan(Seq.clipsAt(t),State.videoTracks);
@@ -489,7 +491,7 @@ export const WCPreview = {
       this.canvas.style.display='block';
       this.ctx.fillStyle='#000';this.ctx.fillRect(0,0,bw,bh);
       this.mode='black'; this.lastPresentedUs=null;
-      Media.setWebCodecsComposited(true,{time:t,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});this._setTakeover(true);
+      Media.setWebCodecsComposited(true,{time:t,...stage,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});this._setTakeover(true);
       Media.reportWebCodecsPresentation?.([t]);
       return;
     }
@@ -507,11 +509,11 @@ export const WCPreview = {
     const presentedTimelineTimes = [];
     for(const L of layers){
       if(L.alpha <= 0.003) continue; // 全透明不需要 bitmap，也不提供影片 timestamp。
-      // 【v4.25.3】畫布＝專案輸出解析度（State.videoWidth/Height，與 ffmpeg:exportVideo 同一張畫布），
+      // 畫布採本次 tick 凍結的專案尺寸，獨立於各層來源解析度。
       // 不是「第一層的解析度」——否則換到不同比例/解析度的片時整個畫面區跟著變，
       // 字幕大小也跟著跳（症狀＝「字幕在各個影片上大小不同」）。各層再 contain 進這張畫布（比例不同就留黑邊，與匯出一致）。
       if(!base){
-        const pw = State.videoWidth || 1920, ph = State.videoHeight || 1080;
+        const {width:pw,height:ph} = stage;
         base = stageBox({ canvasW: bw, canvasH: bh, projectW: pw, projectH: ph });
       }
       /* 幾何一律走 image-compositor-engine.js 的 imageBoxOnStage()：軌影格（available-space 定位）
@@ -569,10 +571,10 @@ export const WCPreview = {
     if(resized){this.canvas.width=bw;this.canvas.height=bh;}
     this.ctx.drawImage(render,0,0);
     this.canvas.style.display='block';
-    this._stageW=State.videoWidth||1920;this._stageH=State.videoHeight||1080;
+    this._stageW=stage.width;this._stageH=stage.height;
     const transformed=acts.some(c=>c.reverse || (Number(c.speed)>0 && Number(c.speed)!==1));
     const presentedTime=transformed ? t : (presentedTimelineTimes.at(-1)?.time??t);
-    Media.setWebCodecsComposited(true,{time:presentedTime,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});
+    Media.setWebCodecsComposited(true,{time:presentedTime,...stage,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});
     this._setTakeover(true);
     if(painted && lastTs != null){
       this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl;

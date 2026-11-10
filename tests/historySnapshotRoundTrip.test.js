@@ -53,6 +53,7 @@ function resetState() {
   State.externalAudioEnd = 0;
   State.exportIn = null;
   State.exportOut = null;
+  State.projectCanvas = null;
   State.duration = 0;
   History.stack = [];
   History.hi = -1;
@@ -61,6 +62,13 @@ function resetState() {
 /* 每一列是一個快照欄位的往返案例：把 State 設成 a、設成 b，各記一步，
    再用 read() 取出目前的值來比對。read 回傳可比較的純資料。 */
 const FIELDS = [
+  {
+    name: '專案畫布（自動與自訂）',
+    a: () => { State.projectCanvas=null; },
+    b: () => { State.projectCanvas={width:1080,height:1920}; },
+    read: () => State.projectCanvas,
+    expectA: null, expectB: {width:1080,height:1920},
+  },
   {
     name: '影片音訊效果（不包含可重建的快取）',
     a: () => { State.clips=[videoClip()]; },
@@ -207,12 +215,12 @@ describe('快照欄位清單', () => {
   /* 這一條是「有沒有人偷加欄位卻沒接進 restore()」的哨兵。
      加欄位是好事——但加完必須同時（a）在 restore() 讀回來、
      （b）在上面的 FIELDS 表補一列往返案例、（c）更新這裡的清單。 */
-  it('目前是這 12 個欄位；要增減請一併補上往返案例', () => {
+  it('目前是這 13 個欄位；要增減請一併補上往返案例', () => {
     State.cues = [cue(0, 1, 'x')];
     State.clips = [videoClip()];
     expect(Object.keys(History.snap()).sort()).toEqual([
       'audioProject', 'clipGeo', 'cues', 'dropFrame', 'exportIn', 'exportOut',
-      'externalAudioState', 'fps', 'notes', 'trackCount', 'tracks', 'videoTracks',
+      'externalAudioState', 'fps', 'notes', 'projectCanvas', 'trackCount', 'tracks', 'videoTracks',
     ]);
   });
 

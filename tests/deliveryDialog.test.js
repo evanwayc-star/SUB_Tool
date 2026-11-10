@@ -39,7 +39,7 @@ vi.mock('../src/project-intake-engine.js', () => ({ buildSubtitleImportPlan: vi.
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn(), History: {
   committedSnapshot: () => ({ cues: structuredClone(State.cues), tracks: structuredClone(State.tracks),
     clips: structuredClone(State.clips), videoTracks: structuredClone(State.videoTracks),
-    audioProject: structuredClone(State.audioProject) }),
+    audioProject: structuredClone(State.audioProject), projectCanvas: structuredClone(State.projectCanvas) }),
 } }));
 vi.mock('../src/subtitles.js', () => ({ sortCues: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), layoutTimeline: vi.fn() }));
@@ -93,6 +93,7 @@ beforeEach(() => {
   State.mediaName = 'ST_交付測試.mov';
   State.videoWidth = 1920;
   State.videoHeight = 1080;
+  State.projectCanvas = null;
   State.fps = 25;
   State.dropFrame = false;
   State.duration = 900;
@@ -108,6 +109,25 @@ beforeEach(() => {
 });
 
 describe('匯出交付清單', () => {
+  it('custom project canvas supplies a new delivery default while row overrides and fixed formats remain independent',async()=>{
+    State.projectCanvas={width:1080,height:1920};
+    await showExportVideoDialog();
+    await vi.waitFor(()=>expect(document.querySelector('.ev-res')).not.toBeNull());
+    const resolution=document.querySelector('.ev-res');
+    expect(resolution.selectedOptions[0].textContent).toContain('1080');
+    expect(resolution.selectedOptions[0].textContent).toContain('1920');
+    resolution.value='720';resolution.dispatchEvent(new Event('change',{bubbles:true}));
+    const outDir=document.querySelector('.ev-outdir');outDir.value='D:/交付';outDir.dispatchEvent(new Event('input',{bubbles:true}));
+    window.subtool.exportVideo.mockResolvedValue('custom-canvas');
+    await spies.openModal.mock.calls.at(-1)[2].find(button=>button.id==='evSubmitBtn').act();
+    expect(window.subtool.exportVideo).toHaveBeenCalledWith(expect.objectContaining({width:404,height:720}));
+    expect(State.projectCanvas).toEqual({width:1080,height:1920});
+    await showExportVideoDialog();
+    await vi.waitFor(()=>expect(document.querySelector('.ev-format')).not.toBeNull());
+    const format=document.querySelector('.ev-format');format.value='airline-exw';format.dispatchEvent(new Event('change',{bubbles:true}));
+    expect(document.querySelector('.ev-res').selectedOptions[0].textContent).toBe('640×360p');
+    expect(State.projectCanvas).toEqual({width:1080,height:1920});
+  });
   async function prepareRows(names = ['A.mp4', 'B.mp4', 'C.mp4']) {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-name')).not.toBeNull());

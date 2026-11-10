@@ -214,7 +214,7 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `present(time, options)` | `mpv:present` | exact、waitForFrame、tolerance、frameTarget／frameStart／frameDuration |
 | `cancelPresent()` | `mpv:cancelPresent` | 撤銷待完成呈現 |
 | `loadfile(path)` | `mpv:loadfile` | 已授權來源切換；以命令回覆的 playlist entry ID 配對載入事件及路徑，舊來源事件不能完成新切換；回覆不代表首幀已呈現 |
-| `screenshot(path)` | `mpv:screenshot` | main 驗證請求的截圖目錄，在私有暫存擷取並回傳 base64 畫格 |
+| `screenshot(path)` | `mpv:screenshot` | main 驗證請求的截圖目錄，在私有暫存擷取並回傳 base64 畫格。自訂畫布補邊時附上同一畫格的畫布與內容矩形 |
 | `play(options)` | `mpv:play` | 預設等待播放命令 ACK；`waitForReady: true` 另核對同來源、定位與播放意圖的即時狀態，回覆 `{ ready: true, sourceTime }`。ACK 不能代替可播放證據；命令錯誤、取消、片尾、逾時或斷線會拒絕 |
 | `pause()` | `mpv:pause` | 暫停 |
 | `direction(value)` | `mpv:direction` | 播放方向 |
@@ -222,6 +222,7 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `rate(value)` | `mpv:rate` | 速度 |
 | `brightness(value)` | `mpv:brightness` | 亮度 |
 | `setBounds(bounds)` | `mpv:setBounds` | 視窗幾何 |
+| `setProjectCanvas(size)` | `mpv:setProjectCanvas` | 主視窗傳 `{ width, height }` 或 `null`（自動）。不同比例等比例縮放後補黑邊。等同來源及設定的實際輸出畫格就緒才完成 |
 | `show(value)` | `mpv:show` | 可見性 |
 | `setGuide(guide)` | `mpv:setGuide` | 字幕 guide |
 | `setImageGuide(data)` | `mpv:setImageGuide` | 圖片 guide |
@@ -539,6 +540,8 @@ Windows filtergraph 路徑由既有兩層跳脫處理，包含逗號、單引號
 DMPES 16:9／SAR 32:27 是已確認取捨，優先於 CPF 6:5 與參考成品 40:33。兩類關 deblocking、weighted prediction、B pyramid；exW 關 HRD、加逐格 pic timing 與 AUD 後 AFD active_format 10；DMPES 用 NAL HRD CBR。1.5M VBV 傳入 1041616 bits，x264 取整後排程使用 130124 bytes，4M 使用 347124 bytes。最後 video PES 加 EOS／EOST。
 
 Transport 採 program 1、PMT 0x3f、Video/PCR 0x30、Audio 0x31、TransportPriority。DMPES 1.5M 為 1855594 bps CBR，4M 為 4600000；exW VBR 不填空閒 null，排程上限 2.5 Mbps。依原 PTS／DTS、priming 及緩衝限制排 PES；影片 TB 目標 ≤400 bytes／上限 512，音訊提前 DMPES 約 0.1s、exW 約 0.35s，PCR 約 50ms、PAT／PMT 約 90ms。不能靠增 mux delay 掩蓋 TSA 溢位。
+
+`tests/airlineAudioClock.test.js` 以 132 秒素材跑專案配線及舊音軌兩條正式交付路徑。以 ADTS 樣本數獨立核對 PID 0x31 的 PTS。修正前 AAC 封包索引 3003／6006／6127 各少兩個 90 kHz tick，與實際 TSA6 報告相符。整數 sample 時鐘修正後，每個 1024-sample AAC 封包相隔 1920 tick，封裝前後的 AAC 與解碼 PCM 皆吻合參考。這項驗收使用實際 TS 內容，TSA6 交付掃描另行執行。
 
 曾實測 exW 提早場景切換 IDR 讓 TSA6 判 reorder depth 4、逐格報 4-16e，TSA7 卻不報；因此停提前 IDR、保留 GOP 15 與 pic timing，並以黑場轉動態測試守住。112 秒二次編碼診斷檔曾在 TSA6／7 零錯誤警告，但它不是正式交付驗收；實際每片仍須 TSA 檢測。Carbon 搜尋／量化不保證等價，也不宣稱已通過航空設備。
 

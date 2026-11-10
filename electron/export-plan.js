@@ -270,7 +270,9 @@ function _buildPlannedAudio(plan, inputs, fc, inputIndex, duration, reusableMast
       const offMs = Math.max(0, Math.round(input.offset * 1000));
       // adelay 可先送出 PTS=NOPTS 的靜音；用輸出 sample clock 補上完整時間軸，
       // 才能 trim/rebase。否則 STARTPTS 以第一個有 timestamp 的音訊為起點，抹掉 placement offset。
-      chain += `,adelay=${offMs}:all=1,asetpts=N/SR/TB,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${label}`;
+      // 已重採樣為 48 kHz：固定整數 sample timebase，避免 N/SR/TB 浮點除法
+      // 在 64.064 秒等位置少一個 sample，轉成航空 90 kHz PTS 後跳動 2 ticks。
+      chain += `,adelay=${offMs}:all=1,asettb=1/48000,asetpts=N,atrim=0:${_filterNumber(duration)},asetpts=PTS-STARTPTS${label}`;
       fc.push(chain);
       parts.push(label);
     });
@@ -740,7 +742,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       if (afParts.length) { const afl = `[af${i}]`; fc.push(`${al}${afParts.join(',')}${afl}`); asrc = afl; }
       // adelay's leading silence can have NOPTS; retain the placement offset
       // through amix/trim and the muxer with the same sample clock as audioPlan.
-      fc.push(`${asrc}adelay=${offMs}:all=1,asetpts=N/SR/TB[ad${i}]`);
+      fc.push(`${asrc}adelay=${offMs}:all=1,asettb=1/48000,asetpts=N[ad${i}]`);
       aLabels.push(`[ad${i}]`);
     });
     if (aLabels.length) fc.push(`${aLabels.join('')}amix=inputs=${aLabels.length}:normalize=0:dropout_transition=0,atrim=0:${_filterNumber(D)},aresample=48000[ac]`);

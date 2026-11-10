@@ -34,12 +34,13 @@ beforeEach(() => {
   State.clips = []; State.duration = 10;
   setSelection({kind:'sub',ids:[]});
   Media.playing = false;
+  document.activeElement?.blur();
   key(document.body, 'Tab');
 });
 afterAll(() => { Menus.hideCtx(); UI.closeModal(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
-it.each([' ', 'Enter'])('聚焦工具列按鈕時 %s 保留原生啟用，不開始播放', async value => {
-  const button = document.querySelector('[data-act="save-project"]');
+it.each([' ', 'Enter'])('其他區域的聚焦按鈕保留 %s 原生啟用', async value => {
+  const button = document.getElementById('playBtn');
   const click = vi.fn(); button.addEventListener('click', click, {once:true}); button.focus();
   const event = key(button, value);
   await Promise.resolve();
@@ -59,25 +60,31 @@ it.each([['exp-dialog',false],['exp-dialog',true],['exp-video',false],['exp-vide
   button.dispatchEvent(new MouseEvent('click', {bubbles:true,detail:1}));
   key(document.getElementById('modalBody').querySelector('button'), 'Tab');
   UI.closeModal({committed}); await vi.runOnlyPendingTimersAsync();
-  expect(document.activeElement).toBe(button);
-  const event = key(button, ' '); await Promise.resolve();
+  expect(document.activeElement).toBe(document.body);
+  const event = key(document.activeElement, ' '); await Promise.resolve();
   expect(event.defaultPrevented).toBe(true);
   expect(Media.play).toHaveBeenCalledOnce();
 });
 
-it.each([' ', 'Enter'])('滑鼠點過按鈕後，明確 Tab 導覽回來仍可用 %s 原生啟用', async value => {
+it.each([' ', 'Enter'])('上方操作按鈕不留焦點，%s 交回工作區', async value => {
+  const buttons = [...document.querySelectorAll('.menubar button')];
+  expect(buttons.length).toBeGreaterThan(0);
+  for (const button of buttons) {
+    expect(button.tabIndex).toBe(-1);
+    button.focus();
+    expect(document.activeElement).not.toBe(button);
+  }
+  const fps = document.getElementById('fpsSel');
+  fps.focus(); expect(document.activeElement).toBe(fps);
   const button = document.querySelector('[data-act="exp-dialog"]');
-  button.focus(); button.dispatchEvent(new MouseEvent('click', {bubbles:true,detail:1}));
-  key(button, 'Tab');
-  // jsdom does not perform the browser's default Tab focus movement.
-  const next = document.getElementById('fpsSel'); next.focus();
-  key(next, 'Tab', {shiftKey:true}); button.focus();
-  const event = key(button, value); await Promise.resolve();
-  expect(event.defaultPrevented).toBe(false); expect(Media.play).not.toHaveBeenCalled();
+  button.focus(); expect(document.activeElement).toBe(document.body);
+  const event = key(document.activeElement, value); await Promise.resolve();
+  expect(event.defaultPrevented).toBe(true);
+  expect(Media.play).toHaveBeenCalledOnce();
 });
 
-it('滑鼠按鈕的 Space 不繞過對話框、IME 或文字編輯的快捷鍵圍籬', async () => {
-  const button = document.querySelector('[data-act="exp-dialog"]');
+it('其他區域的滑鼠按鈕不繞過對話框、IME 或文字編輯的快捷鍵圍籬', async () => {
+  const button = document.getElementById('playBtn');
   button.focus(); button.dispatchEvent(new MouseEvent('click', {bubbles:true,detail:1}));
   key(button, ' ', {isComposing:true}); key(button, ' ', {keyCode:229});
   UI.openModal('輸入', '<input id="keyboardOwnerInput">');
@@ -98,7 +105,7 @@ it('工作區仍可用 Space 播放，已被局部控制處理的事件不再播
 });
 
 it('選單方向鍵略過停用項目，Enter 執行目前項目並還原焦點', () => {
-  const origin = document.querySelector('[data-act="save-project"]'); origin.focus();
+  const origin = document.getElementById('playBtn'); origin.focus();
   const first = vi.fn(), last = vi.fn();
   Menus.showCtx(20, 20, [{label:'一',act:first},{label:'不可用'},{sep:true},{label:'二',act:last}]);
   const items = [...document.querySelectorAll('#ctxmenu [role="menuitem"]')];
@@ -115,7 +122,7 @@ it('選單方向鍵略過停用項目，Enter 執行目前項目並還原焦點'
 it('Escape 只關閉選單，不清除字幕選取；Tab 關閉選單後可繼續導航', () => {
   State.cues = [{id:'cue',start:0,end:1,text:'保留',track:0}];
   setSelection({kind:'sub',ids:['cue'],primary:'cue'});
-  const origin = document.querySelector('[data-act="save-project"]'); origin.focus();
+  const origin = document.getElementById('playBtn'); origin.focus();
   Menus.showCtx(20, 20, [{label:'編輯',act:vi.fn()}]);
   const escape = key(document.activeElement, 'Escape');
   expect(escape.defaultPrevented).toBe(true);

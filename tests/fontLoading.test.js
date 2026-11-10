@@ -1,4 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+
+function fontBuffer(relative) {
+  const bytes=readFileSync(new URL(relative,import.meta.url));
+  return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
+}
+const sarasaBuffer=()=>fontBuffer('../font/更紗黑體/sarasa-mono-tc-nerd-regular.ttf');
+const taipeiBuffer=()=>fontBuffer('../font/台北黑體/TaipeiSansTCBeta-Regular.ttf');
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -134,5 +142,55 @@ describe('font loading ownership', () => {
     await fonts.loadFonts(true);
     expect(registered.size).toBe(1);
     expect(registered.has(original)).toBe(false);
+  });
+
+  it('uses the loaded face dimensions for ASS while preserving CSS size and unregistered fallback', async () => {
+    const fonts=await fontEnvironment(vi.fn().mockResolvedValue({fonts:[{name:'更紗黑體',file:'sarasa.ttf',family:'Sarasa Mono TC Nerd'}]}));
+    vi.stubGlobal('fetch',async()=>({arrayBuffer:async()=>sarasaBuffer()}));
+    document.createElement=()=>({getContext:()=>({measureText:()=>({fontBoundingBoxAscent:977,fontBoundingBoxDescent:273})})});
+    await fonts.loadFonts();
+    const st={...fonts.STYLE_DEFAULTS,fontSize:70,lineSpacing:1.2};
+    expect(fonts.styleToCss(st,1)).toContain('font-size:52.5px;');
+    expect(fonts.styleToAssStyleLine('test',st,1080).split(',')[2]).toBe('65.625');
+    const layout=fonts.assHorizontalTextLayout(st,['first','second'],1920,1080);
+    expect(layout.lines[1].cy-layout.lines[0].cy).toBe(63);
+    expect(fonts.cueAssTags({fontSize:70},st)).toBe('{\\fs65.625}');
+    expect(fonts.cueAssTags({vertical:true},{...st,vertical:true})).toBe('{\\fs70}');
+    const unknown={...st,font:'Unregistered System Family'};
+    expect(fonts.assHorizontalTextLayout(unknown,['text'],1920,1080)).toBeNull();
+    expect(fonts.styleToAssStyleLine('test',unknown,1080).split(',')[2]).toBe('70');
+    expect(fonts.cueAssTags({font:unknown.font},unknown)).toBe('{\\fnUnregistered System Family\\fs70}');
+  });
+
+  it.each(['getContext','measureText'])('publishes the complete new face and mapping when %s fails', async failure => {
+    const list=[{name:'Face',file:'first.ttf',family:'First Family'}];
+    const fontsList=vi.fn().mockResolvedValue({fonts:list});
+    const fonts=await fontEnvironment(fontsList);
+    vi.stubGlobal('fetch',async()=>({arrayBuffer:async()=>sarasaBuffer()}));
+    document.createElement=()=>({getContext:()=> {
+      if(failure==='getContext') throw new Error('unavailable canvas');
+      return {measureText:()=>{throw new Error('unavailable measurement');}};
+    }});
+    await fonts.loadFonts();
+    fontsList.mockResolvedValue({fonts:[{name:'Face',file:'second.ttf',family:'Second Family'}]});
+    vi.stubGlobal('fetch',async()=>({arrayBuffer:async()=>taipeiBuffer()}));
+    await fonts.loadFonts(true);
+    expect(fonts.assFontName('Face')).toBe('Second Family');
+    const fields=fonts.styleToAssStyleLine('test',{...fonts.STYLE_DEFAULTS,font:'Face',fontSize:70},1080).split(',');
+    expect(Number(fields[2])).toBeCloseTo(70*0.75*1181/1024,6);
+  });
+
+  it('keeps the old face family and dimensions together when its folder changes but loading fails', async () => {
+    const original={name:'Face',file:'first.ttf',family:'First Family'};
+    const fontsList=vi.fn().mockResolvedValue({fonts:[original]});
+    const fonts=await fontEnvironment(fontsList);
+    vi.stubGlobal('fetch',async()=>({arrayBuffer:async()=>sarasaBuffer()}));
+    await fonts.loadFonts();
+    fontsList.mockResolvedValue({fonts:[{...original,file:'second.ttf',family:'Second Family'}]});
+    vi.stubGlobal('FontFace',class { async load(){throw new Error('temporarily unreadable');} });
+    await fonts.loadFonts(true);
+    expect(fonts.getFonts()).toEqual([original]);
+    const fields=fonts.styleToAssStyleLine('test',{...fonts.STYLE_DEFAULTS,font:'Face',fontSize:70},1080).split(',');
+    expect(fields.slice(1,3)).toEqual(['First Family','65.625']);
   });
 });

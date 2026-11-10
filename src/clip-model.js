@@ -15,6 +15,7 @@ import { History, recordHistory } from './history.js';
 import { fitScale } from './image-compositor-engine.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { Project } from './project.js';
+import { projectCanvasSize } from './project-canvas.js';
 import { lastSourceFrameIndex } from '../shared/clip-visual.cjs';
 
 function clipEditable(c){
@@ -243,8 +244,9 @@ export function resetClipTrim(c){
    這裡只負責套用結果與回報。 */
 function fitClipToStage(c){
   if(!clipEditable(c)) return null;
+  const {width,height}=projectCanvasSize();
   const { scale, recentred } = fitScale({
-    stageW: State.videoWidth || 1920, stageH: State.videoHeight || 1080,
+    stageW: width, stageH: height,
     natW: c.natW, natH: c.natH, posX: c.posX ?? 0.5, posY: c.posY ?? 0.5,
   });
   if (recentred) { c.posX = 0.5; c.posY = 0.5; }

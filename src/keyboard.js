@@ -61,12 +61,15 @@ function exportBracketChord(e) {
     && matchAction(State.keymap, { ...modifiers, key:']', code:'BracketRight' }) === 'exp_out';
 }
 if (typeof window !== 'undefined') {
+  // 上方操作按鈕不留鍵盤焦點，即使對話框關閉時嘗試還原焦點。
+  window.addEventListener('focusin', e => {
+    if (e.target.matches?.('.menubar button')) e.target.blur();
+  }, true);
   window.addEventListener('click', e => {
     if ($('modalBg')?.classList?.contains('show') || document.getElementById('settingsModal')) return;
     const control = e.target.closest?.(ACTIVATION_CONTROL);
     if (!control) return;
-    // Modal close may restore the clicked toolbar button after app.js blurs it.
-    // Keep that pointer intent until explicit keyboard activation or navigation.
+    // Other workspace controls still distinguish pointer and keyboard intent.
     if (e.detail > 0) _pointerActivatedControls.add(control);
     else _pointerActivatedControls.delete(control);
   }, true);

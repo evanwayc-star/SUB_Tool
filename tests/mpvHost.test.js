@@ -134,6 +134,238 @@ describe('Windows mpv host lifecycle', () => {
   }
   const flushReady = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
 
+  function canvasSocket({ autoRestart = true } = {}) {
+    const socket = socketThatReportsDuration(), write = socket.write.getMockImplementation();
+    socket.inputParams = { w: 320, h: 180, dw: 320, dh: 180, par: 1 };
+    socket.outputParams = { ...socket.inputParams };
+    socket.finishCanvas = () => {
+      socket.outputParams = socket.nextParams;
+      socket.emit('data', Buffer.from('{"event":"video-reconfig"}\n{"event":"playback-restart"}\n'));
+    };
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw), command = message.command;
+      if (command[0] === 'get_property' && ['video-params', 'video-out-params'].includes(command[1])) {
+        const data = command[1] === 'video-params' ? socket.inputParams : socket.outputParams;
+        queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, data, error: 'success' }) + '\n')));
+      } else if (command.includes('vf')) {
+        const match = /pad=(\d+):(\d+)/.exec(command.at(-1));
+        socket.nextParams = match ? { w: +match[1], h: +match[2], dw: +match[1], dh: +match[2], par: 1,
+          rotate: socket.inputParams.rotate || 0 } : { ...socket.inputParams };
+        write(raw);
+        if (autoRestart) queueMicrotask(socket.finishCanvas);
+      } else write(raw);
+    });
+    return socket;
+  }
+
+  it('自訂畫布准入拒絕注入/過大尺寸，Auto 與同 DAR 不加 filter', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    for (const value of [{ width: '320', height: 240 }, { width: 8192, height: 8192 }, { width: 1, height: 2 }]) {
+      await expect(host.setProjectCanvas(value)).rejects.toThrow();
+    }
+    await host.setProjectCanvas({ width: 1920, height: 1080 });
+    await host.launch({ src: 'D:/media/wide.mkv' });
+    await host.setProjectCanvas(null);
+    expect(sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command).filter(c => c.includes('vf'))).toEqual([]);
+    host.quit();
+  });
+
+  it('不同 DAR 等新畫格與輸出尺寸，才接受畫布並截取含 padding 的同一畫格', async () => {
+    const { host, sockets } = make({ socketFactory: () => canvasSocket({ autoRestart: false }) });
+    await host.launch({ src: 'D:/media/wide.mkv' });
+    const socket = sockets[0]; socket.write.mockClear();
+    let done = false;
+    const setting = host.setProjectCanvas({ width: 181, height: 321 }).then(result => { done = true; return result; });
+    await flushReady(); expect(done).toBe(false);
+    socket.emit('data', Buffer.from('{"event":"playback-restart"}\n'));
+    await flushReady(); expect(done).toBe(false);
+    socket.finishCanvas();
+    await expect(setting).resolves.toEqual({ ok: true });
+    await expect(host.screenshot('C:/tmp/frame.png')).resolves.toEqual({ ok: true,
+      contentRect: { x: 0, y: 110, width: 181, height: 101 }, canvasSize: { width: 181, height: 321 },
+      projectCanvas: { width: 181, height: 321 } });
+    const commands = socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands.some(c => c[0] === 'seek' || c[1] === 'time-pos' || c[1] === 'pause')).toBe(false);
+    host.quit();
+  });
+
+  it('Auto 清除唯一自訂 filter 且等來源尺寸還原，不清其他 filter', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    await host.setProjectCanvas({ width: 320, height: 240 });
+    await host.launch({ src: 'D:/media/wide.mkv' });
+    await host.setProjectCanvas(null);
+    const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands).toContainEqual(['no-osd', 'vf', 'remove', '@subtool-canvas']);
+    expect(commands.some(c => c.includes('clr') || (c.includes('vf') && c.includes('set')))).toBe(false);
+    await expect(host.screenshot('C:/tmp/frame.png')).resolves.toEqual({ ok: true, projectCanvas: null });
+    host.quit();
+  });
+
+  it('較新畫布及換來源使舊完成回覆失效，不能還原新設定', async () => {
+    const { host, sockets } = make({ socketFactory: () => canvasSocket({ autoRestart: false }) });
+    await host.launch({ src: 'D:/media/wide.mkv' });
+    const old = host.setProjectCanvas({ width: 320, height: 240 });
+    const rejectedOld = expect(old).rejects.toThrow(); await flushReady();
+    const next = host.setProjectCanvas({ width: 180, height: 320 });
+    await rejectedOld; await flushReady(); sockets[0].finishCanvas();
+    await expect(next).resolves.toEqual({ ok: true });
+    const cancelled = host.setProjectCanvas({ width: 300, height: 300 });
+    const rejectedCancelled = expect(cancelled).rejects.toThrow(); await flushReady();
+    host.quit(); await rejectedCancelled;
+  });
+
+  it('同尺寸與 Auto 重送共用尚未完成的畫格 barrier；截圖不能越過它', async () => {
+    const { host, sockets } = make({ socketFactory: () => canvasSocket({ autoRestart: false }) });
+    await host.launch({ src: 'D:/media/wide.mkv' });
+    const a = host.setProjectCanvas({ width: 320, height: 240 }); await flushReady();
+    let done = false;
+    const repeated = host.setProjectCanvas({ width: 320, height: 240 }).then(() => { done = true; });
+    await flushReady(); expect(done).toBe(false); sockets[0].finishCanvas(); await a; await repeated;
+    const clear = host.setProjectCanvas(null); await flushReady(); done = false;
+    const clearAgain = host.setProjectCanvas(null).then(() => { done = true; });
+    let shotDone = false;
+    const shot = host.screenshot('C:/tmp/auto.png').then(() => { shotDone = true; });
+    await flushReady(); expect(done).toBe(false); expect(shotDone).toBe(false);
+    sockets[0].finishCanvas(); await clear; await clearAgain; await shot;
+    host.quit();
+  });
+
+  it('native 拒絕新 filter 不提交 desired，下一次 load 仍用最後成功畫布', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    await host.setProjectCanvas({ width: 320, height: 240 });
+    await host.launch({ src: 'D:/media/wide.mkv' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command.includes('vf') && message.command.at(-1).includes('pad=180:320')) {
+        queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'error running command' }) + '\n')));
+      } else write(raw);
+    });
+    await expect(host.setProjectCanvas({ width: 180, height: 320 })).rejects.toThrow('mpv 命令失敗');
+    await host.loadFile('D:/media/next.mkv');
+    await expect(host.screenshot('C:/tmp/last.png')).resolves.toMatchObject({ canvasSize: { width: 320, height: 240 } });
+    host.quit();
+  });
+
+  it('非方形像素的同 DAR 不加 filter，極窄畫布只分配受限正整數尺寸', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    await host.launch({ src: 'D:/media/anamorphic.mkv' });
+    sockets[0].inputParams = { w: 720, h: 480, dw: 853, dh: 480, par: 32 / 27 };
+    await host.setProjectCanvas({ width: 1920, height: 1080 });
+    expect(sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command).filter(c => c.includes('vf'))).toEqual([]);
+    await host.setProjectCanvas({ width: 2, height: 8192 });
+    await expect(host.screenshot('C:/tmp/narrow.png')).resolves.toMatchObject({
+      canvasSize: { width: 2, height: 8192 }, contentRect: { x: 0, y: 4095, width: 2, height: 1 },
+    });
+    host.quit();
+  });
+
+  it('同 DAR 新來源保留既有 filter，核新來源畫格而不依賴重送 vf 的 restart', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    await host.setProjectCanvas({ width: 320, height: 240 });
+    await host.launch({ src: 'D:/media/first.mkv' }); sockets[0].write.mockClear();
+    await expect(host.loadFile('D:/media/second.mkv')).resolves.toMatchObject({ ok: true });
+    const commands = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    expect(commands.filter(c => c.includes('vf'))).toEqual([]);
+    expect(commands).toContainEqual(['get_property', 'video-out-params']);
+    host.quit();
+  });
+
+  it('旋轉來源在原始像素域補邊，截圖 rect 仍是最後顯示畫布的座標', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    await host.launch({ src: 'D:/media/rotated.mp4' }); sockets[0].inputParams.rotate = 270;
+    await host.setProjectCanvas({ width: 320, height: 240 });
+    await expect(host.screenshot('C:/tmp/rotation.png')).resolves.toMatchObject({
+      canvasSize: { width: 320, height: 240 }, contentRect: { x: 92, y: 0, width: 135, height: 240 },
+    });
+    expect(sockets[0].nextParams).toMatchObject({ w: 240, h: 320, rotate: 270 });
+    host.quit();
+  });
+
+  it.each([null, { width: 320, height: 240 }])('畫格逾時且還原也失敗時不允許截圖誤標成舊畫布（原畫布 %j）', async initial => {
+    const timers = [];
+    const { host, sockets } = make({ socketFactory: canvasSocket, setTimer: fn => { timers.push(fn); return timers.length; } });
+    await host.setProjectCanvas(initial); await host.launch({ src: 'D:/media/wide.mkv' });
+    timers.length = 0;
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command.includes('vf')) {
+        const error = message.command.includes('remove') || message.command.at(-1).includes('pad=320:240') ? 'error running command' : 'success';
+        queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error }) + '\n')));
+      } else write(raw);
+    });
+    const changed = host.setProjectCanvas({ width: 180, height: 320 });
+    const rejected = expect(changed).rejects.toThrow('畫格未在期限內就緒');
+    await flushReady(); timers[0](); await rejected;
+    await expect(host.screenshot('C:/tmp/wrong.png')).rejects.toThrow('尚未就緒');
+    host.quit();
+  });
+
+  it('換來源取消尚未提交的畫布時，載入者套用最後成功的專案設定', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    await host.setProjectCanvas({ width: 320, height: 240 }); await host.launch({ src: 'D:/media/wide.mkv' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command.includes('vf') && message.command.at(-1).includes('pad=180:320')) {
+        queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'success' }) + '\n')));
+      } else write(raw);
+    });
+    const changed = host.setProjectCanvas({ width: 180, height: 320 });
+    const rejected = expect(changed).rejects.toThrow(); await flushReady();
+    await host.loadFile('D:/media/next.mkv'); await rejected;
+    await expect(host.screenshot('C:/tmp/next.png')).resolves.toMatchObject({ projectCanvas: { width: 320, height: 240 } });
+    host.quit();
+  });
+
+  it('Auto 首次套用遭 native 拒絕後，仍能截取原本有效的 Auto 畫面', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    await host.launch({ src: 'D:/media/wide.mkv' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command.includes('vf')) {
+        queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'error running command' }) + '\n')));
+      } else write(raw);
+    });
+    await expect(host.setProjectCanvas({ width: 320, height: 240 })).rejects.toThrow('mpv 命令失敗');
+    await expect(host.screenshot('C:/tmp/original.png')).resolves.toEqual({ ok: true, projectCanvas: null });
+    host.quit();
+  });
+
+  it('重開明確畫布在 quit 前接收，舊 session 取消不能回復 Auto', async () => {
+    const { host, sockets } = make({ socketFactory: canvasSocket });
+    await host.launch({ src: 'D:/media/old.mkv' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command.includes('vf')) {
+        queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'success' }) + '\n')));
+      } else write(raw);
+    });
+    const old = host.setProjectCanvas({ width: 320, height: 320 });
+    const rejected = expect(old).rejects.toThrow(); await flushReady();
+    await host.launch({ src: 'D:/media/reopened.mkv', projectCanvas: { width: 320, height: 320 } });
+    await rejected;
+    await expect(host.screenshot('C:/tmp/reopened.png')).resolves.toMatchObject({ projectCanvas: { width: 320, height: 320 }, canvasSize: { width: 320, height: 320 } });
+    host.quit();
+  });
+
+  it('launch 開始後較新的 UI 畫布優先於 launch snapshot，無效 payload 不關閉舊來源', async () => {
+    let continueProbe;
+    const { host, sockets, children } = make({ socketFactory: canvasSocket,
+      describeSource: source => source.includes('waiting') ? new Promise(resolve => { continueProbe = resolve; }) : null });
+    await host.launch({ src: 'D:/media/old.mkv' });
+    await expect(host.launch({ src: 'D:/media/invalid.mkv', projectCanvas: { width: 8192, height: 8192 } })).rejects.toThrow('畫布');
+    expect(children[0].child.kill).not.toHaveBeenCalled();
+    const loading = host.launch({ src: 'D:/media/waiting.mkv', projectCanvas: { width: 320, height: 240 } });
+    await host.setProjectCanvas({ width: 180, height: 320 }); continueProbe(null);
+    await loading;
+    await expect(host.screenshot('C:/tmp/latest.png')).resolves.toMatchObject({ projectCanvas: { width: 180, height: 320 }, canvasSize: { width: 180, height: 320 } });
+    expect(sockets).toHaveLength(2); host.quit();
+  });
+
   it('ready play 不以 pause ACK 或舊 restart 放行，等當前核心真正播放並回來源時間', async () => {
     const { host, sockets } = make({ socketFactory: playingSocket });
     await host.launch({ src: 'D:/media/initial.mxf' });
@@ -727,7 +959,7 @@ describe('Windows mpv host lifecycle', () => {
     await Promise.resolve();
     expect(settled).toBe(false);
     socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'success' }) + '\n'));
-    await expect(screenshot).resolves.toEqual({ ok: true });
+    await expect(screenshot).resolves.toEqual({ ok: true, projectCanvas: null });
     const failed = host.screenshot('D:/out/Shot-002.jpg');
     const rejection = expect(failed).rejects.toThrow('writing-error');
     const second = JSON.parse(socket.write.mock.calls[1][0]);

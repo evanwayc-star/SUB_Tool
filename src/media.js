@@ -31,6 +31,7 @@
 ============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { AudioEngine } from './audio-engine.js';
+import { projectCanvasSize } from './project-canvas.js';
 import { MediaIntakeJobs } from './media-intake-jobs.js';
 import { MediaAudioRouter, AudioPipeline } from './audio-routing-engine.js';
 import { destroyScrubber } from './audio-engine.js';
@@ -2152,7 +2153,8 @@ const Media = {
     else if(composition) this._wcComposition=Object.freeze({
       time:composition.time,imagesComposited:!!composition.imagesComposited,
       imageIds:Object.freeze([...(composition.imageIds||[])]),
-      width:State.videoWidth||1920,height:State.videoHeight||1080,
+      ...projectCanvasSize(),
+      ...(composition.width>0&&composition.height>0?{width:composition.width,height:composition.height}:{}),
     });
   },
   /* 已呈現的畫布包含哪些圖片；DOM/guide 與擷取只讀此契約，不碰 WC 私有狀態。 */

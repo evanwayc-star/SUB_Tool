@@ -22,21 +22,21 @@
         <small id="appVersion"></small>
       </div>
 
-      <button class="icon" data-act="new" title="清空新建">🗑 <span class="lbl">開新專案</span></button>
+      <button class="icon" data-act="new" tabindex="-1" title="清空新建">🗑 <span class="lbl">開新專案</span></button>
       <div class="sep"></div>
-      <button class="icon open-proj-btn" data-act="open-project" title="開啟專案 (.subtool)">📂 <span class="lbl">開啟專案</span></button>
+      <button class="icon open-proj-btn" data-act="open-project" tabindex="-1" title="開啟專案 (.subtool)">📂 <span class="lbl">開啟專案</span></button>
       <!-- 最近開啟：清單由主程序持有，這裡只顯示與送索引（見 electron/main.js project:recentList）。
            .menu 的開合由 app.js 既有的通用邏輯處理，不必另外接線。 -->
-      <div class="menu" id="recentMenu"><button class="icon" id="recentBtn" title="最近開啟的專案">🕘 <span class="lbl">最近開啟</span></button><div class="items" id="recentItems"></div></div>
+      <div class="menu" id="recentMenu"><button class="icon" id="recentBtn" tabindex="-1" title="最近開啟的專案">🕘 <span class="lbl">最近開啟</span></button><div class="items" id="recentItems"></div></div>
       <div class="sep"></div>
-      <button class="icon" data-act="save-project" title="儲存專案 (Ctrl+S)">💾 <span class="lbl">儲存專案</span></button>
-      <button class="icon" data-act="save-as-project" title="另存新檔">💾 <span class="lbl">另存新檔</span></button>
+      <button class="icon" data-act="save-project" tabindex="-1" title="儲存專案 (Ctrl+S)">💾 <span class="lbl">儲存專案</span></button>
+      <button class="icon" data-act="save-as-project" tabindex="-1" title="另存新檔">💾 <span class="lbl">另存新檔</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="open-media" title="匯入影片或音訊檔">🎬 <span class="lbl">開啟影音</span></button>
+      <button class="icon" data-act="open-media" tabindex="-1" title="匯入影片或音訊檔">🎬 <span class="lbl">開啟影音</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="imp-auto" title="匯入字幕（自動辨識格式）">📄 <span class="lbl">匯入字幕</span></button>
+      <button class="icon" data-act="imp-auto" tabindex="-1" title="匯入字幕（自動辨識格式）">📄 <span class="lbl">匯入字幕</span></button>
       <div class="sep"></div>
-      <button class="icon" data-act="exp-dialog" title="匯出字幕">💬 <span class="lbl">匯出字幕</span></button>
+      <button class="icon" data-act="exp-dialog" tabindex="-1" title="匯出字幕">💬 <span class="lbl">匯出字幕</span></button>
       <div class="sep"></div>
       <div class="fps-box" title="影格率 (Adobe Encore 時碼換算用)">
         FPS <select id="fpsSel">
@@ -49,22 +49,24 @@
         </select>
       </div>
 
+      <button class="icon" data-act="project-settings" tabindex="-1" title="設定專案畫布解析度">▣ <span class="lbl">專案畫布</span></button>
+
       <div class="spacer"></div>
 
-      <button class="auto-select-btn" id="autoSelectToggleBtnStatus" data-act="toggle-auto-select" title="播放時自動選取對應字幕 (Z)">不自動選取</button>
+      <button class="auto-select-btn" id="autoSelectToggleBtnStatus" data-act="toggle-auto-select" tabindex="-1" title="播放時自動選取對應字幕 (Z)">不自動選取</button>
       <div class="sep"></div>
-      <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" title="切換覆蓋狀態 (X)">不覆蓋</button>
-      <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)" disabled>保留</button>
+      <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" tabindex="-1" title="切換覆蓋狀態 (X)">不覆蓋</button>
+      <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep" tabindex="-1" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)" disabled>保留</button>
       <div class="sep"></div>
-      <button class="pointer-seek-btn" id="pointerSeekModeBtn" data-act="toggle-pointer-seek" aria-pressed="false" title="滑鼠跳到其他時間點後繼續播放；按下切換為跳轉後暫停">跳轉繼續</button>
+      <button class="pointer-seek-btn" id="pointerSeekModeBtn" data-act="toggle-pointer-seek" tabindex="-1" aria-pressed="false" title="滑鼠跳到其他時間點後繼續播放；按下切換為跳轉後暫停">跳轉繼續</button>
 
       <div class="sep"></div>
 
-      <button class="icon" data-act="settings" title="自訂快捷鍵">⚙ <span class="lbl">設定</span></button>
-      <button class="icon desktop-only" data-act="cache-manage" title="管理轉檔快取（音軌／波形）">🗂 <span class="lbl">快取</span></button>
-      <button class="icon" id="asrMonitorBtn" data-act="asr-monitor" title="語音辨識進度" style="display:none"><span class="asr-monitor-ring" aria-hidden="true"></span><span class="lbl" id="asrMonitorLbl">🎙 辨識中 0%</span></button>
-      <button class="icon desktop-only" id="stMonitorBtn" data-act="queue-monitor" title="監控匯出佇列（.）" style="display:none"><span class="queue-monitor-ring" aria-hidden="true"></span><span class="lbl">監控序列</span></button>
-      <button class="icon desktop-only" data-act="exp-video" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV" style="display:none">🎞 <span class="lbl">匯出影片</span></button>
+      <button class="icon" data-act="settings" tabindex="-1" title="自訂快捷鍵">⚙ <span class="lbl">設定</span></button>
+      <button class="icon desktop-only" data-act="cache-manage" tabindex="-1" title="管理轉檔快取（音軌／波形）">🗂 <span class="lbl">快取</span></button>
+      <button class="icon" id="asrMonitorBtn" data-act="asr-monitor" tabindex="-1" title="語音辨識進度" style="display:none"><span class="asr-monitor-ring" aria-hidden="true"></span><span class="lbl" id="asrMonitorLbl">🎙 辨識中 0%</span></button>
+      <button class="icon desktop-only" id="stMonitorBtn" data-act="queue-monitor" tabindex="-1" title="監控匯出佇列（.）" style="display:none"><span class="queue-monitor-ring" aria-hidden="true"></span><span class="lbl">監控序列</span></button>
+      <button class="icon desktop-only" data-act="exp-video" tabindex="-1" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV" style="display:none">🎞 <span class="lbl">匯出影片</span></button>
     </div>
 
     <!-- ===== 主體 ===== -->

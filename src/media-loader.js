@@ -494,6 +494,9 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     try{
       const launch=()=>adapter.enterMpv({
         src:p,
+        // Project restore can quit the previous native session after its canvas
+        // event. Carry the current project setting into the new source owner.
+        projectCanvas:State.projectCanvas?{...State.projectCanvas}:null,
         bounds:ctx._mpvRect(),
         audio,
         boundsElement:$('videoWrap'),

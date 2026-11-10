@@ -195,6 +195,7 @@ contextBridge.exposeInMainWorld('subtool', {
     rate:      (r)     => ipcRenderer.invoke('mpv:rate', r),
     brightness:(v)     => ipcRenderer.invoke('mpv:brightness', v),
     setBounds: (b)     => ipcRenderer.invoke('mpv:setBounds', b),
+    setProjectCanvas: (canvas) => ipcRenderer.invoke('mpv:setProjectCanvas', canvas),
     show:      (v)     => ipcRenderer.invoke('mpv:show', v),
     setGuide:  (g)     => ipcRenderer.invoke('mpv:setGuide', g),
     setImageGuide: (h) => ipcRenderer.invoke('mpv:setImageGuide', h),

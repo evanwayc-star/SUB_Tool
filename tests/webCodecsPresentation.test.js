@@ -59,6 +59,7 @@ const { Seq } = await import('../src/sequence.js');
 describe('WebCodecs presentation acknowledgement', () => {
   beforeEach(() => {
     stateMock.State.clips = [clipA, clipB];
+    stateMock.State.projectCanvas=null;
     stateMock.State.videoTracks = [
       { visible: true, opacity: 1, scale: 1, posX: 0.5, posY: 0.5 },
       { visible: true, opacity: 1, scale: 1, posX: 0.5, posY: 0.5 },
@@ -90,6 +91,18 @@ describe('WebCodecs presentation acknowledgement', () => {
     expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([
       expect.objectContaining({time:104,start:104,reverse:false}),expect.objectContaining({time:104,start:104,reverse:false})
     ]);
+  });
+
+  it('custom portrait canvas controls source containment and freezes the rendered composition dimensions',()=>{
+    stateMock.State.projectCanvas={width:1080,height:1920};
+    WCPreview.tick();
+    const first=contextMock.drawImage.mock.calls[0];
+    expect(first.slice(1)).toEqual([218,123,203,114]);
+    expect(WCPreview.stageSize()).toEqual({w:1080,h:1920});
+    expect(mediaMock.setWebCodecsComposited).toHaveBeenLastCalledWith(true,expect.objectContaining({width:1080,height:1920}));
+    // A later project change must not relabel an already published frame.
+    stateMock.State.projectCanvas={width:1920,height:1080};
+    expect(mediaMock.setWebCodecsComposited.mock.calls.at(-1)[1]).toMatchObject({width:1080,height:1920});
   });
 
   it('loads compositor images with anonymous CORS before assigning their source',async()=>{
@@ -204,7 +217,7 @@ describe('WebCodecs presentation acknowledgement', () => {
     expect(contextMock.drawImage.mock.calls.map(([source])=>source)).toEqual([bitmap,videoFrame]);
     expect(publishContext.drawImage).toHaveBeenCalledOnce();
     expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([expect.objectContaining({time:104,start:104})]);
-    expect(mediaMock.setWebCodecsComposited).toHaveBeenLastCalledWith(true,{time:104,imageIds:['img-low'],imagesComposited:true});
+    expect(mediaMock.setWebCodecsComposited).toHaveBeenLastCalledWith(true,{time:104,width:1920,height:1080,imageIds:['img-low'],imagesComposited:true});
   });
 
   it('上層圖片可留在 native guide，不強制解碼單一滿版影片',()=>{
@@ -249,7 +262,7 @@ describe('WebCodecs presentation acknowledgement', () => {
   it('snapshot 的時間使用實際影片 PTS，不能用尚未命中的要求時間',()=>{
     WCPreview.sources.get('b.mp4#1').request.mockReturnValue({timestamp:1.99e6,displayWidth:1920,displayHeight:1080});
     WCPreview.tick();
-    expect(mediaMock.setWebCodecsComposited).toHaveBeenLastCalledWith(true,{time:103.99,imageIds:[],imagesComposited:false});
+    expect(mediaMock.setWebCodecsComposited).toHaveBeenLastCalledWith(true,{time:103.99,width:1920,height:1080,imageIds:[],imagesComposited:false});
     expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([
       expect.objectContaining({time:104,start:104}),expect.objectContaining({time:103.99,start:103.99})
     ]);

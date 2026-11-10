@@ -337,6 +337,29 @@ describe('Electron invoke interface', () => {
     expect(present).toHaveBeenCalledWith(1,options);
   });
 
+  it('專案畫布經真 preload 傳主 renderer 所有的 handler，其他視窗不能設定', async () => {
+    const source = fs.readFileSync(path.join(ROOT, 'electron/main.js'), 'utf8');
+    const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
+    const registration = ast.body.find(node => node.expression?.callee?.object?.name === 'ipcMain'
+      && node.expression?.callee?.property?.name === 'handle' && node.expression.arguments[0]?.value === 'mpv:setProjectCanvas');
+    let handler, api;
+    const sender = {}, setProjectCanvas = vi.fn(async () => ({ ok: true }));
+    vm.runInNewContext(source.slice(registration.start, registration.end), {
+      ipcMain: { handle: (_name, fn) => { handler = fn; } }, mpvHost: { setProjectCanvas },
+      mainWin: { isDestroyed: () => false, webContents: sender },
+    });
+    vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'electron/preload.js'), 'utf8'), {
+      require: () => ({ contextBridge: { exposeInMainWorld: (name, value) => { if (name === 'subtool') api = value; } },
+        ipcRenderer: { invoke: (channel, value) => { expect(channel).toBe('mpv:setProjectCanvas'); return handler({ sender }, value); }, on() {}, send() {} }, webUtils: {} }),
+      ArrayBuffer, Uint8Array, Promise, TypeError, RangeError,
+    });
+    await expect(api.mpv.setProjectCanvas({ width: 1080, height: 1920 })).resolves.toEqual({ ok: true });
+    expect(setProjectCanvas).toHaveBeenLastCalledWith({ width: 1080, height: 1920 });
+    await api.mpv.setProjectCanvas(null); expect(setProjectCanvas).toHaveBeenLastCalledWith(null);
+    expect(() => handler({ sender: {} }, { width: 320, height: 240 })).toThrow('請求來源無效');
+    expect(setProjectCanvas).toHaveBeenCalledTimes(2);
+  });
+
   it('截圖預留的釋放與寫入使用路徑及獨立憑證', async () => {
     const invoke = vi.fn().mockResolvedValue(true);
     let api;

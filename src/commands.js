@@ -10,6 +10,7 @@ import { AudioRouting } from './audio-routing.js';
 import { runVideoExportCommand } from './export-job-engine.js';
 import { showToast, openModal, closeModal, togglePanel, openCacheDialog } from './ui.js';
 import { showSettingsModal } from './settings.js';
+import { showProjectSettings } from './project-settings.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
 import { importSub, showExportDialog, showExportVideoDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
 import { renderCheckPanel, deleteSelected } from './subtitles.js';
@@ -83,6 +84,7 @@ function createCommands() {
     'save-as-project': saveAsProject,
     'new': startNewProject,
     'cache-manage': openCacheDialog,
+    'project-settings': showProjectSettings,
 
     // Subtitle I/O
     'imp-auto': importSub,

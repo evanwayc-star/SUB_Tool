@@ -89,7 +89,7 @@ beforeEach(()=>{
   vi.clearAllMocks();
   adapters.Media.captureMediaOwnership.mockReturnValue(()=>true);
   adapters.Media.withPresentedFrame.mockImplementation(async (time, capture) => capture({ adapter: adapters.player, isCurrent: () => true }));
-  Object.assign(State,{videoWidth:8,videoHeight:4,fps:25,dropFrame:false,clips:[],videoTracks:[{visible:true}],soloVideoTrack:-1});
+  Object.assign(State,{projectCanvas:null,videoWidth:8,videoHeight:4,fps:25,dropFrame:false,clips:[],videoTracks:[{visible:true}],soloVideoTrack:-1});
   adapters.Media.displayTime.mockReturnValue(1);
   adapters.Media.inGap.mockReturnValue(false);
   adapters.Media.mpvPresenting.mockReturnValue(false);
@@ -105,6 +105,54 @@ beforeEach(()=>{
   const layer=document.getElementById('imageLayer');layer.innerHTML='';layer._imageHtml='';
 });
 afterAll(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
+
+it.each(['html5','mpv'])('captures %s into the custom square canvas with source aspect and black padding intact',async presenter=>{
+  State.projectCanvas={width:8,height:8};
+  adapters.Media.mpvPresenting.mockReturnValue(presenter==='mpv');
+  const result=await capturePreviewFrame({nativePath:'temp.jpg',readBase64:async()=> 'native-red'});
+  expect([result.canvas.width,result.canvas.height]).toEqual([8,8]);
+  expect(pixel(result,4,0)).toEqual([0,0,0]);
+  expect(pixel(result,4,3)).toEqual([255,0,0]);
+  expect(pixel(result,4,7)).toEqual([0,0,0]);
+});
+
+it('does not crop burned native subtitles out of a padded custom canvas while mixed-image composition is pending',async()=>{
+  State.projectCanvas={width:8,height:8};
+  State.videoTracks=[{visible:true},{visible:true}];
+  State.clips=[image({vtrack:0}),{id:'upper',type:'video',in:0,out:4,offset:0,vtrack:1}];
+  adapters.Media.mpvPresenting.mockReturnValue(true);
+  adapters.player.screenshot.mockResolvedValue({ok:true,contentRect:{x:0,y:2,width:8,height:4}});
+  const read=vi.fn(async()=> 'native-red');
+  await expect(capturePreviewFrame({nativePath:'temp.jpg',readBase64:read})).rejects.toThrow('合成預覽尚未就緒');
+  expect(read).not.toHaveBeenCalled();
+});
+
+it('rejects native pixels belonging to the previous canvas while a restored project canvas is being applied',async()=>{
+  State.projectCanvas={width:8,height:8};
+  adapters.Media.mpvPresenting.mockReturnValue(true);
+  adapters.player.screenshot.mockResolvedValue({ok:true,projectCanvas:null});
+  await expect(capturePreviewFrame({nativePath:'temp.jpg',readBase64:async()=> 'native-red'})).rejects.toThrow('畫布仍在更新');
+});
+
+it('revokes a pending native capture if the project canvas is replaced before the screenshot receipt',async()=>{
+  State.projectCanvas={width:8,height:8};
+  adapters.Media.mpvPresenting.mockReturnValue(true);
+  const pending=deferred();adapters.player.screenshot.mockReturnValue(pending.promise);
+  const result=capturePreviewFrame({nativePath:'temp.jpg',readBase64:async()=> 'native-red'});
+  State.projectCanvas=null;pending.resolve({ok:true,projectCanvas:{width:8,height:8}});
+  await expect(result).rejects.toMatchObject({name:'AbortError'});
+});
+
+it('captures the already presented custom mixed-image canvas without requesting or dismantling native pixels',async()=>{
+  State.projectCanvas={width:8,height:8};
+  State.videoTracks=[{visible:true},{visible:true}];
+  State.clips=[image({vtrack:0}),{id:'upper',type:'video',in:0,out:4,offset:0,vtrack:1}];
+  preview.style.display='block';
+  adapters.Media.previewComposition.mockReturnValue({time:1,width:8,height:8,imagesComposited:true,imageIds:['image']});
+  const result=await capturePreviewFrame();
+  expect(pixel(result,4,0)).toEqual([0,0,0]);expect(pixel(result,4,3)).toEqual([0,0,255]);
+  expect(adapters.player.screenshot).not.toHaveBeenCalled();
+});
 
 it.each(['replacement','same-source-clone','reset'])('image metadata %s respects live source and media lifetime',reason=>{
   const pending=[];

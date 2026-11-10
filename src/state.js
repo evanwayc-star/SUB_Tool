@@ -437,6 +437,7 @@ const State = {
   mediaSize: 0,
   videoWidth: 0,
   videoHeight: 0,
+  projectCanvas: null, // null = source-derived canvas; explicit dimensions belong to the project.
   muted:false, lastVol:1,
   mediaPath:null,
   clipboard:[],  // copied cues for paste

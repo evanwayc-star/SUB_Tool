@@ -39,6 +39,7 @@ import { clearAsrSession } from './speech-recognition-session.js';
 import { captureSubtitleRemovalOwnership } from './subtitle-removal-guard.js';
 import { normalizeExternalAudioData, assetRange } from './external-audio.js';
 import { audioLimiterSnapshot, audioMotherPath } from '../shared/audio-loudness.cjs';
+import { validProjectCanvas } from './project-canvas.js';
 export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
 const PROJECT_APP = 'SUB Tool';
 
@@ -104,6 +105,9 @@ function validateProjectIntegrity(projectData) {
   }
   if (projectData.fps !== undefined && (!Number.isFinite(Number(projectData.fps)) || Number(projectData.fps) <= 0)) {
     errors.push('專案 FPS 必須為大於 0 的數值');
+  }
+  if (projectData.projectCanvas != null && !validProjectCanvas(projectData.projectCanvas)) {
+    errors.push('專案畫布寬高必須為 2–8192 的整數，總像素不得超過 8192 × 4320');
   }
   for (const key of ['tracks', 'cues', 'clips', 'videoTracks', 'notes']) {
     if(projectData[key]===undefined && ['videoTracks','notes'].includes(key)) continue;
@@ -313,6 +317,7 @@ function _buildProjectData({snapshot=null,workspace=null}={}){
     playhead: Math.max(0, Media.displayTime() || 0),
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:committed.fps, dropFrame:committed.dropFrame, duration, trackCount:committed.trackCount,
+    projectCanvas:committed.projectCanvas??null,
     // 存檔時固定展開「當下生效樣式」，避免日後 STYLE_DEFAULTS 調整後讓既有專案外觀漂移。
     // posPct 僅供舊版 SUB Tool 讀取；新版以同值的 posY 為準。
     tracks:committed.tracks.map(t=>{
@@ -515,6 +520,9 @@ function resetProject(){
   if(_autoSaveTimer){ clearInterval(_autoSaveTimer); _autoSaveTimer=null; }
   resetAudioProject();
   State.vtracksCollapsed=false;
+  State.projectCanvas=null;
+  State.videoWidth=0; State.videoHeight=0;
+  emit('project:canvasChanged');
   State.exportIn=null;
   State.exportOut=null;
   _projectLoadSession.clearPlan();
@@ -903,6 +911,8 @@ const Project = {
         ...(style&&Object.keys(style).length?{style}:{})}; // v4.23 逐句樣式覆蓋
     });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
+    State.projectCanvas=data.projectCanvas?{width:data.projectCanvas.width,height:data.projectCanvas.height}:null;
+    State.videoWidth=0; State.videoHeight=0;
     snapAllCuesToFrames();
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map(_restoreSubtitleTrack);
     else State.tracks=[];
@@ -967,6 +977,7 @@ const Project = {
     const playhead=data.playhead != null&&typeof data.playhead==='number' ? Math.max(0,data.playhead) : null;
     _projectLoadSession.createRestorePlan(generation,{clips:pendingClips,externalAudioSources:pendingExternal,playhead,mediaRelink});
     emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes();
+    emit('project:canvasChanged');
     return true;
   },
   async load(file,consent=null){

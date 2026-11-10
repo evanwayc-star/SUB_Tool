@@ -452,7 +452,7 @@ export function createNativePreviewRuntime({
       return Math.max(0, sourceClockTime(value, clockFor(url))) || 0;
     },
 
-    async enterMpv({ src, bounds, audio, readBounds, boundsElement } = {}) {
+    async enterMpv({ src, bounds, audio, projectCanvas, readBounds, boundsElement } = {}) {
       activeTransport.cancelPendingSeek?.();
       const token = ++generation;
       revokeNativeSource();
@@ -463,7 +463,7 @@ export function createNativePreviewRuntime({
       nativeRequested = true;
       let result;
       try {
-        result = await bridge.launch({ src, bounds, audio });
+        result = await bridge.launch({ src, bounds, audio, ...(projectCanvas!==undefined?{projectCanvas}:{}) });
       } catch (error) {
         if (token === generation) {
           selectHtml5(video);
@@ -599,6 +599,11 @@ export function createNativePreviewRuntime({
     async setBounds(bounds) {
       if (!bridge?.setBounds) return false;
       return bridge.setBounds(bounds);
+    },
+    async setProjectCanvas(canvas) {
+      // Browser builds have no native presenter; the HTML/compositor reads State.
+      if (!bridge?.setProjectCanvas) return true;
+      return bridge.setProjectCanvas(canvas);
     },
     async setGuide(guide) { return runtime.setSubtitleGuide(guide); },
     async show(visible) { return runtime.setNativeVisible(visible); },

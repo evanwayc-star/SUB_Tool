@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
+const { validProjectCanvas } = require('../shared/project-canvas.cjs');
 
 // 持有輸出 reservation，讓不同 capture 不會共用檔名，也不會覆寫既有圖片。
 // 正式路徑只接受完成的 staging；失敗只清本 owner 的 staging 與仍屬本 reservation 的空檔。
@@ -110,6 +111,18 @@ function createScreenshotOutput({ fileAuthority, tempDir, fsModule = fs, coordin
           throw new Error('原生截圖暫存檔內容已變更');
         }
         result = { ok: true, b64: bytes.toString('base64') };
+        if (screenshot.projectCanvas === null || validProjectCanvas(screenshot.projectCanvas)) {
+          result.projectCanvas = screenshot.projectCanvas === null ? null
+            : { width: screenshot.projectCanvas.width, height: screenshot.projectCanvas.height };
+        }
+        const rect = screenshot.contentRect, canvas = screenshot.canvasSize;
+        if (validProjectCanvas(canvas) && rect
+          && [rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger)
+          && rect.x >= 0 && rect.y >= 0 && rect.width > 0 && rect.height > 0
+          && rect.x + rect.width <= canvas.width && rect.y + rect.height <= canvas.height) {
+          result.canvasSize = { width: canvas.width, height: canvas.height };
+          result.contentRect = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        }
       } catch (error) { failure = error; }
       finally {
         try { await handle?.close(); } catch (error) { failure ||= error; }

@@ -70,6 +70,7 @@ export async function renderRecentMenu() {
   for (const item of list) {
     const b = document.createElement('button');
     b.type = 'button';
+    b.tabIndex = -1;
     /* 無法找到時標灰但仍可點，儲存裝置恢復後可用相同項目重試。 */
     b.style.cssText = 'display:block;text-align:left;line-height:1.3;'
       + (item.missing ? 'opacity:.45;' : '');
@@ -91,6 +92,7 @@ export async function renderRecentMenu() {
   sep.className = 'msep';
   const clear = document.createElement('button');
   clear.type = 'button';
+  clear.tabIndex = -1;
   clear.textContent = '清除清單';
   clear.addEventListener('click', async () => {
     if ($('recentItems') !== box) return;

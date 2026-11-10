@@ -258,6 +258,21 @@ describe('截圖輸出 reservation', () => {
     expect(fs.existsSync(path.dirname(nativePath))).toBe(false);
   });
 
+  it('原生畫布與內容範圍隨同一張安全截圖回傳，非法 metadata 不外洩', async () => {
+    const { output } = fixture();
+    const canvasSize = { width: 320, height: 240 }, contentRect = { x: 0, y: 30, width: 320, height: 180 };
+    const result = await output.captureNative({ async screenshot(file) {
+      fs.writeFileSync(file, 'frame');
+      return { ok: true, projectCanvas: canvasSize, canvasSize, contentRect, path: 'C:/foreign' };
+    } });
+    expect(result).toEqual({ ok: true, b64: Buffer.from('frame').toString('base64'), projectCanvas: canvasSize, canvasSize, contentRect });
+    const invalid = await output.captureNative({ async screenshot(file) {
+      fs.writeFileSync(file, 'next');
+      return { ok: true, projectCanvas: null, canvasSize, contentRect: { ...contentRect, x: -1 } };
+    } });
+    expect(invalid).toEqual({ ok: true, b64: Buffer.from('next').toString('base64'), projectCanvas: null });
+  });
+
   it('原生截圖失敗仍清除本工作暫存並保留使用者同名檔', async () => {
     const { directory, output } = fixture();
     const existing = path.join(directory, '.subtool_temp_shot.jpg');

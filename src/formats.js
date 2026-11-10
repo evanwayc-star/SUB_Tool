@@ -6,7 +6,7 @@
 ============================================================================== */
 import { clamp } from './util.js';
 import { secToSRT, secToASS, secToEncore, srtToSec, assToSec, encoreToSec, getExactFps } from './time.js';
-import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss, normalizeStyleValue, normalizeStyleRecord } from './substyle.js';
+import { ASS_PLAY_RES, effStyle, styleToAssStyleLine, cueAssTags, cueAssPos, assJoinLines, assJoinVertical, verticalAssCols, assAlignN, assEscapeText, assHorizontalTextLayout, subtitleBackgroundCssMetrics, STYLE_ONLY_KEYS, CUE_STYLE_KEYS, STYLE_DEFAULTS, uiFontNameFromAss, normalizeStyleValue, normalizeStyleRecord } from './substyle.js';
 function finiteBackgroundLayout(layout){
   if(!layout || typeof layout !== 'object') return null;
   const lineIndex = Number(layout.lineIndex);
@@ -73,7 +73,9 @@ class AssDocumentBuilder {
     // 單行文字盒往外擴到整段高度」，比較接近 CSS 的整塊 padding 語義。
     const yBorder = Math.max(metrics.padY, (layout.height - metrics.fontSize) / 2);
     const angle = Number(st.angle) || 0;
-    const rotate = `${angle ? `\\org(${x},${y})` : ''}\\frz${-angle}`;
+    const textLayout=assHorizontalTextLayout(st,rawLines,this.vww,this.vwh);
+    const origin=textLayout?.origin || {x,y};
+    const rotate = `${angle ? `\\org(${origin.x},${origin.y})` : ''}\\frz${-angle}`;
     const shadow = Number.isFinite(Number(st.shadow)) ? Math.max(0, Number(st.shadow)) : 0;
     const shadowTags = shadow > 0
       ? `\\shad${shadow}\\4c&H000000&\\4a&H26&`
@@ -119,6 +121,7 @@ class AssDocumentBuilder {
       ? `{\\an${assAlignN(st)}}` : '';
     
     const lines = String(cue.text || '').replace(/\r/g, '').split('\n').map(assEscapeText);
+    const textLayout=assHorizontalTextLayout(st,lines,this.vww,this.vwh);
 
     if (layout) {
       const backgroundHead = `Dialogue: ${100-(cue.track||0)},${secToASS(cue.start, this.fps)},${secToASS(cue.end, this.fps)},${styName},atg${(cue.track||0)+1},0,0,0,,`;
@@ -127,11 +130,17 @@ class AssDocumentBuilder {
       if(background) this.events.push({ type: 'background', text: background });
       const x = Math.round((st.posX / 100) * this.vww);
       const y = Math.round((st.posY / 100) * this.vwh);
-      const blockOrigin = st.angle ? `\\org(${x},${y})` : '';
-      const text = layout.textLines.map((l, i) => {
+      const origin=textLayout?.origin || {x,y};
+      const blockOrigin = st.angle ? `\\org(${origin.x},${origin.y})` : '';
+      const text = (textLayout?.lines || layout.textLines).map((l, i) => {
         return `${head}{\\an${l.hAlign}\\pos(${l.x},${l.cy})${blockOrigin}}${tags}${lines[i]}`;
       }).join('\n');
       this.events.push({ type: 'text', text });
+    } else if(textLayout) {
+      const origin=textLayout.origin;
+      const rotation=st.angle ? `\\org(${origin.x},${origin.y})` : '';
+      this.events.push({type:'text',text:textLayout.lines.map((line,index)=>
+        `${head}{\\an${line.hAlign}\\pos(${line.x},${line.cy})${rotation}}${tags}${lines[index]}`).join('\n')});
     } else {
       const text = head + anOv + cueAssPos(st, this.vww, this.vwh) + tags + assJoinLines(lines, st);
       this.events.push({ type: 'text', text });

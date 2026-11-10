@@ -19,6 +19,7 @@ const { StringDecoder } = require('node:string_decoder');
 const { randomBytes } = require('node:crypto');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 const { sourceClockTime, playerClockTime } = require('../shared/media-source-clock.cjs');
+const { validProjectCanvas } = require('../shared/project-canvas.cjs');
 
 function createMpvTemporaryFiles(fs, path, tmpDir, ensureTmp, rootAuthority) {
   const records = new Set();
@@ -112,6 +113,15 @@ function createMpvHost(deps) {
   let buffer = '';
   let generation = 0;
   let sourceClock = null;
+  let projectCanvas = null;
+  let canvasRevision = 0;
+  let pendingCanvas = null;
+  let canvasFilter = '';
+  let confirmedCanvasFilter = '';
+  let confirmedCanvasSession = null;
+  let canvasCommand = 0;
+  let canvasFrame = null;
+  let canvasFrameReady = true;
   const playerTime = time => Math.max(0, playerClockTime(time, sourceClock));
   const sourceTime = time => sourceClockTime(time, sourceClock);
   const sourceDuration = time => Math.max(0, sourceTime(time)) || 0;
@@ -538,6 +548,12 @@ function createMpvHost(deps) {
   }
 
   function detachClient({ destroy = true, emitDisconnected = false } = {}) {
+    cancelCanvas();
+    canvasFilter = '';
+    confirmedCanvasFilter = '';
+    confirmedCanvasSession = null;
+    canvasFrame = null;
+    canvasFrameReady = true;
     cancelPlaybackReady();
     playbackCommandGeneration++;
     directionGeneration++;
@@ -685,6 +701,150 @@ function createMpvHost(deps) {
     });
   }
 
+  const ownsCanvas = request => pendingCanvas === request && request.revision === canvasRevision
+    && request.session === fileLoadSession && request.session.client === client && request.session.generation === generation;
+
+  function finishCanvas(request, error) {
+    if (!request || pendingCanvas !== request) return;
+    pendingCanvas = null;
+    clearTimer(request.timer);
+    if (error) request.reject(error);
+    else {
+      canvasFrame = request.frame;
+      canvasFrameReady = true;
+      confirmedCanvasFilter = request.filter;
+      confirmedCanvasSession = request.session;
+      request.resolve({ ok: true });
+    }
+  }
+
+  function cancelCanvas() {
+    finishCanvas(pendingCanvas, new Error('mpv 畫布操作已被新的來源或設定取代'));
+  }
+
+  function refreshCanvas(request) {
+    if (!request || !ownsCanvas(request) || !request.acknowledged || !request.restarted) return;
+    if (request.querying) { request.queryAgain = true; return; }
+    request.querying = true;
+    void send(['get_property', 'video-out-params'], true, { requireSuccess: true }).then(params => {
+      if (!ownsCanvas(request)) return;
+      if (params?.w === request.width && params?.h === request.height
+        && (params.rotate || 0) === request.rotation) finishCanvas(request);
+    }).catch(error => finishCanvas(request, error)).finally(() => {
+      request.querying = false;
+      if (request.queryAgain && ownsCanvas(request)) { request.queryAgain = false; refreshCanvas(request); }
+    });
+  }
+
+  function applyProjectCanvas(session) {
+    if (pendingCanvas?.session === session && pendingCanvas.revision === canvasRevision) return pendingCanvas.promise;
+    cancelCanvas();
+    if (!projectCanvas && !canvasFilter && !confirmedCanvasFilter && canvasFrameReady) { canvasFrame = null; return Promise.resolve({ ok: true }); }
+    const request = { session, revision: canvasRevision, canvas: projectCanvas, frame: null,
+      acknowledged: false, restarted: false, commandSent: false, querying: false, queryAgain: false };
+    request.promise = new Promise((resolve, reject) => { request.resolve = resolve; request.reject = reject; });
+    pendingCanvas = request;
+    request.timer = setTimer(() => finishCanvas(request, new Error('mpv 畫布畫格未在期限內就緒')), 5000);
+    void (async () => {
+      const input = await send(['get_property', 'video-params'], true, { requireSuccess: true });
+      if (!ownsCanvas(request)) return;
+      if (![input?.w, input?.h, input?.dw, input?.dh].every(value => Number.isFinite(value) && value > 0)) {
+        throw new Error('mpv 來源畫面尺寸無效');
+      }
+      const canvas = request.canvas, dar = input.par > 0 ? input.w * input.par / input.h : input.dw / input.dh;
+      const rotation = ((input.rotate || 0) % 360 + 360) % 360;
+      if (![0, 90, 180, 270].includes(rotation)) throw new Error('目前來源旋轉角度無法套用專案畫布');
+      const swapped = rotation === 90 || rotation === 270;
+      const displayDar = swapped ? 1 / dar : dar;
+      let filter = '';
+      request.width = input.w; request.height = input.h; request.rotation = rotation;
+      if (canvas && Math.abs(displayDar - canvas.width / canvas.height) > 1e-6 * Math.max(1, displayDar)) {
+        // mpv applies the source's rotation after vf. Pad in its pre-rotation
+        // pixel domain so the final canvas (and ASS/screenshot) keeps its axes.
+        const targetWidth = swapped ? canvas.height : canvas.width, targetHeight = swapped ? canvas.width : canvas.height;
+        const width = Math.max(1, Math.min(targetWidth, Math.floor(targetHeight * dar)));
+        const height = Math.max(1, Math.min(targetHeight, Math.floor(targetWidth / dar)));
+        const x = Math.floor((targetWidth - width) / 2), y = Math.floor((targetHeight - height) / 2);
+        // 4:4:4 admits odd / one-pixel contain rectangles without chroma rounding.
+        // Let libavfilter choose an equivalent depth; never force a 10/12-bit source to 8-bit.
+        filter = '@subtool-canvas:lavfi=[scale=' + width + ':' + height + ',setsar=1,'
+          + 'format=pix_fmts=yuv444p|yuv444p10le|yuv444p12le|yuv444p16le|gbrp|gbrp10le|gbrp12le|gbrp16le,'
+          + 'pad=' + targetWidth + ':' + targetHeight + ':' + x + ':' + y + ']';
+        request.width = targetWidth; request.height = targetHeight;
+        const contentRect = rotation === 90 ? { x: targetHeight - y - height, y: x, width: height, height: width }
+          : rotation === 270 ? { x: y, y: targetWidth - x - width, width: height, height: width }
+            : rotation === 180 ? { x: targetWidth - x - width, y: targetHeight - y - height, width, height } : { x, y, width, height };
+        request.frame = { contentRect, canvasSize: { ...canvas } };
+      }
+      request.filter = filter;
+      if (canvasFrameReady && filter === canvasFilter && filter === confirmedCanvasFilter
+        && (!filter || confirmedCanvasSession === session)) { finishCanvas(request); return; }
+      if (filter === canvasFilter && filter === confirmedCanvasFilter && session.loading) {
+        // loadFile already waited for this source's first frame. A retained
+        // identical vf needs fresh geometry proof, not a redundant reconfigure.
+        request.acknowledged = true; request.restarted = true;
+        refreshCanvas(request); return;
+      }
+      const previous = canvasFilter, previousFrameReady = canvasFrameReady, command = ++canvasCommand;
+      canvasFilter = filter;
+      canvasFrameReady = false;
+      request.commandSent = true;
+      try {
+        await send(filter ? ['no-osd', 'vf', 'add', filter] : ['no-osd', 'vf', 'remove', '@subtool-canvas'], true, { requireSuccess: true });
+      } catch (error) {
+        // Only a native rejection proves that mpv rolled back its vf operation.
+        // Timeout/write/disconnect failures leave the frame uncertain and must
+        // go through a real restore command before a screenshot is allowed.
+        if (error.code === 'MPV_COMMAND_REJECTED' && command === canvasCommand
+          && session.client === client && session.generation === generation) {
+          canvasFilter = previous;
+          canvasFrameReady = previousFrameReady;
+        }
+        throw error;
+      }
+      if (!ownsCanvas(request)) return;
+      // vf ACK only accepts the new chain. Paused screenshot can still contain
+      // the old frame until this command's restart and matching output geometry.
+      request.acknowledged = true;
+      refreshCanvas(request);
+    })().catch(error => finishCanvas(request, error));
+    return request.promise;
+  }
+
+  async function applyLatestProjectCanvas(session) {
+    while (session === fileLoadSession && session.client === client && session.generation === generation) {
+      const revision = canvasRevision;
+      try { await applyProjectCanvas(session); }
+      catch (error) { if (revision === canvasRevision) throw error; }
+      if (revision === canvasRevision) return;
+    }
+    throw new Error('mpv 畫布來源已被取代');
+  }
+
+  async function setProjectCanvas(value) {
+    if (value !== null && !validProjectCanvas(value)) throw new TypeError('專案畫布尺寸無效');
+    if (pendingCanvas && value?.width === projectCanvas?.width && value?.height === projectCanvas?.height) return pendingCanvas.promise;
+    const previous = projectCanvas, session = fileLoadSession;
+    projectCanvas = value === null ? null : { width: value.width, height: value.height };
+    const revision = ++canvasRevision;
+    cancelCanvas();
+    // A loading source is not yet capturable; its launch/load completion applies
+    // the latest desired canvas after the first decoded frame has been observed.
+    if (!session || session.loading || !client) return { ok: true };
+    try { return await applyProjectCanvas(session); }
+    catch (error) {
+      if (revision === canvasRevision) {
+        projectCanvas = previous;
+        canvasRevision++;
+        const current = fileLoadSession;
+        if (current && !current.loading && current.client === client) {
+          try { await applyProjectCanvas(current); } catch (restoreError) { log('[mpv] 畫布還原失敗:', restoreError.message); }
+        }
+      }
+      throw error;
+    }
+  }
+
   function presentationMatches(request,presented){
     // time-pos is actual player evidence; a duration never widens the symmetric
     // seek tolerance. It only permits the source frame containing this target.
@@ -808,12 +968,18 @@ function createMpvHost(deps) {
         if (!line.trim()) continue;
         try {
           const message = JSON.parse(line);
+          if (pendingCanvas?.commandSent && (message.event === 'playback-restart' || message.event === 'video-reconfig')) {
+            if (message.event === 'playback-restart') pendingCanvas.restarted = true;
+            refreshCanvas(pendingCanvas);
+          }
           if (typeof message.request_id === 'number' && callbacks.has(message.request_id)) {
             const callback = callbacks.get(message.request_id);
             callbacks.delete(message.request_id);
             clearTimer(callback.timer);
             if (callback.requireSuccess && message.error !== 'success') {
-              callback.reject(new Error('mpv 命令失敗：' + (message.error || '無效的命令回覆')));
+              const error = new Error('mpv 命令失敗：' + (message.error || '無效的命令回覆'));
+              error.code = 'MPV_COMMAND_REJECTED';
+              callback.reject(error);
             } else {
               callback.onSuccess?.();
               callback.resolve(message.data ?? null);
@@ -954,10 +1120,19 @@ function createMpvHost(deps) {
     await guideWin.loadURL(url.pathToFileURL(guidePath).href);
   }
 
-  async function launch({ src, bounds, audio } = {}) {
+  async function launch(options = {}) {
+    const { src, bounds, audio } = options;
     if (disposed) throw new Error('mpv 宿主已關閉');
     if (!supported?.()) throw new Error('目前 macOS 版不啟用 Windows 專用的 mpv 嵌入');
     if (typeof src !== 'string' || !src) throw new Error('mpv：來源路徑無效');
+    if (Object.hasOwn(options, 'projectCanvas')) {
+      const canvas = options.projectCanvas;
+      if (canvas !== null && !validProjectCanvas(canvas)) throw new TypeError('專案畫布尺寸無效');
+      // Receive this source's snapshot before quit cancels old setters. Their
+      // rollback is now stale; any later UI setter still advances this revision.
+      projectCanvas = canvas === null ? null : { width: canvas.width, height: canvas.height };
+      canvasRevision++;
+    }
     quit();
     const token = ++generation;
     const exe = detect();
@@ -1051,6 +1226,8 @@ function createMpvHost(deps) {
       if (!loaded) throw new Error('mpv 初始畫格未在期限內就緒');
       if (!await installSourceObservers(startupSession)) throw new Error('mpv 啟動已被新的媒體取代');
       const duration = await send(['get_property', 'duration'], true);
+      if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
+      await applyLatestProjectCanvas(startupSession);
       if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
       startupSession.loading = false;
       publishPendingSourceProperties(startupSession);
@@ -1173,6 +1350,7 @@ function createMpvHost(deps) {
   }
 
   async function loadFile(filePath) {
+    cancelCanvas();
     cancelPlaybackReady();
     if (!client) return null;
     directionGeneration++;
@@ -1210,7 +1388,7 @@ function createMpvHost(deps) {
     if (!current()) return superseded();
     for(const old of [...sourceObserverSessions]) if(old!==session) releaseSourceObservers(old);
     // 建立 waiter 後才送命令，避免快速載入的 file-loaded 先於 command ack 到達。
-    const ready = waitForFileLoad(session);
+    const ready = waitForFileLoad(session, { firstFrame: !!projectCanvas || !!canvasFilter });
     try {
       const receipt = await send(['loadfile', filePath, 'replace'], true, { requireSuccess: true });
       acknowledgeFileLoad(session, receipt);
@@ -1225,6 +1403,8 @@ function createMpvHost(deps) {
     }
     if (!await installSourceObservers(session)) return superseded();
     const duration = await send(['get_property', 'duration'], true);
+    if (!current()) return superseded();
+    await applyLatestProjectCanvas(session);
     if (!current()) return superseded();
     session.loading = false;
     publishPendingSourceProperties(session);
@@ -1241,6 +1421,7 @@ function createMpvHost(deps) {
     disposeAndWait,
     resume,
     setBounds: applyBounds,
+    setProjectCanvas,
     setVisible,
     reapplyBounds,
     showForParentRestore,
@@ -1266,8 +1447,15 @@ function createMpvHost(deps) {
     },
     present,
     cancelPresent,
-    screenshot: filePath => send(['screenshot-to-file', filePath, 'subtitles'], true, { requireSuccess: true })
-      .then(() => ({ ok: true })),
+    screenshot: async filePath => {
+      while (pendingCanvas) await pendingCanvas.promise;
+      const session = fileLoadSession, revision = canvasRevision, frame = canvasFrame;
+      const canvas = projectCanvas && { ...projectCanvas };
+      if (session?.loading || !canvasFrameReady) throw new Error('mpv 來源或畫布畫格尚未就緒');
+      await send(['screenshot-to-file', filePath, 'subtitles'], true, { requireSuccess: true });
+      if (session !== fileLoadSession || revision !== canvasRevision) throw new Error('mpv 截圖來源或畫布已變更');
+      return { ok: true, projectCanvas: canvas, ...(frame || {}) };
+    },
     play: (options = {}) => {
       cancelPlaybackReady();
       const commandGeneration=++playbackCommandGeneration,session=fileLoadSession,previousPaused=playerPaused;

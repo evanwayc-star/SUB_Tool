@@ -2077,6 +2077,10 @@ ipcMain.handle('mpv:launch', async (event, request = {}) => {
   return mpvHost.launch(request);
 });
 ipcMain.handle('mpv:setBounds', (event, bounds) => mpvHost.setBounds(bounds));
+ipcMain.handle('mpv:setProjectCanvas', (event, canvas) => {
+  if (!mainWin || mainWin.isDestroyed() || event.sender !== mainWin.webContents) throw new Error('專案畫布請求來源無效');
+  return mpvHost.setProjectCanvas(canvas);
+});
 ipcMain.handle('mpv:show', (event, value) => mpvHost.setVisible(value));
 ipcMain.handle('mpv:setGuide', (event, guide) => mpvHost.setGuide(guide));
 ipcMain.handle('mpv:setImageGuide', (event, data) => mpvHost.setImageGuide(data));

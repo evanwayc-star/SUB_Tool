@@ -132,7 +132,7 @@ const History = {
   committedSnapshot({clips=Seq.snapshot(), externalAudioState=State.externalAudioState||[]}={}){
     return projectEditPreviews(structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
       audioProject:normalizeAudioProject(audioProjectForSnapshot()),externalAudioState,
-      fps:State.fps,dropFrame:State.dropFrame,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clips}), {clipGeo:'clips'});
+      fps:State.fps,dropFrame:State.dropFrame,projectCanvas:State.projectCanvas??null,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clips}), {clipGeo:'clips'});
   },
   snap(){
     const {clips,...snapshot}=this.committedSnapshot({externalAudioState:externalAudioSnapshot()});
@@ -266,6 +266,7 @@ const History = {
     State.cues=d.cues; State.tracks=d.tracks; State.notes=d.notes||[]; syncTrackCount();
     State.videoTracks = (Array.isArray(d.videoTracks)&&d.videoTracks.length) ? d.videoTracks : [{name:'視訊軌 1',visible:true,locked:false}];
     State.audioProject=normalizeAudioProject(d.audioProject);
+    State.projectCanvas=d.projectCanvas??null;
     // 專案音訊路由與 bus M/S/音量不只是畫面資料：還會決定 Web Audio 的實際 gain。
     // 還原快照後通知協調層重新套用，避免 Ctrl+Z/Redo 看起來已變、聲音卻維持舊設定。
     emit('audio:projectRestored', { audioProject: State.audioProject });
@@ -279,6 +280,7 @@ const History = {
     emit('media:sequenceRestored');
     pruneSelection(); // 還原後選取只留仍存在的字幕（三處各自寫過一次，現在同一條規則）
     this.hi=i; emit('render:listTrackSel'); emit('render:all'); drawTimeline(); renderNotes(); renderHistory();
+    emit('project:canvasChanged');
     syncCompareSnapshot();
   },
   undo(){ if(this.hi>0){ this.restore(this.hi-1); setStatus('已復原','ok'); } else setStatus('沒有可復原的動作',''); },

@@ -40,6 +40,13 @@ describe('desktop player adapter guide contract', () => {
 });
 
 describe('原生來源 session 歸屬',()=>{
+  it.each([null,{width:1080,height:1920}])('launch carries the restored project canvas %j through the source transaction',async projectCanvas=>{
+    const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'canvas-source'})};
+    const runtime=resetPlayerAdapter({mpv:bridge});
+    await runtime.enterMpv({src:'C:/restored.mov',projectCanvas});
+    expect(bridge.launch).toHaveBeenCalledWith(expect.objectContaining({src:'C:/restored.mov',projectCanvas}));
+    expect(runtime.ownsNativeSourceSession('canvas-source')).toBe(true);
+  });
   it('重載期間撤銷舊 session，僅最新完成的同路徑工作取得資格',async()=>{
     let finishFirst,finishSecond;
     const first=new Promise(resolve=>{finishFirst=resolve;}),second=new Promise(resolve=>{finishSecond=resolve;});

@@ -22,6 +22,7 @@
 ============================================================================== */
 "use strict";
 import { State } from './state.js';
+import { projectCanvasSize } from './project-canvas.js';
 import { emit } from './events.js';
 
 /* 樣式欄位與預設值（軌道級；逐句覆蓋為其子集）。
@@ -251,7 +252,7 @@ export function colorName(hex){ return COLOR_NAMES[String(hex||'').toLowerCase()
 
 /* 樣式的畫面像素座標（內部存百分比＝解析度無關、專案可攜；UI 與摘要顯示像素） */
 export function posToPx(st){
-  const VW = State.videoWidth || 1920, VH = State.videoHeight || 1080;
+  const {width:VW,height:VH} = projectCanvasSize();
   return { x: Math.round(st.posX / 100 * VW), y: Math.round(st.posY / 100 * VH), VW, VH };
 }
 
@@ -300,7 +301,7 @@ export function styleToAssStyleLine(name, st, vwh){
   const shadowV = assShadow(st);
   const outlineCol = st.bgBox ? backCol : hexToAssColor(st.outlineColor);
   // Fontname 走 assFontName()：ASS 要的是字型檔內部家族名，不是 UI 的資料夾名
-  return `Style: ${name},${assFontName(st.font)},${st.fontSize},${hexToAssColor(st.color)},&H00FFFFFF,${outlineCol},${backCol},`+
+  return `Style: ${name},${assFontName(st.font)},${assFontSize(st)},${hexToAssColor(st.color)},&H00FFFFFF,${outlineCol},${backCol},`+
     `${st.bold ? 1 : 0},${st.italic ? 1 : 0},0,0,100.0,100.0,${st.vertical ? 0 : st.letterSpacing},${(-(st.angle || 0)).toFixed(1)},`+
     `${borderStyle},${outlineV},${shadowV},${alignN},135,135,${mv},1`;
 }
@@ -318,7 +319,7 @@ export function cueAssTags(diff, st=null){
   if(!diff) return '';
   let t = '';
   if(diff.font != null) t += `\\fn${assFontName(diff.font)}`; // 同 Style：ASS 認的是內部家族名
-  if(diff.fontSize != null) t += `\\fs${diff.fontSize}`;
+  if(diff.fontSize != null || (st && (diff.font != null || diff.vertical != null))) t += `\\fs${st ? assFontSize(st) : diff.fontSize}`;
   if(diff.color != null) t += `\\c${hexToAssColor(diff.color)}&`;
   if(diff.bold != null) t += `\\b${diff.bold ? 1 : 0}`;
   if(diff.italic != null) t += `\\i${diff.italic ? 1 : 0}`;
@@ -538,7 +539,59 @@ export function capturePresetUpdate(preset){
 let _fonts = null; // [{name:資料夾名（UI／CSS 用）, file, family:檔案內部家族名（ASS 用）}]
 let _fontsLoading = null;
 let _fontFaces = new Map(); // 只持有本 module 註冊的 face，不能清除其他字型擁有者。
+let _fontMetrics = new Map();
 export function getFonts(){ return _fonts || []; }
+
+/* libass 以 OS/2 Win ascent+descent 作 REAL_DIM 字級，CSS 字級則是 em。
+   兩者並非固定 pt/px 換算；讀取正在註冊的同一份 face，不猜資料夾或字型名稱。
+   https://github.com/libass/libass/blob/master/libass/ass_font.c */
+function readFontMetrics(buffer){
+  try {
+    const view=new DataView(buffer), u16=offset=>view.getUint16(offset), i16=offset=>view.getInt16(offset);
+    const u32=offset=>view.getUint32(offset);
+    const tag=offset=>String.fromCharCode(...new Uint8Array(buffer,offset,4));
+    const base=tag(0)==='ttcf' ? u32(12) : 0;
+    if(![0x00010000,0x4f54544f,0x74727565].includes(u32(base))) return null;
+    const tables=new Map();
+    for(let i=0;i<u16(base+4);i++) {
+      const entry=base+12+i*16, offset=u32(entry+8), length=u32(entry+12);
+      if(offset+length>view.byteLength) return null;
+      tables.set(tag(entry),{offset,length});
+    }
+    const head=tables.get('head'), os2=tables.get('OS/2');
+    if(!head || head.length<20 || !os2 || os2.length<78) return null;
+    const em=u16(head.offset+18), ascent=i16(os2.offset+74), descent=i16(os2.offset+76);
+    if(em<=0 || ascent<=0 || descent<0) return null;
+    return {ascent:ascent/em,descent:descent/em};
+  } catch { return null; }
+}
+
+function fontMetricsOf(st){
+  if(st?.vertical) return null; // 直書仍由既有逐字排版契約負責。
+  const font=getFonts().find(font=>font.name===st?.font || font.family===st?.font);
+  return font ? _fontMetrics.get(font.name) : null;
+}
+
+function assFontSize(st){
+  const metrics=fontMetricsOf(st);
+  return metrics ? +(st.fontSize*0.75*(metrics.ascent+metrics.descent)).toFixed(6) : st.fontSize;
+}
+
+/* 每一行的基線由 CSS 行盒決定，不使用會疊加字型內部 leading 的空白 Dialogue 行。
+   不認識的系統／fallback face 沿用原 ASS 契約，不能套用另一個字型的度量。 */
+export function assHorizontalTextLayout(st, lines, vww, vwh){
+  const font=fontMetricsOf(st);
+  if(!font) return null;
+  const metrics=subtitleBackgroundCssMetrics(st), anchor=anchorPct(st);
+  const x=st.posX/100*vww, y=st.posY/100*vwh;
+  const top=y-lines.length*metrics.lineHeight*anchor.y/100;
+  const baselineOffset=((font.cssAscent-font.cssDescent)-(font.ascent-font.descent))*metrics.fontSize/2;
+  const padding=st.bgBox ? {x:metrics.padX,y:metrics.padY}
+    : {x:(st.outline||0)*2+(st.shadow||0)+12,y:(st.outline||0)*2+(st.shadow||0)+12};
+  const origin={x:x+padding.x*(anchor.x/50-1),y:y+padding.y*(anchor.y/50-1)};
+  return {origin,lines:lines.map((_,index)=>({x,cy:top+(index+0.5)*metrics.lineHeight+baselineOffset,
+    hAlign:{left:4,center:5,right:6}[st.align]||5}))};
+}
 
 /* 資料夾名 → ASS Fontname（v4.29.3 修）。
    ── libass／fontconfig 只認字型檔【內部的家族名】；我們 UI 用的是使用者自取的資料夾名
@@ -587,6 +640,8 @@ async function _loadFontFaces(){
     const list = ((r && r.fonts) || []).slice()
       .sort((a, b) => (b.name === STYLE_DEFAULTS.font) - (a.name === STYLE_DEFAULTS.font));
     const nextFaces = new Map();
+    const nextMetrics = new Map();
+    const acceptedFonts = [];
     // 以 FontFace API 直接餵位元組註冊——CSS `@font-face{src:url('file://…')}` 會被
     // Chromium 擋下（"A network error occurred"），即使 webSecurity 關閉亦然。
     for(const f of list){
@@ -596,9 +651,17 @@ async function _loadFontFaces(){
         const face = new FontFace(f.name, buf);
         await face.load();
         nextFaces.set(f.name, face);
+        const metrics=readFontMetrics(buf);
+        if(metrics) nextMetrics.set(f.name,metrics);
+        acceptedFonts.push(f);
       }catch(e){
         // 暫時讀取失敗仍保留可用的舊 face；下次強制載入成功才取代。
-        if(_fontFaces.has(f.name)) nextFaces.set(f.name, _fontFaces.get(f.name));
+        if(_fontFaces.has(f.name)) {
+          nextFaces.set(f.name, _fontFaces.get(f.name));
+          if(_fontMetrics.has(f.name)) nextMetrics.set(f.name,{..._fontMetrics.get(f.name)});
+          // 同一資料夾可能已換檔／family；保留舊 face 時也保留它的 ASS 身分。
+          acceptedFonts.push(getFonts().find(font=>font.name===f.name) || f);
+        } else acceptedFonts.push(f);
         console.warn('[fonts] 預覽載入失敗（仍可匯出）：' + f.name, String(e && e.message || e));
       }
     }
@@ -607,8 +670,28 @@ async function _loadFontFaces(){
     for(const [name, face] of _fontFaces){
       if(nextFaces.get(name) !== face) document.fonts.delete(face);
     }
+    // Chromium 在各平台選用的 CSS ascent/descent 可能不同（如 USE_TYPO_METRICS）。
+    // 在 face 已完整發布後量測基線；只保存度量，不快取任何句子的像素或內容。
+    let context;
+    try { if(nextMetrics.size) context=globalThis.document?.createElement?.('canvas')?.getContext?.('2d'); }
+    catch { /* 度量 adapter 不可中斷已載妥 face 的整批發布。 */ }
+    for(const [name,metrics] of nextMetrics) {
+      try {
+        if(context) {
+          context.font=`1000px "${name}"`;
+          const measured=context.measureText('Hg國');
+          if(Number.isFinite(measured.fontBoundingBoxAscent) && Number.isFinite(measured.fontBoundingBoxDescent)) {
+            metrics.cssAscent=measured.fontBoundingBoxAscent/1000;
+            metrics.cssDescent=measured.fontBoundingBoxDescent/1000;
+          }
+        }
+      } catch { /* 個別量測失敗以同 face 的已知度量作後援，不污染其他字型。 */ }
+      metrics.cssAscent ??= metrics.ascent;
+      metrics.cssDescent ??= metrics.descent;
+    }
     _fontFaces = nextFaces;
-    _fonts = list;
+    _fontMetrics = nextMetrics;
+    _fonts = acceptedFonts;
   }catch(e){ console.warn('[fonts] load', e); }
   // 掃描失敗保留既有清單；首次失敗保持未載入，下一次可重試。
   return getFonts();

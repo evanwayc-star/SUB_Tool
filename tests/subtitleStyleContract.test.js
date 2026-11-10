@@ -5,7 +5,7 @@
      src/substyle.js  styleToAssStyleLine() → ASS → mpv/libass ＋ FFmpeg 燒錄
 
    為什麼不合併成一份：CSS 與 ASS 是兩種本質不同的排版系統，
-   字級單位（px vs pt）、外框語義（置中描邊 vs 向外擴）、旋轉方向（順時針 vs 逆時針）
+   字級度量（em vs face 的 ascent/descent）、外框語義（置中描邊 vs 向外擴）、旋轉方向（順時針 vs 逆時針）
    都不一樣。正確的接縫是「共用同一份生效樣式，各自渲染成自己的表達」。
 
    既然無法合併，就必須有機制阻止它們漂掉——就是這支測試。
@@ -78,10 +78,9 @@ describe('字幕樣式跨路契約：CSS ↔ ASS', () => {
       const css = styleToCss(st, 1);
       const ass = assFields(st);
 
-      /* 字級是三路一致最容易靜默壞掉的一項：libass 把 Fontsize 當 pt，
-         CSS 是 px，96dpi 下 1pt = 4/3 px，所以預覽要乘 0.75 才同構。
-         這個係數若被改掉，畫面看起來仍然「有字」，但匯出字級會整個不同。 */
-      it('字級：CSS px = ASS Fontsize × 0.75，不加入固定預覽像素下限', () => {
+      /* 保留使用者既有的 CSS 字級。此純契約沒有載入字型，ASS 因而保留舊後援；
+         已載入 face 的換算與像素一致性另由 subtitlePreviewExportRendering 驗證。 */
+      it('未載入字型的後援保留原 ASS 字級，CSS 維持既有 0.75 倍且無像素下限', () => {
         const expected = Number(ass.Fontsize) * 0.75;
         expect(cssProp(css, 'font-size')).toBe(`${expected}px`);
       });

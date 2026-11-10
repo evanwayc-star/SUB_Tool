@@ -21,6 +21,7 @@ import { showToast, setMpvWindowVisible } from './ui.js';
 import { refreshSelectionUI, selectCueSingle } from './subtitles.js';
 import { subtitlePreviewIndex } from './subtitle-preview-index.js';
 import { setMediaElementSource } from './media-intake-engine.js';
+import { projectCanvasSize, projectCanvasRect } from './project-canvas.js';
 
 let _mpvSubT=null;
 let _lastMpvSubSend=0;
@@ -163,31 +164,12 @@ export function _setSubtitleHover(el){
   _hoveredSubEl?.classList.add('hovering');
   _sendMpvSubtitleGuide(_hoveredSubEl);
 }
-/* 影片畫面在 videoWrap 內的實際顯示區（contain）。字幕層對齊它 ——
-   否則字幕框固定 16:9，遇到不同比例的片（2.39:1 電影 vs 16:9）畫面高度不同，
-   字幕卻照同一個框換算 →「字幕大小在各個影片上不一樣」。回 null＝取不到來源尺寸。 */
-/* 畫面【實際被畫出來的那塊】——字幕層、安全框、圖片層、拖曳換算全部以它為基準。
-   #video 是 object-fit:contain，所以顯示區是「來源比例貼合 videoWrap 後」的內縮矩形。
-
-   基準必須是【來源的真實尺寸】，不能寫死 16:9：
-   匯出畫布用的是 State.videoWidth/Height（見 subio.js），mpv 也照真實畫面。
-   這裡若假設 16:9，2.35:1 的素材會讓預覽的字級相對畫面高放大約 32%，
-   而 posY=91% 在預覽落在黑邊上、匯出卻在畫面內——三路一致（§0.1）當場破功。
-
-   State.videoWidth/Height 兩條開檔路徑都會設：原生走 media.js:752（video.videoWidth）、
-   mpv／ffmpeg 走 media.js:874（ffprobe 的 info.video）。取不到才退回 16:9，
-   那是「還沒載入任何影片」的空專案情境。 */
-const STAGE_FALLBACK_W = 1920, STAGE_FALLBACK_H = 1080;
+/* 專案畫布 contain 到 videoWrap：字幕、安全框、圖片及拖曳共用此矩形。
+   自訂尺寸獨立於來源；Auto 沿用主影片 metadata，未載入時退回 1920×1080。
+   字幕字級仍依畫布顯示高度 / ASS PlayResY 縮放。 */
 export function _stageRect(){
   if(!_videoWrap) return null;
-  const W = _videoWrap.clientWidth, H = _videoWrap.clientHeight;
-  if(!W || !H) return null;
-  const srcW = +State.videoWidth || 0, srcH = +State.videoHeight || 0;
-  const vw = srcW > 0 ? srcW : STAGE_FALLBACK_W;
-  const vh = srcH > 0 ? srcH : STAGE_FALLBACK_H;
-  const s = Math.min(W/vw, H/vh);
-  const dw = Math.max(1, Math.round(vw*s)), dh = Math.max(1, Math.round(vh*s));
-  return { x: Math.round((W-dw)/2), y: Math.round((H-dh)/2), w: dw, h: dh };
+  return projectCanvasRect(_videoWrap.clientWidth,_videoWrap.clientHeight);
 }
 /* 安全框（v4.33）：90%／80% 安全區＋中心十字線，疊在 videoWrap 上供構圖參考。
    ── 僅預覽：畫在獨立的 #safeFrame，【不】經 ffmpeg 燒入匯出。
@@ -271,6 +253,7 @@ export function toggleTimecodeWatermark(){
 }
 
 let _lastStageH = 0;
+let _htmlCanvasRectKey = '';
 export function renderVideoSub(fromPlayback=false){
   // 編輯／Undo／匯入由直接 render 或 render:videoSub 進來；只有播放 tick 可沿用索引。
   if(fromPlayback!==true) subtitlePreviewIndex.invalidate();
@@ -281,8 +264,7 @@ export function renderVideoSub(fromPlayback=false){
   //    因此，單軌時「必須」依賴 MPV 內建的 C++ libass 引擎，直接將字幕畫在影片上。此時 HTML DOM 僅保留透明命中層供拖曳。
   // 2. 多軌影片 (WebCodecs): MPV 無法進行複雜即時混圖，因此會被隱藏。此時改用 HTML canvas (WCPreview) 渲染畫面，
   //    字幕也就「必須」改由 HTML DOM (#videoSub) 繪製，因為 libass 已經跟著 MPV 被隱藏了。
-  // 3. 尺寸對齊: 透過 substyle.js 的 ASS_PLAY_RES 鎖定 1920x1080 與 0.75 (72/96) 字體係數，
-  //    確保 HTML DOM 與 libass 的字體在像素級別達到數學上的 100% 一致。
+  // 3. 尺寸對齊: 保留固定 1920×1080 字幕畫布與既有 CSS 字級；ASS 另依已載入字型的實際度量及 CSS 行盒換算。
   // 若 contextmenu 開啟（_ctxOpen），原生 mpv 會讓位，此時需解除 transparent 顯示 HTML 字幕預覽，避免文字不見。
   const mpvHitLayer=!!(Media.mpvPresenting() && !_mpvSubtitleDrag && !State.presetEdit && !window._ctxOpen);
   if(_videoSub){
@@ -297,6 +279,14 @@ export function renderVideoSub(fromPlayback=false){
 
   // 字幕層對齊影片實際畫面區（v4.25.3）：大小/位置以「畫面」為基準，各片比例不同也一致
   const rect = _stageRect();
+  // Custom canvas contains the source. Auto restores the existing CSS behavior.
+  const htmlRectKey=State.projectCanvas&&rect ? `${rect.x}|${rect.y}|${rect.w}|${rect.h}` : '';
+  if(video && htmlRectKey!==_htmlCanvasRectKey){
+    _htmlCanvasRectKey=htmlRectKey;
+    Object.assign(video.style,htmlRectKey
+      ? {position:'absolute',left:rect.x+'px',top:rect.y+'px',width:rect.w+'px',height:rect.h+'px'}
+      : {position:'',left:'',top:'',width:'',height:''});
+  }
   if(rect && _videoSub){
     const key = rect.x+'|'+rect.y+'|'+rect.w+'|'+rect.h;
     if(_videoSub.dataset.rect !== key){
@@ -707,7 +697,9 @@ export async function capturePreviewFrame({nativePath,readBase64}={}){
   const preview=$('previewCanvas');
   const previewVisible=preview&&getComputedStyle(preview).display!=='none'&&getComputedStyle(preview).visibility!=='hidden';
   const composition=previewVisible?Media.previewComposition?.():null;
-  const width=composition?.width||State.videoWidth||1920,height=composition?.height||State.videoHeight||1080;
+  const canvasSetting=State.projectCanvas;
+  const canvasSize=projectCanvasSize();
+  const width=composition?.width||canvasSize.width,height=composition?.height||canvasSize.height;
   const hasCanvas=previewVisible&&preview.width&&preview.height&&(!Media.inGap()||composition);
   const time=composition?.time??Media.displayTime(),fps=State.fps,dropFrame=State.dropFrame;
   const videoDarkness=Math.max(0,Math.min(1,Media.previewFadeDarkness()));
@@ -726,11 +718,19 @@ export async function capturePreviewFrame({nativePath,readBase64}={}){
     // 呈現 owner 等該時間確認後才取圖，讀入像素前持續停住 presenter；
     // 換來源或較新的 seek 會撤銷取圖資格，不得保存遲到的舊圖。
     await Media.withPresentedFrame(time,async({adapter,isCurrent})=>{
-      const check=()=>{if(!isCurrent()) throw Object.assign(new Error('截圖已被較新的播放操作取代'),{name:'AbortError'});};
+      const check=()=>{if(!isCurrent()||State.projectCanvas!==canvasSetting) throw Object.assign(new Error('截圖已被較新的播放或畫布設定取代'),{name:'AbortError'});};
       check();
       const result=await adapter.screenshot(nativePath);
       check();
       if(!result||result.ok===false) throw new Error('原生播放器截圖失敗');
+      if(Object.hasOwn(result,'projectCanvas') &&
+        (result.projectCanvas?.width!==canvasSetting?.width || result.projectCanvas?.height!==canvasSetting?.height))
+        throw new Error('專案畫布仍在更新，請稍後重試截圖');
+      // Native JPEG already contains ASS, including subtitles in canvas padding.
+      // Rebuilding a mixed-image stack from its cropped content would lose those
+      // subtitles. The ready compositor path above captures the complete canvas.
+      if(canvasSetting && result.contentRect && stack.mixedImages)
+        throw new Error('合成預覽尚未就緒，請待合成畫面顯示後再截圖');
       const b64=typeof result.b64==='string'?result.b64:await readBase64(nativePath);
       check();
       if(!b64) throw new Error('無法讀取原生播放器截圖');
