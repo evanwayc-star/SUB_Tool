@@ -188,7 +188,8 @@ describe('mpv 暫存檔所有權', () => {
       children[0].emit('close', 1);
       await new Promise(resolve => setImmediate(resolve));
       expect(host.logPath()).toBe(first);
-      expect(fs.readFileSync(first, 'utf8')).toContain('mpv diagnostic');
+      // Child close / setImmediate do not wait for the WriteStream's pending fs write.
+      await vi.waitFor(() => expect(fs.readFileSync(first, 'utf8')).toContain('mpv diagnostic'));
       await host.launch({ src:'movie.mp4' });
       expect(host.logPath()).not.toBe(first);
       for (let attempt = 0; attempt < 100 && fs.existsSync(first); attempt++) {
