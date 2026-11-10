@@ -12,6 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const assert = require('node:assert/strict');
 const {
   isMainWindowTarget,
   ROOT,
@@ -24,7 +25,7 @@ const {
   verifiedCleanup,
 } = require('./cdp-electron-harness.js');
 
-async function captureDocumentationWorkspace(outputPath, inspect) {
+async function captureDocumentationWorkspace(outputPath, inspect, { beforeSeed } = {}) {
   outputPath = path.resolve(outputPath);
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('找不到 dist/index.html，請先執行 npm run build');
@@ -66,8 +67,10 @@ async function captureDocumentationWorkspace(outputPath, inspect) {
       mobile: false,
     });
 
-    await waitFor(() => client.evaluate('Boolean(window.SUB?.State && document.getElementById("timelinePanel"))'), 'renderer 初始化');
-    await client.evaluate(`(async () => {
+    await waitFor(() => client.evaluate('Boolean(window.SUB?.State && document.querySelector("#sublist .empty, #sublist .sub-row"))'), 'renderer 初始化');
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    await beforeSeed?.(client, path.dirname(outputPath));
+    const seeded = await client.evaluate(`(async () => {
       const { State } = window.SUB;
       const rightPanel = document.getElementById('rightPanel');
       if (rightPanel) rightPanel.style.width = '700px';
@@ -107,6 +110,7 @@ async function captureDocumentationWorkspace(outputPath, inspect) {
         sourceMaps: {},
         exportLayout: { streams: [] },
       };
+      window.SUB.renderListTrackSel();
       window.SUB.renderAll();
       window.SUB.drawTimeline();
       window.SUB.selectCueSingle('docs-c3', false);
@@ -143,11 +147,22 @@ async function captureDocumentationWorkspace(outputPath, inspect) {
         ctx.font = '17px sans-serif';
         ctx.fillText('多軌剪輯・字幕・音訊・逐格播放', canvas.width / 2, canvas.height * .52);
       }
-      return { cues: State.cues.length, tracks: State.tracks.length, clips: State.clips.length };
+      const trackSelect = document.getElementById('listTrackSel');
+      return {
+        disabled: trackSelect.disabled,
+        options: [...trackSelect.options].map(option => ({ value: option.value, text: option.textContent })),
+        value: trackSelect.value,
+        selectedText: trackSelect.selectedOptions[0]?.textContent,
+      };
     })()`);
+    assert.deepEqual(seeded, {
+      disabled: false,
+      options: [{ value: '0', text: '中文字幕' }, { value: '1', text: '英文字幕' }],
+      value: '0',
+      selectedText: '中文字幕',
+    }, '展示資料的字幕軌道選單必須與目前軌道同步');
     await delay(300);
 
-    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     if (inspect) await inspect(client, path.dirname(outputPath));
     const screenshot = await client.send('Page.captureScreenshot', {
       format: 'png',

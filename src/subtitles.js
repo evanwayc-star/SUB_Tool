@@ -309,6 +309,11 @@ function updateTlSel(){
 function renderCheckPanel(){
   const panel=$('checkPanel'); if(!panel||!panel.classList.contains('show'))return;
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
+  const summary=$('checkSummary');
+  if(summary){
+    const trackName=State.tracks[State.listTrack]?.name||'目前字幕軌';
+    summary.textContent=list.length?`${trackName} · ${list.length} 句。點選編號可前往字幕。`:`${trackName}尚無字幕，請先匯入或新增字幕。`;
+  }
   const lenEl=$('cpLenInput');
   _checkLenLimit = lenEl ? (parseInt(lenEl.value)||0) : 0;
   const containsRaw=($('cpContainsInput')||{}).value||'';
@@ -317,15 +322,15 @@ function renderCheckPanel(){
   const report = analyzeSubtitles(list, { checkLenLimit: _checkLenLimit, checkContains: _checkContains, fps: State.fps });
   const { overlapNums, multiNums, twoNums, blankNums, bNums, iNums, uNums, fontNums, posNums, trimNums, overLenNums, containsNums, nonTraditionalIssues, noTimeNums, consecutiveIdenticalNums, consecutiveIdenticalJoinedNums=[] } = report;
   
-  const mkNums=nums=>nums.length?nums.map(n=>`<span class="cp-num" data-idx="${n}">${n}</span>`).join(', '):'N/A';
+  const mkNums=nums=>nums.length?nums.map(n=>`<button type="button" class="cp-num" data-idx="${n}" aria-label="前往第 ${n} 句字幕">${n}</button>`).join(' '):'無';
   const joinedIdenticalSet=new Set(consecutiveIdenticalJoinedNums);
-  const mkConsecutiveIdenticalNums=nums=>nums.length?nums.map(n=>`<span class="cp-num${joinedIdenticalSet.has(n)?' cp-joined-identical':''}" data-idx="${n}">${n}</span>`).join(', '):'N/A';
+  const mkConsecutiveIdenticalNums=nums=>nums.length?nums.map(n=>`<button type="button" class="cp-num${joinedIdenticalSet.has(n)?' cp-joined-identical':''}" data-idx="${n}" aria-label="前往第 ${n} 句字幕">${n}</button>`).join(' '):'無';
   const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{
     const detail=[];
     if(simplified.length) detail.push('常見簡體：'+simplified.join('、'));
     if(unsupported.length) detail.push('非允許字元：'+unsupported.map(ch=>/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/u.test(ch)?`U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}`:ch).join('、'));
-    return `<span class="cp-num" data-idx="${num}" title="${escapeHTML(detail.join('；'))}">${num}</span>`;
-  }).join(', '):'N/A';
+    return `<button type="button" class="cp-num" data-idx="${num}" aria-label="前往第 ${num} 句字幕：${escapeHTML(detail.join('；'))}" title="${escapeHTML(detail.join('；'))}">${num}</button>`;
+  }).join(' '):'無';
   const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rnt=$('cpNonTraditional'),rt=$('cpTrim'),rn=$('cpNoTime'),rci=$('cpConsecutiveIdentical');
   const sb=$('cpSrtB'),si=$('cpSrtI'),su=$('cpSrtU'),sf=$('cpSrtFont'),sp=$('cpSrtPos');
   if(rn)rn.querySelector('.cp-nums').innerHTML=mkNums(noTimeNums);
@@ -340,9 +345,12 @@ function renderCheckPanel(){
   if(su)su.querySelector('.cp-nums').innerHTML=mkNums(uNums);
   if(sf)sf.querySelector('.cp-nums').innerHTML=mkNums(fontNums);
   if(sp)sp.querySelector('.cp-nums').innerHTML=mkNums(posNums);
-  if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'—';
-  if(rc)rc.querySelector('.cp-nums').innerHTML=_checkContains.length?mkNums(containsNums):'—';
+  if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'未設定';
+  if(rc)rc.querySelector('.cp-nums').innerHTML=_checkContains.length?mkNums(containsNums):'未設定';
   if(rnt)rnt.querySelector('.cp-nums').innerHTML=mkCharacterIssueNums(nonTraditionalIssues);
+  const locked=!!State.tracks[State.listTrack]?.locked;
+  const trimButton=panel.querySelector('[data-act="trim-track"]');
+  if(trimButton)trimButton.disabled=locked||!trimNums.length;
   panel.querySelectorAll('.cp-num').forEach(el=>{
     el.onclick=()=>{
       const idx=parseInt(el.dataset.idx)-1; const c=list[idx]; if(!c)return;
@@ -435,7 +443,13 @@ function renderSubList(){
   }
 
   if(list.length===0){
-    sublist.innerHTML='<div class="empty">'+(State.cues.length?'此軌道沒有符合篩選條件的字幕':'尚無字幕<br><br>· 匯入字幕檔，或<br>· 選一條字幕後按 <b>I</b>/<b>O</b> 設定起訖<br>· 或點 <b>⬆＋ / ⬇＋</b> 新增')+'</div>';
+    const title=allList.length?'沒有符合樣式的字幕':State.tracks.length?'此字幕軌尚無字幕':'尚無字幕';
+    const nextStep=allList.length
+      ? `改選上方「所有樣式」，即可顯示此軌的 ${allList.length} 句字幕。`
+      : State.tracks[State.listTrack]?.locked
+        ? '此字幕軌已鎖定。請先在時間軸解鎖，再新增字幕。'
+        : '匯入字幕檔，或點上方「⬇＋」在播放點新增字幕。';
+    sublist.innerHTML=`<div class="empty"><strong>${title}</strong><p>${nextStep}</p></div>`;
     $('subCount').textContent=list.length+' 句' + (allList.length !== list.length ? ` / ${allList.length} 句` : '');
     return;
   }
@@ -961,7 +975,19 @@ function searchReplace(all) {
 }
 function updateSearchCount() {
   const el=$('searchCount');
-  if(el) el.textContent = getSearchCountText();
+  const countText=getSearchCountText();
+  if(el) el.textContent = countText;
+  const feedback=$('searchFeedback');
+  const hasCues=State.cues.some(c=>(c.track||0)===State.listTrack);
+  const locked=!!State.tracks[State.listTrack]?.locked;
+  if(feedback)feedback.textContent=!hasCues?'此字幕軌尚無字幕。請先匯入字幕，或切換字幕軌。'
+    : countText==='無結果'?'此軌沒有符合的字幕。請調整關鍵字，或切換字幕軌。'
+    : locked?'此字幕軌已鎖定，可搜尋；請先解鎖再取代。'
+    : '多關鍵字用 || 分隔。Enter 下一個，Shift+Enter 上一個。';
+  const searchDialog=$('searchDialog');
+  const hasMatches=!!countText&&countText!=='無結果';
+  searchDialog?.querySelectorAll('[data-act="search-prev"],[data-act="search-next"],[data-act="search-select-all"]').forEach(button=>{button.disabled=!hasMatches;});
+  searchDialog?.querySelectorAll('[data-act="replace-one"],[data-act="replace-all"]').forEach(button=>{button.disabled=!hasMatches||locked;});
   const badge = $('searchDialogTrackBadge');
   if(badge) {
     const tk = State.listTrack || 0;

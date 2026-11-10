@@ -27,6 +27,45 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
   const recordKey = key => document.getElementById('settings-input-toggle_play_pause-0')
     .dispatchEvent(new KeyboardEvent('keydown', { key, bubbles:true, cancelable:true }));
 
+  it('搜尋動作或快捷鍵只篩選顯示，空結果可清除且保留尚未儲存的草稿', async () => {
+    showSettingsModal(); recordKey('q');
+    const search = document.getElementById('settingsSearch');
+    expect(search).not.toBeNull();
+    search.value = 'Q'; search.dispatchEvent(new Event('input', {bubbles:true}));
+    expect(document.getElementById('settings-row-toggle_play_pause').hidden).toBe(false);
+    expect(document.getElementById('settings-row-rewind').hidden).toBe(true);
+    search.value = '不存在的動作'; search.dispatchEvent(new Event('input', {bubbles:true}));
+    expect(document.getElementById('settingsEmpty').hidden).toBe(false);
+    document.getElementById('settingsSearchClear').click();
+    expect(search.value).toBe(''); expect(document.activeElement).toBe(search);
+    expect(document.getElementById('settings-row-rewind').hidden).toBe(false);
+    await document.getElementById('settingsSaveBtn').onclick();
+    expect(State.keymap.toggle_play_pause).toEqual([{key:'q'}]);
+  });
+
+  it('篩選內的快捷鍵衝突在視窗內說明並顯示原綁定，不改寫草稿', () => {
+    State.keymap = {toggle_play_pause:[{key:' '}],rewind:[{key:'j'}]};
+    showSettingsModal();
+    const search = document.getElementById('settingsSearch');
+    expect(search).not.toBeNull();
+    search.value='播放或暫停';search.dispatchEvent(new Event('input',{bubbles:true}));
+    recordKey('j');
+    expect(document.getElementById('settingsError').textContent).toContain('倒帶');
+    expect(document.getElementById('settingsError').hidden).toBe(false);
+    expect(document.getElementById('settings-row-rewind').hidden).toBe(false);
+    expect(document.getElementById('settings-input-toggle_play_pause-0').value).toBe('Space');
+  });
+
+  it('搜尋欄 Escape 先清除條件，再按一次才關閉，不會錄製按鍵', () => {
+    showSettingsModal();
+    const search=document.getElementById('settingsSearch');expect(search).not.toBeNull();
+    search.value='播放';search.dispatchEvent(new Event('input',{bubbles:true}));search.focus();
+    search.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    expect(search.value).toBe('');expect(document.getElementById('settingsModal')).not.toBeNull();
+    search.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    expect(document.getElementById('settingsModal')).toBeNull();
+  });
+
   it('Tab 和 Shift+Tab 導航不改寫快捷鍵草稿', async () => {
     showSettingsModal();
     const input = document.getElementById('settings-input-toggle_play_pause-0');

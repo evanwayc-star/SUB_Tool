@@ -128,7 +128,7 @@ if (typeof document !== 'undefined') document.addEventListener('focusin', event 
   if (!event.target.closest?.('#settingsModal') && event.target !== document.body) lastSettingsOrigin = event.target;
 });
 
-function renderSettingsTable(tbody, isCurrent, onChange) {
+function renderSettingsTable(tbody, isCurrent, onChange, onConflict) {
   tbody.innerHTML = '';
   
   // Flat map for looking up labels
@@ -160,15 +160,22 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
 
   for (const category of actionCategories) {
     const hdr = document.createElement('tr');
-    hdr.innerHTML = `<td colspan="4" style="background:var(--panel3); color:var(--text); font-weight:bold; padding:12px 10px; border-top:2px solid var(--border2);">${category.name}</td>`;
+    hdr.className = 'settings-category';
+    hdr.dataset.category = category.name;
+    hdr.innerHTML = `<th colspan="4" scope="rowgroup">${category.name}</th>`;
     tbody.appendChild(hdr);
 
     for (const [action, label] of Object.entries(category.actions)) {
       const tr = document.createElement('tr');
       tr.id = 'settings-row-' + action;
+      tr.dataset.category = category.name;
+      tr.dataset.search = `${category.name} ${label}`;
       
       const tdLabel = document.createElement('td');
       tdLabel.textContent = label;
+      if (fixedActions.includes(action)) {
+        const note = document.createElement('span'); note.className='settings-fixed';note.textContent='固定';tdLabel.appendChild(note);
+      }
       tr.appendChild(tdLabel);
 
       const binds = tempKeymap[action] || [];
@@ -180,7 +187,7 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
         input.className = 'key-input';
         input.id = `settings-input-${action}-${i}`;
         input.setAttribute('aria-label', `${label}，第 ${i+1} 組快捷鍵`);
-        input.setAttribute('aria-describedby', 'settingsKeyboardHelp');
+        input.setAttribute('aria-describedby', 'settingsKeyboardHelp settingsError');
         input.value = fixedDisplay[action] && i === 0 ? fixedDisplay[action] : formatBind(binds[i]);
         
         const isFixed = fixedActions.includes(action);
@@ -215,9 +222,9 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
             binds[i] = null;
             // 草稿索引對應畫面的三個欄位；儲存時才壓縮空位，避免衝突提示指錯欄。
             tempKeymap[action] = binds;
-            onChange();
             input.value = '';
             updateStyle();
+            onChange();
             return;
           }
 
@@ -228,16 +235,15 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
           // Check for duplicate
           const dupInfo = checkDuplicate(bind);
           if (dupInfo) {
-            setStatus(`該快捷鍵已經被指派給「${dupInfo.label}」`, 'err');
+            onConflict(`「${formatBind(bind)}」已指派給「${dupInfo.label}」，請改用其他按鍵，或先清除原綁定。`);
+            input.setAttribute('aria-invalid','true');
             input.blur();
             const targetRow = document.getElementById('settings-row-' + dupInfo.action);
             if (targetRow) {
-              targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              targetRow.scrollIntoView?.({ block: 'nearest' });
             }
             const targetInput = document.getElementById(`settings-input-${dupInfo.action}-${dupInfo.index}`);
             if (targetInput) {
-              targetInput.classList.remove('flash-duplicate');
-              void targetInput.offsetWidth; // Trigger reflow
               targetInput.classList.add('flash-duplicate');
             }
             return;
@@ -245,9 +251,9 @@ function renderSettingsTable(tbody, isCurrent, onChange) {
 
           binds[i] = bind;
           tempKeymap[action] = binds;
-          onChange();
           input.value = formatBind(bind);
           updateStyle();
+          onChange();
           input.blur();
         });
         } // End of if(!isFixed)
@@ -278,27 +284,34 @@ export function showSettingsModal() {
   modal.innerHTML = `
     <div class="settings-modal-content" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" tabindex="-1">
       <h2 id="settingsTitle">快捷鍵設定</h2>
-      <p id="settingsKeyboardHelp" class="settings-keyboard-help">Tab 切換欄位；在欄位按下要設定的按鍵，Escape 結束本次設定。</p>
+      <div class="settings-search-bar">
+        <label for="settingsSearch">尋找快捷鍵</label>
+        <div class="settings-search-controls"><input id="settingsSearch" type="search" placeholder="搜尋動作或按鍵，例如：播放、Ctrl+S" autocomplete="off" aria-controls="settingsTbody" aria-describedby="settingsResultCount"><button id="settingsSearchClear" class="btn" type="button" hidden>清除搜尋</button></div>
+        <span id="settingsResultCount" role="status" aria-live="polite"></span>
+      </div>
+      <p id="settingsKeyboardHelp" class="settings-keyboard-help">按 Tab 切換欄位，再按下要設定的按鍵。Delete／Backspace 清除，Escape 結束錄製；標示「固定」的項目無法修改。儲存後才生效。</p>
       <div class="settings-table-container">
         <table class="settings-table">
           <thead>
             <tr>
-              <th>項目</th>
-              <th>第一組快捷鍵</th>
-              <th>第二組快捷鍵</th>
-              <th>第三組快捷鍵</th>
+              <th scope="col">動作</th>
+              <th scope="col">第一組</th>
+              <th scope="col">第二組</th>
+              <th scope="col">第三組</th>
             </tr>
           </thead>
           <tbody id="settingsTbody"></tbody>
         </table>
+        <p id="settingsEmpty" class="settings-empty" hidden>找不到符合的快捷鍵。請換個關鍵字，或清除搜尋查看全部。</p>
       </div>
       <div id="settingsError" class="settings-error" role="alert" hidden></div>
       <div class="settings-footer">
-        <button id="settingsRestoreBtn" class="btn" style="margin-right:auto;">還原預設</button>
-        <button id="settingsExportBtn" class="btn" title="把目前這份快捷鍵設定存成 .json 檔">⭳ 匯出</button>
-        <button id="settingsImportBtn" class="btn" title="從 .json 檔載入快捷鍵設定（需按「儲存」才生效）">⭱ 匯入</button>
+        <div class="settings-file-actions"><button id="settingsRestoreBtn" class="btn">還原預設</button>
+        <button id="settingsExportBtn" class="btn" title="把目前這份快捷鍵設定存成 .json 檔">匯出設定</button>
+        <button id="settingsImportBtn" class="btn" title="從 .json 檔載入快捷鍵設定（需按「儲存」才生效）">匯入設定</button></div>
+        <div class="settings-save-actions">
         <button id="settingsCancelBtn" class="btn">取消</button>
-        <button id="settingsSaveBtn" class="btn primary">儲存</button>
+        <button id="settingsSaveBtn" class="btn primary">儲存</button></div>
       </div>
       <input type="file" id="settingsImportFile" accept="application/json,.json" hidden>
     </div>
@@ -326,11 +339,30 @@ export function showSettingsModal() {
   activeSettingsClose = close;
 
   const tbody = document.getElementById('settingsTbody');
-  const renderDraft = () => renderSettingsTable(tbody, canEdit, () => { draftRevision++; });
-  renderDraft();
+  const search = modal.querySelector('#settingsSearch');
+  const filterRows = () => {
+    const query=search.value.trim().toLocaleLowerCase().replace(/\s+/g,'');
+    const rows=[...tbody.querySelectorAll('tr[data-search]')];
+    let count=0;
+    for(const row of rows){
+      const text=(row.dataset.search+' '+[...row.querySelectorAll('input')].map(input=>input.value).join(' ')).toLocaleLowerCase().replace(/\s+/g,'');
+      row.hidden=!!query&&!text.includes(query);if(!row.hidden) count++;
+    }
+    for(const heading of tbody.querySelectorAll('.settings-category')) heading.hidden=!rows.some(row=>row.dataset.category===heading.dataset.category&&!row.hidden);
+    modal.querySelector('#settingsResultCount').textContent=query?`${count} / ${rows.length} 項動作`:`共 ${rows.length} 項動作`;
+    modal.querySelector('#settingsEmpty').hidden=count!==0;
+    modal.querySelector('#settingsSearchClear').hidden=!search.value;
+  };
+  const renderDraft = () => {renderSettingsTable(tbody, canEdit, () => {
+    draftRevision++;showError('');
+    for(const input of tbody.querySelectorAll('[aria-invalid],.flash-duplicate')) {input.removeAttribute('aria-invalid');input.classList.remove('flash-duplicate');}
+  }, message=>{
+    for(const input of tbody.querySelectorAll('[aria-invalid],.flash-duplicate')) {input.removeAttribute('aria-invalid');input.classList.remove('flash-duplicate');}
+    search.value='';filterRows();showError(message);
+  });filterRows();};
   const dialog = modal.querySelector('[role="dialog"]');
   const focusables = () => [...modal.querySelectorAll('button, input')]
-    .filter(element=>!element.disabled&&!element.hidden&&element.type!=='file'&&element.tabIndex!==-1);
+    .filter(element=>!element.disabled&&!element.closest('[hidden]')&&element.type!=='file'&&element.tabIndex!==-1);
   const focusFirst = () => (focusables()[0]||dialog).focus({preventScroll:true});
   const containFocus = event => { if(isCurrent()&&!modal.contains(event.target)) focusFirst(); };
   document.addEventListener('focusin', containFocus, true);
@@ -346,11 +378,15 @@ export function showSettingsModal() {
     error.textContent=message;error.hidden=!message;
     if(message) setStatus(message,'err');
   };
+  renderDraft();
+  search.addEventListener('input',filterRows);
+  modal.querySelector('#settingsSearchClear').onclick=()=>{search.value='';filterRows();search.focus();};
 
   document.getElementById('settingsRestoreBtn').onclick = () => {
     if (!canEdit()) return;
     draftRevision++;
     tempKeymap = JSON.parse(JSON.stringify(State.defaultKeymap));
+    showError('');
     renderDraft();
   };
 
@@ -382,6 +418,7 @@ export function showSettingsModal() {
       // 只採用「本版本認得的動作」，其餘一律以預設補齊（規則見 keybinding-engine.js）
       const { keymap: merged, applied } = mergeImportedKeymap(State.defaultKeymap, obj);
       tempKeymap = merged;
+      showError('');
       renderDraft();
       showToast(`已匯入 ${applied} 項快捷鍵；按「儲存」才會生效`);
     } catch (e) { if (ownsImport()) showError('匯入失敗：' + (e?.message || e)); }
@@ -406,7 +443,8 @@ export function showSettingsModal() {
     if (!isCurrent()) { document.removeEventListener('keydown', onEsc, true); return; }
     if (saving) { e.preventDefault(); e.stopPropagation(); return; }
     const t = e.target;
-    if (t && t.tagName === 'INPUT' && t.closest('#settingsModal')) return; // 錄製中：讓輸入框自己 blur
+    if (t===search && search.value) {e.preventDefault();e.stopPropagation();search.value='';filterRows();return;}
+    if (t?.classList?.contains('key-input')) return; // 錄製中：讓輸入框自己 blur
     e.preventDefault();
     e.stopPropagation();
     cancel();
@@ -421,6 +459,7 @@ export function showSettingsModal() {
     const keymap = stripEmptyBinds(structuredClone(tempKeymap));
     const controls = [...modal.querySelectorAll('input, button')].map(control => ({ control, disabled:control.disabled }));
     saving = true;
+    modal.querySelector('#settingsSaveBtn').textContent='儲存中…';
     showError('');
     for (const { control } of controls) control.disabled = true;
     dialog.focus({preventScroll:true});
@@ -430,6 +469,7 @@ export function showSettingsModal() {
     catch (failure) { error = failure; }
     finally {
       saving = false;
+      modal.querySelector('#settingsSaveBtn').textContent='儲存';
       for (const { control, disabled } of controls) control.disabled = disabled;
     }
     if (!isCurrent()) return;

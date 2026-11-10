@@ -13,10 +13,9 @@
       --border-strong: rgba(255, 255, 255, 0.16);
       --text: #f0f4f8;
       --text-dim: #94a3b8;
-      --text-muted: #64748b;
+      --text-muted: #7c8ca3;
       --accent: #f59e0b;
       --accent-bg: rgba(245, 158, 11, 0.14);
-      --brand-gold: #f59e0b;
       --success: #10b981;
       --success-bg: rgba(16, 185, 129, 0.12);
       --warn: #f59e0b;
@@ -48,15 +47,6 @@
     .header { display: flex; flex-direction: column; gap: 17px; margin-bottom: 14px; }
     .header-main, .header-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-width: 0; }
     .header-title { min-width: 0; }
-    .eyebrow {
-      margin-bottom: 5px;
-      color: var(--brand-gold);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: .12em;
-      text-transform: uppercase;
-      opacity: 0.9;
-    }
     .title-line {
       display: flex;
       flex-wrap: wrap;
@@ -107,8 +97,9 @@
       font-weight: 600;
       transition: all .16s ease;
     }
-    button:hover { border-color: var(--border-strong); background: var(--surface-hover); color: #ffffff; }
-    button:focus-visible, select:focus-visible, summary:focus-visible {
+    button:disabled, select:disabled { opacity: .5; cursor: default; }
+    button:not(:disabled):hover { border-color: var(--border-strong); background: var(--surface-hover); color: #ffffff; }
+    button:focus-visible, select:focus-visible, summary:focus-visible, #unfinishedHeading:focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
     }
@@ -168,6 +159,26 @@
     }
     .warning[hidden] { display: none !important; }
 
+    .queue-load-error {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      flex: none;
+      gap: 10px 16px;
+      margin-bottom: 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(239, 68, 68, .3);
+      border-radius: 7px;
+      background: var(--error-bg);
+      color: #fca5a5;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .queue-load-error[hidden] { display: none; }
+    .queue-load-error-copy { flex: 1 1 300px; min-width: 0; overflow-wrap: anywhere; }
+    .queue-load-error-detail { max-height: 4.5em; overflow: auto; white-space: pre-wrap; }
+    .queue-load-error button { flex: none; }
+
     .queue-workspace {
       display: flex;
       flex: 1 1 auto;
@@ -211,7 +222,6 @@
       content: "";
       border-radius: 50%;
       background: var(--warn);
-      box-shadow: 0 0 10px rgba(245, 158, 11, .75);
     }
     .panel-count {
       min-width: 22px;
@@ -281,23 +291,22 @@
     .job:hover { border-color: var(--border-strong); background: var(--surface-hover); }
     .job--compact { min-height: 56px; padding-block: 9px; }
     .job-main { grid-area: main; min-width: 0; }
-    .job-header { display: flex; gap: 8px; align-items: center; min-width: 0; }
+    .job-header { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; min-width: 0; }
     .job-title {
       min-width: 0;
-      overflow: hidden;
+      flex: 1 1 180px;
       color: #ffffff;
       font-size: 13px;
       font-weight: 700;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      overflow-wrap: anywhere;
+      line-height: 1.5;
     }
     .job-meta {
-      overflow: hidden;
       margin-top: 3px;
       color: var(--text-muted);
       font-size: 11px;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      overflow-wrap: anywhere;
+      line-height: 1.5;
     }
     .job-retry-feedback { margin: 0; color: var(--text-dim); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
     .job-retry-feedback:not(:empty) { margin-top: 6px; }
@@ -354,7 +363,8 @@
     }
     .job-chip--spec {
       color: var(--text-dim);
-      font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
     .job-audio { margin: 5px 0 0; color: var(--text-dim); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
     #queuePauseHint { flex-basis: 100%; color: var(--text-muted); font-size: 12px; text-align: right; }
@@ -508,9 +518,9 @@
       font-size: 11px;
     }
     .error-box summary { cursor: pointer; color: #fca5a5; font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif; font-weight: 700; }
-    .error-detail { margin-top: 7px; white-space: pre-wrap; user-select: text; }
+    .error-detail { margin-top: 7px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
     .error-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
-    .error-actions button { min-height: 25px; padding: 3px 7px; font-size: 11px; }
+    .error-actions button { min-height: 32px; padding: 5px 9px; font-size: 11px; }
 
     .completed-history {
       overflow: hidden;
@@ -610,7 +620,6 @@
   <header class="header">
     <div class="header-main">
       <div class="header-title">
-        <p class="eyebrow">影片交付</p>
         <h2>匯出序列</h2>
         <p class="header-description">查看輸出進度、調整等待項目，完成後開啟成品位置。</p>
       </div>
@@ -618,22 +627,22 @@
     </div>
     <div class="header-toolbar">
       <div class="queue-stats" aria-label="佇列摘要">
-        <span class="queue-stat queue-stat--active"><b id="activeCount">0</b> 處理中</span>
-        <span class="queue-stat queue-stat--waiting"><b id="waitingCount">0</b> 等待</span>
-        <span class="queue-stat queue-stat--attention"><b id="attentionCount">0</b> 需處理</span>
-        <span class="queue-stat queue-stat--completed"><b id="completedSummaryCount">0</b> 完成</span>
+        <span class="queue-stat queue-stat--active"><b id="activeCount">—</b> 處理中</span>
+        <span class="queue-stat queue-stat--waiting"><b id="waitingCount">—</b> 等待</span>
+        <span class="queue-stat queue-stat--attention"><b id="attentionCount">—</b> 需處理</span>
+        <span class="queue-stat queue-stat--completed"><b id="completedSummaryCount">—</b> 完成</span>
       </div>
       <div class="controls">
         <label class="concurrency-control" title="並行通常不會更快，因為多次讀取同一個來源素材會讓磁碟效能下降。">
           同時執行
-          <select id="concurrencySel" aria-label="同時執行數量">
+          <select id="concurrencySel" disabled aria-label="同時執行數量">
             <option value="1">1</option>
             <option value="2">2</option>
             <option value="3">3</option>
           </select>
         </label>
-        <button id="clearCompletedBtn">清除完成紀錄</button>
-        <button id="pauseToggleBtn" title="只暫停啟動後續工作，正在執行的工作會繼續完成">暫停後續工作</button>
+        <button id="clearCompletedBtn" disabled>清除完成紀錄</button>
+        <button id="pauseToggleBtn" disabled title="只暫停啟動後續工作，正在執行的工作會繼續完成">暫停後續工作</button>
         <span id="queuePauseHint" role="status" hidden>已暫停後續工作；目前工作會繼續完成。</span>
       </div>
     </div>
@@ -642,14 +651,22 @@
     <svg class="icon" viewBox="0 0 24 24"><path d="M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z"/></svg>
     匯出中，背景轉碼可能會使預覽發生卡頓。
   </div>
+  <div class="queue-load-error" id="queueLoadError" role="alert" hidden>
+    <div class="queue-load-error-copy">
+      <strong>無法讀取匯出佇列</strong>
+      <p id="queueLoadMessage"></p>
+      <p class="queue-load-error-detail" id="queueLoadDetail"></p>
+    </div>
+    <button type="button" id="reloadQueueBtn">重新讀取</button>
+  </div>
   
   <main class="queue-workspace" id="queueBoard">
     <section class="work-panel" aria-labelledby="unfinishedHeading">
       <div class="panel-heading">
         <div class="panel-heading-main">
-          <h3 class="panel-heading-title" id="unfinishedHeading">
+          <h3 class="panel-heading-title" id="unfinishedHeading" tabindex="-1">
             待處理與執行中
-            <span class="panel-count" id="unfinishedCount" aria-label="未完成工作數">0</span>
+            <span class="panel-count" id="unfinishedCount" aria-label="未完成工作數">—</span>
           </h3>
           <p class="panel-heading-copy">依加入順序輸出；需要處理的項目也會留在這裡</p>
         </div>
@@ -682,6 +699,11 @@
       attentionCount: document.getElementById('attentionCount'),
       completedHistory: document.getElementById('completedHistory'),
       warning: document.getElementById('queueWarning'),
+      loadError: document.getElementById('queueLoadError'),
+      loadMessage: document.getElementById('queueLoadMessage'),
+      loadDetail: document.getElementById('queueLoadDetail'),
+      reloadBtn: document.getElementById('reloadQueueBtn'),
+      unfinishedHeading: document.getElementById('unfinishedHeading'),
       showMainWindowBtn: document.getElementById('showMainWindowBtn'),
       pauseBtn: document.getElementById('pauseToggleBtn'),
       clearCompletedBtn: document.getElementById('clearCompletedBtn'),
@@ -693,8 +715,11 @@
     let _deliveryFormatPresets = [];
     let _isDragging = false;
     let _closing = false;
+    let _loadRevision = 0;
+    let _hasLoaded = false;
     const _retryActions = new Map();
     const _deliveryEditors = new WeakMap();
+    const _cardSnapshots = new WeakMap();
     const releaseRetryActions = () => { _closing = true; _retryActions.clear(); };
     window.addEventListener('beforeunload', releaseRetryActions);
     window.addEventListener('pagehide', releaseRetryActions);
@@ -1028,8 +1053,11 @@
             }
           }
         });
+        _cardSnapshots.set(el, jobCardSnapshot(job));
         return el;
     }
+
+    const jobCardSnapshot = job => JSON.stringify([job, deliveryPreset(job.payload?.format)]);
 
     const RES_OPTIONS = [[0, '來源解析度'], [2160, '4K (2160p)'], [1080, '1080p'], [720, '720p']];
 
@@ -1123,7 +1151,12 @@
       q('[data-f="res"]').addEventListener('change', syncVisibility);
       syncVisibility();
 
-      const close = () => { if (box.isConnected) { box.remove(); renderJobs(); } };
+      const close = () => {
+        if (!box.isConnected) return;
+        box.remove();
+        _cardSnapshots.delete(cardEl);
+        renderJobs();
+      };
       q('[data-f="cancel"]').addEventListener('click', close);
       q('[data-f="save"]').addEventListener('click', async () => {
         if (!ownsEditor()) return;
@@ -1164,17 +1197,21 @@
         if (editor?.ownsEditor()) editingCards.set(editor.cardEl.dataset.jobId, editor.cardEl);
         else box.remove();
       }
+      const previousCards = new Map([...UI.board.querySelectorAll('.job')].map(card => [card.dataset.jobId, card]));
+      const cardFor = job => {
+        const previous = previousCards.get(job.id);
+        const index = _jobs.findIndex(item => item.id === job.id);
+        const card = editingCards.get(job.id)
+          || (previous && _cardSnapshots.get(previous) === jobCardSnapshot(job) ? previous : createJobCard(job, index));
+        card.dataset.index = String(index);
+        return card;
+      };
       const completed = _jobs.filter(job => job.status === 'done');
       const unfinished = _jobs.filter(job => job.status !== 'done');
       const active = unfinished.filter(job => job.status === 'running' || job.status === 'stopping');
       const waiting = unfinished.filter(job => job.status === 'queued');
       const attention = unfinished.filter(job => !['running', 'stopping', 'queued'].includes(job.status));
 
-      UI.completedList.replaceChildren();
-      const keptCards = new Set(editingCards.values());
-      for (const child of [...UI.unfinishedList.children]) {
-        if (!keptCards.has(child)) child.remove();
-      }
       UI.completedCount.textContent = String(completed.length);
       UI.completedSummaryCount.textContent = String(completed.length);
       UI.unfinishedCount.textContent = String(unfinished.length);
@@ -1186,43 +1223,31 @@
       UI.clearCompletedBtn.disabled = completed.length === 0;
       UI.warning.hidden = !_jobs.some(job => job.status === 'running' || job.status === 'stopping');
 
-      if (completed.length > 0) {
-        completed.forEach(job => {
-          const index = _jobs.findIndex(item => item.id === job.id);
-          UI.completedList.appendChild(createJobCard(job, index));
-        });
-      }
+      placeJobCards(UI.completedList, completed.map(cardFor));
+      placeJobCards(UI.unfinishedList, unfinished.length > 0 ? unfinished.map(cardFor) : [emptyState(_jobs.length === 0
+        ? '目前沒有匯出工作。'
+        : '所有工作都已完成。')]);
+    }
 
-      if (unfinished.length === 0) {
-        UI.unfinishedList.appendChild(emptyState(_jobs.length === 0
-          ? '目前沒有匯出工作。'
-          : '所有工作都已完成。'));
-      } else {
-        const cards = unfinished.map(job => {
-          const index = _jobs.findIndex(item => item.id === job.id);
-          const card = editingCards.get(job.id) || createJobCard(job, index);
-          card.dataset.index = String(index);
-          return card;
-        });
-        // Move the surrounding cards rather than detaching the input that owns focus.
-        const focusedCard = document.activeElement?.closest('.job');
-        let cursor = UI.unfinishedList.firstChild;
-        for (const card of cards) {
-          if (card === focusedCard && card !== cursor && card.parentElement === UI.unfinishedList) {
-            while (cursor && cursor !== card) {
-              const next = cursor.nextSibling;
-              UI.unfinishedList.insertBefore(cursor, card.nextSibling);
-              cursor = next;
-            }
+    function placeJobCards(list, cards) {
+      // Move surrounding cards rather than detaching the control that owns focus.
+      const focusedCard = document.activeElement?.closest('.job');
+      let cursor = list.firstChild;
+      for (const card of cards) {
+        if (card === focusedCard && card !== cursor && card.parentElement === list) {
+          while (cursor && cursor !== card) {
+            const next = cursor.nextSibling;
+            list.insertBefore(cursor, card.nextSibling);
+            cursor = next;
           }
-          if (card === cursor) cursor = cursor.nextSibling;
-          else UI.unfinishedList.insertBefore(card, cursor);
         }
-        while (cursor) {
-          const next = cursor.nextSibling;
-          cursor.remove();
-          cursor = next;
-        }
+        if (card === cursor) cursor = cursor.nextSibling;
+        else list.insertBefore(card, cursor);
+      }
+      while (cursor) {
+        const next = cursor.nextSibling;
+        cursor.remove();
+        cursor = next;
       }
     }
 
@@ -1288,24 +1313,50 @@
     }
 
     async function loadData() {
-      const data = await window.queueAPI.getAll();
       if (_closing) return;
-      _jobs = data.jobs;
-      _deliveryFormatPresets = Array.isArray(data.deliveryFormatPresets) ? data.deliveryFormatPresets : [];
-      _isPaused = data.isPaused;
-      
-      if (_isPaused) {
-        UI.pauseBtn.textContent = '繼續後續工作';
-        UI.pauseBtn.classList.add('primary');
-      } else {
-        UI.pauseBtn.textContent = '暫停後續工作';
-        UI.pauseBtn.classList.remove('primary');
+      const revision = ++_loadRevision;
+      const owns = () => !_closing && revision === _loadRevision;
+      const retryHadFocus = document.activeElement === UI.reloadBtn;
+      UI.reloadBtn.disabled = true;
+      UI.reloadBtn.textContent = '重新讀取中…';
+      UI.board.setAttribute('aria-busy', 'true');
+      try {
+        const data = await window.queueAPI.getAll();
+        if (!owns()) return;
+        _jobs = data.jobs;
+        _deliveryFormatPresets = Array.isArray(data.deliveryFormatPresets) ? data.deliveryFormatPresets : [];
+        _isPaused = data.isPaused;
+
+        UI.pauseBtn.textContent = _isPaused ? '繼續後續工作' : '暫停後續工作';
+        UI.pauseBtn.classList.toggle('primary', !!_isPaused);
+        document.getElementById('queuePauseHint').hidden = !_isPaused;
+        UI.concurrencySel.value = data.concurrency;
+        renderJobs();
+        UI.pauseBtn.disabled = false;
+        UI.concurrencySel.disabled = false;
+        _hasLoaded = true;
+        if (document.activeElement === UI.reloadBtn || (retryHadFocus && document.activeElement === document.body)) {
+          UI.unfinishedHeading.focus();
+        }
+        UI.loadError.hidden = true;
+      } catch (error) {
+        if (!owns()) return;
+        UI.loadMessage.textContent = _hasLoaded
+          ? '仍顯示上次讀取的狀態。請重新讀取以確認最新進度。'
+          : '尚未取得工作狀態，請重新讀取。';
+        UI.loadDetail.textContent = error?.message || String(error);
+        UI.loadError.hidden = false;
+      } finally {
+        if (owns()) {
+          UI.reloadBtn.disabled = false;
+          UI.reloadBtn.textContent = '重新讀取';
+          UI.board.setAttribute('aria-busy', 'false');
+          if (retryHadFocus && !UI.loadError.hidden && document.activeElement === document.body) UI.reloadBtn.focus();
+        }
       }
-      
-      document.getElementById('queuePauseHint').hidden = !_isPaused;
-      UI.concurrencySel.value = data.concurrency;
-      renderJobs();
     }
+
+    UI.reloadBtn.onclick = () => loadData();
 
     UI.pauseBtn.onclick = async () => {
       await window.queueAPI.setPause(!_isPaused);

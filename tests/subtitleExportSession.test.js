@@ -47,6 +47,25 @@ function openExport(kind) {
   }
 }
 
+it('字幕匯出以具名區分格式、軌道及備註，選擇摘要隨勾選與預設更新', () => {
+  showExportDialog();
+  expect([...document.querySelectorAll('.subtitle-export-section legend')].map(node => node.textContent))
+    .toEqual(['字幕格式', '字幕軌道', '備註（1 條）']);
+  const summary = document.getElementById('subtitleExportSummary');
+  expect(summary?.textContent).toContain('1 種字幕格式');
+  expect(summary.textContent).toContain('2 個字幕軌道');
+  const srt = document.querySelector('[data-fmt="srt"]');
+  srt.checked = true; srt.dispatchEvent(new Event('change', { bubbles: true }));
+  expect(summary.textContent).toContain('2 種字幕格式');
+  expect(document.getElementById('merge_srt').getAttribute('aria-label')).toContain('SRT');
+  expect(document.getElementById('merge_ass').getAttribute('aria-label')).toContain('ASS');
+  document.querySelector('#modalFoot button').click();
+  expect(summary.textContent).toContain('1 種字幕格式');
+  expect(summary.textContent).toContain('2 個字幕軌道');
+  expect(document.querySelectorAll('[data-fmt]:checked')).toHaveLength(1);
+  expect(desktop.exportSub).not.toHaveBeenCalled();
+});
+
 it.each(['字幕', '備註'])('%s 舊匯出視窗不能在外部開啟另一個專案後提交新資料', async kind => {
   openExport(kind);
   const oldButton = confirmButton();

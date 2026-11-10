@@ -36,7 +36,8 @@ describe('Mac 工具列 responsive 版面', () => {
        tests/menubarClipping.test.js）。clip 不會，所以垂直軸留得住 visible。 */
     expect(menu).toContain('overflow-x:clip');
     expect(menu).not.toContain('overflow:hidden');
-    expect(css).toContain('@media(max-width:1250px){.menubar button.icon .lbl{display:none}}');
+    expect(declarations('.menubar-group,.menubar-operations')).toContain('flex-wrap:wrap');
+    expect(css).not.toMatch(/\.menubar[^{}]*\.lbl\s*\{[^}]*display\s*:\s*none/);
     expect(html).toMatch(/id="stMonitorBtn"[\s\S]*class="lbl">監控序列/);
     expect(html).toMatch(/data-act="exp-video"[\s\S]*class="lbl">匯出影片/);
   });

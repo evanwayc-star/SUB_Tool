@@ -40,7 +40,7 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.j
 import { createCommands } from './commands.js';
 import { renderPointerSeekControl, requestPointerSeek, timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction-engine.js';
 import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
-import { togglePanel, renderQueueMonitorIndicator, renderAsrIndicator, renderProjectIdentity, renderCurrentTimecode } from './ui.js';
+import { togglePanel, bindOverlayDrag, keepPanelInViewport, renderQueueMonitorIndicator, renderAsrIndicator, renderProjectIdentity, renderCurrentTimecode } from './ui.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { bindMediaIntakeView, handleMediaIntakeProgress } from './media-intake-view.js';
@@ -355,6 +355,7 @@ $('zoomBar').addEventListener('input',e=>setZoom(+e.target.value));
    指令的 production actions 由 commands.js 直接組裝；app.js 只保留事件入口。 */
 const Commands = createCommands();
 function doAction(act, force = false){ return Commands.run(act, { force }); }
+const WINDOW_CONTROLS='.modal, #settingsModal, .float-panel, .search-dialog';
 
 let _repTimer=null, _repInterval=null, _repFired=false;
 const REP_ACTS=['back1','frame-back','frame-fwd','fwd1'];
@@ -375,7 +376,7 @@ document.addEventListener('mouseout', e=>{ if(e.target.closest&&e.target.closest
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-act]');
   if(b){
-    b.blur();
+    if(!b.closest(WINDOW_CONTROLS)) b.blur();
     if(_repFired && REP_ACTS.includes(b.dataset.act)){ _repFired=false; return; }
     doAction(b.dataset.act);
   }
@@ -399,8 +400,10 @@ function renderListTrackSel(){
   const sel=$('listTrackSel'); if(!sel)return;
   const prev=clamp(State.listTrack,0,State.tracks.length-1);
   State.listTrack=prev;
-  sel.innerHTML=State.tracks.map((t,i)=>`<option value="${i}">${escapeHTML(t.name)}</option>`).join('');
-  sel.value=String(prev);
+  sel.disabled=State.tracks.length===0;
+  sel.innerHTML=sel.disabled ? '<option value="">尚無字幕軌</option>'
+    : State.tracks.map((t,i)=>`<option value="${i}">${escapeHTML(t.name)}</option>`).join('');
+  if(!sel.disabled) sel.value=String(prev);
   StylePanelController.renderTrackStyle();
   updateSearchCount();
 }
@@ -444,27 +447,22 @@ function initUI(){
   ;
   // 字幕檢查：字數上限輸入
   $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
-  $('cpLenInput').addEventListener('keydown',e=>e.stopPropagation());
+  $('cpLenInput').addEventListener('keydown',e=>{if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation();});
   // 全域數值輸入框滾輪微調：每個欄位遵守自己的 step（行距＝0.1、字距＝0.5）。
   bindNumberInputWheel(document);
   // 字幕檢查：包含文字輸入
   $('cpContainsInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
-  $('cpContainsInput').addEventListener('keydown',e=>e.stopPropagation());
+  $('cpContainsInput').addEventListener('keydown',e=>{if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation();});
   // 搜尋浮動視窗
   $('searchInput').addEventListener('input',()=>searchUpdate($('searchInput').value));
-  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ searchNav(e.shiftKey ? -1 : 1); } else if(e.key==='Escape'){ $('searchInput').value=''; searchUpdate(); $('searchDialog').style.display='none'; _syncMpvPanel(); } });
+  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ e.preventDefault(); searchNav(e.shiftKey ? -1 : 1); } });
   $('replaceInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ replaceOne(); } });
-  // 搜尋視窗可拖曳
-  { const head=$('searchDialogHead'), dlg=$('searchDialog');
-    if(head&&dlg){ let ox=0,oy=0,sx=0,sy=0;
-      head.addEventListener('mousedown',e=>{ e.preventDefault();
-        const r=dlg.getBoundingClientRect(); ox=r.left; oy=r.top; sx=e.clientX; sy=e.clientY;
-        const mv=e2=>{ dlg.style.left=(ox+e2.clientX-sx)+'px'; dlg.style.top=(oy+e2.clientY-sy)+'px'; dlg.style.right='auto'; };
-        const up=()=>{ document.removeEventListener('mousemove',mv); document.removeEventListener('mouseup',up); };
-        document.addEventListener('mousemove',mv); document.addEventListener('mouseup',up);
-      });
-    }
-  }
+  $('searchDialog').addEventListener('keydown',e=>{
+    if(e.isComposing||e.keyCode===229||e.key!=='Escape')return;
+    e.preventDefault();e.stopPropagation();doAction('search-clear');doAction('search-close');
+  },{capture:true});
+  const searchPanel=$('searchDialog'), searchHead=$('searchDialogHead');
+  if(searchPanel&&searchHead) bindOverlayDrag(searchPanel,searchHead);
   // 軌道區垂直捲動：時間軸 <-> 左欄 同步
   let _sync=false; const gt=$('tlGutterTracks');
   tlTracks.addEventListener('scroll',()=>{ if(_sync)return; _sync=true; gt.scrollTop=tlTracks.scrollTop; _sync=false; },{passive:true});
@@ -542,8 +540,11 @@ function initUI(){
   // 點擊時間軸時解除輸入框焦點
   $('timelinePanel').addEventListener('mousedown',()=>{ const ae=document.activeElement; if(ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'))ae.blur(); },{capture:true});
 
-  // 任何按鈕點擊後立即解除焦點，避免 Space/Enter 誤觸
-  document.addEventListener('click',e=>{ const btn=e.target.closest('button'); if(btn)btn.blur(); },{capture:true});
+  // 工作區點擊後交回播放快捷鍵，對話框和面板內保留 Tab 導覽。
+  document.addEventListener('click',e=>{
+    const btn=e.target.closest('button');
+    if(btn&&!btn.closest(WINDOW_CONTROLS)) btn.blur();
+  },{capture:true});
 
 
 }
@@ -586,8 +587,10 @@ function initExtras(){
   document.querySelectorAll('.shift-tab').forEach(tab=>{
     tab.addEventListener('click',e=>{
       e.stopPropagation();
-      document.querySelectorAll('.shift-tab').forEach(t=>t.classList.remove('active'));
-      tab.classList.add('active');
+      document.querySelectorAll('.shift-tab').forEach(t=>{
+        t.classList.toggle('active',t===tab);
+        t.setAttribute('aria-pressed',String(t===tab));
+      });
       const isTc=tab.dataset.tab==='tc';
       $('shiftPageTc').style.display=isTc?'':'none';
       $('shiftPageDur').style.display=isTc?'none':'';
@@ -624,42 +627,30 @@ function initExtras(){
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
   $('tcCur').addEventListener('contextmenu',e=>{ e.preventDefault();
     try{ navigator.clipboard.writeText(secToEncore(Media.displayTime(),State.fps,State.dropFrame)); showToast('已複製時間碼'); }catch(err){} });
-  // 浮動面板拖曳（拖 fp-head 移動整個面板）
   document.querySelectorAll('.float-panel').forEach(panel=>{
-    const head=panel.querySelector('.fp-head'); if(!head)return;
-    let ox=0,oy=0,sx=0,sy=0;
-    head.addEventListener('mousedown',e=>{
-      if(e.target.closest('button'))return;
+    const head=panel.querySelector('.fp-head');
+    if(head) bindOverlayDrag(panel,head);
+    panel.addEventListener('keydown',e=>{
+      if(e.key!=='Escape'||e.isComposing||e.keyCode===229)return;
       e.preventDefault();
-      const r=panel.getBoundingClientRect();
-      panel.style.right='auto'; panel.style.bottom='auto';
-      panel.style.left=r.left+'px'; panel.style.top=r.top+'px';
-      ox=r.left; oy=r.top; sx=e.clientX; sy=e.clientY;
-      document.body.style.cursor='grabbing';
-      const mv=e2=>{
-        panel.style.left=clamp(ox+e2.clientX-sx,0,window.innerWidth-60)+'px';
-        panel.style.top=clamp(oy+e2.clientY-sy,0,window.innerHeight-40)+'px';
-        _syncMpvPanel();
-      };
-      const up=()=>{
-        document.body.style.cursor='';
-        document.removeEventListener('mousemove',mv);
-        document.removeEventListener('mouseup',up);
-        _syncMpvPanel();
-      };
-      document.addEventListener('mousemove',mv);
-      document.addEventListener('mouseup',up);
+      e.stopPropagation();
+      panel.querySelector('.fp-close')?.click();
     });
   });
 }
 
 /* resize */
 let rzT;
-window.addEventListener('resize',()=>{clearTimeout(rzT);rzT=setTimeout(()=>{drawTimeline();renderVideoSub();},120);});
+window.addEventListener('resize',()=>{
+  document.querySelectorAll('.float-panel.show, #searchDialog').forEach(panel=>keepPanelInViewport(panel));
+  clearTimeout(rzT);
+  rzT=setTimeout(()=>{drawTimeline();renderVideoSub();_syncMpvPanel();},120);
+});
 
-/* 下拉選單/數字輸入選定後自動失焦，避免攔截鍵盤快捷鍵 */
+/* 工作區下拉選單用完交回播放快捷鍵，視窗內則保留鍵盤操作的焦點。 */
 document.addEventListener('change',(e)=>{
   const t=e.target;
+  if(t.closest?.(WINDOW_CONTROLS)) return;
   if(t.tagName==='SELECT' || (t.tagName==='INPUT' && t.type==='number')){
     setTimeout(()=>t.blur(),0);
   }
@@ -814,7 +805,6 @@ async function initDesktop(){
   const brand=document.querySelector('.brand');
   if(brand && !brand.querySelector('small')){ const sm=document.createElement('small'); sm.style.cssText='opacity:.55;font-size:11px;margin-left:6px;vertical-align:middle'; sm.textContent='桌面版'; brand.appendChild(sm); }
   document.querySelectorAll('.desktop-only').forEach(el=>{ el.style.display=''; }); // 顯示桌面專屬功能（匯出影片等）
-  const nv=$('noVideo'); if(nv) nv.innerHTML='<b>尚未載入影音</b>點 <kbd>🎬 影音</kbd> 匯入<br>桌面版支援 MP4 / MOV / <b>MXF</b> / MKV / 多音軌（ffmpeg）<br>多音軌可同時混音播放，每軌獨立音量／獨奏';
   try{
     const s=await desktopStatus;
     const eng=$('stEngine');

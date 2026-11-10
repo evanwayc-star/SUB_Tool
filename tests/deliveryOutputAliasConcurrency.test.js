@@ -7,6 +7,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const { verifiedCleanup } = require('../scripts/acceptance/cdp-electron-harness.js');
 const { FileAuthority } = require('../electron/file-authority');
 const { createExportAdmission, createExportQueue } = require('../electron/export-queue');
 const { outputKey } = require('../electron/export-lease');
@@ -26,9 +27,7 @@ const roots = [];
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
-    const real = fs.realpathSync(root);
-    if (path.dirname(real) !== fs.realpathSync(os.tmpdir()) || !path.basename(real).startsWith('subtool-output-alias-')) throw new Error('拒絕刪除測試目錄以外資料');
-    fs.rmSync(real, { recursive: true, force: true, maxRetries: 12, retryDelay: 100 });
+    verifiedCleanup(root, 'subtool-output-alias-', { maxRetries: 12, retryDelay: 100 });
   }
 });
 

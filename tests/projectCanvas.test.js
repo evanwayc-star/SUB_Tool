@@ -38,6 +38,17 @@ beforeEach(async () => {
 afterEach(() => { resetProject?.(); delete window.subtool; });
 
 describe('project canvas settings and persistence', () => {
+  it('invalid dimensions identify and focus the field; editing clears the error and updates the size summary', async () => {
+    showProjectSettings(); select('projectCanvasMode','custom');
+    const width=document.getElementById('projectCanvasWidth');width.value='0';
+    await document.getElementById('projectCanvasApply').onclick();
+    expect(width.getAttribute('aria-invalid')).toBe('true');expect(document.activeElement).toBe(width);
+    width.value='1080';width.dispatchEvent(new Event('input',{bubbles:true}));
+    expect(width.getAttribute('aria-invalid')).not.toBe('true');
+    expect(document.getElementById('projectCanvasError').textContent).toBe('');
+    expect(document.getElementById('projectCanvasSummary').textContent).toContain('1080');
+    expect(State.projectCanvas).toBeNull();
+  });
   it('locks the submitted draft while native apply is pending; Cancel restores Auto and revokes the late result', async () => {
     let complete;
     nativeCanvas.mockImplementationOnce(() => new Promise(resolve => {complete=resolve;}));

@@ -20,6 +20,32 @@ beforeEach(()=>{
  document.getElementById('subStyleFilter').value='';Subtitles.renderSubList();
 });
 afterAll(()=>{vi.clearAllTimers();vi.useRealTimers();});
+it('新專案的空列表引導匯入或新增，不要求先選取不存在的字幕',()=>{
+ State.cues=[];State.tracks=[];Subtitles.renderSubList();
+ const empty=document.querySelector('#sublist .empty').textContent;
+ expect(empty).toContain('尚無字幕');expect(empty).toContain('匯入字幕檔');
+ expect(empty).toContain('在播放點新增字幕');expect(empty).not.toContain('選一條字幕');
+});
+it('其他軌有字幕時，空軌仍顯示新增引導而非篩選無結果',()=>{
+ State.tracks.push({name:'Empty',visible:true,locked:false});State.listTrack=1;Subtitles.renderSubList();
+ const empty=document.querySelector('#sublist .empty').textContent;
+ expect(empty).toContain('此字幕軌尚無字幕');expect(empty).toContain('在播放點新增字幕');
+ expect(empty).not.toContain('符合');expect(document.getElementById('subCount').textContent).toBe('0 句');
+});
+it('鎖定的空軌先引導解鎖，不直接要求新增',()=>{
+ State.cues=[];State.tracks[0].locked=true;Subtitles.renderSubList();
+ const empty=document.querySelector('#sublist .empty').textContent;
+ expect(empty).toContain('此字幕軌已鎖定');expect(empty).toContain('先在時間軸解鎖');
+ expect(empty).not.toContain('⬇＋');
+});
+it('樣式篩選無結果時說明如何恢復此軌字幕，清除篩選後恢復列表',()=>{
+ document.getElementById('subStyleFilter').value='__non_default';Subtitles.renderSubList();
+ const empty=document.querySelector('#sublist .empty').textContent;
+ expect(empty).toContain('沒有符合樣式的字幕');expect(empty).toContain('所有樣式');
+ expect(empty).toContain('2 句字幕');expect(document.getElementById('subCount').textContent).toBe('0 句 / 2 句');
+ document.getElementById('subStyleFilter').value='';Subtitles.renderSubList();
+ expect(shown()).toEqual(['a','b']);expect(document.querySelector('#sublist .empty')).toBeNull();
+});
 it('全軌套用非預設樣式後，沒有逐句覆蓋也完整歸入自訂樣式',()=>{
  Subtitles.applyTrackStylePlan(State.tracks[0],State.cues,{...Styles.STYLE_DEFAULTS,fontSize:99});Subtitles.renderSubList();
  expect(State.cues.every(cue=>cue.style===undefined)).toBe(true);

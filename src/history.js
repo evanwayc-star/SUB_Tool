@@ -292,10 +292,16 @@ function recordHistory(label, { sync = true } = {}){
 }
 function renderHistory(){
   const el=$('historyList'); if(!el)return;
+  const focused=document.activeElement?.closest?.('.hist-item');
+  const focusedIndex=focused?.parentElement===el?focused.dataset.hi:null;
   el.innerHTML=History.stack.map((h,i)=>
-    `<div class="hist-item ${i===History.hi?'current':''} ${i>History.hi?'future':''}" data-hi="${i}"><span class="hi-idx">${i}</span><span>${escapeHTML(h.label)}</span></div>`
-  ).join('');
-  el.querySelectorAll('.hist-item').forEach(d=>d.onclick=()=>History.restore(+d.dataset.hi));
+    `<button type="button" class="hist-item ${i===History.hi?'current':''} ${i>History.hi?'future':''}" data-hi="${i}"${i===History.hi?' aria-current="step"':''}>`+
+    `<span class="hi-idx" aria-hidden="true">${i}</span><span class="hi-name">${escapeHTML(h.label)}</span>${i===History.hi?'<span class="hi-current">目前</span>':''}</button>`
+  ).join('') || '<p class="empty">編輯後，變更紀錄會顯示在這裡。</p>';
+  el.querySelectorAll('.hist-item').forEach(button=>{
+    button.onclick=()=>History.restore(+button.dataset.hi);
+    if(button.dataset.hi===focusedIndex) button.focus({preventScroll:true});
+  });
 }
 on('media:projectReady',detail=>History.rebaseSequence(detail?.clips));
 on('media:projectClipRestored',detail=>{

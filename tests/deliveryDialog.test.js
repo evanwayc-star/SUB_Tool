@@ -105,10 +105,86 @@ beforeEach(() => {
   window.subtool.exportVideo.mockReset();
   window.subtool.getStartupFile.mockResolvedValue(null);
   window.subtool.listDir.mockResolvedValue([]);
-  window.subtool.exportDirectory.mockResolvedValue(null);
+  window.subtool.exportDirectory.mockReset().mockResolvedValue(null);
 });
 
 describe('匯出交付清單', () => {
+  it.each([
+    ['.ev-format', 'prores'], ['.ev-res', '720'], ['.ev-fps', '24'], ['.ev-tc', true],
+  ])('變更 %s 後鍵盤焦點仍在同一份交付的對應欄位', async (selector, value) => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector(selector)).not.toBeNull());
+    const control = document.querySelector(selector);
+    control.focus();
+    if (typeof value === 'boolean') control.checked = value;
+    else control.value = value;
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+    const updated = document.querySelector(selector);
+    expect(document.activeElement === updated).toBe(true);
+    if (typeof value === 'boolean') expect(updated.checked).toBe(value);
+    else expect(updated.value).toBe(value);
+  });
+
+  it('自訂高度正規化為預設尺寸時，焦點回尺寸選單且保留其他列草稿', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-res')).not.toBeNull());
+    document.getElementById('evAddRowBtn').click();
+    const name = document.querySelector('.ev-name[data-idx="1"]');
+    name.value = '客戶保留名稱.mp4'; name.dispatchEvent(new Event('input', { bubbles: true }));
+    const resolution = document.querySelector('.ev-res');
+    resolution.focus(); resolution.value = 'custom'; resolution.dispatchEvent(new Event('change', { bubbles: true }));
+    const height = document.querySelector('.ev-custom-res');
+    height.focus(); height.value = '721'; height.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(document.querySelector('.ev-custom-res')).toBeNull();
+    expect(document.activeElement === document.querySelector('.ev-res')).toBe(true);
+    expect(document.querySelector('.ev-res').value).toBe('720');
+    expect(document.querySelector('.ev-name[data-idx="1"]').value).toBe('客戶保留名稱.mp4');
+  });
+
+  it('刪除後聚焦鄰近輸出；最後一份刪除後顯示新增指引並回到新增按鈕', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-del')).not.toBeNull());
+    document.getElementById('evAddRowBtn').click();
+    let remove = document.querySelector('.ev-del[data-idx="1"]');
+    remove.focus(); remove.click();
+    expect(document.activeElement === document.querySelector('.ev-del')).toBe(true);
+    remove = document.querySelector('.ev-del');
+    remove.focus(); remove.click();
+    expect(document.querySelector('.delivery-empty')?.textContent).toContain('新增輸出項目');
+    expect(document.activeElement === document.getElementById('evAddRowBtn')).toBe(true);
+    document.getElementById('evAddRowBtn').click();
+    expect(document.querySelector('.delivery-empty')).toBeNull();
+    expect(document.activeElement === document.querySelector('.ev-format')).toBe(true);
+  });
+
+  it('資料夾選取完成後保留目前欄位焦點與選取範圍，不搶回瀏覽按鈕', async () => {
+    let finish;
+    window.subtool.exportDirectory.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-dir-btn')).not.toBeNull());
+    document.querySelector('.ev-dir-btn').click();
+    const name = document.querySelector('.ev-name');
+    name.focus(); name.setSelectionRange(2, 5);
+    finish('D:/交付');
+    await vi.waitFor(() => expect(document.querySelector('.ev-outdir').value).toBe('D:/交付'));
+    const updated = document.querySelector('.ev-name');
+    expect(document.activeElement === updated).toBe(true);
+    expect([updated.selectionStart, updated.selectionEnd]).toEqual([2, 5]);
+  });
+
+  it('音訊子視窗取消後回原交付列的音軌按鈕，不改另一份檔名', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-audio-btn')).not.toBeNull());
+    document.getElementById('evAddRowBtn').click();
+    const name = document.querySelector('.ev-name');
+    name.value = '保留名稱.mp4'; name.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('.ev-audio-btn[data-idx="1"]').click();
+    spies.openDeliveryOutputSettings.mock.lastCall[1]({ saved: false });
+    await vi.waitFor(() => expect(document.querySelector('.ev-audio-btn[data-idx="1"]')).not.toBeNull());
+    expect(document.activeElement === document.querySelector('.ev-audio-btn[data-idx="1"]')).toBe(true);
+    expect(document.querySelector('.ev-name').value).toBe('保留名稱.mp4');
+  });
+
   it('custom project canvas supplies a new delivery default while row overrides and fixed formats remain independent',async()=>{
     State.projectCanvas={width:1080,height:1920};
     await showExportVideoDialog();

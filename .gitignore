@@ -11,6 +11,12 @@ test-media/
 .agents/
 skills-lock.json
 
+# Impeccable 的本機 hook 指向不進版控的 .agents/ 安裝目錄。
+/.codex/hooks.json
+/.impeccable/config.json
+/.impeccable/config.local.json
+/.impeccable/hook.cache.json
+
 # 文件插圖工具的專案偏好；只影響本機產圖流程，不屬於產品原始碼。
 .baoyu-skills/
 

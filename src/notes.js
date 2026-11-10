@@ -147,7 +147,7 @@ function renderNotes(){
   if(!validIds.has(_activeNoteId)) _activeNoteId=null;
   if(!validIds.has(_lastSelectedNoteId)) _lastSelectedNoteId=null;
   const el=$('notesList'); if(!el)return;
-  if(!State.notes.length){ el.innerHTML='<div class="empty">尚無備註<br>播放到某處 → 點「＋ 新增」</div>'; return; }
+  if(!State.notes.length){ el.innerHTML='<div class="empty">尚無備註<br>將播放點移到要標記的位置，再按「新增」。</div>'; return; }
   const focused=document.activeElement;
   const candidate=focused?.closest?.('.note-item');
   const candidateOwner=candidate&&el.contains(candidate)?noteRowOwners.get(candidate):null;

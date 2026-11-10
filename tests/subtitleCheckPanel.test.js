@@ -54,6 +54,7 @@ beforeAll(async () => {
   document.body.innerHTML = `
     <div id="sublist"></div><span id="stSel"></span>
     <div id="checkPanel" class="show">
+      <p id="checkSummary"></p>
       <div id="cpConsecutiveIdentical"><span class="cp-nums"></span></div>
     </div>`;
   state = await import('../src/state.js');
@@ -84,6 +85,17 @@ it('連續相同且頭尾黏接時，這一對的兩個編號都套用深綠 cla
     { number: 4, joined: true },
   ]);
   const [orange, , darkGreen] = document.querySelectorAll('#cpConsecutiveIdentical .cp-num');
+  expect(orange.tagName).toBe('BUTTON');
+  expect(orange.getAttribute('type')).toBe('button');
+  expect(orange.getAttribute('aria-label')).toBe('前往第 1 句字幕');
   expect(getComputedStyle(darkGreen).color).not.toBe(getComputedStyle(orange).color);
   expect(getComputedStyle(darkGreen).color).toBe('rgb(31, 122, 63)');
+});
+
+it('空軌明確提示尚無字幕，已檢查而無命中顯示無', () => {
+  Object.assign(state.State,{tracks:[{name:'中文字幕'}],listTrack:0,cues:[]});
+  renderCheckPanel();
+  expect(document.getElementById('checkSummary').textContent).toContain('中文字幕尚無字幕');
+  expect(document.querySelector('#cpConsecutiveIdentical .cp-nums').textContent).toBe('無');
+  expect(document.querySelectorAll('.cp-num')).toHaveLength(0);
 });

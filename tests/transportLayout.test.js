@@ -35,12 +35,13 @@ describe('播放器時間在 Mac 窄欄仍保持單行', () => {
     expect(range).toContain('margin:0');
   });
 
-  it('窄欄把交付工具整組換列，極窄欄再拆 TC 與 seek', () => {
+  it('窄欄讓定位滑桿與交付工具共用下一列，極窄欄可再換行', () => {
     expect(declarations('.left')).toContain('container-type:inline-size');
     expect(html).toMatch(/class="transport-tools"[\s\S]*data-act="exp-in"[\s\S]*data-act="mixer"/);
     expect(css).toContain('@container (max-width:779px)');
-    expect(css).toContain('@container (max-width:600px)');
-    expect(css).toContain('.transport-tools{grid-column:1/-1;justify-self:end}');
+    expect(declarations('.transport-controls')).toContain('flex-wrap:wrap');
+    expect(css).toContain('.transport-controls{grid-column:1/-1}');
+    expect(css).toContain('.transport #seekBar{width:100%}');
   });
 
   it('seekBar 不可用 inline style 蓋回較大的最小寬', () => {

@@ -100,11 +100,10 @@ if (typeof document !== 'undefined') {
   });
 }
 
-function _focusables() {
-  const m = $('modalBg')?.querySelector('.modal');
-  if (!m) return [];
-  return Array.from(m.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
-    .filter(el => !el.disabled && el.offsetParent !== null);
+function _focusables(modal = $('modalBg')?.querySelector('.modal')) {
+  if (!modal) return [];
+  return [...modal.querySelectorAll('button, [href], input, select, textarea, summary, [contenteditable="true"], [tabindex]')]
+    .filter(el => !el.matches(':disabled, [tabindex="-1"]') && el.offsetParent !== null && getComputedStyle(el).visibility === 'visible');
 }
 
 function openModal(title, html, buttons, opts = {}) {
@@ -120,7 +119,10 @@ function openModal(title, html, buttons, opts = {}) {
   if (replaced) replaced();
   _modalCloseOnBackdrop = opts.closeOnBackdrop !== false;
   const titleEl = $('modalTitle');
-  if (titleEl) titleEl.textContent = title;
+  if (titleEl) {
+    titleEl.textContent = title;
+    titleEl.title = title;
+  }
   const bodyEl = $('modalBody');
   if (bodyEl) bodyEl.innerHTML = html;
   const foot = $('modalFoot');
@@ -150,7 +152,15 @@ function openModal(title, html, buttons, opts = {}) {
   bg.classList.toggle('clear-bg', _modalKeepVideo);
   _modalPrevFocus = _lastFocusedOutsideModal || document.activeElement;
   bg.classList.add('show');
-  setTimeout(() => { if (session.isCurrent()) _focusables()[0]?.focus(); }, 0);
+  if (bodyEl) {
+    bodyEl.scrollTop = 0;
+    bodyEl.scrollLeft = 0;
+  }
+  setTimeout(() => {
+    if (!session.isCurrent()) return;
+    const first = _focusables(modalEl).find(el => !el.closest('.mhead'));
+    (first || modalEl)?.focus({preventScroll:true});
+  }, 0);
   if (!_modalKeepVideo && Media.mpvMode) setMpvWindowVisible(false);
   return session;
 }
@@ -167,8 +177,13 @@ function closeModal(arg) {
   const bg = $('modalBg');
   if (bg) bg.classList.remove('show', 'dock-right', 'clear-bg');
   _modalKeepVideo = false;
-  if (prev && prev.focus) {
-    setTimeout(() => { if (generation === _modalGeneration) { try { prev.focus(); } catch (e) {} } }, 0);
+  if (prev?.isConnected) {
+    setTimeout(() => {
+      const focused = document.activeElement;
+      if (generation === _modalGeneration && prev.isConnected && (focused === document.body || bg?.contains(focused))) {
+        prev.focus({preventScroll:true});
+      }
+    }, 0);
   }
   if (Media.mpvMode) setMpvWindowVisible(true);
   if (!committed && dismiss) {
@@ -224,33 +239,54 @@ function promptModal(title, label, defVal = '', { placeholder = '', okLabel = '�
   });
 }
 
-// Modal dragging
-let _mDragging = false, _mStartX = 0, _mStartY = 0, _mStartTx = 0, _mStartTy = 0;
+// Keep the whole overlay, including its close control, within reach after dragging or resizing.
+function viewportOverlayPosition(rect, left, top) {
+  const margin = 12;
+  return {
+    left: Math.max(margin, Math.min(left, window.innerWidth - rect.width - margin)),
+    top: Math.max(margin, Math.min(top, window.innerHeight - rect.height - margin)),
+  };
+}
+
+export function keepPanelInViewport(panel, left, top) {
+  const rect = panel.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const position = viewportOverlayPosition(rect, left ?? rect.left, top ?? rect.top);
+  if (position.left === rect.left && position.top === rect.top) return;
+  Object.assign(panel.style, { right:'auto', bottom:'auto', left:position.left+'px', top:position.top+'px' });
+}
+
+export function bindOverlayDrag(panel, handle, place = keepPanelInViewport) {
+  let drag;
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.target.closest('button, input, select, textarea, a[href]')) return;
+    const { left, top } = panel.getBoundingClientRect();
+    drag = { pointerId:event.pointerId, x:event.clientX - left, y:event.clientY - top };
+    handle.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  handle.addEventListener('pointermove', event => {
+    if (event.pointerId !== drag?.pointerId) return;
+    place(panel, event.clientX - drag.x, event.clientY - drag.y);
+    emit('mpv:sync');
+  });
+  handle.addEventListener('lostpointercapture', () => { drag = null; });
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => place(panel)).observe(panel);
+}
+
+function moveModalInViewport(modal, left, top) {
+  const rect = modal.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const position = viewportOverlayPosition(rect, left ?? rect.left, top ?? rect.top);
+  if (position.left === rect.left && position.top === rect.top) return;
+  modal.style.transform = `translate(${position.left - modal.offsetLeft}px, ${position.top - modal.offsetTop}px)`;
+}
 const titleBar = $('modalTitle');
-if (titleBar) {
-  titleBar.addEventListener('pointerdown', e => {
-    if (e.button !== 0) return;
-    _mDragging = true;
-    _mStartX = e.clientX;
-    _mStartY = e.clientY;
-    const m = $('modalBg')?.querySelector('.modal');
-    if (m) {
-      const style = window.getComputedStyle(m);
-      const matrix = new DOMMatrixReadOnly(style.transform);
-      _mStartTx = matrix.m41;
-      _mStartTy = matrix.m42;
-    }
-    titleBar.setPointerCapture(e.pointerId);
-  });
-  titleBar.addEventListener('pointermove', e => {
-    if (!_mDragging) return;
-    const dx = e.clientX - _mStartX, dy = e.clientY - _mStartY;
-    const m = $('modalBg')?.querySelector('.modal');
-    if (m) m.style.transform = `translate(${_mStartTx + dx}px, ${_mStartTy + dy}px)`;
-  });
-  titleBar.addEventListener('pointerup', e => {
-    _mDragging = false;
-    titleBar.releasePointerCapture(e.pointerId);
+const modal = modalBg?.querySelector('.modal');
+if (titleBar && modal) {
+  bindOverlayDrag(modal, titleBar, moveModalInViewport);
+  window.addEventListener('resize', () => {
+    if (modal.style.transform && modalBg.classList.contains('show')) moveModalInViewport(modal);
   });
 }
 
@@ -300,7 +336,11 @@ function togglePanel(id) {
   document.querySelectorAll('.float-panel.show').forEach(x => x.classList.remove('show'));
   if (willShow) {
     p.classList.add('show');
-    setTimeout(() => { _ensurePanelInRightArea(p); emit('mpv:sync'); }, 0);
+    setTimeout(() => {
+      _ensurePanelInRightArea(p);
+      keepPanelInViewport(p);
+      emit('mpv:sync');
+    }, 0);
   } else {
     emit('mpv:sync');
   }
@@ -319,7 +359,7 @@ async function openCacheDialog() {
   const DESK = window.subtool;
   if (!DESK || !DESK.cacheInfo) { showToast('快取管理僅在桌面版可用'); return; }
   const displayedSource=State.mediaPath||null;
-  const loading = openModal('🗂 轉檔快取', '<div style="padding:6px 2px">讀取中…</div>', [{ label: '關閉', primary: true, act: closeModal }]);
+  const loading = openModal('轉檔快取', '<p class="cache-loading" role="status">正在讀取快取保存紀錄…</p>', [{ label: '關閉', primary: true, act: closeModal }]);
   
   let info;
   try {
@@ -333,31 +373,36 @@ async function openCacheDialog() {
   
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const summary = !info || info.unavailable === true
-    ? '<div>無法確認中央快取狀態，請檢查快取目錄與權限。</div>'
+    ? '<p class="cache-unavailable">無法確認中央快取狀態，請檢查快取目錄與權限後重新整理。</p>'
     : `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>`;
   const locations=info?.source?.path===displayedSource?info.source.locations||[]:[];
-  const sourceSummary=!displayedSource?'':`<div class="cache-source-summary"><b>目前素材</b><div>${esc(displayedSource)}</div>`+
-    (!info?.source||info.source.path!==displayedSource||info.source.unavailable?'<p>無法確認目前素材的快取紀錄，請檢查來源與目錄權限。</p>':locations.length?locations.map(location=>{
+  const sourceSummary=!displayedSource?'<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-note">尚未載入素材。開啟影片後，可在此查看同資料夾的波形、Proxy 與聲道保存紀錄。</p></section>':`<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-path">${esc(displayedSource)}</p>`+
+    (!info?.source||info.source.path!==displayedSource||info.source.unavailable?'<p class="cache-unavailable">無法確認目前素材的快取紀錄，請檢查來源與目錄權限後重新整理。</p>':locations.length?locations.map(location=>{
       const wave=location.waveform||{};
       const progress=Number.isSafeInteger(wave.completedSamples)&&Number.isSafeInteger(wave.totalSamples)
         ?` ${ (wave.completedSamples/4000).toFixed(1)} / ${(wave.totalSamples/4000).toFixed(1)} 秒`:'';
       const waveText=wave.state==='complete'?'紀錄已完成':wave.state==='partial'?'部分保存紀錄'+progress:wave.state==='unknown'?'無法確認':'未找到完成紀錄';
-      return `<div class="cache-source-location"><b>${location.kind==='sidecar'?'同資料夾快取':'本機中央快取'}</b>`+
-        `<div>${esc(location.directory)}</div><div>波形：${esc(waveText)}</div>`+
-        (Number.isSafeInteger(wave.bytes)?`<div>波形檔：${_fmtBytes(wave.bytes)}</div>`:'')+
-        `<div>Proxy：${location.proxy?'已有完整紀錄':'未找到完整紀錄'} · 聲道：${Number(location.channels)||0} 條</div></div>`;
-    }).join(''):'<p>尚未找到屬於目前素材的保存紀錄。</p>')+
-    '<p>此處只查保存紀錄與檔案大小；使用前重新驗證來源與內容，不代表已完成內容查核。</p></div>';
+      return `<div class="cache-source-location"><h4>${location.kind==='sidecar'?'同資料夾快取':'本機中央快取'}</h4>`+
+        `<p class="cache-path">${esc(location.directory)}</p><dl class="cache-records"><dt>波形</dt><dd>${esc(waveText)}</dd>`+
+        (Number.isSafeInteger(wave.bytes)?`<dt>波形檔大小</dt><dd>${_fmtBytes(wave.bytes)}</dd>`:'')+
+        `<dt>Proxy</dt><dd>${location.proxy?'已有完整紀錄':'未找到完整紀錄'}</dd><dt>聲道</dt><dd>${Number(location.channels)||0} 條</dd></dl></div>`;
+    }).join(''):'<p class="cache-note">尚未找到屬於目前素材的保存紀錄。</p>')+
+    '<p class="cache-note">此處只查保存紀錄與檔案大小；使用前重新驗證來源與內容，不代表已完成內容查核。</p></section>';
   const html =
-    `<div style="padding:4px 2px;line-height:1.9">` +
+    `<div class="cache-dialog-content">` +
     sourceSummary+
-    summary +
-    `<div style="font-size:11px;color:var(--muted);word-break:break-all;margin-top:2px">${esc(info?.root || '')}</div>` +
-    `<div style="font-size:12px;color:var(--muted);margin-top:8px">Proxy、聲道與波形優先保存在素材同資料夾的 <code>.subtool_Cache</code>，無法寫入時使用本機中央快取。同一 NAS 來源可在核對後跨電腦沿用；中斷的波形可從有效檢查點續算。快取不因放置天數過期。「清理孤兒檔」只處理本機中央快取；「清除快取」包含所有中央快取及目前素材的同資料夾快取。</div>` +
+    '<section class="cache-central-summary"><h3>本機中央快取</h3>'+summary +
+    `<p class="cache-path">${esc(info?.root || '')}</p></section>` +
+    `<details class="cache-help"><summary>保存位置與清除範圍</summary><p>Proxy、聲道與波形優先保存在素材同資料夾的 <code>.subtool_Cache</code>，無法寫入時使用本機中央快取。同一 NAS 來源可在核對後跨電腦沿用；中斷的波形可從有效檢查點續算，快取不因放置天數過期。</p><dl class="cache-records"><dt>清理孤兒檔</dt><dd>只處理本機中央快取的無效項目。</dd><dt>清除快取</dt><dd>所有中央快取，以及目前素材的同資料夾快取。其他素材的同資料夾快取不受影響。</dd></dl></details>` +
+    '<p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p>'+
     `</div>`;
-    
+  let cleaning=false;
+  const showCacheError=message=>{const error=document.getElementById('cacheActionError');if(error){error.textContent=message;error.hidden=false;}showToast(message);};
   const buttons = [
-    { label: '清理孤兒檔', act: async () => {
+    { label: '清理孤兒檔', id:'cacheCleanOrphans', act: async () => {
+        if(!session.isCurrent()||cleaning)return;
+        cleaning=true;
+        const button=document.getElementById('cacheCleanOrphans');button.disabled=true;button.textContent='清理中…';
         try {
           const r = await DESK.cacheCleanOrphans();
           if (!session.isCurrent()) return;
@@ -367,19 +412,19 @@ async function openCacheDialog() {
           else showToast(`已處理孤兒快取，${cleaned}`);
           await openCacheDialog();
         } catch (error) {
-          if (session.isCurrent()) showToast('清理快取失敗：' + error.message);
-        }
+          if (session.isCurrent()) showCacheError('清理快取失敗：' + error.message + '。請重試。');
+        } finally {cleaning=false;if(session.isCurrent()){button.disabled=false;button.textContent='清理孤兒檔';}}
       },
     },
-    { label: '清除快取', act: () => {
+    { label: '清除快取', className:'del-btn', act: () => {
         if (!session.isCurrent()) return;
         // 清除資格屬於使用者看到的母素材，不能在確認後才讀取新專案的路徑。
         const sourcePath = State.mediaPath || null;
         const ownsSource = () => (State.mediaPath || null) === sourcePath;
         let clearing = false;
-        const sourceLabel = sourcePath ? `<br><b style="word-break:break-all">${esc(sourcePath)}</b>` : '';
-        const confirmation = openModal('確認清除', '<div style="padding:6px 2px">將刪除所有中央快取，以及目前影片在 .subtool_Cache 內對應的快取項目；其他素材與舊版留下的項目不受影響。' + sourceLabel + '<br>下次開啟同檔可能需要重新轉檔。確定？</div>', [
-          { label: '確定清除', primary: true, act: async () => {
+        const sourceLabel = sourcePath ? `<p class="cache-path">${esc(sourcePath)}</p>` : '';
+        const confirmation = openModal('清除快取？', '<div class="cache-dialog-content"><p>將刪除所有中央快取，以及目前影片在 .subtool_Cache 內對應的快取項目；其他素材與舊版留下的項目不受影響。</p>' + sourceLabel + '<p class="cache-note">下次開啟同檔可能需要重新轉檔。</p><p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p></div>', [
+          { label: '確定清除', primary: true, id:'cacheClearConfirm', act: async () => {
             if (!confirmation.isCurrent() || clearing) return;
             if (!ownsSource()) {
               confirmation.close();
@@ -387,6 +432,7 @@ async function openCacheDialog() {
               return;
             }
             clearing = true;
+            const button=document.getElementById('cacheClearConfirm');button.disabled=true;button.textContent='清除中…';
             try {
               const r = await DESK.cacheClearAll(sourcePath);
               if (!confirmation.isCurrent() || !ownsSource()) return;
@@ -395,17 +441,18 @@ async function openCacheDialog() {
               else showToast(`已處理快取，釋放 ${_fmtBytes(r.bytes)}`);
               confirmation.close();
             } catch (error) {
-              if (confirmation.isCurrent() && ownsSource()) showToast('清除快取失敗：' + error.message);
-            } finally { clearing = false; }
+              if (confirmation.isCurrent() && ownsSource()) showCacheError('清除快取失敗：' + error.message + '。請重試。');
+            } finally { clearing = false;if(confirmation.isCurrent()){button.disabled=false;button.textContent='確定清除';} }
             },
           },
           { label: '取消', act: openCacheDialog },
         ]);
       },
     },
+    { label: '重新整理', id:'cacheRefresh', act: openCacheDialog },
     { label: '關閉', primary: true, act: closeModal },
   ];
-  const session = openModal('🗂 轉檔快取', html, buttons);
+  const session = openModal('轉檔快取', html, buttons, {width:'600px'});
 }
 
 export function renderQueueMonitorIndicator(button, snapshot = {}) {

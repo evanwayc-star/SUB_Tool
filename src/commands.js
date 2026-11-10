@@ -8,7 +8,7 @@ import { State, IS_DESKTOP, DESK } from './state.js';
 import { Media } from './media.js';
 import { AudioRouting } from './audio-routing.js';
 import { runVideoExportCommand } from './export-job-engine.js';
-import { showToast, openModal, closeModal, togglePanel, openCacheDialog } from './ui.js';
+import { showToast, openModal, closeModal, togglePanel, openCacheDialog, keepPanelInViewport } from './ui.js';
 import { showSettingsModal } from './settings.js';
 import { showProjectSettings } from './project-settings.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
@@ -207,6 +207,7 @@ function createCommands() {
       const sd = $('searchDialog');
       if (sd) {
         sd.style.display = 'flex';
+        keepPanelInViewport(sd);
         emit('render:searchCount');
         $('searchInput').focus();
         emit('mpv:sync');

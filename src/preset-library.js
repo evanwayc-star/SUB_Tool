@@ -59,43 +59,44 @@ export function initPresetLibrary({ styleChanged }){
       }
     });
 
-    const renderItem = (item, isGrouped) => {
-      const { p, i, text } = item;
+    const renderItem = ({ p, i, text }) => {
       const st=Object.assign({},STYLE_DEFAULTS,p.style||{});
       const ui=i-BUILTIN_PRESETS.length;
-      return `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border);">`+
-        _presetSwatch(st)+
-        `<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(text)}`+
-        (p.builtin?`<span style="margin-left:6px;font-size:10px;padding:1px 5px;border-radius:8px;background:var(--panel3);color:var(--text-faint)">內建</span>`:'')+
-        `</span>`+
-        `<button class="ts-preset" data-pre-apply="${i}" title="套用到目前選取的字幕（或整軌）">套用</button>`+
-        (p.builtin
-          ? `<span style="font-size:11px;color:var(--text-faint);opacity:.6;padding:0 6px">不可修改</span>`
-          : `<button class="ts-preset" data-pre-edit="${ui}" title="在樣式面板上修改這組樣式；完成後所有套用它的字幕一起變">修改參數</button>`+
-            `<button class="ts-preset" data-pre-ren="${ui}" title="重新命名，或是將它移入/移出資料夾">改名 / 移動</button>`+
-            `<button class="ts-preset" data-pre-del="${ui}" style="color:var(--red,#e66)">刪除</button>`)+
-        `</div>`;
+      return `<div class="preset-library-row">
+        ${_presetSwatch(st)}
+        <span class="preset-library-name">${escapeHTML(text)}${p.builtin?'<small>內建</small>':''}</span>
+        <div class="preset-library-actions">
+          <button type="button" data-pre-apply="${i}" title="套用到目前選取的字幕">套用</button>
+          ${p.builtin?'':`<button type="button" data-pre-edit="${ui}" title="在樣式面板編輯這組樣式">修改參數</button>
+            <button type="button" data-pre-ren="${ui}">改名／移動</button>
+            <button type="button" class="del-btn" data-pre-del="${ui}">刪除</button>`}
+        </div>
+      </div>`;
     };
 
-    let itemsHtml = orphans.map(o => renderItem(o, false)).join('');
+    let itemsHtml = orphans.map(renderItem).join('');
     for (const [g, entries] of groups) {
-      itemsHtml += `<div style="display:flex;align-items:center;gap:10px;padding:7px 4px;border-bottom:1px solid var(--border);cursor:pointer;" onclick="if(event.target.closest('button'))return; const c=this.nextElementSibling; const e=c.style.display==='none'; c.style.display=e?'block':'none';">`+
-        `<span style="font-size:14px;color:#ffca28;min-width:30px;text-align:center;">📁</span>`+
-        `<span style="flex:1;font-size:14px;font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(g)}</span>`+
-        `<button class="ts-preset" data-pre-ren-grp="${escapeHTML(g)}">改名</button>`+
-        `<button class="ts-preset" data-pre-del-grp="${escapeHTML(g)}" style="color:var(--red,#e66)">刪除</button>`+
-        `</div>`;
-      itemsHtml += `<div style="margin-left:15px; padding-left:10px; border-left:1px solid #444; display:block;">` + entries.map(o => renderItem(o, true)).join('') + `</div>`;
+      itemsHtml += `<details class="preset-library-group" open>
+        <summary><span>${escapeHTML(g)}</span> <small>${entries.length} 組</small></summary>
+        <div class="preset-library-actions preset-library-group-actions">
+          <button type="button" data-pre-ren-grp="${escapeHTML(g)}">改名資料夾</button>
+          <button type="button" class="del-btn" data-pre-del-grp="${escapeHTML(g)}">刪除資料夾</button>
+        </div>
+        ${entries.map(renderItem).join('')}
+      </details>`;
     }
 
-    body.innerHTML=`<div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:10px;padding:0 4px">`+
-      `<button class="btn" id="preExportBtn" title="把自訂樣式存成 .json 檔">⭳ 匯出</button>`+
-      `<button class="btn" id="preImportBtn" title="讀取 .json 檔並加入樣式庫">⭱ 匯入</button>`+
-      `</div>`+
-      `<div style="max-height:360px;overflow:auto;display:flex;flex-direction:column;gap:2px">`+
-      itemsHtml +
-      (getPresets().length?'':`<div style="color:var(--text-faint);font-size:12px;padding:10px 2px">尚未建立自訂樣式——在樣式面板調好後按「☆ 存為常用」即可新增。</div>`)+
-      `</div>`;
+    body.innerHTML=`<div class="preset-library">
+      <div class="preset-library-toolbar">
+        <p>${getPresets().length} 組自訂樣式</p>
+        <div class="preset-library-actions">
+          <button type="button" id="preImportBtn">匯入 JSON</button>
+          <button type="button" id="preExportBtn">匯出 JSON</button>
+        </div>
+      </div>
+      ${itemsHtml}
+      ${getPresets().length?'':'<p class="preset-library-empty">在字幕樣式面板調整外觀後，按「存為常用」即可新增自訂樣式。</p>'}
+    </div>`;
   }
   // 保存/回滾屬於樣式庫；即使舊 dialog 已關閉，目前清單也不能保留失效索引。
   on('presets:changed', () => {
@@ -103,7 +104,7 @@ export function initPresetLibrary({ styleChanged }){
     StylePanelController.renderTrackStyle(); refreshStyleSummaries();
   });
   const openPresetMgr = () => {
-    const session = openModal('⚙ 常用樣式管理','',[{label:'關閉',primary:true,act:()=>session.close()}]);
+    const session = openModal('常用樣式管理','',[{label:'關閉',primary:true,act:()=>session.close()}],{width:'680px'});
     managerSession = session;
     _renderPresetMgr();
   };

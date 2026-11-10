@@ -41,6 +41,39 @@ function planPayload(overrides = {}) {
 }
 
 describe('字幕比對視窗 view adapter', () => {
+  it('字幕與樣式選單可由鍵盤存取，Escape 回到原字幕且不送出編輯', () => {
+    const { dom, callbacks, commands } = openCompareView();
+    callbacks[0](planPayload());
+    const document = dom.window.document;
+    const cell = document.querySelector('[data-cue-id="left"]');
+    expect(cell.tagName).toBe('BUTTON');
+    cell.focus();
+    cell.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true }));
+    expect(document.activeElement.id).toBe('miMatchStyle');
+    document.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(document.activeElement).toBe(cell);
+    expect(document.getElementById('ctxMenu').classList.contains('show')).toBe(false);
+    expect(commands).toEqual([]);
+    expect(document.getElementById('toggleTime').getAttribute('aria-pressed')).toBe('true');
+    const next=planPayload();next.plan.checks.time=false;callbacks[0](next);
+    expect(document.getElementById('toggleTime').getAttribute('aria-pressed')).toBe('false');
+    expect(document.activeElement.dataset.cueId).toBe('left');
+    dom.window.close();
+  });
+
+  it('隱藏相同字幕後提供恢復提示，摘要區分總組數與可見組數', () => {
+    const { dom, callbacks } = openCompareView();
+    const payload=planPayload();payload.plan.rows[0].active={any:false};callbacks[0](payload);
+    const document=dom.window.document;
+    const hide=document.getElementById('hideIdentical');hide.checked=true;hide.dispatchEvent(new dom.window.Event('change'));
+    expect(document.getElementById('emptyState').textContent).toContain('取消「隱藏無差異字幕」');
+    expect(document.getElementById('comparisonStatus').textContent).toContain('顯示 0 / 1 組');
+    hide.checked=false;hide.dispatchEvent(new dom.window.Event('change'));
+    expect(document.querySelectorAll('.row')).toHaveLength(1);
+    expect(document.getElementById('comparisonStatus').textContent).toContain('顯示 1 / 1 組');
+    dom.window.close();
+  });
+
   it.each(['time', 'text'])('關閉 %s 檢查移除該類差異標示，原文及原始差異仍保留，重新開啟即恢復', check => {
     const { dom, callbacks, commands } = openCompareView();
     const updates = [];
@@ -88,7 +121,8 @@ describe('字幕比對視窗 view adapter', () => {
     const hide = dom.window.document.getElementById('hideIdentical');
     hide.checked=true; hide.dispatchEvent(new dom.window.Event('change'));
     expect(dom.window.document.querySelectorAll('.row')).toHaveLength(0);
-    expect(dom.window.document.getElementById('emptyState').textContent).toBe('無差異字幕');
+    expect(dom.window.document.getElementById('emptyState').textContent).toContain('已關閉所有比對項目');
+    expect(dom.window.document.getElementById('emptyState').textContent).toContain('啟用時間、內容或樣式');
     dom.window.document.getElementById('toggleTime').click();
     expect(dom.window.document.querySelectorAll('.row')).toHaveLength(1);
     expect(dom.window.document.querySelectorAll('.diff-time').length).toBeGreaterThan(0);

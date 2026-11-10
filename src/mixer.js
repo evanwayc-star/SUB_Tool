@@ -220,7 +220,7 @@ function renderMixer(){
   cancelVolumeEdits(wrap);
   _meterStrips=[];
   const buses=projectBuses();
-  if(!buses.length){ wrap.innerHTML='<div class="empty" style="padding:18px 24px;text-align:center;color:#71717a;white-space:nowrap">尚未建立專案音訊軌</div>'; return; }
+  if(!buses.length){ wrap.innerHTML='<div class="empty">尚未建立專案音軌。<br>匯入影音或在專案音軌設定中新增音軌。</div>'; return; }
   wrap.innerHTML='';
 
   // 同步工具列按鈕狀態（讓使用者一眼看見狀態與功能反映）

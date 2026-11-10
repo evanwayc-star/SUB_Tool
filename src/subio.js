@@ -117,32 +117,43 @@ function showExportDialog() {
     session.close(); showToast('專案已變更，請重新開啟匯出視窗'); return false;
   };
 
-  const sec = (title, body) => `<div style="margin-bottom:20px"><div style="font-size:14px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">${title}</div>${body}</div>`;
-  const cb = (attrs, label) => `<label style="display:flex;align-items:center;padding:6px 0;cursor:pointer;font-size:15px;color:#e2e2e2;"><input type="checkbox" ${attrs} style="transform:scale(1.2);margin-right:8px;"> ${label}</label>`;
+  const sec = (title, body) => `<fieldset class="subtitle-export-section"><legend>${title}</legend>${body}</fieldset>`;
+  const cb = (attrs, label) => `<label class="subtitle-export-option"><input type="checkbox" ${attrs}><span>${label}</span></label>`;
 
   let html = sec('字幕格式',
     [['encore', 'Adobe Encore (.txt)', true, false], ['srt', 'SRT (.srt)', false, true], ['ass', 'ASS (.ass)', false, true], ['txt', '純文字 (.txt)', false, false], ['xlsx', 'Excel (.xlsx)', false, false]]
       .map(([v, l, d, supportMerge]) => {
         let row = cb(`data-fmt="${v}"${d ? ' checked' : ''}`, escapeHTML(l));
         if (supportMerge && showTrackChoices) {
-          row = `<div style="display:flex;align-items:center;gap:16px;">
+          row = `<div class="subtitle-export-format-row">
             ${row}
-            ${cb(`id="merge_${v}"`, '合成單一檔案')}
+            ${cb(`id="merge_${v}" aria-label="將 ${v.toUpperCase()} 合成單一檔案"`, '合成單一檔案')}
           </div>`;
         }
         return row;
       }).join(''));
 
   if (showTrackChoices)
-    html += sec('軌道',
-      tracks.map((tk, i) => cb(`data-tk="${i}" checked`, `${escapeHTML(tk.name)} <span style="color:var(--text-faint)">(${State.cues.filter(c => (c.track || 0) === i).length} 條)</span>`)).join('')
-      + `<div style="font-size:13px;color:var(--text-faint);margin-top:8px">Excel 會將所有勾選軌道合為一個檔案，每軌一個分頁</div>`);
+    html += sec('字幕軌道',
+      tracks.map((tk, i) => cb(`data-tk="${i}" checked`, `${escapeHTML(tk.name)} <span class="subtitle-export-count">(${State.cues.filter(c => (c.track || 0) === i).length} 條)</span>`)).join('')
+      + `<p class="subtitle-export-help">Excel 會將勾選軌道合為一個檔案，每軌一個分頁。</p>`);
 
   if (State.notes.length)
     html += sec(`備註（${State.notes.length} 條）`,
       cb('id="expNotesEdius"', 'Edius 格式') + cb('id="expNotesGeneral"', '一般格式'));
 
-  const session = openModal('匯出', html, [
+  html = `<div class="subtitle-export-dialog"><p class="subtitle-export-intro">勾選要輸出的格式與內容。</p><div class="subtitle-export-sections">${html}</div><p id="subtitleExportSummary" class="subtitle-export-summary" role="status" aria-live="polite"></p></div>`;
+  const updateSummary = () => {
+    if (!session.isCurrent()) return;
+    const formats = document.querySelectorAll('.subtitle-export-dialog [data-fmt]:checked').length;
+    const selectedTracks = showTrackChoices ? document.querySelectorAll('.subtitle-export-dialog [data-tk]:checked').length : tracks.length;
+    const notes = Number(!!$('expNotesEdius')?.checked) + Number(!!$('expNotesGeneral')?.checked);
+    $('subtitleExportSummary').textContent = [
+      ...(formats ? [`${formats} 種字幕格式`, `${selectedTracks} 個字幕軌道`] : []),
+      ...(notes ? [`${notes} 種備註格式`] : []),
+    ].join(' · ') || '尚未選擇輸出格式';
+  };
+  const session = openModal('匯出字幕與備註', html, [
     {
       label: '預設', act: () => {
         if (!current()) return;
@@ -152,6 +163,7 @@ function showExportDialog() {
         for (let i = 0; i < tks.length; i++) tks[i].checked = true;
         const ne = document.getElementById('expNotesEdius'); if(ne) ne.checked = false;
         const ng = document.getElementById('expNotesGeneral'); if(ng) ng.checked = false;
+        updateSummary();
       }
     },
     {
@@ -163,6 +175,7 @@ function showExportDialog() {
         for (let i = 0; i < tks.length; i++) tks[i].checked = true;
         const ne = document.getElementById('expNotesEdius'); if(ne) ne.checked = true;
         const ng = document.getElementById('expNotesGeneral'); if(ng) ng.checked = true;
+        updateSummary();
       }
     },
     {
@@ -197,8 +210,9 @@ function showExportDialog() {
       const result=await submission.write();
       if(result.message){setStatus(result.message,result.kind);showToast(result.toast);}
     }
-  }, { label: '取消', act: () => session.close() }]);
-
+  }, { label: '取消', act: () => session.close() }], { width: 'min(680px,94vw)' });
+  document.querySelectorAll('.subtitle-export-dialog input').forEach(input => input.addEventListener('change', updateSummary));
+  updateSummary();
 }
 
 /* This is a display draft while the modal is open.  It becomes an actual
@@ -318,14 +332,13 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     <div class="delivery-dialog">
       <div class="delivery-header">
         <div class="delivery-intro">
-          <p class="delivery-eyebrow">建立輸出項目</p>
           <p class="delivery-lead">設定格式、檔名與儲存位置，送出後可在匯出序列查看進度。</p>
           <p class="delivery-source" title="${escapeHTML(data.mediaName || '未命名專案')}">來源：${escapeHTML(data.mediaName || '未命名專案')}</p>
           <div id="evOutputDuration" class="delivery-duration-pill" data-seconds="${data.duration}">
             輸出時長 <b>${secToEncore(data.duration, data.fps, data.dropFrame)}</b>${data.hasCustomRange ? ' <span class="delivery-tag-custom">自訂範圍</span>' : ''}
           </div>
         </div>
-        <button id="evAddRowBtn" type="button" class="delivery-add-btn">＋ 新增輸出項目</button>
+        <button id="evAddRowBtn" type="button" class="delivery-add-btn">新增輸出項目</button>
       </div>
       <div class="delivery-list-heading"><span>輸出項目</span><span id="evRowCount" aria-live="polite"></span></div>
       <div id="evRowsContainer" class="delivery-rows"></div>
@@ -376,7 +389,6 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     return `
       <section class="delivery-card" aria-label="輸出項目 ${i + 1}">
         <div class="delivery-card-head">
-          <span class="delivery-item-number">${String(i + 1).padStart(2, '0')}</span>
           <span class="delivery-item-title">輸出項目 ${i + 1}</span>
           ${preset ? '<span class="delivery-fixed-badge">固定規格</span>' : ''}
           <button type="button" class="ev-del delivery-btn-del" data-idx="${i}" aria-label="刪除輸出項目 ${i + 1}" title="刪除此輸出項目">刪除</button>
@@ -388,8 +400,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
             </select>
           </label>
           ${!isWav ? `
-            <label class="delivery-field"><span>畫面尺寸</span>
-              <select class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 此格率為 ${displayMode.width}×${displayMode.height}，${displayMode.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
+            <div class="delivery-field"><label for="evRes${i}">畫面尺寸</label>
+              <select id="evRes${i}" class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 此格率為 ${displayMode.width}×${displayMode.height}，${displayMode.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
                 ${preset ? `<option value="${displayMode.height}" selected>${displayMode.width}×${displayMode.height}${displayMode.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
                 <option value="0" ${r.targetH===0?'selected':''}>專案畫布（${data.canvasW}×${data.canvasH}）</option>
                 <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
@@ -398,10 +410,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
                 <option value="custom" ${(r.targetH>0 && ![1080,720,2160].includes(r.targetH))?'selected':''}>自訂...</option>
                 `}
               </select>
-            </label>
             ${(!preset && r.targetH>0 && ![1080,720,2160].includes(r.targetH)) ?
               `<label class="delivery-field delivery-field--custom"><span>高度（px）</span><input type="number" class="ev-custom-res delivery-input" data-idx="${i}" value="${r.targetH}" min="16" step="2"></label>`
               : ''}
+            </div>
             <label class="delivery-field"><span>影格率</span>
               <select class="ev-fps delivery-select" data-idx="${i}" title="輸出影格率；維持原本播放時長" ${preset && r.format !== 'bd-iso'?'disabled':''}>
                 ${r.format === 'bd-iso' ? availableBdVideoModes(data.fps).map(mode => `<option value="${mode.fps}" ${r.targetFps === mode.fps ? 'selected' : ''}>${mode.fps} FPS · ${mode.label}</option>`).join('') : preset ? `<option value="${preset.fps}" selected>${preset.fps} FPS（固定）</option>` : `
@@ -443,7 +455,13 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     if (!session.isCurrent()) return;
     const c = $('evRowsContainer');
     if (!c) return;
-    c.innerHTML = list.rows().map((r, i) => renderRow(r, i)).join('');
+    const active = c.contains(document.activeElement) ? document.activeElement : null;
+    const focusClass = active && [...active.classList].find(name => name.startsWith('ev-'));
+    const focusIndex = active ? Number(active.dataset.idx) : -1;
+    const selection = active?.tagName === 'INPUT' && active.type === 'text'
+      ? [active.selectionStart, active.selectionEnd, active.selectionDirection] : null;
+    c.innerHTML = list.count() ? list.rows().map((r, i) => renderRow(r, i)).join('')
+      : '<p class="delivery-empty" role="status">尚未設定輸出項目。按「新增輸出項目」選擇格式與儲存位置。</p>';
     c.querySelectorAll('.ev-format').forEach(el => { el.title = el.selectedOptions[0]?.textContent || ''; });
     const rowCount = $('evRowCount');
     if (rowCount) rowCount.textContent = `${list.count()} 項`;
@@ -457,11 +475,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       after();
     });
     $$('.ev-custom-res').forEach(el => el.onchange = e => { list.setTargetHeight(idxOf(e), parseInt(e.target.value, 10)); after(); });
-    $$('.ev-fps').forEach(el => el.onchange = e => {
-      const idx = idxOf(e);
-      list.setTargetFps(idx, e.target.value); after();
-      document.querySelector(`.ev-fps[data-idx="${idx}"]`)?.focus();
-    });
+    $$('.ev-fps').forEach(el => el.onchange = e => { list.setTargetFps(idxOf(e), e.target.value); after(); });
     $$('.ev-kbps').forEach(el => el.onchange = e => list.setKbps(idxOf(e), e.target.value));
     // 文字欄位失焦時若重建整列，下一個被點擊的 input 會在 mouseup 前消失，
     // 看起來就像檔名完全無法輸入。輸入時同步草稿，失焦只更新驗證與欄位顯示。
@@ -504,9 +518,17 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       AudioRouting.openDeliveryOutputSettings(audioSpec, ({ saved, spec } = {}) => {
         if (!ownsWorkspace()) return;
         if (saved && spec) list.applyRow(idx, applyDeliveryAudioSpec(list.get(idx), spec));
-        void showExportVideoDialog({ deliverables: list.rows(), draft: data, ownsWorkspace });
+        void showExportVideoDialog({ deliverables: list.rows(), draft: data, ownsWorkspace, focusAudioRow: idx });
       }, { deliveryFormat });
     });
+    if (focusClass) {
+      const index = Math.min(focusIndex, list.count() - 1);
+      const target = c.querySelector(`.${focusClass}[data-idx="${index}"]`)
+        || (focusClass === 'ev-custom-res' ? c.querySelector(`.ev-res[data-idx="${index}"]`) : null)
+        || $('evAddRowBtn');
+      target.focus();
+      if (selection && target.tagName === 'INPUT' && target.type === 'text') target.setSelectionRange(...selection);
+    }
   }
 
   const checkConflicts = () => submission.previewConflicts();
@@ -566,6 +588,9 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     if (!session.isCurrent()) return;
     updateRows();
     checkConflicts();
+    if (Number.isInteger(initialDraft?.focusAudioRow)) {
+      document.querySelector(`.ev-audio-btn[data-idx="${initialDraft.focusAudioRow}"]`)?.focus();
+    }
   }, 20);
 }
 

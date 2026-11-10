@@ -323,7 +323,7 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
       </div>`}
       <div class="audio-delivery-presets"><span>${delivery?'輸出配置':'預設輸出配置'}</span><button id="audioOutputAllMono" type="button">全部專案音軌（Mono）</button>${presetButtons}</div>
       <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>${wavDelivery?'WAV 聲道群組':'輸出音軌'}</th><th>聲道格式</th><th>${delivery?'輸出聲道 ← 專案音軌':'專案音軌'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="audio-output-actions"><button id="audioOutputAdd" type="button">＋ 新增 ${wavDelivery?'群組':'Stream'}</button></div>
+      <div class="audio-output-actions"><button id="audioOutputAdd" type="button">新增${wavDelivery?' WAV 聲道群組':'輸出音軌'}</button></div>
     </div>`,
     [{label:'儲存輸出設定',primary:true,act:()=>{
       const current=editor.current();

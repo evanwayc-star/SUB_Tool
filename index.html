@@ -22,51 +22,50 @@
         <small id="appVersion"></small>
       </div>
 
-      <button class="icon" data-act="new" tabindex="-1" title="清空新建">🗑 <span class="lbl">開新專案</span></button>
-      <div class="sep"></div>
-      <button class="icon open-proj-btn" data-act="open-project" tabindex="-1" title="開啟專案 (.subtool)">📂 <span class="lbl">開啟專案</span></button>
-      <!-- 最近開啟：清單由主程序持有，這裡只顯示與送索引（見 electron/main.js project:recentList）。
-           .menu 的開合由 app.js 既有的通用邏輯處理，不必另外接線。 -->
-      <div class="menu" id="recentMenu"><button class="icon" id="recentBtn" tabindex="-1" title="最近開啟的專案">🕘 <span class="lbl">最近開啟</span></button><div class="items" id="recentItems"></div></div>
-      <div class="sep"></div>
-      <button class="icon" data-act="save-project" tabindex="-1" title="儲存專案 (Ctrl+S)">💾 <span class="lbl">儲存專案</span></button>
-      <button class="icon" data-act="save-as-project" tabindex="-1" title="另存新檔">💾 <span class="lbl">另存新檔</span></button>
-      <div class="sep"></div>
-      <button class="icon" data-act="open-media" tabindex="-1" title="匯入影片或音訊檔">🎬 <span class="lbl">開啟影音</span></button>
-      <div class="sep"></div>
-      <button class="icon" data-act="imp-auto" tabindex="-1" title="匯入字幕（自動辨識格式）">📄 <span class="lbl">匯入字幕</span></button>
-      <div class="sep"></div>
-      <button class="icon" data-act="exp-dialog" tabindex="-1" title="匯出字幕">💬 <span class="lbl">匯出字幕</span></button>
-      <div class="sep"></div>
-      <div class="fps-box" title="影格率 (Adobe Encore 時碼換算用)">
-        FPS <select id="fpsSel">
-          <option value="23.976">23.98</option>
-          <option value="24" selected>24</option>
-          <option value="25">25</option>
-          <option value="29.97df">29.97 (DF)</option>
-          <option value="29.97">29.97 (NDF)</option>
-          <option value="30">30</option>
-        </select>
+      <div class="menubar-group" role="group" aria-label="專案檔案">
+        <button class="icon" data-act="new" tabindex="-1" title="清空新建">🗑 <span class="lbl">開新專案</span></button>
+        <button class="icon open-proj-btn" data-act="open-project" tabindex="-1" title="開啟專案 (.subtool)">📂 <span class="lbl">開啟專案</span></button>
+        <!-- 最近開啟：清單由主程序持有，這裡只顯示與送索引（見 electron/main.js project:recentList）。
+             .menu 的開合由 app.js 既有的通用邏輯處理，不必另外接線。 -->
+        <div class="menu" id="recentMenu"><button class="icon" id="recentBtn" tabindex="-1" title="最近開啟的專案">🕘 <span class="lbl">最近開啟</span></button><div class="items" id="recentItems"></div></div>
+        <button class="icon" data-act="save-project" tabindex="-1" title="儲存專案 (Ctrl+S)">💾 <span class="lbl">儲存專案</span></button>
+        <button class="icon" data-act="save-as-project" tabindex="-1" title="另存新檔">💾 <span class="lbl">另存新檔</span></button>
       </div>
-
-      <button class="icon" data-act="project-settings" tabindex="-1" title="設定專案畫布解析度">▣ <span class="lbl">專案畫布</span></button>
-
-      <div class="spacer"></div>
-
-      <button class="auto-select-btn" id="autoSelectToggleBtnStatus" data-act="toggle-auto-select" tabindex="-1" title="播放時自動選取對應字幕 (Z)">不自動選取</button>
-      <div class="sep"></div>
-      <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" tabindex="-1" title="切換覆蓋狀態 (X)">不覆蓋</button>
-      <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep" tabindex="-1" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)" disabled>保留</button>
-      <div class="sep"></div>
-      <button class="pointer-seek-btn" id="pointerSeekModeBtn" data-act="toggle-pointer-seek" tabindex="-1" aria-pressed="false" title="滑鼠跳到其他時間點後繼續播放；按下切換為跳轉後暫停">跳轉繼續</button>
-
-      <div class="sep"></div>
-
-      <button class="icon" data-act="settings" tabindex="-1" title="自訂快捷鍵">⚙ <span class="lbl">設定</span></button>
-      <button class="icon desktop-only" data-act="cache-manage" tabindex="-1" title="管理轉檔快取（音軌／波形）">🗂 <span class="lbl">快取</span></button>
-      <button class="icon" id="asrMonitorBtn" data-act="asr-monitor" tabindex="-1" title="語音辨識進度" style="display:none"><span class="asr-monitor-ring" aria-hidden="true"></span><span class="lbl" id="asrMonitorLbl">🎙 辨識中 0%</span></button>
-      <button class="icon desktop-only" id="stMonitorBtn" data-act="queue-monitor" tabindex="-1" title="監控匯出佇列（.）" style="display:none"><span class="queue-monitor-ring" aria-hidden="true"></span><span class="lbl">監控序列</span></button>
-      <button class="icon desktop-only" data-act="exp-video" tabindex="-1" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV" style="display:none">🎞 <span class="lbl">匯出影片</span></button>
+      <div class="menubar-group" role="group" aria-label="影音與字幕檔案">
+        <button class="icon" data-act="open-media" tabindex="-1" title="匯入影片或音訊檔">🎬 <span class="lbl">開啟影音</span></button>
+        <button class="icon" data-act="imp-auto" tabindex="-1" title="匯入字幕（自動辨識格式）">📄 <span class="lbl">匯入字幕</span></button>
+        <button class="icon" data-act="exp-dialog" tabindex="-1" title="匯出字幕">💬 <span class="lbl">匯出字幕</span></button>
+      </div>
+      <div class="menubar-group" role="group" aria-label="專案規格">
+        <label class="fps-box" title="影格率 (Adobe Encore 時碼換算用)">
+          FPS <select id="fpsSel">
+            <option value="23.976">23.98</option>
+            <option value="24" selected>24</option>
+            <option value="25">25</option>
+            <option value="29.97df">29.97 (DF)</option>
+            <option value="29.97">29.97 (NDF)</option>
+            <option value="30">30</option>
+          </select>
+        </label>
+        <button class="icon" data-act="project-settings" tabindex="-1" title="設定專案畫布解析度">▣ <span class="lbl">專案畫布</span></button>
+      </div>
+      <div class="menubar-operations">
+        <div class="menubar-group" role="group" aria-label="編輯模式">
+          <button class="auto-select-btn" id="autoSelectToggleBtnStatus" data-act="toggle-auto-select" tabindex="-1" title="播放時自動選取對應字幕 (Z)">不自動選取</button>
+          <div class="sep"></div>
+          <button class="ow-toggle-btn" id="overwriteToggleBtnStatus" data-act="toggle-overwrite" tabindex="-1" title="切換覆蓋狀態 (X)">不覆蓋</button>
+          <button class="ow-keep-btn inactive-mode" id="overwriteKeepBtnStatus" data-act="toggle-ow-keep" tabindex="-1" title="當新字幕完全覆蓋其他字幕時的處理方式 (C)" disabled>保留</button>
+          <div class="sep"></div>
+          <button class="pointer-seek-btn" id="pointerSeekModeBtn" data-act="toggle-pointer-seek" tabindex="-1" aria-pressed="false" title="滑鼠跳到其他時間點後繼續播放；按下切換為跳轉後暫停">跳轉繼續</button>
+        </div>
+        <div class="menubar-group" role="group" aria-label="設定與匯出影片">
+          <button class="icon" data-act="settings" tabindex="-1" title="自訂快捷鍵">⚙ <span class="lbl">設定</span></button>
+          <button class="icon desktop-only" data-act="cache-manage" tabindex="-1" title="管理轉檔快取（音軌／波形）">🗂 <span class="lbl">快取</span></button>
+          <button class="icon" id="asrMonitorBtn" data-act="asr-monitor" tabindex="-1" title="語音辨識進度" style="display:none"><span class="asr-monitor-ring" aria-hidden="true"></span><span class="lbl" id="asrMonitorLbl">🎙 辨識中 0%</span></button>
+          <button class="icon desktop-only" id="stMonitorBtn" data-act="queue-monitor" tabindex="-1" title="監控匯出佇列（.）" style="display:none"><span class="queue-monitor-ring" aria-hidden="true"></span><span class="lbl">監控序列</span></button>
+          <button class="icon desktop-only" data-act="exp-video" tabindex="-1" title="匯出影片（ProRes / MP4）或依專案 A 軌匯出多聲道 WAV" style="display:none">🎞 <span class="lbl">匯出影片</span></button>
+        </div>
+      </div>
     </div>
 
     <!-- ===== 主體 ===== -->
@@ -92,33 +91,37 @@
           <div class="imglayer" id="imageLayer"></div>
           <div class="vsublayer" id="videoSub"></div>
           <div class="no-video" id="noVideo">
-            <b>尚未載入影音</b>
-            拖曳影片到此處，或點 <kbd>🎬 影音</kbd> 匯入<br>
-            支援 MP4 / MOV / MP3 / WAV（瀏覽器原生）<br>
-            MXF 等格式與多音軌將透過 ffmpeg 處理
+            <h2>尚未載入影音</h2>
+            <p>將影片或音訊拖到這裡，開始製作字幕。</p>
+            <div class="no-video-actions">
+              <button type="button" class="primary" data-act="open-media">開啟影音</button>
+              <button type="button" data-act="open-project">開啟專案</button>
+            </div>
           </div>
           <div class="speed-osd" id="speedOsd"></div>
         </div>
 
         <div class="transport">
-          <div class="btns">
-            <button class="icon" data-act="back1" title="後退 1 秒">⏮1</button>
-            <button class="icon" data-act="frame-back" title="後退 1 格 (←)">◀ǀ</button>
-            <button class="icon primary" id="playBtn" data-act="playpause" title="播放/暫停 (空白鍵)">▶</button>
-            <button class="icon" data-act="frame-fwd" title="前進 1 格 (→)">ǀ▶</button>
-            <button class="icon" data-act="fwd1" title="前進 1 秒">1⏭</button>
+          <div class="transport-controls">
+            <div class="btns">
+              <button class="icon" data-act="back1" title="後退 1 秒">⏮1</button>
+              <button class="icon" data-act="frame-back" title="後退 1 格 (←)">◀ǀ</button>
+              <button class="icon primary" id="playBtn" data-act="playpause" title="播放/暫停 (空白鍵)">▶</button>
+              <button class="icon" data-act="frame-fwd" title="前進 1 格 (→)">ǀ▶</button>
+              <button class="icon" data-act="fwd1" title="前進 1 秒">1⏭</button>
+            </div>
+            <div id="speedIndicator" class="speed-indicator" title="右鍵變更播放速度" aria-label="目前播放速度；右鍵變更">1x</div>
+            <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span><span class="tc-sep">/</span><span class="tc-duration"><span id="tcDur">00:00:00:00</span><span id="tcClock" class="tc-clock" hidden></span></span></div>
           </div>
-          <div id="speedIndicator" class="speed-indicator" title="右鍵變更播放速度" aria-label="目前播放速度；右鍵變更">1x</div>
-          <div class="tc"><span class="cur" id="tcCur" title="雙擊輸入時間、右鍵複製">00:00:00:00</span><span class="tc-sep">/</span><span class="tc-duration"><span id="tcDur">00:00:00:00</span><span id="tcClock" class="tc-clock" hidden></span></span></div>
-          <input type="range" id="seekBar" min="0" max="1000" value="0" step="1">
+          <input type="range" id="seekBar" aria-label="播放位置" min="0" max="1000" value="0" step="1">
           <div class="transport-tools">
-            <button class="icon tp-btn" data-act="exp-in" title="設定輸出起點 (快捷鍵 [)" style="font-size:11px; padding:2px 6px; min-width:unset;">[ In</button>
-            <button class="icon tp-btn" data-act="exp-out" title="設定輸出終點 (快捷鍵 ])" style="font-size:11px; padding:2px 6px; min-width:unset;">Out ]</button>
-            <button class="icon tp-btn" data-act="exp-clear" title="清除輸出範圍" style="font-size:11px; padding:2px 6px; min-width:unset;">✕</button>
+            <button class="icon tp-btn" data-act="exp-in" title="設定輸出起點 (快捷鍵 [)">[ In</button>
+            <button class="icon tp-btn" data-act="exp-out" title="設定輸出終點 (快捷鍵 ])">Out ]</button>
+            <button class="icon tp-btn" data-act="exp-clear" title="清除輸出範圍">✕</button>
             <div class="transport-sep" aria-hidden="true"></div>
-            <button class="icon tp-btn" data-act="safe-frame" id="safeFrameBtn" title="安全框：100%／90%／80% 安全區＋中心十字線（僅預覽參考，不燒入匯出）" style="font-size:11px; padding:2px 6px; min-width:unset;">⊹</button>
-            <button class="icon tp-btn" data-act="timecode-watermark" id="timecodeWatermarkBtn" title="顯示／隱藏時間碼浮水印（僅播放器監看，不燒入匯出）" aria-pressed="false" style="font-size:10px; padding:2px 5px; min-width:unset;">TC</button>
-            <button class="icon tp-btn" data-act="mixer" title="顯示／隱藏音量表與匯出軌道對應設定" style="font-size:11px; padding:2px 6px; min-width:unset;">🎚</button>
+            <button class="icon tp-btn" data-act="safe-frame" id="safeFrameBtn" title="安全框：100%／90%／80% 安全區＋中心十字線（僅預覽參考，不燒入匯出）">⊹</button>
+            <button class="icon tp-btn" data-act="timecode-watermark" id="timecodeWatermarkBtn" title="顯示／隱藏時間碼浮水印（僅播放器監看，不燒入匯出）" aria-pressed="false">TC</button>
+            <button class="icon tp-btn" data-act="mixer" title="顯示／隱藏音量表與匯出軌道對應設定">🎚</button>
           </div>
         </div>
 
@@ -135,7 +138,7 @@
           <span class="title">字幕列表</span>
           <!-- 軌道選單用黃色：它是「目前在看哪一軌」，是這一列裡要先讀到的資訊。
                總句數改白色——它是那一軌的附屬數字，不該比軌道名更搶眼。 -->
-          <select id="listTrackSel" title="切換顯示的字幕軌道" style="margin-left:8px;max-width:160px;background:var(--panel2);color:#e4bd60;font-weight:600;font-size:15px;border:1px solid var(--border2);padding:2px 6px;border-radius:3px;"></select>
+          <select id="listTrackSel" aria-label="字幕軌道" title="切換顯示的字幕軌道" style="margin-left:8px;max-width:160px;background:var(--panel2);color:#e4bd60;font-weight:600;font-size:15px;border:1px solid var(--border2);padding:2px 6px;border-radius:3px;"></select>
           <span class="count" id="subCount" style="margin-left:8px; color:var(--text); font-weight:bold;">0 句</span>
           <select id="subStyleFilter" title="篩選樣式" style="margin-left:8px;max-width:140px;background:var(--panel2);color:var(--text);font-size:13px;border:1px solid var(--border2);padding:2px 6px;border-radius:3px;display:none;"></select>
           <button class="icon" data-act="add-cue-above" title="於選取字幕上方新增空白" style="margin-left:auto;">⬆＋</button>
@@ -368,20 +371,21 @@
   </div>
 
   <!-- 浮動搜尋視窗 -->
-  <div class="search-dialog" id="searchDialog" style="display:none">
+  <div class="search-dialog" id="searchDialog" role="dialog" aria-labelledby="searchDialogTitle" style="display:none">
     <div class="sd-head" id="searchDialogHead">
       <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
-        <span>🔍 搜尋 / 取代</span>
+        <span id="searchDialogTitle">搜尋 / 取代</span>
         <span id="searchDialogTrackBadge" class="sd-track-badge" title="目前搜尋作用的字幕軌道">[軌道 1]</span>
       </div>
-      <button class="sd-close" data-act="search-close" title="關閉">✕</button>
+      <button class="sd-close" data-act="search-close" title="關閉搜尋 / 取代" aria-label="關閉搜尋 / 取代">✕</button>
     </div>
-    <div class="sr-row"><input type="text" id="searchInput" placeholder="搜尋… 多關鍵字用 || 分隔"><button class="mini"
+    <div class="sr-row"><input type="text" id="searchInput" aria-label="搜尋文字" placeholder="搜尋文字"><button class="mini"
         data-act="search-clear" title="清除搜尋">✕</button><button class="mini" data-act="search-prev"
         title="上一個">↑</button><button class="mini" data-act="search-next" title="下一個">↓</button><button class="mini"
-        data-act="search-select-all" title="全選所有符合的字幕">全選</button><span id="searchCount"></span></div>
-    <div class="sr-row"><input type="text" id="replaceInput" placeholder="取代為…"><button class="mini"
+        data-act="search-select-all" title="全選所有符合的字幕">全選</button><span id="searchCount" role="status"></span></div>
+    <div class="sr-row"><input type="text" id="replaceInput" aria-label="取代文字" placeholder="取代為…"><button class="mini"
         data-act="replace-one">取代</button><button class="mini" data-act="replace-all">全取代</button></div>
+    <p class="sd-help" id="searchFeedback">多關鍵字用 || 分隔。Enter 下一個，Shift+Enter 上一個。</p>
   </div>
 
   <!-- hidden inputs -->
@@ -393,40 +397,41 @@
   <div class="ctxmenu" id="ctxmenu"></div>
 
   <!-- 動作紀錄面板 -->
-  <div class="float-panel" id="historyPanel">
-    <div class="fp-head"><span>🕘 動作紀錄</span>
+  <div class="float-panel" id="historyPanel" role="region" aria-labelledby="historyPanelTitle">
+    <div class="fp-head"><span id="historyPanelTitle">動作紀錄</span>
       <span class="spacer"></span>
       <button class="icon" data-act="undo" title="復原 (Ctrl+Z)">↶</button>
       <button class="icon" data-act="redo" title="重做 (Ctrl+Shift+Z)">↷</button>
-      <button class="fp-close" data-act="close-history">✕</button>
+      <button class="fp-close" data-act="close-history" aria-label="關閉動作紀錄">✕</button>
     </div>
     <div class="fp-body" id="historyList"></div>
   </div>
 
   <!-- 字幕檢查面板 -->
-  <div class="float-panel check-float-panel" id="checkPanel">
-    <div class="fp-head"><span>✓ 字幕檢查</span><span class="spacer"></span><button class="fp-close"
-        data-act="close-check">✕</button></div>
+  <div class="float-panel check-float-panel" id="checkPanel" role="dialog" aria-labelledby="checkPanelTitle">
+    <div class="fp-head"><span id="checkPanelTitle">字幕檢查</span><span class="spacer"></span><button class="fp-close"
+        data-act="close-check" aria-label="關閉字幕檢查">✕</button></div>
     <div class="fp-body check-panel">
+      <p class="cp-summary" id="checkSummary" role="status"></p>
       <div class="cp-row cp-issue" id="cpNoTime"><span class="cp-label">[無時間碼]</span><span class="cp-nums"></span>
       </div>
       <div class="cp-row cp-issue" id="cpOverlap"><span class="cp-label">時間碼重疊</span><span class="cp-nums"></span>
       </div>
       <div class="cp-row cp-issue" id="cpMulti"><span class="cp-label">字幕３行以上</span><span class="cp-nums"></span></div>
       <div class="cp-row cp-issue" id="cpTrim"><span class="cp-label">頭尾為空白</span><button class="mini cp-act"
-          data-act="trim-track" title="自動刪除該軌道所有頭尾空白">Trim</button><span class="cp-nums"></span></div>
+          data-act="trim-track" title="自動刪除該軌道所有頭尾空白">清除</button><span class="cp-nums"></span></div>
       <div class="cp-row cp-issue" id="cpOverLen"><span class="cp-label">超過<input id="cpLenInput" type="number" min="1"
-            max="9999" placeholder="—" title="輸入字數上限，超過的部分會以紅色粗體顯示">字</span><span class="cp-nums"></span></div>
+            max="9999" placeholder="—" aria-label="每行字數上限" title="輸入字數上限，超過的部分會以紅色粗體顯示">字</span><span class="cp-nums"></span></div>
       <div class="cp-row cp-issue cp-contains-row" id="cpContains"><span class="cp-label">包含文字</span><input
-          id="cpContainsInput" type="text" value="  ||　　|| 　||　 "
+          id="cpContainsInput" type="text" value="  ||　　|| 　||　 " aria-label="檢查包含的文字"
           title="以 || 分隔多個關鍵字（OR 搜尋，不分大小寫）&#10;預設：連續兩個半形空白、兩個全形空白、半形+全形、全形+半形"><span class="cp-nums"></span></div>
       <div class="cp-row cp-issue" id="cpNonTraditional"><span class="cp-label"
           title="檢查常見簡體字，以及日文假名、韓文、俄文、零寬空白等非允許字元。繁簡共用字（如「后、干、台、里」）不會誤報。">含非繁中等字元</span><span class="cp-nums"></span></div>
-      <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
+      <div class="cp-sep" role="separator"></div>
       <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span><span class="cp-nums"></span></div>
       <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span><span class="cp-nums"></span></div>
       <div class="cp-row" id="cpConsecutiveIdentical"><span class="cp-label">　連續相同</span><span class="cp-nums"></span></div>
-      <div class="cp-sep">＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝</div>
+      <div class="cp-sep" role="separator"></div>
       <div class="cp-row" style="justify-content:center;margin:8px 0;"><button class="mini" data-act="remove-srt-tags" title="清除所有字幕的 &lt;&gt; 與 {} 標籤">🗑 清除所有 SRT 標籤</button></div>
       <div class="cp-row" id="cpSrtB"><span class="cp-label">　粗體 &lt;b&gt;</span><span class="cp-nums"></span></div>
       <div class="cp-row" id="cpSrtI"><span class="cp-label">　斜體 &lt;i&gt;</span><span class="cp-nums"></span></div>
@@ -437,21 +442,21 @@
   </div>
 
   <!-- 備註面板 -->
-  <div class="float-panel" id="notesPanel">
-    <div class="fp-head"><span>📌 備註</span>
+  <div class="float-panel" id="notesPanel" role="region" aria-labelledby="notesPanelTitle">
+    <div class="fp-head"><span id="notesPanelTitle">備註</span>
       <span class="spacer"></span>
       <button class="icon" data-act="export-notes" title="匯出備註為 CSV">⬇ 匯出</button>
       <button class="icon" data-act="add-note" title="加入目前時間點的備註">＋ 新增</button>
       <button class="icon" data-act="clear-notes" title="清除所有備註">🗑 清除全部</button>
-      <button class="fp-close" data-act="close-notes">✕</button>
+      <button class="fp-close" data-act="close-notes" aria-label="關閉備註">✕</button>
     </div>
     <div class="fp-body" id="notesList"></div>
   </div>
 
   <!-- 混音器面板 -->
-  <div class="float-panel mixer-panel" id="mixerPanel">
-    <div class="fp-head"><span>🎚 音量表</span><span class="spacer"></span><button class="fp-close"
-        data-act="close-mixer">✕</button></div>
+  <div class="float-panel mixer-panel" id="mixerPanel" role="region" aria-labelledby="mixerPanelTitle">
+    <div class="fp-head"><span id="mixerPanelTitle">音量表</span><span class="spacer"></span><button class="fp-close"
+        data-act="close-mixer" aria-label="關閉音量表">✕</button></div>
     <div class="fp-body">
       <div class="mixer-toolbar">
         <div class="mx-tool-group">
@@ -470,38 +475,39 @@
   </div>
 
   <!-- 調整面板 -->
-  <div class="float-panel" id="shiftPanel">
-    <div class="fp-head"><span>⟷ 調整</span><span class="spacer"></span><button class="fp-close"
-        data-act="close-shift">✕</button></div>
+  <div class="float-panel" id="shiftPanel" role="region" aria-labelledby="shiftPanelTitle">
+    <div class="fp-head"><span id="shiftPanelTitle">調整字幕時間</span><span class="spacer"></span><button class="fp-close"
+        data-act="close-shift" aria-label="關閉調整字幕時間">✕</button></div>
     <div class="fp-body shift-body">
+      <label for="tcShiftSel" class="shift-label">套用範圍</label>
       <select id="tcShiftSel">
         <option value="track">當前軌道－所有字幕</option>
         <option value="sel">當前軌道－已選擇的字幕</option>
         <option value="all">所有軌道－所有字幕</option>
       </select>
-      <div class="shift-tabs">
-        <button class="shift-tab active" data-tab="tc">時間碼位移</button>
-        <button class="shift-tab" data-tab="dur">調整持續時間</button>
+      <div class="shift-tabs" role="group" aria-label="調整方式">
+        <button class="shift-tab active" aria-pressed="true" data-tab="tc">時間碼位移</button>
+        <button class="shift-tab" aria-pressed="false" data-tab="dur">調整持續時間</button>
       </div>
       <div class="shift-page" id="shiftPageTc">
         <div class="shift-row">
-          <input type="text" id="tcShiftInput" value="00:00:00:00" placeholder="00:00:00:00" title="時:分:秒:格">
+          <input type="text" id="tcShiftInput" aria-label="位移量（時分秒格）" value="00:00:00:00" placeholder="00:00:00:00" title="時:分:秒:格">
           <button class="icon" data-act="shift-back">◀ 往前</button>
           <button class="icon" data-act="shift-fwd">往後 ▶</button>
         </div>
       </div>
       <div class="shift-page" id="shiftPageDur" style="display:none">
-        <select id="durAdjMode" style="width:100%">
+        <select id="durAdjMode" aria-label="時長調整方式" style="width:100%">
           <option value="tc">增減時長（時:分:秒:格）</option>
           <option value="pct">設為百分比</option>
         </select>
         <div class="shift-row" id="durAdjTcRow">
-          <input type="text" id="durAdjTcInput" value="00:00:00:00" placeholder="00:00:00:00" title="時:分:秒:格">
+          <input type="text" id="durAdjTcInput" aria-label="時長變化量（時分秒格）" value="00:00:00:00" placeholder="00:00:00:00" title="時:分:秒:格">
           <button class="icon" data-act="dur-adj-sub">－</button>
           <button class="icon" data-act="dur-adj-add">＋</button>
         </div>
         <div class="shift-row" id="durAdjPctRow" style="display:none">
-          <input type="number" id="durAdjPctInput" min="1" max="999" value="100" placeholder="100"
+          <input type="number" id="durAdjPctInput" aria-label="時長百分比" min="1" max="999" value="100" placeholder="100"
             style="width:66px;text-align:center"> %
           <button class="icon" data-act="dur-adj-pct">套用</button>
         </div>
@@ -513,8 +519,13 @@
 
   <!-- modal -->
   <div class="modal-bg" id="modalBg">
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-      <h3 id="modalTitle">說明</h3>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1">
+      <div class="mhead">
+        <h3 id="modalTitle">說明</h3>
+        <button type="button" class="mclose" data-act="modal-close" aria-label="關閉視窗" title="關閉視窗（Esc）">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4 4 8 8m0-8-8 8"/></svg>
+        </button>
+      </div>
       <div class="mbody" id="modalBody"></div>
       <div class="mfoot" id="modalFoot"><button class="primary" data-act="modal-close">關閉</button></div>
     </div>

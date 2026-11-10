@@ -689,7 +689,6 @@ export function openAsrMonitorDialog(session) {
         <div class="asr-card-heading">
           ${asrIcon('progress')}
           <div class="asr-heading-copy">
-            <span class="asr-eyebrow">背景工作</span>
             <h4 id="asrMonitorSummaryTitle">${taskTitle}</h4>
           </div>
           <span class="asr-provider-badge">${escapeHTML(providerName)}</span>
@@ -961,7 +960,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     }).join('');
     const total=clips.length>1?`<span class="asr-duration-pill">總計約 ${secToEncore(totalDur,State.fps,State.dropFrame)}</span>`:'';
     return {
-      heading:`${asrIcon('source')}<div class="asr-heading-copy"><span class="asr-eyebrow">本次輸入</span><h4 id="asrSourceTitle">已選取 ${clips.length} 個音訊來源</h4></div>${total}`,
+      heading:`${asrIcon('source')}<div class="asr-heading-copy"><h4 id="asrSourceTitle">已選取 ${clips.length} 個音訊來源</h4></div>${total}`,
       items,
     };
   }
@@ -986,17 +985,14 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         </div>
         <div class="asr-source-list" role="list">${initialSourceSummary.items}</div>
         <div id="asrClipSelectorRow" class="asr-field asr-source-selector" style="display:${allAvailableClips.length > 1 ? 'flex' : 'none'};">
-          <label for="asrClipSelect">指定辨識素材（多軌／人聲分離軌）</label>
+          <label for="asrClipSelect">選擇辨識素材</label>
           <select id="asrClipSelect">${clipChoicesHtml}</select>
           <div class="asr-helper">可選擇主要視訊聲音或已匯入的人聲分離軌道（例如 Demucs / UVR 分離之 vocals.wav）。</div>
         </div>
-        <div class="asr-callout asr-vocal-callout">
-          <div class="asr-section-icon">${asrIcon('info')}</div>
-          <div>
-            <strong>💡 人聲分離技巧：</strong>
-            <span class="asr-helper">若影片伴奏或環境雜音較大，可先使用 AI 工具（如 UVR5 或 Demucs）分離出純人聲（vocals.wav），匯入時間軸音軌後於此處直接選取該音軌進行辨識。</span>
-          </div>
-        </div>
+        <details class="asr-inline-help">
+          <summary>人聲分離提示</summary>
+          <p>伴奏或環境音蓋過人聲時，可先用 UVR5 或 Demucs 分離人聲。將 vocals.wav 匯入時間軸後，在上方選為辨識素材。</p>
+        </details>
         <div id="asrRecognitionAudioSourceRow" class="asr-field asr-source-selector" style="display:${recognitionAudioChoices.length > 1 ? 'flex' : 'none'};">
           <label for="asrRecognitionAudioSource">辨識音訊來源</label>
           <select id="asrRecognitionAudioSource">${recognitionAudioOptions}</select>
@@ -1026,7 +1022,6 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <div class="asr-card-heading asr-card-heading-compact">
             ${asrIcon('transcript')}
             <div class="asr-heading-copy">
-              <span class="asr-eyebrow">內容與輸出</span>
               <h4 id="asrContentTitle">${initialTaskMode === 'align' ? '逐行文字稿' : '辨識輸出'}</h4>
             </div>
           </div>
@@ -1051,7 +1046,6 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           <div class="asr-card-heading asr-card-heading-compact">
             ${asrIcon('engine')}
             <div class="asr-heading-copy">
-              <span class="asr-eyebrow">處理設定</span>
               <h4 id="asrEngineTitle">辨識引擎</h4>
             </div>
             <span id="asrProviderBadge" class="asr-provider-badge">${escapeHTML(ASR_PROVIDER_UI_META[conf.provider]?.badge || '')}</span>

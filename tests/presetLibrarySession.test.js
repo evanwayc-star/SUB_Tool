@@ -139,9 +139,9 @@ describe('常用樣式 module 的工作歸屬', () => {
     const pending=deferred(); window.subtool={configSave:()=>pending.promise};
     click('#tsPresetMgr'); click('[data-pre-del="0"]');
     ui.closeModal(); click('#tsPresetMgr');
-    expect(document.querySelector('[data-pre-edit="0"]').parentElement.textContent).toContain('B');
+    expect(document.querySelector('[data-pre-edit="0"]').closest('.preset-library-row').querySelector('.preset-library-name').textContent).toContain('B');
     ui.showToast('新視窗'); pending.resolve(false);
-    await vi.waitFor(()=>expect(document.querySelector('[data-pre-edit="0"]').parentElement.textContent).toContain('A'));
+    await vi.waitFor(()=>expect(document.querySelector('[data-pre-edit="0"]').closest('.preset-library-row').querySelector('.preset-library-name').textContent).toContain('A'));
     expect(document.getElementById('toast').textContent).toBe('新視窗');
     click('[data-pre-apply="1"]');
     expect(state.tracks[0].fontSize).toBe(30);

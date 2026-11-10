@@ -26,6 +26,36 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers(); delete window.subtool; });
 
 describe('modal lifecycle ownership', () => {
+  it('關閉後已移到另一個面板的焦點不會被遲到的還原搶走',()=>{
+    const trigger=document.createElement('button');
+    const next=document.createElement('select');
+    document.body.append(trigger,next);
+    document.querySelector('.modal').tabIndex=-1;
+    trigger.focus();
+    ui.openModal('設定','');
+    vi.runAllTimers();
+    expect(document.activeElement).toBe(document.querySelector('.modal'));
+    ui.closeModal();
+    next.focus();
+    vi.runAllTimers();
+    expect(document.activeElement).toBe(next);
+  });
+  it('快取查詢失敗後可重新整理，清理期間不重複送出且錯誤留在視窗內',async()=>{
+    const {State}=await import('../src/state.js');State.mediaPath=null;
+    const info=vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({root:'C:/cache',folders:1,bytes:100});
+    let fail;const cleanup=new Promise((_resolve,reject)=>{fail=reject;});
+    window.subtool={cacheInfo:info,cacheCleanOrphans:vi.fn(()=>cleanup)};
+    await ui.openCacheDialog();
+    const refresh=document.getElementById('cacheRefresh');expect(refresh).not.toBeNull();
+    await refresh.onclick();expect(info).toHaveBeenCalledTimes(2);
+    const clean=document.getElementById('cacheCleanOrphans');
+    const pending=clean.onclick();await clean.onclick();
+    expect(window.subtool.cacheCleanOrphans).toHaveBeenCalledOnce();expect(clean.disabled).toBe(true);
+    fail(new Error('busy'));await pending;
+    expect(clean.disabled).toBe(false);
+    expect(document.getElementById('cacheActionError').textContent).toContain('busy');
+    expect(document.getElementById('cacheActionError').hidden).toBe(false);
+  });
   it('快取視窗列目前素材的共享保存進度，清楚區分中央用量與待重驗紀錄',async()=>{
     const {State}=await import('../src/state.js');State.mediaPath='C:/NAS/movie.mov';
     window.subtool={cacheInfo:vi.fn(async()=>({root:'C:/local',folders:0,bytes:0,source:{path:State.mediaPath,locations:[{

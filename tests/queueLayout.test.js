@@ -10,7 +10,7 @@ import queueStore from '../electron/queue-store.js';
 const queueHtml = readFileSync(new URL('../electron/queue.html', import.meta.url), 'utf8');
 const openWindows = [];
 
-async function openQueueWindow(jobs) {
+async function openQueueWindow(jobs, { getAll } = {}) {
   const queueAPI = {
     exactFrameRate: rate => frameRates.exactDeliveryFrameRate(rate),
     getAll: vi.fn().mockResolvedValue({ jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: deliveryFormats.DELIVERY_FORMAT_PRESETS }),
@@ -29,6 +29,7 @@ async function openQueueWindow(jobs) {
     showItemInFolder: vi.fn().mockResolvedValue(),
     onUpdate: vi.fn()
   };
+  if (getAll) queueAPI.getAll = getAll;
   const dom = new JSDOM(queueHtml, {
     runScripts: 'dangerously',
     pretendToBeVisual: true,
@@ -48,6 +49,159 @@ async function openQueueWindow(jobs) {
 
 afterEach(() => {
   while (openWindows.length) openWindows.pop().close();
+});
+
+describe('佇列更新與讀取恢復', () => {
+  const failed = { id: 'failed', attempt: 1, status: 'failed', errorMsg: '轉碼失敗，請檢查素材', payload: { outPath: 'C:/out/a.mp4' } };
+  const running = { id: 'running', status: 'running', pct: 10, payload: { outPath: 'C:/out/b.mp4' } };
+  const snapshot = jobs => ({ jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: deliveryFormats.DELIVERY_FORMAT_PRESETS });
+  const settle = document => new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
+
+  it('進度更新與排序變動保留同一失敗詳情及真實鍵盤焦點，其他進度仍更新', async () => {
+    const { document, queueAPI } = await openQueueWindow([running, failed]);
+    const card = document.querySelector('[data-job-id="failed"]');
+    const detail = card.querySelector('details');
+    detail.open = true;
+    const button = card.querySelector('[data-action="copy-error"]');
+    button.focus();
+    for (const jobs of [[{ ...running, pct: 35 }, structuredClone(failed)], [structuredClone(failed), { ...running, pct: 70 }]]) {
+      queueAPI.getAll.mockResolvedValue(snapshot(jobs));
+      queueAPI.onUpdate.mock.calls[0][0]();
+      await settle(document);
+      expect(document.querySelector('[data-job-id="failed"]') === card).toBe(true);
+      expect(detail.open).toBe(true);
+      expect(document.activeElement === button).toBe(true);
+      expect(document.querySelector('[data-job-id="running"] [role="progressbar"]').getAttribute('aria-valuenow')).toBe(jobs.find(job => job.id === 'running').pct.toFixed(1));
+    }
+    expect([...document.querySelectorAll('#unfinishedJobList .job')].map(card => card.dataset.jobId)).toEqual(['failed', 'running']);
+    button.click();
+    await vi.waitFor(() => expect(button.textContent).toBe('已複製！'));
+    expect(document.defaultView.navigator.clipboard.writeText).toHaveBeenCalledWith(failed.errorMsg);
+  });
+
+  it('執行進度更新不重建正在查看的完成紀錄或移走焦點', async () => {
+    const done = { id: 'done', status: 'done', payload: { outPath: 'C:/out/complete.mp4' } };
+    const { document, queueAPI } = await openQueueWindow([done, running]);
+    const history = document.getElementById('completedHistory');
+    history.open = true;
+    const button = document.querySelector('[data-job-id="done"] [data-action="show-output"]');
+    button.focus();
+    queueAPI.getAll.mockResolvedValue(snapshot([done, { ...running, pct: 70 }]));
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await settle(document);
+    expect(history.open).toBe(true);
+    expect(document.activeElement === button).toBe(true);
+    expect(button.isConnected).toBe(true);
+    button.click();
+    expect(queueAPI.showItemInFolder).toHaveBeenCalledWith(done.payload.outPath);
+  });
+
+  it('首次讀取失敗有可操作的重試入口，成功後顯示真實空狀態', async () => {
+    const getAll = vi.fn().mockRejectedValueOnce(new Error('佇列服務沒有回應')).mockResolvedValue(snapshot([]));
+    const { document, queueAPI } = await openQueueWindow([], { getAll });
+    const notice = document.getElementById('queueLoadError');
+    expect(notice?.hidden).toBe(false);
+    expect(document.defaultView.getComputedStyle(notice).display).not.toBe('none');
+    expect(notice.textContent).toContain('無法讀取匯出佇列');
+    expect(document.getElementById('activeCount').textContent).toBe('—');
+    expect(document.getElementById('pauseToggleBtn').disabled).toBe(true);
+    expect(document.getElementById('concurrencySel').disabled).toBe(true);
+    expect(document.getElementById('unfinishedJobList').textContent).not.toContain('目前沒有匯出工作');
+    const retry = document.getElementById('reloadQueueBtn');
+    retry.focus();
+    retry.click();
+    await vi.waitFor(() => expect(notice.hidden).toBe(true));
+    expect(document.defaultView.getComputedStyle(notice).display).toBe('none');
+    expect(queueAPI.getAll).toHaveBeenCalledTimes(2);
+    expect(document.getElementById('unfinishedJobList').textContent).toContain('目前沒有匯出工作');
+    expect(document.getElementById('activeCount').textContent).toBe('0');
+    expect(document.getElementById('pauseToggleBtn').disabled).toBe(false);
+    expect(document.getElementById('concurrencySel').disabled).toBe(false);
+    expect(document.activeElement).toBe(document.getElementById('unfinishedHeading'));
+  });
+
+  it('更新讀取失敗保留工作與焦點，純文字錯誤可重試且等待期間禁止重複點擊', async () => {
+    const { document, queueAPI } = await openQueueWindow([failed, running]);
+    const card = document.querySelector('[data-job-id="failed"]');
+    card.querySelector('details').open = true;
+    const copy = card.querySelector('[data-action="copy-error"]');
+    copy.focus();
+    queueAPI.getAll.mockRejectedValueOnce(new Error('連線 <img id="queue-load-injected"> 中斷'));
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await settle(document);
+    const notice = document.getElementById('queueLoadError');
+    expect(notice?.hidden).toBe(false);
+    expect(notice.textContent).toContain('仍顯示上次讀取的狀態');
+    expect(notice.textContent).toContain('連線 <img id="queue-load-injected"> 中斷');
+    expect(document.getElementById('queue-load-injected')).toBeNull();
+    expect(document.activeElement).toBe(copy);
+    expect(document.querySelector('[data-job-id="failed"]')).toBe(card);
+    expect(card.querySelector('details').open).toBe(true);
+    let finish;
+    queueAPI.getAll.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const retry = document.getElementById('reloadQueueBtn');
+    retry.click(); retry.click();
+    expect(queueAPI.getAll).toHaveBeenCalledTimes(3);
+    expect(retry.disabled).toBe(true);
+    expect(retry.textContent).toContain('重新讀取中');
+    expect(document.getElementById('queueBoard').getAttribute('aria-busy')).toBe('true');
+    finish(snapshot([failed, { ...running, pct: 90 }]));
+    await vi.waitFor(() => expect(notice.hidden).toBe(true));
+    expect(retry.disabled).toBe(false);
+    expect(document.getElementById('queueBoard').getAttribute('aria-busy')).toBe('false');
+    expect(document.activeElement).toBe(copy);
+    expect(document.querySelector('[data-job-id="running"] .job-status').textContent).toContain('90.0%');
+  });
+
+  it.each(['success', 'failure'])('較舊讀取的 %s 不覆蓋較新結果或重新顯示錯誤', async outcome => {
+    const { document, queueAPI } = await openQueueWindow([running]);
+    let finish, fail;
+    queueAPI.getAll.mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+    queueAPI.onUpdate.mock.calls[0][0]();
+    queueAPI.getAll.mockResolvedValueOnce(snapshot([{ ...running, pct: 90 }]));
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await settle(document);
+    if (outcome === 'success') finish(snapshot([{ ...running, pct: 20 }]));
+    else fail(new Error('過期讀取錯誤'));
+    await settle(document);
+    expect(document.querySelector('.job-status').textContent).toContain('90.0%');
+    expect(document.getElementById('queueLoadError')?.hidden).toBe(true);
+  });
+
+  it('較新讀取失敗後舊成功不能收起錯誤，重試再失敗仍可繼續操作', async () => {
+    const { document, queueAPI } = await openQueueWindow([running]);
+    let finish;
+    queueAPI.getAll.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    queueAPI.onUpdate.mock.calls[0][0]();
+    queueAPI.getAll.mockRejectedValueOnce(new Error('本次讀取失敗'));
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await settle(document);
+    finish(snapshot([{ ...running, pct: 70 }]));
+    await settle(document);
+    const notice = document.getElementById('queueLoadError');
+    expect(document.defaultView.getComputedStyle(notice).display).not.toBe('none');
+    expect(notice.textContent).toContain('本次讀取失敗');
+    expect(document.querySelector('.job-status').textContent).toContain('10.0%');
+    queueAPI.getAll.mockRejectedValueOnce(new Error('暫時無法重新讀取'));
+    const retry = document.getElementById('reloadQueueBtn');
+    retry.focus(); retry.click();
+    await vi.waitFor(() => expect(retry.disabled).toBe(false));
+    expect(document.activeElement === retry).toBe(true);
+    expect(notice.textContent).toContain('暫時無法重新讀取');
+    expect(document.querySelector('.job-status').textContent).toContain('10.0%');
+  });
+
+  it('視窗關閉後的讀取失敗不新增錯誤介面', async () => {
+    const { document, queueAPI } = await openQueueWindow([running]);
+    let fail;
+    queueAPI.getAll.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    queueAPI.onUpdate.mock.calls[0][0]();
+    document.defaultView.dispatchEvent(new document.defaultView.Event('pagehide'));
+    fail(new Error('已關閉視窗的錯誤'));
+    await settle(document);
+    expect(document.getElementById('queueLoadError')?.hidden).toBe(true);
+    expect(document.body.textContent).not.toContain('已關閉視窗的錯誤');
+  });
 });
 
 it('暫停後續工作明示目前轉碼繼續，按鈕只切換排程而不停止工作', async () => {
@@ -348,6 +502,7 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(document.activeElement).toBe(input); expect(input.value).toBe('9000');
     editor.querySelector('[data-f="cancel"]').click();
     expect(queueAPI.updateDelivery).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-job-id="editing"]').draggable).toBe(true);
     document.querySelector('[data-job-id="editing"] [data-action="edit"]').click();
     expect(document.querySelector('.job-editor [data-f="kbps"]').value).toBe('8000');
   });
@@ -438,12 +593,13 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(button.disabled).toBe(false);
   });
 
-  it('clipboard等待期間queue重繪不讓舊回應更動新card', async () => {
+  it('clipboard等待期間新attempt不讓舊回應更動新card', async () => {
     const { document, queueAPI } = await openQueueWindow([{ id: 'failed', status: 'failed', errorMsg: 'failed', payload: {} }]);
     let finish;
     document.defaultView.navigator.clipboard.writeText.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const old = document.querySelector('[data-action="copy-error"]');
     old.click();
+    queueAPI.getAll.mockResolvedValue({ jobs: [{ id: 'failed', attempt: 2, status: 'failed', errorMsg: '新的失敗', payload: {} }], concurrency: 1 });
     queueAPI.onUpdate.mock.calls[0][0]();
     await vi.waitFor(() => expect(document.querySelector('[data-action="copy-error"]')).not.toBe(old));
     const fresh = document.querySelector('[data-action="copy-error"]');
