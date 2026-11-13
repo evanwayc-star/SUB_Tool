@@ -71,7 +71,7 @@ it.each(['close', 'closeAllConnections'])('真 before-quit 的 HTTP %s 拋錯取
   const context = {
     app: { on: (_event, fn) => { beforeQuit = fn; }, quit() {} }, _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false,
     audioNormalizationJobs: new Map(), mediaProbe: null, ffmpegExecution: owner(), deliveryCapabilities: owner(),
-    speechCompressionRuntime: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(),
+    speechCompressionRuntime: owner(), speechAudioReader: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(),
     nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
     QueueManager: { prepareForShutdown: async () => {}, cancelShutdown: async () => {} },
     clipAudioCache: { waitForIdle: async () => {} }, clipFrameCache: { waitForIdle: async () => {} },

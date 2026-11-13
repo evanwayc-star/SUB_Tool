@@ -172,35 +172,42 @@ class AudioEngineCore {
   /* decodeAudioData starts at the decoded audio stream, while source seconds
      start at video (or the selected audio-only stream). Only container evidence
      permits moving PCM; processed WAVs already have source zero. */
-  async normalizeSourceAudioBuffer(buffer,{url=null,file=null,metadata=null,sourceStream=0,owns=()=>true,signal}={}) {
+  async getSourceAudioBufferClock(buffer,{url=null,file=null,metadata=null,sourceStream=0,processed=false,owns=()=>true,signal}={}) {
     const current=()=>!signal?.aborted&&owns();
     const assertCurrent=()=>{if(!current()) throw new DOMException('Audio source changed','AbortError');};
     assertCurrent();
-    if(this._normalizedAudioBuffers.has(buffer)) return buffer;
-    {
-      if(!metadata){
-        if(file) metadata=await this.readSourceAudioClock(file,{owns:current});
-        else if(url) metadata=await this._sourceMetadata(url,{owns:current});
-        else return buffer;
-      }
-      assertCurrent();
-      const audioOffset=Array.isArray(metadata?.decoderAudioPresentationTimestampOffsets)
-        ?metadata.decoderAudioPresentationTimestampOffsets[sourceStream]
-        :metadata?.audioPresentationTimestampOffsets?.[sourceStream]
-          ??(sourceStream===0?metadata?.audioPresentationTimestampOffset:null);
-      if(!metadata||typeof audioOffset!=='number'||!Number.isFinite(audioOffset)
-        ||!Number.isFinite(metadata.presentationTimestampOffset)||!(metadata.duration>0)) return buffer;
-      const rate=buffer.sampleRate;
-      const shift=Math.round((audioOffset-metadata.presentationTimestampOffset)*rate);
-      const length=Math.max(1,Math.round(metadata.duration*rate));
-      if(shift===0&&length===buffer.length) return this.markSourceAudioBuffer(buffer);
-      const aligned=this.createBuffer(buffer.numberOfChannels,length,rate);
-      const from=Math.max(0,shift),to=Math.max(0,-shift),count=Math.max(0,Math.min(buffer.length-from,length-to));
-      for(let channel=0;count>0&&channel<buffer.numberOfChannels;channel++){
-        aligned.getChannelData(channel).set(buffer.getChannelData(channel).subarray(from,from+count),to);
-      }
-      return this.markSourceAudioBuffer(aligned);
+    const original={shiftSamples:0,length:buffer.length,duration:buffer.duration,normalized:false};
+    if(processed||this._normalizedAudioBuffers.has(buffer)) return {...original,normalized:true};
+    if(!metadata){
+      if(file) metadata=await this.readSourceAudioClock(file,{owns:current});
+      else if(url) metadata=await this._sourceMetadata(url,{owns:current});
+      else return original;
     }
+    assertCurrent();
+    const audioOffset=Array.isArray(metadata?.decoderAudioPresentationTimestampOffsets)
+      ?metadata.decoderAudioPresentationTimestampOffsets[sourceStream]
+      :metadata?.audioPresentationTimestampOffsets?.[sourceStream]
+        ??(sourceStream===0?metadata?.audioPresentationTimestampOffset:null);
+    if(!metadata||typeof audioOffset!=='number'||!Number.isFinite(audioOffset)
+      ||!Number.isFinite(metadata.presentationTimestampOffset)||!(metadata.duration>0)) return original;
+    const rate=buffer.sampleRate;
+    const shift=Math.round((audioOffset-metadata.presentationTimestampOffset)*rate);
+    const length=Math.max(1,Math.round(metadata.duration*rate));
+    return {shiftSamples:shift,length,duration:length/rate,normalized:true};
+  }
+
+  async normalizeSourceAudioBuffer(buffer,options={}) {
+    const clock=await this.getSourceAudioBufferClock(buffer,options);
+    if(options.signal?.aborted||options.owns?.()===false) throw new DOMException('Audio source changed','AbortError');
+    if(!clock.normalized) return buffer;
+    const {shiftSamples:shift,length}=clock;
+    if(shift===0&&length===buffer.length) return this.markSourceAudioBuffer(buffer);
+    const aligned=this.createBuffer(buffer.numberOfChannels,length,buffer.sampleRate);
+    const from=Math.max(0,shift),to=Math.max(0,-shift),count=Math.max(0,Math.min(buffer.length-from,length-to));
+    for(let channel=0;count>0&&channel<buffer.numberOfChannels;channel++){
+      aligned.getChannelData(channel).set(buffer.getChannelData(channel).subarray(from,from+count),to);
+    }
+    return this.markSourceAudioBuffer(aligned);
   }
 
   async decodeSourceAudioData(bytes,options={}) {

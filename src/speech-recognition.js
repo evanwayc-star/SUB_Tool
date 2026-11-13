@@ -9,6 +9,7 @@
    ============================================================================== */
 import { State, newTrack, syncTrackCount, newId, setSelection, IS_DESKTOP } from './state.js';
 import { AudioEngine } from './audio-engine.js';
+import { createRecognitionRangeSource } from './speech-recognition-source.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { snapTimeToFrame, secToEncore } from './time.js';
@@ -472,6 +473,102 @@ export async function getClipAudioBuffer(clip, {
   }
 
   throw new Error(`無法載入素材「${clip.name || clip.id}」的音訊資料`);
+}
+
+/** Desktop reads bounded, source-local PCM; browsers retain their decoder. */
+export async function getClipRecognitionSource(clip, options = {}) {
+  const bridge = typeof window !== 'undefined' ? window.subtool : null;
+  if (typeof bridge?.speechAudioRead !== 'function' || typeof bridge?.speechAudioCancel !== 'function') {
+    return getClipAudioBuffer(clip, options);
+  }
+  const { signal, owns = () => true, recognitionSelection = ALL_RECOGNITION_SOURCE_CHANNELS } = options;
+  const assertCurrent = () => {
+    if (signal?.aborted || !owns()) throw new DOMException('語音辨識已取消', 'AbortError');
+  };
+  assertCurrent();
+  // Copy mutable descriptors before the first asynchronous metadata read.
+  const accepted = { ...clip, ...(clip.web ? { web: { ...clip.web } } : {}),
+    ...(clip.audioElement ? { audioElement: { src: clip.audioElement.src } } : {}),
+    recognitionTracks: (clip.recognitionTracks || []).map(track => ({ ...track,
+    ...(track.el ? { el: { src: track.el.src } } : {}),
+    ...(track.audioElement ? { audioElement: { src: track.audioElement.src } } : {})
+  })) };
+  const selection = recognitionSelection?.mode === 'source-channels'
+    ? { mode: recognitionSelection.mode, channels: recognitionSelection.channels?.map(channel => ({ ...channel })) }
+    : recognitionSelection;
+  const selecting = selection?.mode === 'source-channels';
+  const inputs = [], buffers = new Map(), nativeResources = new Set();
+  const file = accepted.file || accepted._file || accepted.blob;
+  const sourceFile = typeof file?.slice === 'function' ? file : null;
+  const originalPath = accepted.path || (sourceFile ? bridge.getFilePath?.(sourceFile) : null);
+  const addBuffer = async (buffer, channel, { processed = false, sourceStream = 0, url } = {}) => {
+    const clockKey = `${processed}:${sourceStream}`;
+    let clock = buffers.get(buffer)?.get(clockKey);
+    if (!clock) {
+      url ||= accepted.web?.url || accepted.audioElement?.src || accepted.src;
+      if (!processed && !url && !sourceFile && originalPath && bridge.fileURL) {
+        url = await bridge.fileURL(originalPath); assertCurrent();
+      }
+      clock = await AudioEngine.getSourceAudioBufferClock(buffer, { processed, sourceStream, url, file: sourceFile, signal, owns });
+      assertCurrent();
+      if (!buffers.has(buffer)) buffers.set(buffer, new Map());
+      buffers.get(buffer).set(clockKey, clock);
+    }
+    const channels = selecting ? [buffer.numberOfChannels === 1 ? 0 : channel]
+      : Array.from({ length: buffer.numberOfChannels }, (_, index) => index);
+    for (const selected of channels) {
+      if (!Number.isInteger(selected) || selected < 0 || selected >= buffer.numberOfChannels) throw new Error('選取的來源聲道不存在或尚未就緒');
+      if (!selecting && inputs.some(input => input.buffer === buffer && input.channel === selected
+        && input.clock.shiftSamples === clock.shiftSamples && input.clock.length === clock.length)) continue;
+      inputs.push({ buffer, channel: selected, clock });
+    }
+  };
+  const addNative = (path, sourceStream, sourceChannel, processed, weight = 1) => {
+    const key = JSON.stringify([path, sourceStream, sourceChannel]);
+    if (!selecting && nativeResources.has(key)) return;
+    nativeResources.add(key);
+    inputs.push({ request: { path, sourceStream, sourceChannel, processed }, weight });
+  };
+  if (accepted.audioBuffer) {
+    if (selecting) {
+      for (const entry of selectedRecognitionEntries(recognitionAudioEntries(accepted), selection)) {
+        await addBuffer(accepted.audioBuffer, entry.sourceChannel, { processed: !!accepted.preferCache });
+      }
+    } else await addBuffer(accepted.audioBuffer, 0, { processed: !!accepted.preferCache });
+  } else {
+    const allEntries = recognitionTrackEntries(accepted);
+    const entries = selectedRecognitionEntries(allEntries, selection);
+    for (const entry of entries) {
+      const track = entry.track;
+      const processed = !!(accepted.preferCache || track._audioEffect
+        || (typeof track.file === 'string' && track.file !== originalPath && track.file !== accepted.web?.url));
+      if (track.buffer) {
+        await addBuffer(track.buffer, entry.sourceChannel, { processed, sourceStream: processed ? 0 : entry.sourceStream,
+          url: track.el?.src || track.audioElement?.src });
+        continue;
+      }
+      const path = typeof track.file === 'string' ? track.file : processed ? null : originalPath;
+      if (!path) throw new Error('辨識來源聲道快取仍在準備中，請稍後再辨識');
+      if (processed) {
+        // Intake caches are split mono; effects preserve a whole stream.
+        const count = track._audioEffect ? Math.max(...allEntries.filter(candidate => candidate.track.file === path)
+          .map(candidate => candidate.sourceChannel)) + 1 : 1;
+        addNative(path, 0, selecting ? (count === 1 ? 0 : entry.sourceChannel) : null, true, selecting ? 1 : count);
+      } else addNative(path, entry.sourceStream, entry.sourceChannel, false);
+    }
+    if (!inputs.length) {
+      if (accepted.preferCache) throw new Error('素材音訊快取仍在準備中，請稍後再辨識');
+      if (!originalPath) throw new Error('無法取得辨識素材的本機音訊來源');
+      addNative(originalPath, 0, null, false);
+    }
+  }
+  assertCurrent();
+  const bufferDuration = Math.max(0, ...inputs.map(input => input.clock?.duration || 0));
+  const declaredDuration = Number(accepted.duration) > 0 ? Number(accepted.duration)
+    : Number(accepted.out) > 0 ? Number(accepted.out) : 0;
+  const duration = Math.max(bufferDuration, declaredDuration);
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error('無法確認辨識素材的來源片長');
+  return createRecognitionRangeSource({ duration, inputs, bridge, signal, owns });
 }
 
 /**
@@ -1440,7 +1537,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         }, {
           releaseResources:releaseSources,
           extractAudio: (clip, { signal, recognitionSelection: selectedAudio }) => (
-            getClipAudioBuffer(clip, { signal, recognitionSelection: selectedAudio })
+            getClipRecognitionSource(clip, { signal, recognitionSelection: selectedAudio })
           ),
           transcribe: ({ audioBuffer, inT, outT, spec, signal, onProgress }) => transcribeAudioStream({
             audioBuffer,

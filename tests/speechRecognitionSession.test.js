@@ -24,6 +24,36 @@ describe('語音辨識背景工作階段管理器 (speech-recognition-session)',
     commit: vi.fn()
   });
 
+  it('closes each bounded audio source after inference, including failure, without offsetting its source duration', async () => {
+    const first = { duration: 100, readRange: vi.fn(), close: vi.fn() };
+    const second = { duration: 200, readRange: vi.fn(), close: vi.fn() };
+    const extractAudio = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const transcribe = vi.fn(async ({ clip, audioBuffer, inT, outT }) => {
+      if (clip.id === 'one') { expect(outT).toBe(100); expect(inT).toBe(20); expect(audioBuffer).toBe(first); return []; }
+      expect(first.close).toHaveBeenCalledTimes(1);
+      throw new Error('provider failure');
+    });
+    const work = startAsrWork({ clips: [{ id: 'one', in: 20, dur: 3 }, { id: 'two', in: 30 }] }, {
+      extractAudio, transcribe, commit: vi.fn()
+    });
+    await expect(work.promise).rejects.toThrow('provider failure');
+    expect(first.close).toHaveBeenCalledTimes(1); expect(second.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a late extracted reader when cancellation has already revoked its work', async () => {
+    let resolve;
+    const source = { duration: 10, readRange: vi.fn(), close: vi.fn() };
+    const transcribe = vi.fn(), commit = vi.fn();
+    const work = startAsrWork({ clips: [{ id: 'one', in: 0, out: 10 }] }, {
+      extractAudio: () => new Promise(done => { resolve = done; }), transcribe, commit
+    });
+    await vi.waitFor(() => expect(resolve).toBeTypeOf('function'));
+    work.cancel(); resolve(source);
+    await expect(work.promise).resolves.toMatchObject({ status: 'cancelled' });
+    expect(source.close).toHaveBeenCalledTimes(1);
+    expect(transcribe).not.toHaveBeenCalled(); expect(commit).not.toHaveBeenCalled();
+  });
+
   it('同一工作同步更新對話框時，後續 listener 不得收到較舊快照',async()=>{
     let changed=false;
     const first=onAsrSessionChange(snapshot=>{

@@ -32,6 +32,17 @@ beforeEach(() => {
 });
 
 describe('ASR original audio source clock admission', () => {
+  it('rechecks ownership after the bounded clock resolves before allocating normalized PCM', async () => {
+    let owns = true;
+    const createBuffer = vi.spyOn(AudioEngine, 'createBuffer');
+    vi.spyOn(AudioEngine, 'getSourceAudioBufferClock').mockImplementation(async () => {
+      queueMicrotask(() => { owns = false; });
+      return { shiftSamples: 3, length: 5, duration: 5 / 16000, normalized: true };
+    });
+    await expect(AudioEngine.normalizeSourceAudioBuffer(pcm([[.1, .2, .3, .4, .5, .6, .7, .8]]), { owns: () => owns }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(createBuffer).not.toHaveBeenCalled();
+  });
   it.each(['default', 'injected'])('normalizes %s decoding and existing top-level buffers through the same owner', async mode => {
     const clip = { web: { url: 'blob:mother' }, file: { arrayBuffer: async () => new ArrayBuffer(4) } };
     const options = mode === 'injected' ? { decodeAudioData: vi.fn(async () => decoded) } : {};

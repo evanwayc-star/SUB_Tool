@@ -9,6 +9,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const isProjectFilePath = filePath => typeof filePath === 'string' && /\.(subtool|json)$/i.test(filePath);
 const MAX_SPEECH_WAV_BYTES = 20_000_000;
 const isSpeechCompressionRequestId = value => typeof value === 'string' && /^speech-[A-Za-z0-9_-]{1,96}$/.test(value);
+const isSpeechAudioRequestId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
 const isVocalWaveRequestId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
 const audioSourceFingerprint = source => {
   if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
@@ -114,6 +115,24 @@ contextBridge.exposeInMainWorld('subtool', {
     return () => ipcRenderer.removeListener('audio:normalize-progress', handler);
   },
   cleanupAudio: (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:cleanup', { path: p }); },
+  speechAudioRead: (request) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少辨識音訊片段參數');
+    const { path, start, duration, sourceStream = 0, sourceChannel = null, processed = false, requestId } = request;
+    if (typeof path !== 'string' || !path.trim() || path.length > 32767 || path.includes('\0')) throw new TypeError('缺少有效的音訊來源路徑');
+    if (!isSpeechAudioRequestId(requestId)) throw new TypeError('辨識音訊 requestId 格式不正確');
+    if (typeof start !== 'number' || !Number.isFinite(start) || start < 0
+      || start > Number.MAX_SAFE_INTEGER / 16000 - 600) throw new RangeError('辨識音訊開始時間必須是有效的非負秒數');
+    if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0 || duration > 600
+      || Math.round(duration * 16000) < 1) throw new RangeError('辨識音訊片段必須至少一個 sample 且不超過 600 秒');
+    if (!Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream > 255) throw new TypeError('無效的來源音訊串流');
+    if (sourceChannel !== null && (!Number.isInteger(sourceChannel) || sourceChannel < 0 || sourceChannel > 127)) throw new TypeError('無效的來源音訊聲道');
+    if (typeof processed !== 'boolean') throw new TypeError('辨識音訊 processed 必須是布林值');
+    return ipcRenderer.invoke('speech:audioRead', { path, start, duration, sourceStream, sourceChannel, processed, requestId });
+  },
+  speechAudioCancel: requestId => {
+    if (!isSpeechAudioRequestId(requestId)) throw new TypeError('辨識音訊 requestId 格式不正確');
+    return ipcRenderer.invoke('speech:audioCancel', { requestId });
+  },
   compressSpeechAudio: (bytes, requestId) => {
     if (!(bytes instanceof ArrayBuffer) && !ArrayBuffer.isView(bytes)) {
       throw new TypeError('speech WAV bytes must be an ArrayBuffer or typed array');

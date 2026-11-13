@@ -99,6 +99,8 @@ describe('辨識素材網址所有權', () => {
     domMock.video.duration = 5;
     domMock.video.resetEvents();
     delete desktopMock.mpv;
+    delete desktopMock.speechAudioRead;
+    delete desktopMock.speechAudioCancel;
     resetPlayerAdapter(desktopMock);
   });
 
@@ -137,6 +139,45 @@ describe('辨識素材網址所有權', () => {
       speech.clearAsrSession();decode.mockRestore();normalize.mockRestore();
       if(oldCreate)Object.defineProperty(URL,'createObjectURL',oldCreate);else delete URL.createObjectURL;
       if(oldRevoke)Object.defineProperty(URL,'revokeObjectURL',oldRevoke);else delete URL.revokeObjectURL;
+    }
+  });
+
+  it('真實對話框接受長素材後使用凍結聲道的有界 reader，來源切換不改此次輸入', async () => {
+    const ui = await import('../src/ui.js');
+    const speech = await import('../src/speech-recognition.js');
+    const { AudioEngine } = await import('../src/audio-engine.js');
+    const clip = { id: 'long', name: 'long.mxf', path: 'C:/long.mxf', audioSourceId: 'long-source',
+      in: 3000, out: 6313.54, dur: 6313.54, offset: 0, vtrack: 0 };
+    const tracks = [0, 1].map(sourceStream => ({ audioSourceId: 'long-source', sourceStream, sourceChannel: 0,
+      file: `C:/cache/ch${sourceStream}.m4a`, el: { src: `subtool-local://ch${sourceStream}` } }));
+    State.clips = [clip]; Media.tracks = tracks;
+    desktopMock.speechAudioRead = vi.fn(async request => {
+      const samples = new Float32Array(Math.round(request.duration * 16000)).fill(request.path.endsWith('ch0.m4a') ? .2 : .4);
+      return { sampleRate: 16000, numberOfChannels: 1, frames: samples.length, pcm: samples.buffer };
+    });
+    desktopMock.speechAudioCancel = vi.fn();
+    const decode = vi.spyOn(AudioEngine, 'decodeAudioData');
+    let accepted, finish;
+    speechMock.transcribe.mockReset().mockImplementation(options => {
+      accepted = options; return new Promise(resolve => { finish = resolve; });
+    });
+    ui.openModal.mockImplementation((_title, html) => { document.body.innerHTML = html + '<div id="modalFoot"></div>'; });
+    try {
+      speech.saveAsrConfig({ ...speech.getAsrConfig(), provider: 'builtin' });
+      speech.openSpeechRecognitionDialog([clip]); await new Promise(resolve => setTimeout(resolve, 0));
+      const pending = ui.openModal.mock.calls.at(-1)[2].find(button => button.primary).act();
+      await vi.waitFor(() => expect(accepted).toBeTruthy());
+      tracks[0].file = 'C:/changed.m4a'; Media.tracks = [];
+      const window = await accepted.audioBuffer.readRange(3000, 3000.1, { signal: accepted.signal });
+      expect(window.getChannelData(0)[0]).toBeCloseTo(.3);
+      expect(desktopMock.speechAudioRead.mock.calls.map(([request]) => request.path)).toEqual(['C:/cache/ch0.m4a', 'C:/cache/ch1.m4a']);
+      expect(accepted).toMatchObject({ inT: 3000, outT: 6313.54 });
+      expect(decode).not.toHaveBeenCalled();
+      finish([]); await pending;
+      await expect(accepted.audioBuffer.readRange(3000, 3000.1)).rejects.toMatchObject({ name: 'AbortError' });
+    } finally {
+      speech.clearAsrSession(); finish?.([]); decode.mockRestore();
+      delete desktopMock.speechAudioRead; delete desktopMock.speechAudioCancel;
     }
   });
 

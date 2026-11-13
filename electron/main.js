@@ -47,6 +47,7 @@ const {
   createSpeechAudioCompressor,
   createSpeechCompressionRuntime,
 } = require('./speech-audio-compressor');
+const { createSpeechAudioReader, validateSpeechAudioRequest } = require('./speech-audio-reader');
 const { createAudioNormalizationRuntime } = require('./audio-normalization-runtime');
 const { createNativeAudioMeter } = require('./native-audio-meter');
 const { motherSourceFingerprint } = require('./mother-source-evidence');
@@ -369,6 +370,7 @@ app.on('before-quit', (event) => {
         ffmpegExecution.cancelAllAndWait(),
         deliveryCapabilities.cancelAllAndWait(),
         speechCompressionRuntime.cancelAllAndWait(),
+        speechAudioReader.cancelAllAndWait(),
         vocalWaveformRuntime.cancelAllAndWait(),
         nativeAudioMeter.stop(),
         mediaIngestCoordinator.cancelAllAndWait(),
@@ -411,6 +413,7 @@ app.on('before-quit', (event) => {
         await recover('轉檔', () => ffmpegExecution.resume());
         await recover('交付能力', () => deliveryCapabilities.resume());
         await recover('辨識壓縮', () => speechCompressionRuntime.resume());
+        await recover('辨識音訊', () => speechAudioReader.resume());
         await recover('媒體匯入', () => mediaIngestCoordinator.resume());
         await recover('媒體波形', () => mediaWaveformCoordinator.resume());
         await recover('人聲波形', () => vocalWaveformRuntime.resume());
@@ -919,6 +922,13 @@ const speechAudioCompressor = createSpeechAudioCompressor({
   execute: (args, options) => runFF(args, options)
 });
 const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
+const speechAudioReader = createSpeechAudioReader({
+  getFFmpegPath: () => FFMPEG,
+  probe: (source, options) => {
+    if (!mediaProbe) throw new Error('找不到 ffprobe');
+    return mediaProbe.describe(source, options);
+  },
+});
 const nativeAudioMeter = createNativeAudioMeter({
   spawn,
   ffmpeg: () => FFMPEG,
@@ -1639,8 +1649,18 @@ ipcMain.handle('audio:analyzeLoudness', async (e, { path: src, duration }) => {
   return audioNormalizationRuntime.analyze(src, { duration });
 });
 
+/* 辨識只讀已授權來源的有界 PCM，不建立新檔或接受 renderer 自訂 filter。 */
+ipcMain.handle('speech:audioRead', (e, request) => {
+  if (_isAppQuitting) throw new Error('程式正在結束，無法讀取辨識音訊');
+  const chunk = validateSpeechAudioRequest(request);
+  requireReadablePath('speech:audioRead', chunk.path);
+  return speechAudioReader.read(e.sender, chunk);
+});
+ipcMain.handle('speech:audioCancel', (e, { requestId } = {}) =>
+  speechAudioReader.cancel(e.sender, requestId));
+
 /* Renderer 只能交付程式自己編出的 16 kHz mono PCM WAV bytes，不能指定輸入／輸出路徑。
-   64 kbps MP3 只活在這次辨識呼叫期間；成功、失敗都由 compressor 清掉兩個暫存檔。 */
+   64 kbps MP3 只活在這次辨識呼叫期間；成功、失敗都由 compressor 清掉暫存檔。 */
 ipcMain.handle('speech:compressAudio', async (e, { bytes, requestId } = {}) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg，無法建立辨識用 MP3');
   return speechCompressionRuntime.compress(bytes, requestId);

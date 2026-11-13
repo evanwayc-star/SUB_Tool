@@ -50,7 +50,7 @@ async function main() {
       app:{on:(_event,fn)=>{handler=fn;},quit:()=>{quitCount++;}},
       _quitReady:false,_quitSequenceStarted:false,_isAppQuitting:false,
       audioNormalizationJobs:new Map(),mediaProbe:scenario==='failure'?{...idle,cancelAllAndWait:async()=>{throw new Error('shutdown failed');}}:idle,
-      ffmpegExecution:idle,deliveryCapabilities:idle,speechCompressionRuntime:idle,vocalWaveformRuntime:idle,
+      ffmpegExecution:idle,deliveryCapabilities:idle,speechCompressionRuntime:idle,speechAudioReader:idle,vocalWaveformRuntime:idle,
       nativeAudioMeter:{stop:async()=>{meterStops++;}},
       mediaIngestCoordinator:idle,mediaWaveformCoordinator:idle,directoryOutput:runtime,
       QueueManager:{prepareForShutdown:async()=>{},cancelShutdown:async()=>{}},

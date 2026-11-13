@@ -103,7 +103,7 @@ function shutdownHandler(vocalRuntime, overrides = {}) {
     audioNormalizationJobs: new Map(), mediaProbe: null, ffmpegExecution: nativeOwner(), deliveryCapabilities: nativeOwner(),
     clipAudioCache: { waitForIdle: vi.fn().mockResolvedValue() },
     clipFrameCache: { waitForIdle: vi.fn().mockResolvedValue() },
-    speechCompressionRuntime: nativeOwner(), mediaIngestCoordinator: nativeOwner(), mediaWaveformCoordinator: nativeOwner(),
+    speechCompressionRuntime: nativeOwner(), speechAudioReader: nativeOwner(), mediaIngestCoordinator: nativeOwner(), mediaWaveformCoordinator: nativeOwner(),
     vocalWaveformRuntime: vocalRuntime,
     nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
     QueueManager: { prepareForShutdown: vi.fn().mockResolvedValue(), cancelShutdown: vi.fn().mockResolvedValue(true) },

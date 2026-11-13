@@ -191,6 +191,8 @@ API 前綴皆為 `window.subtool`。`isDesktop` 是值；`getFilePath(file)` 只
 | `analyzeAudioLoudness(path, duration)` | `audio:analyzeLoudness` | 有效聲量量測 |
 | `onAudioNormalizeProgress(cb)` | `audio:normalize-progress` | 事件；回傳該訂閱的解除函式 |
 | `cleanupAudio(path)` | `ffmpeg:cleanup` | 清理由主程序管理的產物 |
+| `speechAudioRead(request)` | `speech:audioRead` | 已授權 path、來源 start／duration（至多 600 秒）、stream／channel、processed、requestId；回傳 16 kHz mono float32 PCM |
+| `speechAudioCancel(requestId)` | `speech:audioCancel` | 只取消同 sender／request 的辨識擷取，程序結束前不釋放讀取資格 |
 | `compressSpeechAudio(bytes, requestId)` | `speech:compressAudio` | 44–20,000,000 bytes WAV／typed array |
 | `cancelSpeechAudioCompression(requestId)` | `speech:cancelCompression` | 同工作辨識壓縮取消 |
 | `exportVideo(opts)` | `ffmpeg:exportVideo` | 凍結交付快照的逐份准入 |

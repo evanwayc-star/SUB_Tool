@@ -349,14 +349,14 @@ async function executeAsrWork(run, adapters) {
         signal: run.controller.signal,
         recognitionSelection: run.spec.recognitionSelection
       });
-      throwIfInactive(run);
-      const inT = Number(clip.in) || 0;
-      const outT = (clip.out && clip.out > inT)
-        ? clip.out
-        : (inT + (Number(clip.dur ?? clip.duration) || Number(audioBuffer?.duration) || 0));
-
       let evidenceSegments;
       try {
+        throwIfInactive(run);
+        const inT = Number(clip.in) || 0;
+        const outT = (clip.out && clip.out > inT)
+          ? clip.out
+          : typeof audioBuffer?.readRange === 'function' ? audioBuffer.duration
+            : (inT + (Number(clip.dur ?? clip.duration) || Number(audioBuffer?.duration) || 0));
         setProgress(run.id, {
           status: 'transcribing',
           indeterminate: true,
@@ -378,6 +378,8 @@ async function executeAsrWork(run, adapters) {
         console.error('文本匹配的聲音分析失敗，改建完整未定時原稿：', error);
         run.quality.providerFailure = true;
         evidenceSegments = [];
+      } finally {
+        await audioBuffer?.close?.();
       }
       throwIfInactive(run);
 

@@ -1370,7 +1370,8 @@ function offsetWhisperSegments(
   coreStart,
   coreEnd,
   includeCoreEnd = false,
-  wordRefs = null
+  wordRefs = null,
+  preserveProviderMetadata = false
 ) {
   return (Array.isArray(segments) ? segments : []).flatMap(segment => {
     const text = typeof segment?.text === 'string' ? segment.text.trim() : '';
@@ -1399,11 +1400,16 @@ function offsetWhisperSegments(
     });
     const midpoint = (start + end) / 2;
     const segmentInsideCore = midpoint >= coreStart && (includeCoreEnd ? midpoint <= coreEnd : midpoint < coreEnd);
-    if ((sourceWords.length && !words.length) || (!sourceWords.length && !segmentInsideCore)) return [];
+    // A text-only response carries no timing evidence for overlap ownership.
+    // Keep it untimed in the reader path instead of dropping later chunks or
+    // inventing a sentence that spans the entire uploaded audio.
+    const untimed = preserveProviderMetadata && !sourceWords.length && start === end;
+    if ((sourceWords.length && !words.length) || (!sourceWords.length && !segmentInsideCore && !untimed)) return [];
     const retainedText = words.length && words.length < sourceWords.length
       ? joinTimedWordTexts(words, '')
       : text;
     return [{
+      ...(preserveProviderMetadata ? segment : {}),
       start: words.length ? words[0].start : start,
       end: words.length ? words.at(-1).end : end,
       text: retainedText,
@@ -1495,6 +1501,100 @@ function deduplicateWhisperOverlapSegments(segments, chunkEvidence, chunks, sele
   });
 }
 
+async function readRecognitionRange(source, start, end, signal) {
+  throwIfRecognitionAborted(signal);
+  if (!(end > start) || end - start > WHISPER_CLOUD_CHUNK_SECONDS) {
+    throw new Error('辨識音訊讀取範圍必須介於 0 到 600 秒');
+  }
+  const buffer = await source.readRange(start, end, { signal });
+  throwIfRecognitionAborted(signal);
+  const expectedLength = Math.round((end - start) * 16000);
+  if (buffer?.sampleRate !== 16000 || buffer?.numberOfChannels !== 1 ||
+      typeof buffer.getChannelData !== 'function' || !Number.isInteger(buffer.length) ||
+      buffer.length <= 0 || buffer.length > WHISPER_CLOUD_CHUNK_SECONDS * 16000 ||
+      Math.abs(buffer.length - expectedLength) > 1 ||
+      !Number.isFinite(buffer.duration) || Math.abs(buffer.duration * 16000 - buffer.length) > 1 ||
+      buffer.getChannelData(0)?.length !== buffer.length) {
+    throw new Error('辨識音訊區間未完整讀取為 16 kHz 單聲道');
+  }
+  return buffer;
+}
+
+async function planRecognitionReaderChunks(source, start, end, signal) {
+  const chunks = [];
+  for (let chunkStart = start; chunkStart < end;) {
+    const targetEnd = chunkStart + WHISPER_CLOUD_CHUNK_SECONDS;
+    let chunkEnd = Math.min(end, targetEnd);
+    if (chunkEnd < end) {
+      const searchStart = Math.max(chunkStart + 60, targetEnd - 45);
+      // Only the 45-second boundary neighborhood is decoded for silence search.
+      // No PCM survives this iteration; planning retains time ranges alone.
+      const buffer = await readRecognitionRange(source, searchStart, chunkEnd, signal);
+      const localSplit = findSilenceSplitPoint(buffer, 0, buffer.duration);
+      const split = searchStart + localSplit;
+      if (Number.isFinite(localSplit) && split > chunkStart + 30 && split <= chunkEnd) {
+        chunkEnd = split;
+      }
+    }
+    chunks.push({ start: chunkStart, end: chunkEnd });
+    if (chunkEnd >= end) break;
+    chunkStart = Math.max(chunkStart + 1, chunkEnd - WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS);
+  }
+  return chunks;
+}
+
+async function transcribeRecognitionReader(source, options) {
+  const { inT, outT, provider, onProgress, signal } = options;
+  if (!Number.isFinite(source.duration) || source.duration <= 0 ||
+      !Number.isFinite(inT) || inT < 0 || inT >= source.duration ||
+      (outT != null && (!Number.isFinite(outT) || outT <= inT))) {
+    throw new Error('辨識音訊來源或選取範圍無效');
+  }
+  if (!['builtin', 'openai', 'groq', 'google', 'azure', 'elevenlabs'].includes(provider)) {
+    throw new Error(`不支援的語音辨識供應商：${provider}`);
+  }
+  const end = Math.min(outT ?? source.duration, source.duration);
+  const duration = end - inT;
+  const chunks = await planRecognitionReaderChunks(source, inT, end, signal);
+  const allSegments = [];
+  const chunkEvidence = [];
+  const totalWork = chunks.reduce((sum, chunk) => sum + chunk.end - chunk.start, 0);
+  let completedWork = 0;
+  for (const [index, chunk] of chunks.entries()) {
+    throwIfRecognitionAborted(signal);
+    const chunkDuration = chunk.end - chunk.start;
+    onProgress?.({ status: 'transcribing', percent: Math.round(completedWork / totalWork * 100),
+      message: `正在讀取第 ${index + 1}/${chunks.length} 段辨識音訊…` });
+    const buffer = await readRecognitionRange(source, chunk.start, chunk.end, signal);
+    // Each provider receives the same bounded, source-aligned PCM with local
+    // zero as its origin. The session owns close(); this engine owns no files.
+    const segments = await transcribeAudioStream({ ...options, audioBuffer: buffer,
+      inT: 0, outT: buffer.duration, onProgress: update => {
+        if (signal?.aborted) return;
+        const fraction = Math.max(0, Math.min(1, (Number(update?.percent) || 0) / 100));
+        onProgress?.({ ...update, percent: Math.round((completedWork + chunkDuration * fraction) / totalWork * 100),
+          message: `第 ${index + 1}/${chunks.length} 段：${update?.message || '正在辨識…'}` });
+      } });
+    throwIfRecognitionAborted(signal);
+    const offset = chunk.start - inT;
+    const evidence = createWhisperChunkWordEvidence(
+      segments.flatMap(segment => Array.isArray(segment.words) ? segment.words : []), index, offset, duration
+    );
+    chunkEvidence.push(evidence);
+    const previous = chunks[index - 1];
+    const next = chunks[index + 1];
+    allSegments.push(...offsetWhisperSegments(segments, offset, duration,
+      previous ? (chunk.start + previous.end) / 2 - inT : 0,
+      next ? (chunk.end + next.start) / 2 - inT : duration,
+      index === chunks.length - 1, evidence.refByWord, true));
+    completedWork += chunkDuration;
+    onProgress?.({ status: 'transcribing', percent: Math.round(completedWork / totalWork * 100),
+      message: `已完成第 ${index + 1}/${chunks.length} 段音訊` });
+  }
+  throwIfRecognitionAborted(signal);
+  return deduplicateWhisperOverlapSegments(allSegments, chunkEvidence, chunks, inT);
+}
+
 /**
  * 統一音訊串流辨識總入口（深層模組核心接縫）
  */
@@ -1521,6 +1621,12 @@ export async function transcribeAudioStream({
   throwIfRecognitionAborted(signal);
   if (!audioBuffer) {
     throw new Error('未提供有效的音訊來源');
+  }
+
+  if (typeof audioBuffer.readRange === 'function') {
+    return transcribeRecognitionReader(audioBuffer, { inT, outT, provider, builtinModel,
+      apiKey, azureRegion, azurePhrases, azureProfanity, keyterms, elevenlabsNumSpeakers,
+      elevenlabsTagAudioEvents, language, prompt, temperature, vocalFilter, onProgress, signal });
   }
 
   const endT = (outT && outT > inT) ? outT : (inT + (audioBuffer.duration || 0));

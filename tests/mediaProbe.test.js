@@ -172,7 +172,7 @@ describe('媒體探測 interface', () => {
     const context = { Promise, console: { error: vi.fn() }, mediaProbe: probe, requireReadablePath: vi.fn(),
       ipcMain: { handle: (_, handler) => { invoke = handler; } }, app: { on: (_, handler) => { beforeQuit = handler; }, quit },
       _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false, audioNormalizationJobs: new Map(),
-      ffmpegExecution: owner(), deliveryCapabilities: owner(), speechCompressionRuntime: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(),
+      ffmpegExecution: owner(), deliveryCapabilities: owner(), speechCompressionRuntime: owner(), speechAudioReader: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(),
       nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
       QueueManager: { prepareForShutdown: done, cancelShutdown: done }, clipAudioCache: { waitForIdle: done },
       clipFrameCache: { waitForIdle: done },

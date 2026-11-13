@@ -31,7 +31,7 @@ it('真 before-quit 等已受理的專案存檔完成及暫存檔收尾才退出
   const context = {
     app:{ on:(_event, callback) => { handler = callback; }, quit:vi.fn() },
     _quitReady:false, _quitSequenceStarted:false, _isAppQuitting:false, audioNormalizationJobs:new Map(),
-    mediaProbe:null, ffmpegExecution:idle(), deliveryCapabilities:idle(), speechCompressionRuntime:idle(),
+    mediaProbe:null, ffmpegExecution:idle(), deliveryCapabilities:idle(), speechCompressionRuntime:idle(), speechAudioReader:idle(),
     vocalWaveformRuntime:idle(), mediaIngestCoordinator:idle(), mediaWaveformCoordinator:idle(),
     nativeAudioMeter:{ stop:vi.fn().mockResolvedValue() },
     directoryOutput:{ close:async () => {}, resume:async () => {} },
