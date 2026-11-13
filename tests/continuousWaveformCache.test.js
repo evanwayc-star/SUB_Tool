@@ -150,6 +150,111 @@ describe('單檔連續波形的持久進度與所有權', () => {
     expect(fs.readdirSync(generation).sort()).toEqual(['checkpoint.json', 'partial.wav']);
   });
 
+  it.each(['EPERM', 'EACCES', 'EBUSY'])('checkpoint rename 暫時 %s 後發布新 prefix，重試前保留舊 checkpoint 原子性', code => {
+    const f = fixture(16), writer = f.open();
+    writer.appendPCM(f.pcm.subarray(0, 8)); writer.checkpoint();
+    const generation = f.generations()[0], record = path.join(generation, 'checkpoint.json');
+    const previous = fs.readFileSync(record), nativeRename = fs.renameSync.bind(fs);
+    writer.appendPCM(f.pcm.subarray(8, 16));
+    let attempts = 0;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (to !== record) return nativeRename(from, to);
+      attempts++;
+      expect(fs.readFileSync(record)).toEqual(previous);
+      expect(writer.completedSamples).toBe(4);
+      if (attempts === 1) throw Object.assign(new Error('checkpoint rename sharing violation'),
+        { code, syscall: 'rename', path: from, dest: to });
+      return nativeRename(from, to);
+    });
+    expect(writer.checkpoint()).toBe(8);
+    expect(attempts).toBe(2);
+    expect(writer.readPCM(0, 8)).toEqual(f.pcm.subarray(0, 16));
+    expect(JSON.parse(fs.readFileSync(record, 'utf8'))).toMatchObject({ completedSamples: 8, complete: false });
+    expect(fs.readdirSync(generation).sort()).toEqual(['checkpoint.json', 'partial.wav']);
+  });
+
+  it.each(['EPERM', 'EACCES', 'ENOSPC'])('checkpoint rename 持續 %s 時有界失敗，舊 prefix 可續算且不殘留自有 tmp', code => {
+    const f = fixture(16), writer = f.open();
+    writer.appendPCM(f.pcm.subarray(0, 8)); writer.checkpoint();
+    const generation = f.generations()[0], record = path.join(generation, 'checkpoint.json');
+    const previous = fs.readFileSync(record), failure = Object.assign(new Error('persistent rename failure'), { code });
+    writer.appendPCM(f.pcm.subarray(8, 16));
+    const wait = vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out');
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementation(() => { throw failure; });
+    expect(() => writer.checkpoint()).toThrow(failure);
+    expect(rename).toHaveBeenCalledTimes(code === 'ENOSPC' ? 1 : 5);
+    expect(wait.mock.calls.map(args => args[3])).toEqual(code === 'ENOSPC' ? [] : [25, 50, 100, 200]);
+    expect(writer.completedSamples).toBe(4); expect(writer.writtenSamples).toBe(8);
+    expect(fs.readFileSync(record)).toEqual(previous);
+    expect(fs.readdirSync(generation).sort()).toEqual(['checkpoint.json', 'partial.wav']);
+    writer.close(); vi.restoreAllMocks();
+    const resumed = f.open();
+    expect(resumed.completedSamples).toBe(4);
+    expect(resumed.readPCM(0, 4)).toEqual(f.pcm.subarray(0, 8));
+  });
+
+  it.each(['cancel', 'closed', 'checkpoint-content', 'checkpoint-owner', 'temporary-content', 'directory-owner'])
+  ('checkpoint retry 等待中 %s 撤銷發布資格，不重試覆寫外部內容', mode => {
+    const f = fixture(16); let valid = true;
+    const writer = f.open({ verify: () => {
+      if (!valid) throw Object.assign(new Error('cancelled'), { code: 'INGEST_SUPERSEDED' });
+    } });
+    writer.appendPCM(f.pcm.subarray(0, 8)); writer.checkpoint();
+    const generation = f.generations()[0], record = path.join(generation, 'checkpoint.json');
+    const previous = fs.readFileSync(record), nativeRename = fs.renameSync.bind(fs);
+    const foreign = Buffer.from(previous.toString('utf8').replace('"completedSamples":4', '"completedSamples":3'));
+    const nativeLstat = fs.lstatSync.bind(fs);
+    let temporary, attempts = 0;
+    writer.appendPCM(f.pcm.subarray(8, 16));
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (to !== record) return nativeRename(from, to);
+      temporary = from; attempts++;
+      throw Object.assign(new Error('temporary sharing denial'), { code: 'EPERM' });
+    });
+    vi.spyOn(Atomics, 'wait').mockImplementation(() => {
+      if (mode === 'cancel') valid = false;
+      else if (mode === 'closed') writer.close();
+      else if (mode === 'checkpoint-content') fs.writeFileSync(record, foreign);
+      else if (mode === 'checkpoint-owner') {
+        const replacement = path.join(generation, 'replacement');
+        fs.writeFileSync(replacement, previous); nativeRename(replacement, record);
+      } else if (mode === 'temporary-content') fs.writeFileSync(temporary, foreign);
+      else vi.spyOn(fs, 'lstatSync').mockImplementation((file, ...args) => {
+        const stat = nativeLstat(file, ...args);
+        // Windows refuses renaming a directory with this writer's open PCM.
+        // Model the changed identity returned by a remote filesystem instead.
+        if (file === generation) stat.ino += typeof stat.ino === 'bigint' ? 1n : 1;
+        return stat;
+      });
+      return 'timed-out';
+    });
+    expect(() => writer.checkpoint()).toThrow(mode === 'cancel' ? 'cancelled' : mode === 'closed' ? '已關閉' : '已變更');
+    expect(attempts).toBe(1); expect(writer.completedSamples).toBe(4);
+    expect(fs.readFileSync(record)).toEqual(mode === 'checkpoint-content' ? foreign : previous);
+    if (mode === 'temporary-content') expect(fs.readFileSync(temporary)).toEqual(foreign);
+    else if (mode === 'directory-owner') {
+      expect(fs.existsSync(temporary)).toBe(true);
+      expect(fs.readdirSync(generation).sort()).toEqual([path.basename(temporary), 'checkpoint.json', 'partial.wav'].sort());
+    } else expect(fs.readdirSync(generation).sort()).toEqual(['checkpoint.json', 'partial.wav']);
+  });
+
+  it('完整 wave 的完成 checkpoint 暫時 EPERM，重試後仍交付逐 sample 相同內容', () => {
+    const f = fixture(16), writer = f.open(), nativeRename = fs.renameSync.bind(fs);
+    writer.appendPCM(f.pcm);
+    let attempts = 0;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (path.basename(to) === 'checkpoint.json' && fs.existsSync(path.join(path.dirname(to), 'wave.wav'))) {
+        if (++attempts === 1) throw Object.assign(new Error('completion sharing denial'), { code: 'EPERM' });
+      }
+      return nativeRename(from, to);
+    });
+    const wave = writer.complete();
+    expect(attempts).toBe(2); expect(writer.isComplete).toBe(true);
+    expect(fs.readFileSync(wave).subarray(44)).toEqual(f.pcm);
+    expect(readCompleteContinuousWaveformCache(f.root, f.spec)?.wavePath).toBe(wave);
+    expect(fs.readdirSync(path.dirname(wave)).sort()).toEqual(['checkpoint.json', 'wave.wav']);
+  });
+
   it('writer 關檔後父目錄被替換，不發布或清理替代目錄', () => {
     const f = fixture(), nativeOpen = fs.openSync.bind(fs), nativeClose = fs.closeSync.bind(fs);
     const namespace = path.join(f.root, 'continuous-waveforms'), retained = path.join(f.root, 'retained');

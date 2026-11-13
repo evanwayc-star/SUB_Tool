@@ -161,6 +161,44 @@ it('Proxy 完成遇到定位中，定位完成後在同一位置自動接手，�
   }finally{f.dispose();}
 });
 
+it.each([
+  {playing:false,crossClip:false},{playing:true,crossClip:false},
+  {playing:false,crossClip:true},{playing:true,crossClip:true},
+  {playing:false,crossClip:true,staleFailure:true},{playing:true,crossClip:true,staleFailure:true},
+])('背景 Proxy loadfile 等待中連續 seek（playing=$playing crossClip=$crossClip staleFailure=$staleFailure）最後位置不黑屏或誤報載入失敗',async({playing,crossClip,staleFailure})=>{
+  const f=await fixture({path:'\\\\Storage\\DCP\\mother.mov',mode:'smooth'}),loaded=deferred();
+  const {showToast}=await import('../src/ui.js');
+  let first,second,latest;
+  try{
+    f.assets.proxy='\\\\Storage\\DCP\\.subtool_Cache\\proxy.mp4';
+    if(playing)await f.startAt(1);else await f.Media.seek(1);
+    const next=crossClip?f.Seq.add({id:'next',name:'next.mov',path:'\\\\Storage\\DCP\\next.mov',
+      dur:12,in:0,out:12,offset:12,vtrack:0,audioSrc:'video',audioSourceId:'next-audio'}):null;
+    if(next)f.State.duration=24;
+    showToast.mockClear();f.mpv.loadfile.mockImplementationOnce(()=>loaded.promise);
+    f.Media._publishPreviewAssets(f.clip,f.assets,f.Media.captureMediaOwnership());await flush();
+    // 播放中保留母片直到使用者 seek；暫停時由正式背景完成路徑立即接手。
+    if(playing)first=f.Media.seek(4);
+    await vi.waitFor(()=>expect(f.mpv.loadfile).toHaveBeenCalledWith(f.assets.proxy));
+    second=f.Media.seek(6);await flush();
+    const target=next?14:8;
+    latest=f.Media.seek(target);await flush();
+    loaded.resolve(staleFailure?{ok:false,error:'old proxy source unavailable'}:f.accepted());
+    await Promise.all([first,second]);
+    expect(await latest).toMatchObject({status:'presented',requestedTime:target,presentedTime:target});await flush();
+    const expectedPath=next?next.path:f.assets.proxy;
+    expect(f.adapter.ownsNativeSourcePath(expectedPath)).toBe(true);
+    expect(f.Media.displayTime()).toBeCloseTo(target);
+    expect(f.Media.presentedTime()).toBeCloseTo(target);
+    expect(f.mpv.present.mock.calls.at(-1)[0]).toBeCloseTo(next?2:8);
+    expect(f.Media.previewState().phase).not.toBe('error');
+    expect(showToast.mock.calls.filter(([text])=>String(text).includes('mpv 無法載入影片段'))).toEqual([]);
+    expect(f.clip.path).toBe('\\\\Storage\\DCP\\mother.mov');
+  }finally{
+    loaded.resolve(f.accepted());await Promise.allSettled([first,second,latest]);f.dispose();
+  }
+});
+
 it('播放中 Proxy 完成保持目前聲畫，下一次 seek 直接使用同夾 Proxy 與原聲道元素',async()=>{
   const f=await fixture({mode:'smooth'});
   try{

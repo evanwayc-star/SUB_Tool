@@ -297,9 +297,13 @@ Renderer 的 `MediaIntakeJobs` 分別持有在途請求與可重試的失敗／�
 
 `continuous-waveform-cache.js` 在 `.subtool_Cache/<key>/continuous-waveforms/<規格與工作識別>/` 保存一個 `partial.wav` 與原子更新的 `checkpoint.json`。每五秒來源 PCM 寫入並同步保存後，才把該範圍的峰值交給 renderer；未提交的尾端不算已完成。partial 的 WAV header 預告最終總樣本數，讀取只能採信 checkpoint 確認的前綴，不能當成完整 WAV。完成時關閉 writer，重核同一檔案及完整 PCM SHA-256，原子改名為 `wave.wav` 並發布完成紀錄。
 
+stdout 的任意小區塊先在 worker 累積，最多保留 40,000 bytes，對齊上述五秒保存邊界後才驗證來源、比對續算 PCM 與寫入。這避免 pipe 分塊大小放大 NAS 的檔案身分與目錄核對次數；不足五秒的最後一塊須等解碼正常結束、總 sample 數吻合才提交。波形峰值及續算比較仍逐 sample 依原規則產生。
+
 一般 `ingest` 與 `streamIngest` 的共同計畫都必須帶 `duration`；沿用波形時核對 `round(duration * 4000)`、音訊配置、原共享來源證據及 wave 檔案快照。worker 完成結果將原證據交回 main，不以之後新取得的來源指紋替舊 wave 認證。同目錄直接引用正式 wave，必要時在持有來源資格下複製；完成 metadata 保存相對路徑，下一個 runtime 可沿用。完整波形已命中時不再輸出第二份混音 WAV；這不省略仍缺少的 Proxy 或逐聲道音訊。
 
 素材旁快取不可寫時明確回報，不退到本機中央快取；子目錄的權限或容量錯誤也不能轉移儲存位置。開始保存後的寫入失敗保留既有 checkpoint，不假報完成。`ignoreCached:true` 建立新的 writer 世代，不沿用舊前綴或完成檔，也不刪除舊成果。`allowSidecarCache:false` 僅供隔離驗收，避免測試寫入使用者 NAS，並非正式版的自動退路。
+
+checkpoint 原子改名若遇 `EPERM`、`EACCES` 或 `EBUSY`，worker 最多嘗試五次，間隔為 25、50、100、200 ms。每次等待後重核取消、來源、目錄、原 checkpoint 與自有暫存內容；不先刪除舊紀錄。持續遭拒仍回報原錯誤，容量不足及身分變更不重試。此處只處理短暫檔案占用，不保證排除 NAS 權限或伺服器錯誤。
 
 保存規格綁定共享來源證據、混音／時鐘版本、音訊配置及總 sample 數。完整命中驗證 PCM SHA-256 後唯讀交接，不另建 writer；partial 命中則核對已保存前綴，再複製到自己的 writer 世代，不接管或覆寫另一台電腦的 writer。續算以整數 sample 決定完成點前三秒的整秒解碼起點，逐樣本比對已保存的最後一秒；若 decoder／resampler 歷史造成不一致，最多回來源起點一次，核對全部既有前綴後再追加，不能拼接錯位 PCM。不同格式的續算成本因此可能不同。
 

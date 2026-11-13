@@ -4,9 +4,11 @@ import path from 'node:path';
 import {createRequire} from 'node:module';
 import {afterEach,expect,it,vi} from 'vitest';
 const require=createRequire(import.meta.url);
-const {createMediaIntakeRuntime,cacheKeyFor}=require('../electron/media-intake-runtime');
+const {createMediaIntakeRuntime,cacheKeyFor,buildAudioIngestPlan}=require('../electron/media-intake-runtime');
 const {sharedSourceFingerprintSync}=require('../electron/mother-source-evidence');
 const {FileAuthority}=require('../electron/file-authority');
+const {runContinuousSourceWaveform,CHECKPOINT_SAMPLES}=require('../electron/continuous-source-waveform');
+const {openContinuousWaveformCache}=require('../electron/continuous-waveform-cache');
 const roots=[],runtimes=[];
 function fixture(duration=13.12725,{allowSidecarCache=false}={}){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'subtool-continuous-runtime-'));roots.push(root);
@@ -148,4 +150,126 @@ it('完成 wave 原始 shared witness 改變時，同 strict key 的下一個 in
   expect(cacheKeyFor(f.src)).toBe(strict);expect(sharedSourceFingerprintSync(f.src)).not.toBe(shared);
   const result=await runtime.ingest({src:f.src,duration:f.duration,audio:f.audio,needsProxy:true});
   expect(result.wave).not.toBe(first.wave);expect(f.execute.mock.calls[1][0].some(value=>value.endsWith('wave.wav'))).toBe(true);
+});
+
+function continuousCaller(f,{savedSamples=0,verify=vi.fn()}={}){
+  const spec={version:1,sharedSourceKey:'a'.repeat(64),audio:f.audio,totalSamples:f.samples};
+  if(savedSamples){
+    const prefix=openContinuousWaveformCache(f.cacheRoot,spec);
+    prefix.appendPCM(f.pcm.subarray(0,savedSamples*2));prefix.checkpoint();prefix.close();
+  }
+  const writer=openContinuousWaveformCache(f.cacheRoot,spec,{verify});
+  const store={
+    get isComplete(){return writer.isComplete;},get wavePath(){return writer.wavePath;},
+    get completedSamples(){return writer.completedSamples;},get writtenSamples(){return writer.writtenSamples;},
+    appendPCM:vi.fn(bytes=>writer.appendPCM(bytes)),checkpoint:vi.fn(()=>writer.checkpoint()),
+    readPCM:vi.fn((start,count)=>writer.readPCM(start,count)),complete:vi.fn(()=>writer.complete()),
+    close:vi.fn(()=>writer.close()),
+  };
+  const events=[],progress=vi.fn(event=>events.push(event));
+  verify.mockClear?.();
+  const run=execute=>runContinuousSourceWaveform({src:f.src,duration:f.duration,audio:f.audio,sourceKey:'fixture',
+    store,verify,execute,buildPlan:buildAudioIngestPlan,progress});
+  return {store,verify,events,progress,run};
+}
+
+function sendPcm(options,pcm,chunkBytes){
+  for(let offset=0;offset<pcm.length;offset+=chunkBytes)options.onPcm(pcm.subarray(offset,offset+chunkBytes));
+}
+
+function expectedPeaks(pcm){
+  const result=[];
+  for(let offset=0;offset<pcm.length;offset+=80){
+    let minimum=0,maximum=0;
+    for(let sample=offset;sample<Math.min(offset+80,pcm.length);sample+=2){
+      const value=pcm.readInt16LE(sample)/32768;minimum=Math.min(minimum,value);maximum=Math.max(maximum,value);
+    }
+    result.push(minimum,maximum);
+  }
+  return Array.from(Float32Array.from(result));
+}
+
+it.each([16384,257,200000])('stdout 每 %i bytes 到達時，以最多5秒一塊保存，PCM 與所有 peaks 不受 chunk 邊界影響',async chunkBytes=>{
+  const f=fixture(),c=continuousCaller(f);
+  const result=await c.run(async(_args,options)=>sendPcm(options,f.pcm,chunkBytes));
+  expect(fs.readFileSync(result.wave).subarray(44)).toEqual(f.pcm);
+  expect(c.events.flatMap(event=>Array.from(event.waveform.peaks))).toEqual(expectedPeaks(f.pcm));
+  expect(c.events.map(event=>event.waveform.completedSamples)).toEqual([20000,40000,f.samples]);
+  expect(c.store.appendPCM.mock.calls.map(([bytes])=>bytes.length),`verify calls: ${c.verify.mock.calls.length}`)
+    .toEqual([40000,40000,f.pcm.length-80000]);
+  expect(c.store.close).toHaveBeenCalledOnce();
+});
+
+it('小 stdout chunks 不增加來源與檔案權威驗證的往返次數',async()=>{
+  const counts=[];
+  for(const chunkBytes of [40000,257]){
+    const f=fixture(),c=continuousCaller(f);
+    const result=await c.run(async(_args,options)=>sendPcm(options,f.pcm,chunkBytes));
+    expect(fs.readFileSync(result.wave).subarray(44)).toEqual(f.pcm);
+    counts.push(c.verify.mock.calls.length);
+  }
+  expect(counts[1]).toBe(counts[0]);
+});
+
+it.each([1,2])('EOF 少 %i byte 不提交未完整的尾段，只保留已完成5秒 checkpoint',async missingBytes=>{
+  const f=fixture(5.5),c=continuousCaller(f);
+  await expect(c.run(async(_args,options)=>sendPcm(options,f.pcm.subarray(0,-missingBytes),257))).rejects.toThrow('PCM 未完整到達');
+  expect(c.store.writtenSamples).toBe(CHECKPOINT_SAMPLES);expect(c.store.completedSamples).toBe(CHECKPOINT_SAMPLES);
+  expect(c.events.map(event=>event.waveform.completedSamples)).toEqual([CHECKPOINT_SAMPLES]);
+  expect(c.store.complete).not.toHaveBeenCalled();expect(c.store.close).toHaveBeenCalledOnce();
+});
+
+it('PCM 全數到達但解碼程序失敗，不提交不足5秒的尾段或宣告完成',async()=>{
+  const f=fixture(5.5),c=continuousCaller(f),error=Object.assign(new Error('decoder failed'),{code:'FFMPEG_EXIT'});
+  await expect(c.run(async(_args,options)=>{sendPcm(options,f.pcm,257);throw error;})).rejects.toBe(error);
+  expect(c.store.writtenSamples).toBe(CHECKPOINT_SAMPLES);expect(c.store.completedSamples).toBe(CHECKPOINT_SAMPLES);
+  expect(c.events).toHaveLength(1);expect(c.store.complete).not.toHaveBeenCalled();expect(c.store.close).toHaveBeenCalledOnce();
+});
+
+it('取消未滿一塊的 PCM 不寫入或發布，已保存 prefix 可重新逐 sample 續算',async()=>{
+  const f=fixture();let cancelled=false;
+  const verify=vi.fn(()=>{if(cancelled)throw Object.assign(new Error('cancelled'),{code:'INGEST_SUPERSEDED'});});
+  const c=continuousCaller(f,{verify});
+  await expect(c.run(async(_args,options)=>{
+    options.onPcm(f.pcm.subarray(0,40000));options.onPcm(f.pcm.subarray(40000,40127));cancelled=true;
+  })).rejects.toMatchObject({code:'INGEST_SUPERSEDED'});
+  expect(c.store.writtenSamples).toBe(CHECKPOINT_SAMPLES);expect(c.store.completedSamples).toBe(CHECKPOINT_SAMPLES);
+  expect(c.events).toHaveLength(1);expect(c.store.close).toHaveBeenCalledOnce();
+  const resumed=continuousCaller(f),execute=vi.fn(async(args,options)=>{
+    const start=Number(args[args.indexOf('-ss')+1])*8000;sendPcm(options,f.pcm.subarray(start),257);
+  });
+  const result=await resumed.run(execute);
+  expect(result.resumedSamples).toBe(CHECKPOINT_SAMPLES);expect(execute).toHaveBeenCalledOnce();
+  expect(fs.readFileSync(result.wave).subarray(44)).toEqual(f.pcm);
+  expect(resumed.events.flatMap(event=>Array.from(event.waveform.peaks))).toEqual(expectedPeaks(f.pcm));
+});
+
+it('超出來源長度的 PCM chunk 不寫入或完成，保留先前已保存的 prefix',async()=>{
+  const f=fixture(5.5),c=continuousCaller(f),child={kill:vi.fn()};
+  await expect(c.run(async(_args,options)=>{
+    options.onProcess(child);options.onPcm(f.pcm.subarray(0,40000));
+    options.onPcm(Buffer.concat([f.pcm.subarray(40000),Buffer.alloc(2)]));
+  })).rejects.toThrow('超出來源 sample 範圍');
+  expect(child.kill).toHaveBeenCalledOnce();expect(c.store.writtenSamples).toBe(CHECKPOINT_SAMPLES);
+  expect(c.store.complete).not.toHaveBeenCalled();expect(c.events).toHaveLength(1);expect(c.store.close).toHaveBeenCalledOnce();
+});
+
+it.each([false,true])('續算重疊 sample 不同會從原點再核對完整 prefix，永久不一致=%s',async permanentMismatch=>{
+  const f=fixture(),c=continuousCaller(f,{savedSamples:40000});
+  const execute=vi.fn(async(args,options)=>{
+    const start=Number(args[args.indexOf('-ss')+1])*4000,bytes=Buffer.from(f.pcm.subarray(start*2));
+    if(start)bytes[(39000-start)*2]^=127;
+    else if(permanentMismatch)bytes[123*2]^=127;
+    sendPcm(options,bytes,257);
+  });
+  const result=c.run(execute);
+  if(permanentMismatch){
+    await expect(result).rejects.toMatchObject({code:'SOURCE_WAVE_RESUME_MISMATCH'});
+    expect(c.store.writtenSamples).toBe(40000);expect(c.store.complete).not.toHaveBeenCalled();
+  }else{
+    expect(fs.readFileSync((await result).wave).subarray(44)).toEqual(f.pcm);
+    expect(c.events.flatMap(event=>Array.from(event.waveform.peaks))).toEqual(expectedPeaks(f.pcm));
+  }
+  expect(execute.mock.calls.map(([args])=>args[args.indexOf('-ss')+1])).toEqual(['7','0']);
+  expect(c.store.close).toHaveBeenCalledOnce();
 });

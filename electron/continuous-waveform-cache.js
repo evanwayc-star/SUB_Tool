@@ -10,6 +10,9 @@ const BLOCK = 65536;
 const MAX_TRANSFER_BYTES = 4 * 1024 * 1024;
 const MAX_TOTAL_SAMPLES = Math.floor((0xffffffff - 36) / 2);
 const MAX_RECORD_BYTES = 128 * 1024;
+const CHECKPOINT_RETRY_DELAYS = [25, 50, 100, 200];
+const CHECKPOINT_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const checkpointRetryWait = new Int32Array(new SharedArrayBuffer(4));
 const GENERATION = /^[a-f0-9]{64}-[a-f0-9]{24}$/;
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const changed = () => Object.assign(new Error('連續波形快取的來源、目錄或內容已變更'), { code: 'CONTINUOUS_WAVE_CACHE_CHANGED' });
@@ -251,10 +254,22 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
       fs.writeFileSync(metadataFd, bytes); fs.fsyncSync(metadataFd); fs.closeSync(metadataFd); metadataFd = undefined;
       const proof = readRecord(temporary);
       if (!sameFile(metadataOwner, proof.stat) || !proof.bytes.equals(bytes)) throw changed();
-      check();
-      if (recordProof) assertRecord(recordFile, recordProof);
-      else { try { fs.lstatSync(recordFile); throw changed(); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
-      generation.verify(); fs.renameSync(temporary, recordFile);
+      for (let attempt = 0; ; attempt++) {
+        if (closed) throw new Error('連續波形 writer 已關閉');
+        check();
+        if (attempt) assertRecord(temporary, proof);
+        if (recordProof) assertRecord(recordFile, recordProof);
+        else { try { fs.lstatSync(recordFile); throw changed(); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
+        generation.verify();
+        try { fs.renameSync(temporary, recordFile); break; }
+        catch (error) {
+          if (!CHECKPOINT_RETRY_CODES.has(error.code) || attempt >= CHECKPOINT_RETRY_DELAYS.length) throw error;
+          // The synchronous store runs in the waveform worker. Let a transient
+          // sharing denial clear without deleting the last durable checkpoint.
+          // Recheck the shared cancellation flag and all ownership after waiting.
+          Atomics.wait(checkpointRetryWait, 0, 0, CHECKPOINT_RETRY_DELAYS[attempt]);
+        }
+      }
       const published = readRecord(recordFile);
       if (!sameFile(metadataOwner, published.stat) || !published.bytes.equals(bytes)) throw changed();
       generation.verify(); recordProof = published;

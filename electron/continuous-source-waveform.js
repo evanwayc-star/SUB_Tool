@@ -48,30 +48,42 @@ async function runContinuousSourceWaveform({ src, duration, audio, sourceKey, st
       const args = ['-y', '-threads', '1', '-filter_complex_threads', '1', '-ss', String(seek.seek), '-i', src,
         '-vn', '-sn', '-dn', '-filter_complex', filters.join(';'), '-map', '[sourcewave]',
         '-ac', '1', '-ar', String(SAMPLE_RATE), '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'];
-      let decodedSamples = startSample, carry = Buffer.alloc(0), failure, child;
+      let decodedSamples = startSample, receivedBytes = 0, pendingLength = 0, failure, child;
+      // Pipe chunks can be only a few samples. Keep at most one checkpoint in
+      // memory so source/directory checks and durable writes do not turn each
+      // tiny chunk into several synchronous NAS round trips.
+      const pending = Buffer.alloc(CHECKPOINT_SAMPLES * 2);
+      const consume = data => {
+        verify();
+        const samples = data.length / 2;
+        const checkFrom = Math.max(decodedSamples, compareFrom), checkTo = Math.min(decodedSamples + samples, resumedSamples);
+        if (checkTo > checkFrom) {
+          const expected = store.readPCM(checkFrom, checkTo - checkFrom);
+          if (!data.subarray((checkFrom - decodedSamples) * 2, (checkTo - decodedSamples) * 2).equals(expected))
+            throw Object.assign(new Error('續算波形與已保存 PCM 不一致'), { code: 'SOURCE_WAVE_RESUME_MISMATCH' });
+        }
+        let offset = Math.max(0, resumedSamples - decodedSamples) * 2;
+        while (offset < data.length) {
+          const boundary = Math.min(totalSamples, (Math.floor(store.writtenSamples / CHECKPOINT_SAMPLES) + 1) * CHECKPOINT_SAMPLES);
+          const count = Math.min(data.length - offset, (boundary - store.writtenSamples) * 2);
+          store.appendPCM(data.subarray(offset, offset + count)); offset += count;
+          if (store.writtenSamples === boundary) { verify(); store.checkpoint(); publish(store.completedSamples); }
+        }
+        decodedSamples += samples;
+      };
       const receive = bytes => {
         if (failure) throw failure;
         try {
-          verify();
-          const combined = carry.length ? Buffer.concat([carry, Buffer.from(bytes)]) : Buffer.from(bytes);
-          const length = combined.length - combined.length % 2;
-          carry = combined.subarray(length);
-          const data = combined.subarray(0, length), samples = data.length / 2;
-          if (decodedSamples + samples > totalSamples) throw new Error('連續波形超出來源 sample 範圍');
-          const checkFrom = Math.max(decodedSamples, compareFrom), checkTo = Math.min(decodedSamples + samples, resumedSamples);
-          if (checkTo > checkFrom) {
-            const expected = store.readPCM(checkFrom, checkTo - checkFrom);
-            if (!data.subarray((checkFrom - decodedSamples) * 2, (checkTo - decodedSamples) * 2).equals(expected))
-              throw Object.assign(new Error('續算波形與已保存 PCM 不一致'), { code: 'SOURCE_WAVE_RESUME_MISMATCH' });
-          }
-          let offset = Math.max(0, resumedSamples - decodedSamples) * 2;
+          const data = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+          if (receivedBytes + data.length > remainingSamples * 2) throw new Error('連續波形超出來源 sample 範圍');
+          receivedBytes += data.length;
+          let offset = 0;
           while (offset < data.length) {
-            const boundary = Math.min(totalSamples, (Math.floor(store.writtenSamples / CHECKPOINT_SAMPLES) + 1) * CHECKPOINT_SAMPLES);
-            const count = Math.min(data.length - offset, (boundary - store.writtenSamples) * 2);
-            store.appendPCM(data.subarray(offset, offset + count)); offset += count;
-            if (store.writtenSamples === boundary) { verify(); store.checkpoint(); publish(store.completedSamples); }
+            const boundaryBytes = (CHECKPOINT_SAMPLES - decodedSamples % CHECKPOINT_SAMPLES) * 2;
+            const count = Math.min(data.length - offset, boundaryBytes - pendingLength);
+            data.copy(pending, pendingLength, offset, offset + count); pendingLength += count; offset += count;
+            if (pendingLength === boundaryBytes) { consume(pending.subarray(0, pendingLength)); pendingLength = 0; }
           }
-          decodedSamples += samples;
         } catch (error) { failure = error; try { child?.kill(); } catch (_) {} throw error; }
       };
       try {
@@ -84,7 +96,11 @@ async function runContinuousSourceWaveform({ src, duration, audio, sourceKey, st
       } catch (error) { throw failure || error; }
       if (failure) throw failure;
       verify();
-      if (carry.length || decodedSamples !== totalSamples || store.writtenSamples !== totalSamples)
+      if (receivedBytes !== remainingSamples * 2 || pendingLength % 2)
+        throw new Error('連續波形 PCM 未完整到達');
+      // A short final block is accepted only after successful decoder EOF.
+      if (pendingLength) consume(pending.subarray(0, pendingLength));
+      if (decodedSamples !== totalSamples || store.writtenSamples !== totalSamples)
         throw new Error('連續波形 PCM 未完整到達');
     };
     const restartSample = Math.max(0, Math.floor(resumedSamples / SAMPLE_RATE) - 3) * SAMPLE_RATE;
