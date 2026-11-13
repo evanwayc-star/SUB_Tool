@@ -45,23 +45,23 @@ vi.mock('../src/time.js', async importOriginal => {
 });
 
 let state;
-let renderCheckPanel;
+let renderCheckPanel,renderSubList,renderSubRow;
 
 beforeAll(async () => {
   const style = document.createElement('style');
   style.textContent = css;
   document.head.appendChild(style);
   document.body.innerHTML = `
-    <div id="sublist"></div><span id="stSel"></span>
+    <div id="sublist"></div><span id="subCount"></span><span id="stSel"></span>
     <div id="checkPanel" class="show">
       <p id="checkSummary"></p>
       <div id="cpConsecutiveIdentical"><span class="cp-nums"></span></div>
     </div>`;
   state = await import('../src/state.js');
-  ({ renderCheckPanel } = await import('../src/subtitles.js'));
+  ({ renderCheckPanel,renderSubList,renderSubRow } = await import('../src/subtitles.js'));
 });
 
-it('連續相同且頭尾黏接時，這一對的兩個編號都套用深綠 class', () => {
+it('同文按組著色，頭尾黏接另保留提示而不覆蓋群組色', () => {
   Object.assign(state.State, {
     fps: 25,
     listTrack: 0,
@@ -89,7 +89,34 @@ it('連續相同且頭尾黏接時，這一對的兩個編號都套用深綠 cla
   expect(orange.getAttribute('type')).toBe('button');
   expect(orange.getAttribute('aria-label')).toBe('前往第 1 句字幕');
   expect(getComputedStyle(darkGreen).color).not.toBe(getComputedStyle(orange).color);
-  expect(getComputedStyle(darkGreen).color).toBe('rgb(31, 122, 63)');
+  expect(getComputedStyle(darkGreen).color).toBe('rgb(74, 222, 128)');
+  expect(darkGreen.title).toContain('頭尾黏接');
+});
+
+it('同文群組紅綠藍循環，三句一組保持同色，列表色標不改字幕樣式且編輯後更新鄰列',()=>{
+  const texts=['甲','甲','單句','乙','乙','乙','丙','丙','甲','甲'];
+  const cues=texts.map((text,index)=>({id:'group-'+index,text,start:index,end:index+1,track:0,timed:true}));
+  Object.assign(state.State,{fps:25,listTrack:0,tracks:[{name:'字幕',visible:true}],cues});
+  const before=structuredClone(cues);
+  renderSubList();
+  const buttons=[...document.querySelectorAll('#cpConsecutiveIdentical .cp-num')];
+  expect(buttons.map(button=>getComputedStyle(button).color)).toEqual([
+    'rgb(248, 113, 113)','rgb(248, 113, 113)',
+    'rgb(74, 222, 128)','rgb(74, 222, 128)','rgb(74, 222, 128)',
+    'rgb(96, 165, 250)','rgb(96, 165, 250)',
+    'rgb(248, 113, 113)','rgb(248, 113, 113)',
+  ]);
+  expect(buttons.map(button=>Number(button.dataset.identicalGroup))).toEqual([1,1,2,2,2,3,3,4,4]);
+  const rows=[...document.querySelectorAll('.sub-row')];
+  expect(getComputedStyle(rows[0].querySelector('.idx')).color).toBe('rgb(248, 113, 113)');
+  expect(getComputedStyle(rows[3].querySelector('.idx')).color).toBe('rgb(74, 222, 128)');
+  expect(getComputedStyle(rows[6].querySelector('.idx')).color).toBe('rgb(96, 165, 250)');
+  expect(rows[2].className).not.toContain('identical-group-');
+  expect(cues).toEqual(before);
+  cues[1].text='改成不同';renderSubRow(cues[1].id);
+  expect(rows[0].className).not.toContain('identical-group-');
+  expect(rows[1].className).not.toContain('identical-group-');
+  expect(getComputedStyle(rows[3].querySelector('.idx')).color).toBe('rgb(248, 113, 113)');
 });
 
 it('空軌明確提示尚無字幕，已檢查而無命中顯示無', () => {

@@ -23,6 +23,15 @@ function fixture(execute){
   const options={cacheRoot:cache,fileAuthority:authority,execute,probe:async()=>({duration:2,video:{fps:25}})};
   return {root,source,cache,options,request:{path:source,time:1,fps:25},runtime:createClipFrameCache(options)};
 }
+it('來源旁的 sidecar 為連結時，不沿連結建立固定畫面快取',async()=>{
+  const execute=vi.fn(async(_args,options)=>fs.writeFileSync(options.outputDescriptor,PNG)),f=fixture(execute);
+  const target=path.join(f.root,'redirected');fs.mkdirSync(target);
+  const sidecar=path.join(f.root,'.subtool_Cache');
+  fs.symlinkSync(target,sidecar,process.platform==='win32'?'junction':'dir');
+  const runtime=createClipFrameCache({...f.options,cacheRoot:path.join(sidecar,'clip-frames')});
+  await expect(runtime.frame(f.request)).rejects.toThrow('快取目錄');
+  expect(execute).not.toHaveBeenCalled();expect(fs.readdirSync(target)).toEqual([]);
+});
 function corruptedIDAT() {
   const bytes=Buffer.from(PNG),at=bytes.indexOf('IDAT'),length=bytes.readUInt32BE(at-4);
   bytes[at+4]=0;bytes[at+5]=0;

@@ -173,6 +173,7 @@ describe('媒體探測 interface', () => {
       ipcMain: { handle: (_, handler) => { invoke = handler; } }, app: { on: (_, handler) => { beforeQuit = handler; }, quit },
       _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false, audioNormalizationJobs: new Map(),
       ffmpegExecution: owner(), deliveryCapabilities: owner(), speechCompressionRuntime: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(),
+      nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
       QueueManager: { prepareForShutdown: done, cancelShutdown: done }, clipAudioCache: { waitForIdle: done },
       clipFrameCache: { waitForIdle: done },
       screenshotOutput: { close: done, resume: done }, directoryOutput: { close: done, resume: done }, fileCommitCoordinator: { close: done, resume: done }, mediaIntakeRuntime: { close: done },
@@ -191,6 +192,7 @@ describe('媒體探測 interface', () => {
       await vi.waitFor(() => expect(quit).toHaveBeenCalledOnce());
       expect(await outcome).toMatchObject({ code: 'PROBE_ABORTED' });
       expect(context._quitReady).toBe(true);
+      expect(context.nativeAudioMeter.stop).toHaveBeenCalledOnce();
     } finally { child?.kill(); await probe.cancelAllAndWait(); await outcome; }
 
     // A later cleanup failure cancels quit and reopens this same public owner.
@@ -202,6 +204,7 @@ describe('媒體探測 interface', () => {
     await vi.waitFor(() => expect(resume).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(context._quitSequenceStarted).toBe(false));
     expect(context._isAppQuitting).toBe(false);
+    expect(context.nativeAudioMeter.stop).toHaveBeenCalledTimes(2);
   });
   it('有效素材在 16 秒後完成探測時，仍保留完整音視訊資訊', async () => {
     vi.useFakeTimers();
@@ -607,6 +610,18 @@ describe('媒體探測 interface', () => {
       color_space: 'bt470bg', color_primaries: 'bt470bg', color_transfer: 'bt709', color_range: 'tv' }] });
     expect(result.video).toMatchObject({ width: 720, height: 576, sampleAspectRatio: '1:2', pixelFormat: 'yuv420p',
       colorSpace: 'bt470bg', colorPrimaries: 'bt470bg', colorTransfer: 'bt709', colorRange: 'tv' });
+  });
+
+  it('保留實際來源 time base 與名義格率，缺少或非法值不能補造量化證據', () => {
+    const { descriptorOf } = require('../electron/media-probe');
+    const video = fields => descriptorOf({ streams: [{ codec_type: 'video', ...fields }] }).video;
+    expect(video({ time_base: '1/1000', r_frame_rate: '24000/1001', avg_frame_rate: '24000/1001' }))
+      .toMatchObject({ timeBase: '1/1000', nominalFrameRate: '24000/1001', fps: 24000 / 1001 });
+    for (const value of [undefined, '0/0', '1/0', '-1/1000', 'NaN', '1/1000,filter', '9007199254740992/1']) {
+      const result = video({ time_base: value, r_frame_rate: value });
+      expect(result).not.toHaveProperty('timeBase');
+      expect(result).not.toHaveProperty('nominalFrameRate');
+    }
   });
 
   it.each([

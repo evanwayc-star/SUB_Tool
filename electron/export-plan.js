@@ -28,11 +28,12 @@ const { imageBox: sharedImageBox } = require('../shared/image-geometry.cjs');
 const { clipLength, fadeWindow } = require('../shared/clip-fade.cjs');
 const { fixedFrameTime } = require('../shared/clip-visual.cjs');
 const { deliveryFrameRateRatio, exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
+const { normalizeDeliveryChapters } = require('../shared/delivery-chapters.cjs');
 const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
 const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter, HARD_LIMITER_PRESETS } = require('../shared/audio-loudness.cjs');
 const { airlineEncoding } = require('./airline-encoding');
 const { discEncoding } = require('./disc-encoding');
-const { sourceVideoClockSeek, sourceAudioClockFilter, sourceFrameSelectionFilter, timestampOffset } = require('./media-source-clock');
+const { sourceVideoClockSeek, sourceAudioClockFilter, sourceVideoTimestampFilter, sourceFrameSelectionFilter, timestampOffset } = require('./media-source-clock');
 const MOD_AUDIO_BALANCE = HARD_LIMITER_PRESETS.find(preset => preset.id === 'limit_minus_12db');
 
 const _EXPORT_LAYOUTS = Object.freeze({
@@ -450,9 +451,11 @@ function prepareDeliveryPayload(spec = {}) {
       videoKbps: preset.videoKbps } : {}) };
   // The persisted job keeps SMPTE ';'. FFmpeg's '.' spelling belongs only in argv.
   if (!isWav) _normaliseExportTimecodeWatermark(prepared.timecodeWatermark, prepared.fps);
+  const duration = Math.max(0.05, _finiteNumber(prepared.duration, 0), _planDuration(normalizedPlan));
   return {
     ...prepared,
-    duration: Math.max(0.05, _finiteNumber(prepared.duration, 0), _planDuration(normalizedPlan)),
+    duration,
+    ...(prepared.chapters != null ? { chapters: normalizeDeliveryChapters(prepared.chapters, duration, prepared.format) } : {}),
     timecodeWatermark: isWav ? null : prepared.timecodeWatermark,
   };
 }
@@ -494,7 +497,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', wav.label,
-        '-ar', '48000', '-c:a', 'pcm_s24le', outPath],
+        '-map_chapters', '-1', '-ar', '48000', '-c:a', 'pcm_s24le', outPath],
       label: `匯出 WAV PCM（${wav.channels} 軌）`,
       duration: D,
       plannedEncoder: 'pcm_s24le',
@@ -645,6 +648,10 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           // fps 不指定 start_time，保留來源尚未有畫格的 leading gap；只採
           // [0,samples) 的整數格 PTS。反序後以透明尾段保留原缺口，不能借未來格。
           videoTime = `trim=end=${adjOut},${fields}settb=AVTB,setpts=floor((PTS-${sourceFirst}/TB)/${_filterNumber(c.speed,1)})-1,tpad=stop_mode=clone:stop_duration=${1 / sampleRate},fps=${R}:round=up,trim=start_pts=0:end_pts=${samples},reverse,setpts=PTS-STARTPTS,settb=AVTB,setpts=PTS+${phase}/TB,format=yuva420p,tpad=stop_mode=add:color=black@0:stop_duration=${_filterNumber(clen)}`;
+        }
+        if (freezeTime == null) {
+          const clock = env.sourceClock?.(c.path);
+          videoTime = sourceVideoTimestampFilter(clock) + videoTime;
         }
         // 片段保留來源 cadence 與時間軸 offset；只有透明軌底使用交付格網。
         // 逐段 fps / concat 會讓每個短段各自 ceil，跨 FPS 交付逐段累積漂移。
@@ -819,7 +826,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   if (isAirline) {
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
-        '-map', vfinal, ...audioMaps, ...airline.videoArgs,
+        '-map', vfinal, ...audioMaps, '-map_chapters', '-1', ...airline.videoArgs,
         ...airline.audioArgs, ...airline.muxArgs, outPath],
       label: `匯出 ${preset.label} MPG（自動合成 TS）`,
       duration: D,
@@ -830,7 +837,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   if (isDisc) {
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
-        '-map', vfinal, ...audioMaps, '-r', outputRate, ...disc.videoArgs,
+        '-map', vfinal, ...audioMaps, '-map_chapters', '-1', '-r', outputRate, ...disc.videoArgs,
         ...disc.audioArgs, ...disc.muxArgs, outPath],
       label: `匯出 ${preset.label}（${(kbps / 1000).toFixed(2)} Mbps）`,
       duration: D, plannedEncoder: disc.plannedEncoder,
@@ -863,8 +870,14 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     : [];
   
   const args = ['-y', ...inputs];
+  let chapterIndex = -1;
+  if (spec.chapters?.length) {
+    if (typeof spec.chapterFileName !== 'string' || !spec.chapterFileName) _exportPlanError('影片書籤缺少主程序建立的中繼資料');
+    chapterIndex = plannedAudio?.inputIndex ?? ii;
+    args.push('-f', 'ffmetadata', '-i', spec.chapterFileName);
+  }
   if (fc.length > 0) args.push('-filter_complex', fc.join(';'));
-  args.push('-map', vfinal, ...audioMaps);
+  args.push('-map', vfinal, ...audioMaps, '-map_chapters', String(chapterIndex));
   args.push('-r', outputRate);
   args.push(...encode, ...audioMetadata, outPath);
 

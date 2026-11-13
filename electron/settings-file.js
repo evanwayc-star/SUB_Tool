@@ -58,16 +58,26 @@ function createSettingsFile({ filePath, fsModule = fs } = {}) {
     }
     const temporary = `${file}.${crypto.randomUUID()}.tmp`;
     const descriptor = fsModule.openSync(temporary, 'wx');
-    let open = true, published = false, owner = null, evidence = null;
+    let open = true, published = false, owner = null, evidence = null, preserveTemporary = false;
     const expected = Buffer.from(content, 'utf8');
+    const closedEvidence = (before, partial = false) => {
+      const staged = snapshot(temporary);
+      // A network writer can finalize timestamps on close. Only that boundary
+      // may refresh evidence, for the same owned object, mode, size and bytes.
+      if (!owner || !before || !staged || !['dev', 'ino', 'mode'].every(field => before[field] === owner[field])
+        || !['dev', 'ino', 'mode', 'size'].every(field => staged.stat[field] === before[field])
+        || (partial ? staged.bytes.length > expected.length : staged.bytes.length !== expected.length)
+        || !staged.bytes.equals(expected.subarray(0, staged.bytes.length))) throw conflict();
+      return staged.stat;
+    };
     try {
       owner = fsModule.fstatSync(descriptor, { bigint:true });
       fsModule.writeFileSync(descriptor, content, 'utf8');
       evidence = fsModule.fstatSync(descriptor, { bigint:true });
       fsModule.closeSync(descriptor);
       open = false;
-      const staged = snapshot(temporary);
-      if (!staged || !sameSnapshot(staged.stat, evidence) || !staged.bytes.equals(expected)) throw conflict();
+      try { evidence = closedEvidence(evidence); }
+      catch (error) { preserveTemporary = true; throw error; }
       const latest = snapshot(file);
       if ((original === null) !== (latest === null) || (original &&
         (!sameSnapshot(original.stat, latest.stat) || !original.bytes.equals(latest.bytes)))) throw conflict();
@@ -80,9 +90,12 @@ function createSettingsFile({ filePath, fsModule = fs } = {}) {
     } finally {
       if (open) {
         try { evidence = fsModule.fstatSync(descriptor, { bigint:true }); } catch (error) {}
-        try { fsModule.closeSync(descriptor); } catch (error) { evidence = null; }
+        try {
+          fsModule.closeSync(descriptor);
+          evidence = closedEvidence(evidence, true);
+        } catch (error) { evidence = null; }
       }
-      if (!published && owner && evidence && owner.dev === evidence.dev && owner.ino === evidence.ino) {
+      if (!published && !preserveTemporary && owner && evidence && owner.dev === evidence.dev && owner.ino === evidence.ino) {
         try {
           const staged = snapshot(temporary);
           if (staged && sameSnapshot(staged.stat, evidence) && staged.bytes.length <= expected.length

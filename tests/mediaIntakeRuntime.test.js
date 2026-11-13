@@ -616,7 +616,7 @@ describe('native media intake runtime', () => {
     } finally { fault.mockRestore(); await runtime.close(); }
   });
 
-  it('素材旁缺件時優先使用中央完整快取，不啟動補建', async () => {
+  it('素材旁缺件只補建同夾資產，不借用中央完整快取或改寫原 Proxy', async () => {
     const fixture = repairFixture(async args => writeIntakeOutputs(args));
     const request = { src: fixture.source, duration: 1, needsProxy: true, audio: [{ channels: 2 }] };
     const complete = await fixture.runtime.ingest(request);
@@ -625,13 +625,18 @@ describe('native media intake runtime', () => {
     fs.mkdirSync(sidecar, { recursive: true });
     fs.writeFileSync(path.join(sidecar, 'proxy.mp4'), 'keep sidecar proxy');
     fs.writeFileSync(path.join(sidecar, 'meta.json'), JSON.stringify({ proxy: 'proxy.mp4', channels: [], wave: 'missing.wav' }));
+    const execute=vi.fn(async args=>writeIntakeOutputs(args));
     const reopened = createMediaIntakeRuntime({
       cacheRoot: fixture.runtime.cacheInfo().root, allowSidecarCache: true,
       fileAuthority: new FileAuthority({ internalDirectories: [fixture.runtime.cacheInfo().root] }),
-      ffmpegExecution: { execute: () => { throw new Error('unnecessary rebuild'); } },
+      ffmpegExecution: { execute },
     });
     try {
-      expect(await reopened.ingest(request)).toEqual({ ...complete, cached: true });
+      const result=await reopened.ingest(request);
+      expect(result.cached).toBe(false);expect(execute).toHaveBeenCalledOnce();
+      expect(result.proxy).toBe(path.join(sidecar,'proxy.mp4'));
+      for(const channel of result.channels)expect(path.relative(sidecar,channel.file)).not.toMatch(/^\.\./);
+      expect(fs.readFileSync(complete.proxy)).toEqual(Buffer.alloc(131072,7));
       expect(fs.readFileSync(path.join(sidecar, 'proxy.mp4'), 'utf8')).toBe('keep sidecar proxy');
     } finally { await reopened.close(); }
   });
@@ -1421,6 +1426,7 @@ describe('native media intake runtime', () => {
     const runtime = createMediaIntakeRuntime({
       cacheRoot,
       tempRoot,
+      clipCacheRoots: () => [path.join(root, 'clip-frames'), path.join(root, 'clip-audio')],
       fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }),
     });
 
@@ -1429,6 +1435,12 @@ describe('native media intake runtime', () => {
     expect(runtime.isPreviewCacheMedia(path.join(root, '.subtool_Cache', 'abc', 'ch0.m4a'))).toBe(true);
     expect(runtime.isPreviewCacheMedia(path.join(root, 'camera', 'proxy.mp4'))).toBe(false);
     expect(runtime.isPreviewCacheMedia(path.join(cacheRoot, 'abc', 'master.mxf'))).toBe(false);
+    expect(runtime.isPreviewCacheMedia(path.join(root, '.subtool_Cache', 'clip-frames', 'key', 'entry', 'content.png'))).toBe(true);
+    expect(runtime.isPreviewCacheMedia(path.join(root, '.subtool_Cache', 'clip-audio', 'key', 'entry', 'content.wav'))).toBe(true);
+    expect(runtime.isPreviewCacheMedia(path.join(root, 'clip-frames', 'old.png'))).toBe(true);
+    expect(runtime.isPreviewCacheMedia(path.join(root, 'clip-audio', 'old.wav'))).toBe(true);
+    expect(runtime.isPreviewCacheMedia(path.join(root, 'camera', 'content.png'))).toBe(false);
+    expect(runtime.isPreviewCacheMedia(path.join(root, 'camera', 'content.wav'))).toBe(false);
   });
 
   it('stream response 發出後若 session 被取消，不得 commit 舊工作的 cache meta', async () => {

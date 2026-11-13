@@ -15,11 +15,14 @@
 ============================================================================ */
 
 const MPV_TIMECODE_RE = /^\d{1,6}:[0-5]\d:[0-5]\d[:;]\d{2,3}$/;
+const MPV_BUFFERING_PROPERTIES = ['core-idle', 'paused-for-cache', 'seeking'];
 const { StringDecoder } = require('node:string_decoder');
 const { randomBytes } = require('node:crypto');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 const { sourceClockTime, playerClockTime } = require('../shared/media-source-clock.cjs');
 const { validProjectCanvas } = require('../shared/project-canvas.cjs');
+const { buildMpvAudioMix } = require('./mpv-audio-mix');
+const { normaliseMpvRect, normaliseMpvViewport, mpvWindowRegion } = require('./mpv-window-region');
 
 function createMpvTemporaryFiles(fs, path, tmpDir, ensureTmp, rootAuthority) {
   const records = new Set();
@@ -140,6 +143,11 @@ function createMpvHost(deps) {
   let rect = null;
   let appliedBounds = null;
   let visible = true;
+  let occluders = [];
+  let covered = false;
+  let shapeFailed = false;
+  let parentHidden = false;
+  let hostShown = false;
   let guide = null;
   let imagesHtml = '';
   let timecodeWatermark = '';
@@ -224,31 +232,74 @@ function createMpvHost(deps) {
   }
 
   function showGuide() {
-    if (!visible || !guideHasVisibleContent() || !alive(guideWin)) return false;
+    if (!canShowWindows() || !guideHasVisibleContent() || !alive(guideWin)) return false;
     try { guideWin.showInactive(); guideWin.moveTop(); return true; } catch (error) { return false; }
   }
 
-  function applyBounds(nextRect) {
-    if (!alive(hostWin) || !nextRect) return false;
-    rect = nextRect;
+  function canShowWindows() {
+    if (!visible || covered || shapeFailed || parentHidden) return false;
     const parent = mainWindow();
-    if (!parent) return false;
+    try { return !!parent && !parent.isMinimized?.() && parent.isVisible?.() !== false; }
+    catch (error) { return false; }
+  }
+
+  function hideWindows() {
+    safeHide(hostWin);
+    safeHide(guideWin);
+    hostShown = false;
+  }
+
+  function syncWindowVisibility() {
+    if (!canShowWindows()) { hideWindows(); return; }
+    if (!hostShown && alive(hostWin)) {
+      hostWin.show();
+      hostWin.moveTop();
+      hostShown = true;
+    }
+    showGuide();
+  }
+
+  function applyBounds(nextRect) {
+    const checked = normaliseMpvRect(nextRect);
+    if (!alive(hostWin) || !checked) return false;
+    rect = checked;
+    const parent = mainWindow();
+    if (!parent) { shapeFailed = true; hideWindows(); return false; }
     try {
       const content = parent.getContentBounds();
-      const next = {
-        x: Math.round(content.x + nextRect.x),
-        y: Math.round(content.y + nextRect.y),
-        width: Math.max(1, Math.round(nextRect.w)),
-        height: Math.max(1, Math.round(nextRect.h)),
-      };
+      let zoom = 1;
+      try { zoom = parent.webContents?.getZoomFactor?.() ?? 1; } catch (error) {}
+      const region = mpvWindowRegion(rect, occluders, zoom);
+      const next = { ...region.bounds, x: Math.round(content.x + region.bounds.x), y: Math.round(content.y + region.bounds.y) };
       const same = appliedBounds && appliedBounds.x === next.x && appliedBounds.y === next.y
         && appliedBounds.width === next.width && appliedBounds.height === next.height;
-      if (same) return true;
-      appliedBounds = next;
-      hostWin.setBounds(next);
-      if (alive(guideWin)) guideWin.setBounds(next);
+      covered = region.covered;
+      // Never reset a fully covered shape: [] restores the whole native HWND.
+      if (covered) hideWindows();
+      if (!same) {
+        hostWin.setBounds(next);
+        if (alive(guideWin)) guideWin.setBounds(next);
+        appliedBounds = next;
+      }
+      if (alive(guideWin)) guideWin.webContents.setZoomFactor?.(region.zoom);
+      // Reapply even when CSS bounds are unchanged: Windows can rebuild the
+      // physical region after moving to a monitor with a different DPI.
+      if (!covered) {
+        hostWin.setShape(region.shape);
+        if (alive(guideWin)) guideWin.setShape(region.shape);
+      }
+      shapeFailed = false;
+      syncWindowVisibility();
       return true;
-    } catch (error) { return false; }
+    } catch (error) { shapeFailed = true; hideWindows(); return false; }
+  }
+
+  function setViewport(value) {
+    const checked = normaliseMpvViewport(value);
+    if (!checked || !alive(hostWin)) return false;
+    visible = checked.visible;
+    occluders = checked.occluders;
+    return applyBounds(checked.bounds);
   }
 
   function clearCallbacks(value = null) {
@@ -386,6 +437,7 @@ function createMpvHost(deps) {
     const owns=()=>session===fileLoadSession&&session.client===client&&session.generation===generation;
     if (!owns()) return false;
     const observers={ 'time-pos':nextSourceObserverId++, pause:nextSourceObserverId++ };
+    for (const name of MPV_BUFFERING_PROPERTIES) observers[name] = nextSourceObserverId++;
     session.observers=observers;
     sourceObserverSessions.add(session);
     session.observersReady=false;
@@ -404,6 +456,7 @@ function createMpvHost(deps) {
   }
 
   function publishSourceProperty(session,message) {
+    if (MPV_BUFFERING_PROPERTIES.includes(message.name) && typeof message.data !== 'boolean') return;
     const event={...message,sourceSessionId:session.sourceSessionId};
     if(event.name==='time-pos'&&session.awaitingPositioning) event.beforeSourcePositioning=true;
     if(event.name==='time-pos'&&typeof event.data==='number') event.data=sourceTime(event.data);
@@ -434,6 +487,7 @@ function createMpvHost(deps) {
     const pending=session.pendingObserverEvents;
     session.pendingObserverEvents={};
     if(pending?.pause) refreshPauseForSession(session);
+    for (const name of MPV_BUFFERING_PROPERTIES) if (pending?.[name]) publishSourceProperty(session,pending[name]);
     if(pending?.['time-pos']) publishSourceProperty(session,pending['time-pos']);
   }
 
@@ -557,6 +611,7 @@ function createMpvHost(deps) {
     cancelPlaybackReady();
     playbackCommandGeneration++;
     directionGeneration++;
+    cancelAudioMix(fileLoadSession);
     sourceAudioGraph = '';
     const current = client;
     const sourceSessionId = fileLoadSession?.sourceSessionId;
@@ -582,6 +637,11 @@ function createMpvHost(deps) {
     rect = null;
     appliedBounds = null;
     visible = true;
+    occluders = [];
+    covered = false;
+    shapeFailed = false;
+    parentHidden = false;
+    hostShown = false;
     guide = null;
     imagesHtml = '';
     subFile = null;
@@ -699,6 +759,70 @@ function createMpvHost(deps) {
         }
       }
     });
+  }
+
+  function ownsAudioMix(session) {
+    return !!session && session === fileLoadSession && session.client === client
+      && session.generation === generation && !session.loading;
+  }
+
+  function audioMixState(session) {
+    const prior = session.mix;
+    if (prior && !prior.canceled) return prior;
+    // A rejected source probe can restore this session. Canceled commands may
+    // have failed meanwhile, so its desired graph needs a fresh confirmation.
+    return (session.mix = { desired: prior?.desired ?? sourceAudioGraph, confirmed: prior ? null : sourceAudioGraph,
+      active: null, pending: null, suspended: prior?.suspended || false, epoch: 0, canceled: false });
+  }
+
+  function cancelAudioMix(session) {
+    const mix = session?.mix;
+    if (!mix) return;
+    mix.canceled = true;
+    mix.active?.resolve(false);
+    mix.pending?.resolve(false);
+    mix.pending = null;
+  }
+
+  function pumpAudioMix(session, mix) {
+    if (mix.active || !mix.pending || mix.suspended || mix.canceled || !ownsAudioMix(session)) return;
+    const job = mix.pending;
+    mix.pending = null;
+    mix.active = job;
+    const epoch = mix.epoch;
+    void send(['set_property', 'lavfi-complex', job.graph], true, { requireSuccess: true }).then(() => {
+      const current = !mix.canceled && ownsAudioMix(session) && epoch === mix.epoch;
+      if (current) mix.confirmed = job.graph;
+      job.resolve(current && mix.desired === job.graph && !mix.suspended);
+    }, error => {
+      if (!mix.canceled && ownsAudioMix(session) && epoch === mix.epoch && mix.desired === job.graph) job.reject(error);
+      else job.resolve(false);
+    }).finally(() => {
+      mix.active = null;
+      pumpAudioMix(session, mix);
+    });
+  }
+
+  function requestAudioGraph(session, graph) {
+    const mix = audioMixState(session);
+    sourceAudioGraph = mix.desired = graph;
+    if (mix.suspended) return Promise.resolve(true);
+    if (mix.pending?.graph === graph) return mix.pending.promise;
+    mix.pending?.resolve(false);
+    mix.pending = null;
+    if (mix.active?.graph === graph && mix.active.epoch === mix.epoch) return mix.active.promise;
+    if (!mix.active && mix.confirmed === graph) return Promise.resolve(true);
+    const job = { graph, epoch: mix.epoch };
+    job.promise = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
+    mix.pending = job;
+    pumpAudioMix(session, mix);
+    return job.promise;
+  }
+
+  async function audioMix(request) {
+    const session = fileLoadSession;
+    if (!ownsAudioMix(session) || request?.sourceSessionId !== session.sourceSessionId) return false;
+    return requestAudioGraph(session, buildMpvAudioMix(session.audio, request.channels));
   }
 
   const ownsCanvas = request => pendingCanvas === request && request.revision === canvasRevision
@@ -915,27 +1039,35 @@ function createMpvHost(deps) {
     const token = ++directionGeneration;
     const directionClient = client;
     const directionSource = fileLoadSession;
-    const audioGraph = sourceAudioGraph;
     const owns = () => token === directionGeneration && directionClient === client
       && directionSource === fileLoadSession;
-    if (!directionClient || directionSource?.loading) return false;
+    if (!directionClient || !directionSource || directionSource.loading) return false;
+    const mix = audioMixState(directionSource);
+    mix.suspended = true;
+    mix.epoch++;
+    if (mix.desired || mix.active) mix.confirmed = null;
+    mix.pending?.resolve(false);
+    mix.pending = null;
     const command = args => send(args, true, { requireSuccess: true });
     const restore = async () => {
       await command(['set_property', 'play-direction', 'forward']);
       if (!owns()) return false;
       await command(['set_property', 'hwdec', 'auto']);
       if (!owns()) return false;
-      // Restore even when an earlier clear acknowledgement is still pending:
-      // commands already written to the same pipe retain their mutation order.
-      if (audioGraph) await command(['set_property', 'lavfi-complex', audioGraph]);
+      mix.suspended = false;
+      // Faders may have changed during reverse or either direction command.
+      // The latest graph must be confirmed before forward playback can unmute.
+      while (owns() && mix.confirmed !== mix.desired) {
+        await requestAudioGraph(directionSource, mix.desired);
+      }
       return owns();
     };
     try {
       if (!backward) return await restore();
       // Reverse shuttle is silent. An explicit multi-aid amix graph still
       // decodes every input while muted and can stall MPEG-2 MXF reversal.
-      // Keep its exact configuration here, with the source that owns it.
-      if (audioGraph) await command(['set_property', 'lavfi-complex', '']);
+      // Keep the latest requested graph with its source while it is suspended.
+      if (mix.desired) await command(['set_property', 'lavfi-complex', '']);
       if (!owns()) return false;
       // mpv 官方明確說明硬體解碼的 frame ownership 會讓 reversal buffer
       // 失去約束，甚至耗盡 GPU 記憶體。只在倒播期間切軟解；正播仍保留 auto。
@@ -1009,7 +1141,8 @@ function createMpvHost(deps) {
               refreshDurationForSession(fileLoadSession);
               continue;
             }
-            if (message.event === 'property-change' && (message.name === 'time-pos' || message.name === 'pause')) {
+            if (message.event === 'property-change' && (message.name === 'time-pos' || message.name === 'pause'
+              || MPV_BUFFERING_PROPERTIES.includes(message.name))) {
               const session=fileLoadSession;
               if(!session||session.client!==client||session.generation!==generation
                 ||session.observers?.[message.name]!==message.id) continue;
@@ -1093,6 +1226,7 @@ function createMpvHost(deps) {
       fullscreenable: false, focusable: false, acceptFirstMouse: false,
       webPreferences: { offscreen: false, backgroundThrottling: false },
     });
+    hostShown = true;
     try { hostWin.setIgnoreMouseEvents(true, { forward: true }); } catch (error) {}
     try { hostWin.setMenu(null); } catch (error) {}
     hostWin.loadURL('data:text/html,<body style="margin:0;background:transparent"></body>');
@@ -1179,10 +1313,11 @@ function createMpvHost(deps) {
       ];
       const fontDir = fontsDir?.();
       if (fontDir) args.push('--sub-fonts-dir=' + fontDir, '--embeddedfonts=no');
-      if (Array.isArray(audio) && audio.length > 1) {
+      const sourceAudio = Array.isArray(info?.audio) ? info.audio : audio;
+      if (Array.isArray(sourceAudio) && sourceAudio.length > 1) {
         const aids = [];
-        for (let i = 0; i < audio.length; i++) aids.push(`[aid${i + 1}]`);
-        sourceAudioGraph = `${aids.join('')}amix=inputs=${audio.length}:normalize=0[ao]`;
+        for (let i = 0; i < sourceAudio.length; i++) aids.push(`[aid${i + 1}]`);
+        sourceAudioGraph = `${aids.join('')}amix=inputs=${sourceAudio.length}:normalize=0[ao]`;
         args.push('--lavfi-complex=' + sourceAudioGraph);
       }
       const spawned = spawn(exe, args, { windowsHide: true, detached: false, stdio: ['ignore', 'ignore', logOwner ? 'pipe' : 'ignore'] });
@@ -1216,7 +1351,7 @@ function createMpvHost(deps) {
       // Load only after attaching the pipe: CLI playback could finish its initial
       // file-loaded/restart before a client connects. --pause stays in force, and
       // the first load preserves the launch's multi-aid graph (unlike loadFile).
-      startupSession = { client, generation: token, path: src, loading: true, awaitingPositioning:false, sourceSessionId: randomBytes(16).toString('hex') };
+      startupSession = { client, generation: token, path: src, audio: info?.audio, loading: true, awaitingPositioning:false, sourceSessionId: randomBytes(16).toString('hex') };
       fileLoadSession = startupSession;
       const ready = waitForFileLoad(startupSession, { firstFrame: true });
       const receipt = await send(['loadfile', src, 'replace'], true, { requireSuccess: true });
@@ -1243,31 +1378,28 @@ function createMpvHost(deps) {
     visible = !!nextVisible;
     if (!alive(hostWin)) return false;
     if (visible) {
-      try { hostWin.show(); hostWin.moveTop(); } catch (error) {}
-      if (rect) applyBounds(rect);
-      showGuide();
-    } else {
-      safeHide(hostWin);
-      safeHide(guideWin);
-    }
+      if (rect) return applyBounds(rect);
+      try { syncWindowVisibility(); } catch (error) { hideWindows(); return false; }
+    } else hideWindows();
     return true;
   }
 
   function reapplyBounds() {
-    return !!(alive(hostWin) && visible && rect && applyBounds(rect));
+    return !!(alive(hostWin) && rect && applyBounds(rect));
   }
 
   function showForParentRestore() {
+    parentHidden = false;
     if (!alive(hostWin) || !visible) return false;
-    try { hostWin.show(); } catch (error) {}
-    reapplyBounds();
-    showGuide();
-    return true;
+    // Electron can automatically hide owned windows on minimize without going
+    // through hideWindows(), so our last requested state is not evidence here.
+    hostShown = false;
+    return reapplyBounds();
   }
 
   function hideForParent() {
-    safeHide(hostWin);
-    safeHide(guideWin);
+    parentHidden = true;
+    hideWindows();
   }
 
   function setGuide(raw) {
@@ -1356,6 +1488,7 @@ function createMpvHost(deps) {
     directionGeneration++;
     settleFileLoad(false);
     const previousSource = fileLoadSession?.loading ? null : fileLoadSession;
+    cancelAudioMix(fileLoadSession);
     if(fileLoadSession?.loading) releaseSourceObservers(fileLoadSession);
     const session = { client, generation, path: filePath, loading: true, awaitingPositioning:true, sourceSessionId: randomBytes(16).toString('hex') };
     fileLoadSession = session;
@@ -1377,6 +1510,7 @@ function createMpvHost(deps) {
       throw error;
     }
     if (!current()) return superseded();
+    session.audio = info?.audio;
     await send(['set_property', 'pause', true]);
     if (!current()) return superseded();
     sourceAudioGraph = '';
@@ -1401,6 +1535,15 @@ function createMpvHost(deps) {
       log('[mpv] loadfile: matching source load did not complete:', filePath);
       return { ok: false, duration: 0 };
     }
+    // loadfile reuses the process, but every input graph belongs to one source.
+    // Rebuild all native streams while still paused, before accepting mixer IPC.
+    if (Array.isArray(session.audio) && session.audio.length > 1) {
+      const inputs = session.audio.map((_, index) => `[aid${index + 1}]`).join('');
+      const graph = `${inputs}amix=inputs=${session.audio.length}:normalize=0[ao]`;
+      await send(['set_property', 'lavfi-complex', graph], true, { requireSuccess: true });
+      if (!current()) return superseded();
+      sourceAudioGraph = graph;
+    }
     if (!await installSourceObservers(session)) return superseded();
     const duration = await send(['get_property', 'duration'], true);
     if (!current()) return superseded();
@@ -1414,6 +1557,7 @@ function createMpvHost(deps) {
 
   return {
     detect,
+    audioMix,
     logPath: () => lastLogFile && (temporaryFiles.owns?.(lastLogFile) ?? true) ? lastLogFile.file : null,
     launch,
     quit,
@@ -1421,6 +1565,7 @@ function createMpvHost(deps) {
     disposeAndWait,
     resume,
     setBounds: applyBounds,
+    setViewport,
     setProjectCanvas,
     setVisible,
     reapplyBounds,

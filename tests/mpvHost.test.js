@@ -13,11 +13,12 @@ class FakeWindow {
   constructor(options) {
     this.options = options;
     this.destroyed = false;
-    this.webContents = { executeJavaScript: vi.fn(() => Promise.resolve()) };
+    this.webContents = { executeJavaScript: vi.fn(() => Promise.resolve()), setZoomFactor: vi.fn() };
     this.setIgnoreMouseEvents = vi.fn();
     this.setMenu = vi.fn();
     this.loadURL = vi.fn(() => Promise.resolve());
     this.setBounds = vi.fn();
+    this.setShape = vi.fn();
     this.show = vi.fn();
     this.showInactive = vi.fn();
     this.hide = vi.fn();
@@ -133,6 +134,339 @@ describe('Windows mpv host lifecycle', () => {
     return socket;
   }
   const flushReady = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+
+  it('viewport 依 page zoom 同步裁切 host 與 guide，部分遮擋保留影片且不改播放命令', async () => {
+    const { host, parent, sockets } = make();
+    parent.webContents = { getZoomFactor: () => 2 };
+    await host.launch({ src: 'D:/media/a.mxf', bounds: { x: 20, y: 30, w: 200, h: 100 } });
+    const [window, guide] = FakeWindow.instances;
+    host.setTimecodeWatermark('00:00:00:00');
+    window.hide.mockClear(); guide.hide.mockClear(); sockets[0].write.mockClear();
+    expect(host.setViewport({ bounds: { x: 20, y: 30, w: 200, h: 100 }, visible: true,
+      occluders: [{ x: 120, y: 30, w: 100, h: 40 }] })).toBe(true);
+    for (const target of [window, guide]) {
+      expect(target.setBounds).toHaveBeenLastCalledWith({ x: 140, y: 260, width: 400, height: 200 });
+      expect(target.setShape).toHaveBeenLastCalledWith(expect.arrayContaining([
+        { x: 0, y: 80, width: 400, height: 120 }, { x: 0, y: 0, width: 200, height: 80 },
+      ]));
+      expect(target.hide).not.toHaveBeenCalled();
+    }
+    expect(guide.webContents.setZoomFactor).toHaveBeenLastCalledWith(2);
+    expect(sockets[0].write).not.toHaveBeenCalled();
+    host.quit();
+  });
+
+  it('完整遮擋隱藏兩個視窗，解除後 reset shape；gap 隱藏不被 bounds 或 guide 重開', async () => {
+    const { host } = make();
+    const bounds = { x: 10, y: 20, w: 200, h: 100 };
+    await host.launch({ src: 'D:/media/a.mxf', bounds });
+    const windows = FakeWindow.instances;
+    host.setTimecodeWatermark('00:00:00:00');
+    for (const win of windows) { win.setShape.mockClear(); win.show.mockClear(); win.showInactive.mockClear(); }
+    expect(host.setViewport({ bounds, visible: true, occluders: [bounds] })).toBe(true);
+    host.setTimecodeWatermark('00:00:00:01');
+    for (const win of windows) {
+      expect(win.hide).toHaveBeenCalled();
+      expect(win.setShape).not.toHaveBeenCalled();
+      expect(win.show).not.toHaveBeenCalled();
+      expect(win.showInactive).not.toHaveBeenCalled();
+    }
+    expect(host.setViewport({ bounds, visible: true, occluders: [] })).toBe(true);
+    expect(windows[0].show).toHaveBeenCalled();
+    expect(windows[1].showInactive).toHaveBeenCalled();
+    for (const win of windows) expect(win.setShape).toHaveBeenLastCalledWith([]);
+    host.setVisible(false);
+    for (const win of windows) { win.show.mockClear(); win.showInactive.mockClear(); }
+    expect(host.setBounds({ ...bounds, x: 30 })).toBe(true);
+    expect(host.reapplyBounds()).toBe(true);
+    host.setTimecodeWatermark('00:00:00:02');
+    expect(host.showForParentRestore()).toBe(false);
+    for (const win of windows) {
+      expect(win.show).not.toHaveBeenCalled();
+      expect(win.showInactive).not.toHaveBeenCalled();
+    }
+    host.quit();
+  });
+
+  it('父視窗最小化或隱藏期間 viewport 更新不能顯示 child，restore 強制重套 region', async () => {
+    const { host, parent } = make();
+    const bounds = { x: 0, y: 0, w: 100, h: 50 };
+    parent.isMinimized = vi.fn(() => false);
+    parent.isVisible = vi.fn(() => true);
+    await host.launch({ src: 'D:/media/a.mxf', bounds });
+    const [window, guide] = FakeWindow.instances;
+    host.setTimecodeWatermark('00:00:00:00');
+    window.show.mockClear(); guide.showInactive.mockClear();
+    const viewport = { bounds, visible: true, occluders: [{ x: 50, y: 0, w: 50, h: 50 }] };
+    parent.isMinimized.mockReturnValue(true);
+    expect(host.setViewport(viewport)).toBe(true);
+    expect(window.show).not.toHaveBeenCalled(); expect(guide.showInactive).not.toHaveBeenCalled();
+    parent.isMinimized.mockReturnValue(false);
+    parent.isVisible.mockReturnValue(false);
+    expect(host.reapplyBounds()).toBe(true);
+    expect(window.show).not.toHaveBeenCalled(); expect(guide.showInactive).not.toHaveBeenCalled();
+    parent.isVisible.mockReturnValue(true);
+    expect(host.showForParentRestore()).toBe(true);
+    expect(window.show).toHaveBeenCalledOnce(); expect(guide.showInactive).toHaveBeenCalledOnce();
+    window.show.mockClear();
+    for (const win of [window, guide]) win.setShape.mockClear();
+    // Windows can hide its owned windows automatically without hideForParent.
+    window.isVisible = () => false;
+    expect(host.showForParentRestore()).toBe(true);
+    expect(window.show).toHaveBeenCalledOnce();
+    for (const win of [window, guide]) expect(win.setShape).toHaveBeenCalledWith([{ x: 0, y: 0, width: 50, height: 50 }]);
+    host.hideForParent();
+    window.show.mockClear(); guide.showInactive.mockClear();
+    expect(host.setViewport(viewport)).toBe(true);
+    expect(window.show).not.toHaveBeenCalled(); expect(guide.showInactive).not.toHaveBeenCalled();
+    host.quit();
+  });
+
+  it('legacy bounds、主視窗移動與 page zoom 都重新計算同一組 CSS 遮擋', async () => {
+    const { host, parent } = make();
+    const bounds = { x: 0, y: 0, w: 100, h: 50 };
+    parent.webContents = { getZoomFactor: vi.fn(() => 1) };
+    await host.launch({ src: 'D:/media/a.mxf', bounds });
+    expect(host.setViewport({ bounds, visible: true, occluders: [{ x: 50, y: 0, w: 50, h: 50 }] })).toBe(true);
+    expect(host.setBounds({ ...bounds, x: 20 })).toBe(true);
+    for (const win of FakeWindow.instances) expect(win.setShape).toHaveBeenLastCalledWith([
+      { x: 0, y: 0, width: 30, height: 50 }, { x: 80, y: 0, width: 20, height: 50 },
+    ]);
+    parent.getContentBounds = () => ({ x: -200, y: 400 });
+    parent.webContents.getZoomFactor.mockReturnValue(1.5);
+    expect(host.reapplyBounds()).toBe(true);
+    for (const win of FakeWindow.instances) {
+      expect(win.setBounds).toHaveBeenLastCalledWith({ x: -170, y: 400, width: 150, height: 75 });
+      expect(win.setShape).toHaveBeenLastCalledWith([
+        { x: 0, y: 0, width: 45, height: 75 }, { x: 120, y: 0, width: 30, height: 75 },
+      ]);
+      win.setShape.mockClear();
+    }
+    expect(host.reapplyBounds()).toBe(true);
+    for (const win of FakeWindow.instances) expect(win.setShape).toHaveBeenCalledOnce();
+    host.quit();
+  });
+
+  it('invalid viewport 不改目前 visibility、bounds 或 holes，外部修改 input 也不改保存值', async () => {
+    const { host } = make();
+    const bounds = { x: 0, y: 0, w: 100, h: 50 };
+    await host.launch({ src: 'D:/media/a.mxf', bounds });
+    const viewport = { bounds: { ...bounds }, visible: true, occluders: [{ x: 50, y: 0, w: 50, h: 50 }] };
+    expect(host.setViewport(viewport)).toBe(true);
+    viewport.bounds.x = 900; viewport.occluders[0].x = 900;
+    for (const win of FakeWindow.instances) { win.setShape.mockClear(); win.setBounds.mockClear(); win.hide.mockClear(); }
+    expect(host.setViewport({ bounds, visible: false, occluders: [{ ...bounds, w: Infinity }] })).toBe(false);
+    expect(host.setViewport({ bounds, visible: false, occluders: Array(1) })).toBe(false);
+    expect(host.setBounds({ ...bounds, x: NaN })).toBe(false);
+    for (const win of FakeWindow.instances) {
+      expect(win.setShape).not.toHaveBeenCalled(); expect(win.setBounds).not.toHaveBeenCalled(); expect(win.hide).not.toHaveBeenCalled();
+    }
+    expect(host.snapshot().visible).toBe(true);
+    expect(host.reapplyBounds()).toBe(true);
+    for (const win of FakeWindow.instances) expect(win.setShape).toHaveBeenLastCalledWith([{ x: 0, y: 0, width: 50, height: 50 }]);
+    host.quit();
+  });
+
+  it.each(['missing', 'throw'])('setShape %s 時安全隱藏兩窗、回報失敗且 guide 不能重開', async failure => {
+    const { host } = make();
+    const bounds = { x: 0, y: 0, w: 100, h: 50 };
+    await host.launch({ src: 'D:/media/a.mxf', bounds });
+    const [window, guide] = FakeWindow.instances;
+    guide.setShape = failure === 'missing' ? undefined : vi.fn(() => { throw new Error('native region unavailable'); });
+    expect(host.setViewport({ bounds, visible: true, occluders: [{ x: 50, y: 0, w: 50, h: 50 }] })).toBe(false);
+    window.show.mockClear(); guide.showInactive.mockClear();
+    host.setTimecodeWatermark('00:00:00:00');
+    expect(window.hide).toHaveBeenCalled(); expect(guide.hide).toHaveBeenCalled();
+    expect(window.show).not.toHaveBeenCalled(); expect(guide.showInactive).not.toHaveBeenCalled();
+    guide.setShape = vi.fn();
+    expect(host.reapplyBounds()).toBe(true);
+    expect(window.show).toHaveBeenCalledOnce(); expect(guide.showInactive).toHaveBeenCalledOnce();
+    host.quit();
+  });
+
+  it('quit / new launch 清除遮擋、父視窗隱藏與失敗狀態', async () => {
+    const { host } = make();
+    const bounds = { x: 0, y: 0, w: 100, h: 50 };
+    await host.launch({ src: 'D:/media/a.mxf', bounds });
+    host.setViewport({ bounds, visible: true, occluders: [bounds] });
+    host.hideForParent();
+    host.quit();
+    expect(host.setViewport({ bounds, visible: true, occluders: [] })).toBe(false);
+    await host.launch({ src: 'D:/media/b.mxf', bounds });
+    const [window, guide] = FakeWindow.instances.slice(-2);
+    host.setTimecodeWatermark('00:00:00:00');
+    for (const win of [window, guide]) {
+      expect(win.setShape).toHaveBeenLastCalledWith([]);
+      expect(win.hide).not.toHaveBeenCalled();
+    }
+    expect(guide.showInactive).toHaveBeenCalled();
+    host.quit();
+  });
+
+  it('原生混音依 probe 聲道套用每個增益，左右監聽一致且不改 master mute', async () => {
+    const { host, sockets } = make({ describeSource: async () => ({ audio: [{ channels: 2 }, { channels: 1 }] }) });
+    const loaded = await host.launch({ src: 'D:/media/mixed.mkv', audio: [{ channels: 9 }] });
+    const socket = sockets[0]; socket.write.mockClear();
+    try {
+      await expect(host.audioMix({ sourceSessionId: loaded.sourceSessionId, channels: [
+        { sourceStream: 0, sourceChannel: 0, gain: 0 },
+        { sourceStream: 0, sourceChannel: 1, gain: .5 },
+        { sourceStream: 1, sourceChannel: 0, gain: .25 },
+      ] })).resolves.toBe(true);
+      expect(socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command)).toEqual([
+        ['set_property', 'lavfi-complex', '[aid1]pan=stereo|c0=0*c0+0.5*c1|c1=0*c0+0.5*c1[mix0];'
+          + '[aid2]pan=stereo|c0=0.25*c0|c1=0.25*c0[mix1];[mix0][mix1]amix=inputs=2:normalize=0[ao]'],
+      ]);
+    } finally { host.quit(); }
+  });
+
+  it('原生混音只保留最新滑桿值，重複設定沿用已確認配線', async () => {
+    const { host, sockets } = make({ describeSource: async () => ({ audio: [{ channels: 1 }] }) });
+    const loaded = await host.launch({ src: 'D:/media/mono.mkv' });
+    const socket = sockets[0], write = socket.write.getMockImplementation(), held = [];
+    socket.write.mockClear();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command[1] === 'lavfi-complex') held.push(message);
+      else write(raw);
+    });
+    const mix = gain => host.audioMix({ sourceSessionId: loaded.sourceSessionId,
+      channels: [{ sourceStream: 0, sourceChannel: 0, gain }] });
+    const reply = message => socket.emit('data', Buffer.from(JSON.stringify({ request_id: message.request_id, error: 'success' }) + '\n'));
+    try {
+      const first = mix(1), skipped = mix(.5), latest = mix(.25), repeated = mix(.25);
+      expect(held).toHaveLength(1);
+      await expect(skipped).resolves.toBe(false);
+      reply(held[0]); await flushReady();
+      expect(held).toHaveLength(2);
+      expect(held[1].command[2]).toContain('c0=0.25*c0');
+      await expect(first).resolves.toBe(false);
+      reply(held[1]);
+      await expect(latest).resolves.toBe(true);
+      await expect(repeated).resolves.toBe(true);
+      await expect(mix(.25)).resolves.toBe(true);
+      expect(held).toHaveLength(2);
+    } finally { host.quit(); }
+  });
+
+  it('原生混音拒絕錯誤聲道、重複或缺少聲道與非有限增益，舊 session 不下命令', async () => {
+    const { host, sockets } = make({ describeSource: async () => ({ audio: [{ channels: 1 }] }) });
+    const loaded = await host.launch({ src: 'D:/media/mono.mkv' });
+    const socket = sockets[0]; socket.write.mockClear();
+    try {
+      for (const channels of [[], [{ sourceStream: 1, sourceChannel: 0, gain: 1 }],
+        [{ sourceStream: 0, sourceChannel: 1, gain: 1 }],
+        ...[NaN, Infinity, -1, 65, '1', '1[ao];amovie=x'].map(gain => [{ sourceStream: 0, sourceChannel: 0, gain }]),
+        [{ sourceStream: 0, sourceChannel: 0, gain: 1 }, { sourceStream: 0, sourceChannel: 0, gain: 1 }]]) {
+        await expect(host.audioMix({ sourceSessionId: loaded.sourceSessionId, channels })).rejects.toThrow('配線');
+      }
+      await expect(host.audioMix({ sourceSessionId: 'stale', channels: [] })).resolves.toBe(false);
+      expect(socket.write).not.toHaveBeenCalled();
+    } finally { host.quit(); }
+  });
+
+  it('倒播時暫停原生混音，回正播只還原最新 Solo 配線', async () => {
+    const { host, sockets } = make({ describeSource: async () => ({ audio: [{ channels: 1 }, { channels: 1 }] }) });
+    const loaded = await host.launch({ src: 'D:/media/two.mkv' });
+    const socket = sockets[0];
+    const mix = gain => host.audioMix({ sourceSessionId: loaded.sourceSessionId, channels: [
+      { sourceStream: 0, sourceChannel: 0, gain: 1 }, { sourceStream: 1, sourceChannel: 0, gain },
+    ] });
+    try {
+      await mix(1);
+      await host.direction('backward');
+      socket.write.mockClear();
+      await expect(mix(0)).resolves.toBe(true);
+      expect(socket.write).not.toHaveBeenCalled();
+      await expect(host.direction('forward')).resolves.toBe(true);
+      const graphs = socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command).filter(c => c[1] === 'lavfi-complex');
+      expect(graphs).toHaveLength(1);
+      expect(graphs[0][2]).toContain('[aid2]pan=stereo|c0=0*c0|c1=0*c0');
+    } finally { host.quit(); }
+  });
+
+  it('切來源撤銷等待中的混音，重建新來源所有 stream 且晚到回覆不能送出舊配線', async () => {
+    const { host, sockets } = make({ describeSource: async path => ({ audio: path.endsWith('one.mkv')
+      ? [{ channels: 1 }] : [{ channels: 1 }, { channels: 1 }] }) });
+    const firstSource = await host.launch({ src: 'D:/media/one.mkv' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    let held;
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (!held && message.command[1] === 'lavfi-complex') held = message;
+      else write(raw);
+    });
+    const request = gain => host.audioMix({ sourceSessionId: firstSource.sourceSessionId,
+      channels: [{ sourceStream: 0, sourceChannel: 0, gain }] });
+    const first = request(.2), pending = request(.4);
+    const results = Promise.allSettled([first, pending]);
+    try {
+      socket.write.mockClear();
+      await host.loadFile('D:/media/two.mkv');
+      await expect(results).resolves.toEqual([{ status: 'fulfilled', value: false }, { status: 'fulfilled', value: false }]);
+      const graphs = socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command).filter(c => c[1] === 'lavfi-complex');
+      expect(graphs).toHaveLength(2);
+      expect(graphs[0][2]).toBe('');
+      expect(graphs[1][2]).toContain('[aid1][aid2]amix=inputs=2');
+      socket.write.mockClear();
+      socket.emit('data', Buffer.from(JSON.stringify({ request_id: held.request_id, error: 'success' }) + '\n'));
+      await flushReady();
+      await expect(request(1)).resolves.toBe(false);
+      expect(socket.write).not.toHaveBeenCalled();
+    } finally { host.quit(); await results; }
+  });
+
+  it('原生混音失敗不得視為已套用，可重試同一配線；離線立即撤銷等待', async () => {
+    const { host, sockets } = make({ describeSource: async () => ({ audio: [{ channels: 1 }] }) });
+    const loaded = await host.launch({ src: 'D:/media/mono.mkv' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    let held;
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command[1] === 'lavfi-complex') held = message;
+      else write(raw);
+    });
+    const request = () => host.audioMix({ sourceSessionId: loaded.sourceSessionId,
+      channels: [{ sourceStream: 0, sourceChannel: 0, gain: .5 }] });
+    const failed = expect(request()).rejects.toThrow('命令失敗');
+    socket.emit('data', Buffer.from(JSON.stringify({ request_id: held.request_id, error: 'invalid parameter' }) + '\n'));
+    await failed;
+    const retried = request();
+    socket.emit('data', Buffer.from(JSON.stringify({ request_id: held.request_id, error: 'success' }) + '\n'));
+    await expect(retried).resolves.toBe(true);
+    const stopped = host.audioMix({ sourceSessionId: loaded.sourceSessionId,
+      channels: [{ sourceStream: 0, sourceChannel: 0, gain: 0 }] });
+    host.quit();
+    await expect(stopped).resolves.toBe(false);
+  });
+
+  it('新來源 probe 失敗恢復舊來源時，不把被取消且失敗的混音誤認為已套用', async () => {
+    let rejectProbe;
+    const { host, sockets } = make({ describeSource: path => path.endsWith('missing.mkv')
+      ? new Promise((_, reject) => { rejectProbe = reject; }) : Promise.resolve({ audio: [{ channels: 1 }] }) });
+    const loaded = await host.launch({ src: 'D:/media/mono.mkv' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    let held;
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (!held && message.command[1] === 'lavfi-complex') held = message;
+      else write(raw);
+    });
+    const request = () => host.audioMix({ sourceSessionId: loaded.sourceSessionId,
+      channels: [{ sourceStream: 0, sourceChannel: 0, gain: .5 }] });
+    const first = request();
+    const changing = expect(host.loadFile('D:/media/missing.mkv')).rejects.toThrow('missing');
+    try {
+      socket.emit('data', Buffer.from(JSON.stringify({ request_id: held.request_id, error: 'invalid parameter' }) + '\n'));
+      await expect(first).resolves.toBe(false);
+      rejectProbe(new Error('missing')); await changing;
+      socket.write.mockClear();
+      await expect(request()).resolves.toBe(true);
+      expect(socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command)).toEqual([
+        ['set_property', 'lavfi-complex', '[aid1]pan=stereo|c0=0.5*c0|c1=0.5*c0[ao]'],
+      ]);
+    } finally { host.quit(); }
+  });
 
   function canvasSocket({ autoRestart = true } = {}) {
     const socket = socketThatReportsDuration(), write = socket.write.getMockImplementation();
@@ -381,6 +715,93 @@ describe('Windows mpv host lifecycle', () => {
       sockets[0].notify('core-idle', false);
       await expect(playing).resolves.toEqual({ ready: true, sourceTime: 4.04 });
     } finally { host.quit(); await playing.catch(() => {}); }
+  });
+
+  it('慢 seek 與反覆 buffering 事件不會在 host/adapter 重播或重複解除靜音', async () => {
+    let deliver;
+    const { host, sockets } = make({ socketFactory: playingSocket,
+      describeSource: async () => ({ audio: [{ channels: 1 }] }),
+      onEvent: event => deliver?.(event) });
+    const runtime = createNativePreviewRuntime({ mpv: {
+      launch: options => host.launch(options), play: options => host.play(options),
+      pause: options => host.pause(options), present: (time, options) => host.present(time, options),
+      mute: value => host.mute(value), audioMix: mix => host.audioMix(mix),
+      onEvent: callback => { deliver = callback; },
+    } });
+    await runtime.enterMpv({ src: 'D:/media/slow-source.mxf' });
+    const socket = sockets[0], channels = [{ sourceStream: 0, sourceChannel: 0, gain: 1 }];
+    const commands = () => socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command);
+    const controls = () => commands().filter(command => command[0] === 'set_property' && ['pause', 'mute'].includes(command[1]));
+    let committed = 0;
+    await runtime.syncAudioMix(channels, false);
+    socket.write.mockClear();
+    await runtime.pause();
+    const presented = runtime.present(8, { exact: true, tolerance: .01 });
+    const playing = presented.then(() => runtime.play({ waitForReady: true })).then(result => { committed++; return result; });
+    try {
+      await flushReady();
+      for (const position of [4, 6, 7.8]) {
+        socket.notify('time-pos', position);
+        socket.emit('data', Buffer.from('{"event":"playback-restart"}\n'));
+        await runtime.syncAudioMix(channels, false);
+        await flushReady();
+      }
+      expect(committed).toBe(0);
+      expect(controls()).toEqual([['set_property', 'pause', true]]);
+      socket.notify('time-pos', 8);
+      await flushReady();
+      expect(controls()).toEqual([['set_property', 'pause', true], ['set_property', 'pause', false]]);
+      for (let round = 0; round < 8; round++) {
+        socket.notify('seeking', round % 2 === 0);
+        socket.notify('core-idle', true);
+        socket.emit('data', Buffer.from('{"event":"playback-restart"}\n'));
+        await runtime.syncAudioMix(channels, false);
+        await flushReady();
+        expect(committed).toBe(0);
+      }
+      expect(controls()).toEqual([['set_property', 'pause', true], ['set_property', 'pause', false]]);
+      socket.notify('seeking', false); socket.notify('core-idle', false);
+      await expect(playing).resolves.toEqual({ ready: true, sourceTime: 8 });
+      expect(committed).toBe(1);
+      socket.notify('core-idle', true); socket.notify('core-idle', false);
+      await flushReady();
+      expect(committed).toBe(1);
+      expect(controls()).toEqual([['set_property', 'pause', true], ['set_property', 'pause', false]]);
+    } finally { host.quit(); await playing.catch(() => {}); }
+  });
+
+  it.each(['paused-for-cache', 'core-idle', 'seeking'])('起播完成後持續觀察 %s，換來源拒絕舊 observer 的緩衝事件', async name => {
+    const { host, sockets, events } = make({ socketFactory: playingSocket });
+    const initial = await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0];
+    const observations = () => socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command)
+      .filter(command => command[0] === 'observe_property' && command[2] === name);
+    const notify = (id, value) => {
+      socket.playState[name] = value;
+      socket.emit('data', Buffer.from(JSON.stringify({ event: 'property-change', name, id, data: value }) + '\n'));
+    };
+    try {
+      const sourceObserver = observations()[0]?.[1];
+      expect(sourceObserver, `${name} needs a source-lifetime observer`).toEqual(expect.any(Number));
+      Object.assign(socket.playState, { seeking: false, 'core-idle': false, 'paused-for-cache': false });
+      await host.play({ intentId: 'playing-initial', waitForReady: true });
+      const removed = socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command)
+        .filter(command => command[0] === 'unobserve_property').map(command => command[1]);
+      expect(removed).not.toContain(sourceObserver);
+      events.length = 0;
+      notify(sourceObserver, true); await flushReady();
+      expect(events).toContainEqual(expect.objectContaining({ event: 'property-change', name, data: true,
+        sourceSessionId: initial.sourceSessionId }));
+      const next = await host.loadFile('D:/media/next.mxf');
+      const nextObserver = observations().at(-1)?.[1];
+      expect(nextObserver).not.toBe(sourceObserver);
+      events.length = 0;
+      notify(sourceObserver, false); await flushReady();
+      expect(events.filter(event => event.name === name)).toEqual([]);
+      notify(nextObserver, true); await flushReady();
+      expect(events).toContainEqual(expect.objectContaining({ event: 'property-change', name, data: true,
+        sourceSessionId: next.sourceSessionId }));
+    } finally { host.quit(); }
   });
 
   it('同位置 resume 可由現況證明 ready，不要求新的 restart 或先播放固定秒數', async () => {

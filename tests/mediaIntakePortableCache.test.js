@@ -353,7 +353,9 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     expect(args[args.indexOf('-filter_complex') + 1]).toContain(
       'aresample=4000,apad=whole_len=240000,atrim=end_sample=240000,asetpts=N/SR/TB',
     );
-    expect(args[args.indexOf('-filter_complex') + 1]).not.toContain('pan=');
+    // The fresh Mono probe must not read the second channel from the stale
+    // Stereo request; a one-to-one Mono layout normalization is valid.
+    expect(args[args.indexOf('-filter_complex') + 1]).not.toMatch(/\bc1\b/);
     expect(progress.filter(event => !event.done).map(event => event.pct)).toEqual([50, 75]);
     expect(progress.at(-1)).toMatchObject({ pct: 100, done: true, label: '波形片段已備妥' });
   });
@@ -530,14 +532,17 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     expect(waveReader.run).toHaveBeenCalledOnce();
     const reader = runtimeFor(original.root, 'changed-witness');
     expect(reader.runtime.inspectCache(original.source).some(hit => !hit.error)).toBe(false);
-    const result = await reader.runtime.ingest(request(original.source, [{ channels: 1 }]));
-    expect(sourceReads).toEqual([original.source]);
-    expect(result.cached).toBe(!changedBytes);
-    expect(reader.run).toHaveBeenCalledTimes(changedBytes ? 1 : 0);
     if (changedBytes) {
-      expect(result.proxy).not.toBe(saved.proxy);
+      await expect(reader.runtime.ingest(request(original.source,[{channels:1}]))).rejects.toMatchObject({code:'SIDECAR_CACHE_UNAVAILABLE'});
+      expect(fs.existsSync(reader.cacheRoot)).toBe(false);
+      expect(fs.readFileSync(saved.proxy)).toEqual(proxyBytes);
       expect(JSON.parse(fs.readFileSync(receiptPath, 'utf8'))).toEqual(previous);
+    }else{
+      const result=await reader.runtime.ingest(request(original.source,[{channels:1}]));
+      expect(result.cached).toBe(true);
     }
+    expect(sourceReads).toEqual([original.source]);
+    expect(reader.run).not.toHaveBeenCalled();
   });
 
   it('共享 witness 屬於另一份內容收據時不能跳過全文驗證', async () => {
@@ -747,17 +752,12 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     expect(fs.readFileSync(wrongProxy)).toEqual(wrongBytes);
   });
 
-  it.each(['ingest', 'stream'])('%s 本機 key 目錄被換成他素材快取，也必須驗證來源而非只信目錄名稱', async mode => {
+  it.each(['ingest', 'stream'])('%s 本機 key 目錄被換成他素材快取，拒絕認領也不轉存中央', async mode => {
     const { moved, reader, directory, wrongProxy, wrongBytes, wrongMetadata } =
       await replacePreviouslyVerifiedCache(mode, { direct: true });
-    const work = await reader.runtime[mode](request(moved.source, [{ channels: 1 }]));
-    await work.completion;
-    const result = work.response || work;
-    expect(result.cached).toBe(false);
-    expect(reader.run).toHaveBeenCalledOnce();
-    expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
-    expect(JSON.parse(fs.readFileSync(metadata(result.proxy), 'utf8')).sourceContent.sha256)
-      .toBe(crypto.createHash('sha256').update(fs.readFileSync(moved.source)).digest('hex'));
+    await expect(reader.runtime[mode](request(moved.source,[{channels:1}]))).rejects.toMatchObject({code:'SIDECAR_CACHE_UNAVAILABLE'});
+    expect(reader.run).not.toHaveBeenCalled();
+    expect(fs.existsSync(reader.cacheRoot)).toBe(false);
     expect(fs.readFileSync(wrongProxy)).toEqual(wrongBytes);
     expect(fs.readFileSync(path.join(directory, 'meta.json'))).toEqual(wrongMetadata);
   });
@@ -1284,7 +1284,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     } finally { finish(); await work; }
   });
 
-  it.each(['ingest', 'stream'])('%s 共享快取唯讀且只有 Proxy 時，只在可寫本機位置補缺音訊，不重新編碼影片', async mode => {
+  it.each(['ingest', 'stream'])('%s 共享快取唯讀且缺音訊時明確失敗，保留影片且不轉寫本機', async mode => {
     const original = fixture();
     const first = runtimeFor(original.root, 'profile-A');
     const saved = await first.runtime.ingest(request(original.source));
@@ -1303,23 +1303,13 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
       if (deny(file)) throw denied(); return originalAsyncWrite(file, ...args);
     });
     const second = runtimeFor(original.root, 'profile-B');
-    const work = await second.runtime[mode](request(moved.source, [{ channels: 2 }]));
-    await work.completion;
-    const repaired = work.response || work;
-    expect(second.run).toHaveBeenCalledOnce();
-    expect(outputsOf(second.run.mock.calls[0][0]).some(output => output.endsWith('proxy.mp4'))).toBe(false);
+    await expect(second.runtime[mode](request(moved.source,[{channels:2}]))).rejects.toMatchObject({code:'SIDECAR_CACHE_UNAVAILABLE'});
+    expect(second.run).not.toHaveBeenCalled();
+    expect(fs.existsSync(second.cacheRoot)).toBe(false);
     expect(fs.readFileSync(sharedProxy)).toEqual(proxyBytes);
     expect(fs.readFileSync(metadata(sharedProxy))).toEqual(sharedMeta);
-    expect(fs.readFileSync(repaired.proxy)).toEqual(proxyBytes);
-    expect(repaired.channels).toHaveLength(2);
-    for (const channel of repaired.channels) {
-      expect(fs.readFileSync(channel.file).length).toBeGreaterThan(0);
-      expect(path.relative(second.cacheRoot, channel.file)).not.toMatch(/^\.\./);
-    }
     const reopened = runtimeFor(original.root, 'profile-B');
-    expect(await reopened.runtime.ingest(request(moved.source, [{ channels: 2 }]))).toMatchObject({
-      cached: true, proxy: repaired.proxy, channels: repaired.channels, wave: repaired.wave,
-    });
+    await expect(reopened.runtime.ingest(request(moved.source,[{channels:2}]))).rejects.toMatchObject({code:'SIDECAR_CACHE_UNAVAILABLE'});
     expect(reopened.run).not.toHaveBeenCalled();
   });
 

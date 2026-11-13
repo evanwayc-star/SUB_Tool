@@ -35,6 +35,7 @@ it.each(['screenshot', 'queue', 'both'])('真 before-quit 的 %s 恢復失敗仍
     _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false, audioNormalizationJobs: new Map(),
     mediaProbe: null, ffmpegExecution: owner(), deliveryCapabilities: owner(), speechCompressionRuntime: owner(),
     vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(), QueueManager: queue,
+    nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
     clipAudioCache: { waitForIdle: vi.fn() }, clipFrameCache: { waitForIdle: vi.fn() },
     screenshotOutput: screenshot, directoryOutput: { close: vi.fn(), resume: vi.fn() }, fileCommitCoordinator: { close: vi.fn(), resume: vi.fn() }, mpvHost: { resume: vi.fn() }, mediaIntakeRuntime: { resume: vi.fn() },
     mainWin: null, dialog: { showMessageBox }, console: { error() {} }, Promise: CapturedPromise,
@@ -46,6 +47,7 @@ it.each(['screenshot', 'queue', 'both'])('真 before-quit 的 %s 恢復失敗仍
   expect(context._isAppQuitting).toBe(false);
   expect(showMessageBox).toHaveBeenCalledOnce();
   expect(context.ffmpegExecution.resume).toHaveBeenCalledOnce();
+  expect(context.nativeAudioMeter.stop).toHaveBeenCalledOnce();
   expect(queue.cancelShutdown).toHaveBeenCalledOnce();
   const detail = showMessageBox.mock.calls[0].at(-1).detail;
   expect(detail).toContain('shutdown failed');
@@ -54,6 +56,7 @@ it.each(['screenshot', 'queue', 'both'])('真 before-quit 的 %s 恢復失敗仍
   beforeQuit({ preventDefault() {} });
   await recovery.catch(() => {});
   expect(queue.prepareForShutdown).toHaveBeenCalledTimes(2);
+  expect(context.nativeAudioMeter.stop).toHaveBeenCalledTimes(2);
   expect(context._quitSequenceStarted).toBe(false);
   expect(showMessageBox).toHaveBeenCalledTimes(2);
 });

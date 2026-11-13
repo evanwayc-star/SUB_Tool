@@ -6,9 +6,7 @@ const mediaMock = vi.hoisted(() => ({
   activeSource: null,
   getSources: () => [],
   tracks: [],
-  projectAudioInterpretation: () => ({
-    routedTrackStatesForBus: () => [],
-  }),
+  projectAudioInterpretation: vi.fn(),
 }));
 vi.mock('../src/media.js', () => ({ Media: mediaMock, Wave: {} }));
 
@@ -26,6 +24,11 @@ beforeEach(async () => {
 
   const { on } = await import('../src/events.js');
   ({ State } = await import('../src/state.js'));
+  const { createProjectAudioInterpretation } = await import('../src/project-audio.js');
+  mediaMock.tracks = [];
+  mediaMock.projectAudioInterpretation.mockImplementation(() => createProjectAudioInterpretation({
+    audioProject: State.audioProject, mediaTracks: mediaMock.tracks,
+  }));
   ({ renderMixer, mixerZeroFaders, mixerCenterPans, mixerAdjustAllDb, applyDbStringToBus, updateMeters } = await import('../src/mixer.js'));
 
   State.audioProject = {
@@ -37,6 +40,66 @@ beforeEach(async () => {
   };
   seen = [];
   on('audio:busChanged', d => seen.push(d));
+});
+
+describe('音量表實際電平', () => {
+  function sourceTrack({ channel = 0, name = 'L', level = 0.5, busIds = ['ab1'] } = {}) {
+    const track = {
+      name, sourceChannel: channel, sourceStream: 0, audioSourceId: 'meter-source',
+      kind: 'element', volume: 1,
+      analyser: { fftSize: 32, getFloatTimeDomainData: data => data.fill(level) },
+    };
+    mediaMock.tracks.push(track);
+    State.audioProject.sourceMaps['meter-source'] = { channels: [
+      { sourceStream: 0, sourceChannel: channel, enabled: true, gain: 1, busIds },
+    ] };
+    return track;
+  }
+
+  const firstStrip = () => document.querySelector('#mixerStrips .mx-strip');
+  const visibleHeight = strip => 100 - parseFloat(strip.querySelector('.mx-mask').style.height);
+
+  it('同一音軌由小聲變大聲時，數字與音柱同步升高，靜音後回到底部', () => {
+    const track = sourceTrack({ level: 0.01 });
+    renderMixer();
+    updateMeters();
+    const strip = firstStrip();
+    expect(strip.querySelector('.mx-meter-val').textContent).toBe('-40.0');
+    const quietHeight = visibleHeight(strip);
+
+    track.analyser.getFloatTimeDomainData = data => data.fill(0.5);
+    updateMeters();
+    expect(strip.querySelector('.mx-meter-val').textContent).toBe('-6.0');
+    expect(visibleHeight(strip)).toBeGreaterThan(quietHeight);
+
+    State.audioProject.buses[0].muted = true;
+    for (let i = 0; i < 60; i++) updateMeters();
+    expect(strip.querySelector('.mx-meter-val').textContent).toBe('-∞');
+    expect(visibleHeight(strip)).toBe(0);
+  });
+
+  it('同一來源配到不同 bus，分別顯示該 bus 推子套用後的電平', () => {
+    sourceTrack({ busIds: ['ab1', 'ab2'] });
+    State.audioProject.buses[1].pan = 0;
+    renderMixer();
+    updateMeters();
+    const strips = document.querySelectorAll('#mixerStrips .mx-strip');
+    expect(strips[0].querySelector('.mx-meter-val').textContent).toBe('-6.0');
+    expect(strips[1].querySelector('.mx-meter-val').textContent).toBe('-12.0');
+    expect(visibleHeight(strips[0])).toBeGreaterThan(visibleHeight(strips[1]));
+  });
+
+  it.each([
+    { channel: 0, name: 'L', pan: 1 },
+    { channel: 1, name: 'R', pan: -1 },
+  ])('單聲道 bus 不因來源 $name 或舊 pan=$pan 設定而漏顯示', ({ channel, name, pan }) => {
+    sourceTrack({ channel, name });
+    State.audioProject.buses[0].pan = pan;
+    renderMixer();
+    updateMeters();
+    expect(firstStrip().querySelector('.mx-meter-val').textContent).toBe('-6.0');
+    expect(visibleHeight(firstStrip())).toBeGreaterThan(0);
+  });
 });
 
 describe('專業 DAW 調音台通道條 (Channel Strip) 介面與功能', () => {

@@ -147,9 +147,10 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
     || typeof probe !== 'function' || typeof execute !== 'function') throw new TypeError('固定畫面快取缺少必要 adapter');
   const inFlight = new Map();
   const activeRequests = new Set();
-  const root = () => path.resolve(typeof cacheRoot === 'function' ? cacheRoot() : cacheRoot);
+  const root = source => path.resolve(typeof cacheRoot === 'function' ? cacheRoot(source) : cacheRoot);
   function isDerived(source) {
-    const relative = path.relative(root(), path.resolve(source));
+    const relative = path.relative(root(source), path.resolve(source));
+    if (path.resolve(source).split(path.sep).some(part => part.toLowerCase() === '.subtool_cache')) return true;
     return (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative)) || isPreviewCacheMedia(source);
   }
   function assertSource(source) {
@@ -203,7 +204,7 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
   }
 
   async function generate(request, identity, key, clock) {
-    const store = createClipCacheArtifact(root(), key, 'png');
+    const store = createClipCacheArtifact(root(request.path), key, 'png');
     assertSource(request.path);
     for (const candidate of store.candidates()) {
       const existing = await pngDimensions(candidate.path, candidate.verify);

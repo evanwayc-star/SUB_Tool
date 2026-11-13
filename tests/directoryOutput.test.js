@@ -25,6 +25,23 @@ function fixture() {
 }
 const file = (name, content) => ({ name, b64: Buffer.from(content).toString('base64') });
 const privateFiles = chosen => fs.readdirSync(chosen).filter(name => name.startsWith('.directory-output-'));
+function fsWithStageCloseUpdate(update, renameSync = fs.renameSync) {
+  const writers = new Map();
+  return { ...fs, renameSync,
+    openSync(target, mode, ...args) {
+      const descriptor = fs.openSync(target, mode, ...args);
+      if (mode === 'wx+') writers.set(descriptor, target);
+      return descriptor;
+    },
+    closeSync(descriptor) {
+      const target = writers.get(descriptor);
+      const before = target ? fs.fstatSync(descriptor, { bigint: true }) : null;
+      writers.delete(descriptor);
+      fs.closeSync(descriptor);
+      if (target) update(target, before);
+    },
+  };
+}
 function registeredExportDirectory(chosen, { canceled = false, fsModule = fs } = {}) {
   const source = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
   const tree = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
@@ -146,6 +163,68 @@ describe('native directory output public interface', () => {
       expect(await execute(bytes)).toBe(target);
       expect(fs.readFileSync(target)).toEqual(bytes);
     }
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it.each([Buffer.from('\ufeff完整字幕', 'utf16le'), Buffer.alloc(0)])('NAS 關檔才更新時間戳時，單檔字幕 IPC 發布完整內容或空檔且清除暫存（%#）', async bytes => {
+    const { chosen } = fixture(); const target = path.join(chosen, '字幕 # See the Sea.srt');
+    let beforeClose, afterClose;
+    const fsModule = fsWithStageCloseUpdate((stage, before) => {
+      beforeClose = before;
+      fs.utimesSync(stage, before.atime, new Date(Number(before.mtimeMs) + 2000));
+      afterClose = fs.statSync(stage, { bigint: true });
+    });
+    expect(await registeredExportSubtitle(target, { fsModule })(bytes)).toBe(target);
+    expect([afterClose.dev, afterClose.ino, afterClose.size]).toEqual([beforeClose.dev, beforeClose.ino, beforeClose.size]);
+    expect(afterClose.mtimeNs).not.toBe(beforeClose.mtimeNs);
+    expect(fs.readFileSync(target)).toEqual(bytes);
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it('NAS 關檔才更新時間戳時，批次字幕 IPC 完整新增與覆寫且不殘留暫存', async () => {
+    const { chosen } = fixture();
+    const entries = [file('字幕 # 中文.srt', Buffer.from('\ufeff第一份字幕', 'utf16le')),
+      file('See the Sea.srt', Buffer.from('\ufeff第二份字幕', 'utf16le'))];
+    fs.writeFileSync(path.join(chosen, entries[0].name), 'previous subtitles');
+    const closed = [];
+    const fsModule = fsWithStageCloseUpdate((stage, before) => {
+      fs.utimesSync(stage, before.atime, new Date(Number(before.mtimeMs) + 2000));
+      closed.push(stage);
+    });
+    expect(await registeredExportDirectory(chosen, { fsModule }).execute({}, entries)).toBe(chosen);
+    expect(closed).toHaveLength(2);
+    expect(fs.readFileSync(path.join(chosen, entries[0].name))).toEqual(Buffer.from('\ufeff第一份字幕', 'utf16le'));
+    expect(fs.readFileSync(path.join(chosen, entries[1].name))).toEqual(Buffer.from('\ufeff第二份字幕', 'utf16le'));
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it('NAS 關檔更新時間後 rename 失敗，單檔 IPC 保留原字幕並清除已驗證的暫存', async () => {
+    const { chosen } = fixture(); const target = path.join(chosen, 'captions.srt');
+    fs.writeFileSync(target, 'previous subtitles');
+    const failure = Object.assign(new Error('SMB rename denied'), { code: 'EACCES' });
+    let stage;
+    const fsModule = fsWithStageCloseUpdate((temporary, before) => {
+      stage = temporary;
+      fs.utimesSync(stage, before.atime, new Date(Number(before.mtimeMs) + 2000));
+    }, () => { throw failure; });
+    await expect(registeredExportSubtitle(target, { fsModule })('new subtitles')).rejects.toBe(failure);
+    expect(fs.readFileSync(target, 'utf8')).toBe('previous subtitles');
+    expect(fs.existsSync(stage)).toBe(false);
+    expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it('NAS 關檔更新時間後目的檔被改寫，單檔 IPC 回報衝突並清除本次暫存', async () => {
+    const { chosen } = fixture(); const target = path.join(chosen, 'captions.srt');
+    fs.writeFileSync(target, 'previous subtitles');
+    let stage;
+    const fsModule = fsWithStageCloseUpdate((temporary, before) => {
+      stage = temporary;
+      fs.utimesSync(stage, before.atime, new Date(Number(before.mtimeMs) + 2000));
+      fs.writeFileSync(target, 'external subtitles');
+    });
+    await expect(registeredExportSubtitle(target, { fsModule })('pending subtitles')).rejects.toThrow('匯出期間目的檔已變更');
+    expect(fs.readFileSync(target, 'utf8')).toBe('external subtitles');
+    expect(fs.existsSync(stage)).toBe(false);
     expect(privateFiles(chosen)).toEqual([]);
   });
 
@@ -343,6 +422,49 @@ describe('native directory output public interface', () => {
     expect(() => writeDirectoryFiles(chosen, [file('preset.json', 'new bytes')], { fsModule: faultFs })).toThrow(operation + ' fault');
     expect(fs.readFileSync(target, 'utf8')).toBe('old bytes');
     expect(privateFiles(chosen)).toEqual([]);
+  });
+
+  it('NAS 同步失敗後 finally 關檔更新時間戳，仍清除本次完整字幕 tmp', () => {
+    const { chosen } = fixture(), target = path.join(chosen, 'captions.srt');
+    fs.writeFileSync(target, 'old captions');
+    const failure = Object.assign(new Error('SMB sync failed'), { code: 'EIO' });
+    let stage, beforeClose, afterClose;
+    const faultFs = fsWithStageCloseUpdate((file, before) => {
+      stage = file; beforeClose = before;
+      fs.utimesSync(file, before.atime, new Date(Number(before.mtimeMs) + 2000));
+      afterClose = fs.lstatSync(file, { bigint: true });
+    });
+    faultFs.fsyncSync = descriptor => { fs.fsyncSync(descriptor); throw failure; };
+    expect(() => writeDirectoryFiles(chosen, [file('captions.srt', 'new captions')], { fsModule: faultFs })).toThrow(failure);
+    expect(afterClose.ino).toBe(beforeClose.ino); expect(afterClose.size).toBe(beforeClose.size);
+    expect(afterClose.mtimeNs).not.toBe(beforeClose.mtimeNs);
+    expect(fs.readFileSync(target, 'utf8')).toBe('old captions');
+    expect(fs.existsSync(stage)).toBe(false);
+  });
+
+  it.each(['等長改寫', '追加', '替換'])('NAS 同步失敗且關檔時字幕暫存遭%s，保留外部內容及原始錯誤', change => {
+    const { chosen } = fixture(), target = path.join(chosen, 'captions.srt');
+    fs.writeFileSync(target, 'old captions');
+    const failure = Object.assign(new Error('SMB sync failed'), { code: 'EIO' });
+    let stage, external;
+    const faultFs = fsWithStageCloseUpdate((current, before) => {
+      stage = current;
+      if (change === '替換') fs.renameSync(current, `${current}.retained`);
+      external = change === '追加' ? 'intended-external' : 'external';
+      fs.writeFileSync(current, external);
+      fs.utimesSync(current, before.atime, new Date(Number(before.mtimeMs) + 2000));
+      if (change === '等長改寫') {
+        const after = fs.lstatSync(current, { bigint: true });
+        expect([after.ino, after.size]).toEqual([before.ino, before.size]);
+      }
+    });
+    faultFs.fsyncSync = descriptor => { fs.fsyncSync(descriptor); throw failure; };
+    let caught;
+    try { writeDirectoryFiles(chosen, [file('captions.srt', 'intended')], { fsModule: faultFs }); }
+    catch (error) { caught = error; }
+    expect(caught).toBe(failure);
+    expect(fs.readFileSync(target, 'utf8')).toBe('old captions');
+    expect(fs.readFileSync(stage, 'utf8')).toBe(external);
   });
 
   it.each(['新增', '替換', '同檔修改', '移除'])('輸出準備期間目的檔%s時保留外部內容並回報衝突', change => {

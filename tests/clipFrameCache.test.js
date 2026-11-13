@@ -68,6 +68,15 @@ afterEach(() => {
 });
 
 describe('固定畫面的母素材幀快取', () => {
+  it('source-aware cache root keeps the generated frame beside its mother source', async () => {
+    const cacheRoot = vi.fn(source => path.join(path.dirname(source), '.subtool_Cache', 'clip-frames'));
+    const s = fixture({ cacheRoot });
+    const result = await s.runtime.frame(s.request);
+    expect(result.path.startsWith(path.join(s.directory, '.subtool_Cache', 'clip-frames') + path.sep)).toBe(true);
+    expect(cacheRoot).toHaveBeenCalledWith(s.source);
+    expect(fs.existsSync(s.cacheRoot)).toBe(false);
+    await expect(s.runtime.frame({ ...s.request, path: result.path })).rejects.toThrow('母素材');
+  });
   it.each([{ time: NaN }, { time: Infinity }, { time: -1 }, { time: '0' }, { fps: 0 },
     { fps: 241 }, { fps: NaN }, { fps: '30' }, { path: '' }, { path: null }, { path: 'bad\0path' }])
   ('main 與 preload 都拒絕非法參數 %j', invalid => {

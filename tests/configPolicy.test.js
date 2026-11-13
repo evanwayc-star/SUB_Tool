@@ -5,6 +5,12 @@ const require = createRequire(import.meta.url);
 const { mergeRendererConfig } = require('../electron/ipc-guards.js');
 
 describe('renderer config policy', () => {
+  it('persists only supported preview modes without accepting a path or arbitrary mode', () => {
+    expect(mergeRendererConfig({}, {previewMode:'original'})).toEqual({previewMode:'original'});
+    expect(mergeRendererConfig({previewMode:'original'}, {previewMode:'smooth'})).toEqual({previewMode:'smooth'});
+    for(const previewMode of ['C:/private.mov','auto',null,{},true])
+      expect(mergeRendererConfig({previewMode:'original'}, {previewMode})).toEqual({previewMode:'original'});
+  });
   it('keeps main-owned recent projects immutable while accepting renderer settings', () => {
     const current = {
       recentProjects: [{ path: 'C:\\Projects\\trusted.subtool' }],

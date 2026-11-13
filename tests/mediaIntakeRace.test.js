@@ -1237,6 +1237,7 @@ describe('desktop mother-source intake ownership', () => {
     ['逐格', () => stepFrame(-1), 7.96],
     ['連續滑鼠定位', () => { shuttlePause(); Media.seek(6); Media.seek(5.5); }, 5.52],
   ])('原生倒播轉%s時，播放目標立即更新，呈現等 Proxy 還原母素材', async (action, seek, target) => {
+    const previousPreviewMode = State.previewMode;
     let notifyMpv = () => {};
     let sourceSessionId='reverse-mother';
     const restore = deferred();
@@ -1270,6 +1271,7 @@ describe('desktop mother-source intake ownership', () => {
     deskMock.ingest.mockResolvedValueOnce({ proxy: 'C:/cache/short-gop-proxy.mp4', channels: [] });
 
     try {
+      State.previewMode = 'original'; // 此案例驗證回母片；順暢模式會依選擇留在 Proxy。
       await Media.loadDesktopMedia('C:/media/long-gop.mp4');
       await vi.waitFor(() => expect(Media.reverseShuttleProxyReady()).toBe(true));
       Media._mpvTime = 8;
@@ -1298,12 +1300,14 @@ describe('desktop mother-source intake ownership', () => {
       jklReset();
       vi.restoreAllMocks();
       Media.reset();
+      State.previewMode = previousPreviewMode;
       delete window.subtool.mpv;
       resetPlayerAdapter(window.subtool);
     }
   });
 
   it('短 GOP Proxy 就緒後倒播切到 Proxy，停止時在同一來源時間切回母素材', async () => {
+    const previousPreviewMode = State.previewMode;
     let notifyMpv = () => {};
     let sourceSessionId='mother-session', sourceGeneration=0;
     const mpv = {
@@ -1327,6 +1331,7 @@ describe('desktop mother-source intake ownership', () => {
     deskMock.ingest.mockResolvedValueOnce({ proxy: 'C:/cache/short-gop-proxy.mp4', channels: [] });
 
     try {
+      State.previewMode = 'original'; // 保留母片還原與失敗回退的既有斷言。
       await Media.loadDesktopMedia('C:/media/long-gop.mp4');
       await vi.waitFor(() => expect(Media.reverseShuttleProxyReady()).toBe(true));
       expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({ needsProxy: true }));
@@ -1364,6 +1369,7 @@ describe('desktop mother-source intake ownership', () => {
       expect(Media._reverseProxyActive).toBe(false);
     } finally {
       Media.reset();
+      State.previewMode = previousPreviewMode;
       delete window.subtool.mpv;
       resetPlayerAdapter(window.subtool);
     }

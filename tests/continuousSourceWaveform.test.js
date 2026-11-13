@@ -124,16 +124,16 @@ it('ignoreCached 強制重新解碼成新的完整 wave，保留原本已完成�
   expect(fs.readFileSync(first.wave).subarray(44)).toEqual(f.pcm);expect(fs.readFileSync(rebuilt.wave).subarray(44)).toEqual(f.pcm);
 });
 
-it('sidecar key 可寫但波形子目錄拒絕建立時，先轉中央保存再發進度',async()=>{
+it('sidecar key 可寫但波形子目錄拒絕建立時明確失敗，不轉中央或發布未保存進度',async()=>{
   const f=fixture(13.12725,{allowSidecarCache:true}),events=[],mkdir=fs.mkdirSync;
   vi.spyOn(fs,'mkdirSync').mockImplementation((dir,...args)=>{
     if(String(dir).includes('.subtool_Cache')&&path.basename(dir)==='continuous-waveforms')throw Object.assign(new Error('namespace readonly'),{code:'EACCES'});
     return mkdir(dir,...args);
   });
-  const result=await f.create((_target,event)=>events.push(event)).waveform(f.request);
-  expect(result.wave.startsWith(f.cacheRoot+path.sep)).toBe(true);expect(fs.readFileSync(result.wave).subarray(44)).toEqual(f.pcm);
-  expect(events.filter(event=>event.waveform).map(event=>event.waveform.completedSamples)).toEqual([20000,40000,f.samples]);
-  expect(f.execute).toHaveBeenCalledOnce();
+  await expect(f.create((_target,event)=>events.push(event)).waveform(f.request)).rejects.toMatchObject({code:'EACCES'});
+  expect(fs.readdirSync(f.cacheRoot)).toEqual([]);
+  expect(events.filter(event=>event.waveform)).toEqual([]);
+  expect(f.execute).not.toHaveBeenCalled();
 });
 
 it('完成 wave 原始 shared witness 改變時，同 strict key 的下一個 ingest 不得重用舊 wave',async()=>{

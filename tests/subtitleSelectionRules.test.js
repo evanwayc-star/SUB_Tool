@@ -59,11 +59,12 @@ vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
 vi.mock('../src/keyboard.js', () => ({ jklReset: vi.fn(), nudge: vi.fn() }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));
 vi.mock('../src/subtitle-text-check.js', () => ({ inspectSubtitleCharacters: () => ({}) }));
-vi.mock('../src/subtitle-audit.js', () => ({
+vi.mock('../src/subtitle-audit.js', async importOriginal => ({
+  ...(await importOriginal()),
   analyzeSubtitles: () => ({
     overlapNums: [], multiNums: [], twoNums: [], blankNums: [], bNums: [], iNums: [], uNums: [],
     fontNums: [], posNums: [], trimNums: [], overLenNums: [], containsNums: [], nonTraditionalIssues: [],
-    noTimeNums: [], consecutiveIdenticalNums: [],
+    noTimeNums: [], consecutiveIdenticalNums: [], consecutiveIdenticalGroups: [],
   }),
 }));
 vi.mock('../src/subtitle-model.js', async importOriginal => ({

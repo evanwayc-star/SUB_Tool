@@ -8,12 +8,14 @@ let State,History,Model,Subtitles,Menus,UI,Media,Project,ProjectModule,Style,Sty
 let recordMediaCommands=false;
 const click=label=>[...document.querySelectorAll('#modalFoot button')].find(x=>x.textContent===label).click();
 const clip=(id,values={})=>({id,name:id,path:'C:/'+id+'.mp4',in:0,out:4,dur:4,offset:0,vtrack:0,...values});
-function observeDuration(duration){
+function observeDuration(duration,{sourcePath=Media.activeClip()?.path}={}){
   // These editor cases exercise the result of an already verified native
-  // session; token ownership itself is tested through the real adapter.
+  // mother-source session; token ownership itself is tested through the real
+  // adapter. A verified token alone does not make proxy duration mother evidence.
   const owns=vi.spyOn(getPlayerAdapter(),'ownsNativeSourceSession').mockImplementation(id=>id==='editor-session');
+  const previousPath=Media._mpvPath;Media._mpvPath=sourcePath;
   try{Media.observeMpvEvent({event:'property-change',name:'duration',data:duration,sourceSessionId:'editor-session'});}
-  finally{owns.mockRestore();}
+  finally{Media._mpvPath=previousPath;owns.mockRestore();}
 }
 async function timeline(){
   const Timeline=await import(ROOT+'/src/timeline-renderer.js');
@@ -266,7 +268,7 @@ describe('editor mutation ownership through public commands',()=>{
     const c=clip('new-source',{dur:3,out:3});State.clips=[c];Media.activeClipId=c.id;
     History.reset();Project.establishCleanBaseline();Media._seqSwitching=true;
     try{
-      Media._mpvPath='C:/old-source.mp4';observeDuration(100);
+      Media._mpvPath='C:/old-source.mp4';observeDuration(100,{sourcePath:Media._mpvPath});
       Menus.showClipDuration(c);
       expect(document.getElementById('modalBody').textContent).toContain('00:00:03:00');
       document.getElementById('cdVal').value='00:00:50:00';click('套用');

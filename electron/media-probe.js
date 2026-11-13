@@ -43,6 +43,12 @@ function fpsOf(stream) {
     : null;
 }
 
+function positiveRatio(value) {
+  if (typeof value !== 'string' || !/^\d+\/\d+$/.test(value)) return null;
+  const [numerator, denominator] = value.split('/').map(Number);
+  return Number.isSafeInteger(numerator) && Number.isSafeInteger(denominator) && numerator > 0 && denominator > 0 ? value : null;
+}
+
 /**
  * 將 ffprobe JSON 輸出結構轉換為標準化之媒體資訊描述物件。
  * 
@@ -93,6 +99,8 @@ function descriptorOf(document = {}) {
       ...(displayTransform ? { displayTransform: true } : {}),
       ...(Object.hasOwn(video, 'field_order') ? { fieldOrder: video.field_order } : {}),
       fps: fpsOf(video),
+      ...(positiveRatio(video.time_base) ? { timeBase: positiveRatio(video.time_base) } : {}),
+      ...(positiveRatio(video.r_frame_rate) ? { nominalFrameRate: positiveRatio(video.r_frame_rate) } : {}),
       timestampOffset: containerStart - videoStart,
       // HTML 與 MP4 edit-list／WebCodecs 保留絕對呈現 PTS；FFmpeg／mpv
       // 的 input 時鐘則已扣除容器起點。兩個 adapter 不能共用 raw epoch。

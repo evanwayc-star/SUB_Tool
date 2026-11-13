@@ -542,6 +542,7 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
     $('noVideo').style.display='none';
     video.style.display='none';
     $('videoSub').style.display=''; // 字幕由 HTML DOM (#videoSub) 統一渲染
+    emit('mpv:sync'); // A new native host must respect panels already open over the stage.
     ctx._mpvTime=0; ctx._mpvPath=p;
     // mpv 顯示時仍要建立透明的 DOM 字幕命中層，才能直接拖曳字幕。
     emit('render:videoSub');

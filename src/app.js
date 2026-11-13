@@ -33,7 +33,7 @@ import { refreshMpvSubs, renderVideoSub, _syncMpvPanel, renderImageOverlays, _se
 const _videoSub = document.getElementById('videoSub');
 const _videoWrap = document.getElementById('videoWrap');
 import _logoUrl from './logo.png';
-import { clamp, pad, decodeText, encodeUTF16LE, downloadBytes, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML } from './util.js';
+import { clamp, pad, decodeText, encodeUTF16LE, readFile, pickFile, b64ToBytes, bytesToB64, baseName, escapeHTML } from './util.js';
 import { fmtClock, secToSRT, secToASS, secToEncore, getExactFps, srtToSec, assToSec, encoreToSec, snapTimeToFrame } from './time.js';
 import { SubFormats, splitN } from './formats.js';
 import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.js';
@@ -44,6 +44,7 @@ import { togglePanel, bindOverlayDrag, keepPanelInViewport, renderQueueMonitorIn
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { bindMediaIntakeView, handleMediaIntakeProgress } from './media-intake-view.js';
+import { bindPreviewStatusView } from './preview-status-view.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline-renderer.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, applyCueStylePatch } from './subtitles.js';
@@ -76,6 +77,11 @@ if (typeof __APP_VERSION__ !== 'undefined') {
   const el = document.getElementById('appVersion');
   if (el) el.textContent = 'v' + __APP_VERSION__;
 }
+
+const previewStatusView=bindPreviewStatusView({
+  root:$('previewStatus'),readState:()=>Media.previewState(),setMode:mode=>Media.setPreviewMode(mode),
+});
+on('media:preview-state',()=>previewStatusView.update());
 
 /* app.js 為協調層：訂閱各模組發送的事件並呼叫對應的渲染/指令函式。
    各模組只 emit、不再反向 import app.js，藉此切斷雙向相依。
@@ -113,7 +119,8 @@ bindPlayerFullscreen({
 on('note:openInPanel', openNoteInPanel);
 on('cue:openEdit', StylePanelController.openCueEditModal);
 on('action', doAction);
-on('mpv:sync', _syncMpvPanel); // 自訂視窗（快捷鍵設定、右鍵選單）開閉時重算 mpv 讓位
+// 原生視窗讓位／回歸時，來源提示也須改讀目前可見的 presenter。
+on('mpv:sync', ()=>{_syncMpvPanel();previewStatusView.update();});
 on('history:record', recordHistory); // 供 media.js 等低階模組記錄歷史（避免 media→history 循環相依）
 on('project:relinkBrowserMedia', (generation, projectRestore)=>{
   void Commands.run('open-media', { relink: { generation, plan: projectRestore } })
@@ -749,6 +756,7 @@ function startAppTicker(renderVideoSubCallback) {
 
 async function init(){
   await loadConfig();
+  previewStatusView.update();
   await loadKeys();
   $('safeFrameBtn')?.classList.toggle('active', !!State.safeFrame); // 安全框開關狀態還原（v4.33）
   $('timecodeWatermarkBtn')?.classList.toggle('active', !!State.timecodeWatermark);

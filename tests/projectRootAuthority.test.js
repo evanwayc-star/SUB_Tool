@@ -410,6 +410,60 @@ describe('專案根授權與真實 IPC',()=>{
     expect(fs.readdirSync(f.selected)).toEqual(['edit.subtool']);
   });
 
+  it('NAS 同步失敗後 finally 關檔更新時間戳，仍清除本次完整專案 tmp',async()=>{
+    const failure=Object.assign(new Error('SMB sync failed'),{code:'EIO'});
+    let stage,beforeClose,afterClose;
+    const writer=createAtomicProjectWriter({fsModule:{...fs,...fs.promises,
+      async open(file,...args){
+        const handle=await fs.promises.open(file,...args);
+        if(args[0]==='r')return handle;
+        stage=file;
+        return {stat:options=>handle.stat(options),writeFile:bytes=>handle.writeFile(bytes),
+          async sync(){await handle.sync();throw failure;},
+          async close(){
+            beforeClose=await handle.stat({bigint:true});await handle.close();
+            fs.utimesSync(file,beforeClose.atime,new Date(Number(beforeClose.mtimeMs)+2000));
+            afterClose=fs.lstatSync(file,{bigint:true});
+          }};
+      },
+    }});
+    const f=fixture({writeFile:writer});
+    await expect(writer(f.project,Buffer.from('intended'))).rejects.toBe(failure);
+    expect(afterClose.ino).toBe(beforeClose.ino);expect(afterClose.size).toBe(beforeClose.size);
+    expect(afterClose.mtimeNs).not.toBe(beforeClose.mtimeNs);
+    expect(fs.readFileSync(f.project)).toEqual(projectBytes);
+    expect(fs.existsSync(stage)).toBe(false);
+  });
+
+  it.each(['等長改寫','追加','替換'])('NAS 同步失敗且關檔時暫存遭%s，保留外部內容及原始錯誤',async change=>{
+    const failure=Object.assign(new Error('SMB sync failed'),{code:'EIO'});
+    let stage,external;
+    const writer=createAtomicProjectWriter({fsModule:{...fs,...fs.promises,
+      async open(file,...args){
+        const handle=await fs.promises.open(file,...args);
+        if(args[0]==='r')return handle;
+        stage=file;
+        return {stat:options=>handle.stat(options),writeFile:bytes=>handle.writeFile(bytes),
+          async sync(){await handle.sync();throw failure;},
+          async close(){
+            const before=await handle.stat({bigint:true});await handle.close();
+            if(change==='替換')fs.renameSync(file,`${file}.retained`);
+            external=change==='追加'?'intended-external':'external';
+            fs.writeFileSync(file,external);
+            fs.utimesSync(file,before.atime,new Date(Number(before.mtimeMs)+2000));
+            if(change==='等長改寫'){
+              const after=fs.lstatSync(file,{bigint:true});
+              expect([after.ino,after.size]).toEqual([before.ino,before.size]);
+            }
+          }};
+      },
+    }});
+    const f=fixture({writeFile:writer});
+    await expect(writer(f.project,Buffer.from('intended'))).rejects.toBe(failure);
+    expect(fs.readFileSync(f.project)).toEqual(projectBytes);
+    expect(fs.readFileSync(stage,'utf8')).toBe(external);
+  });
+
   it('專案部分寫入後發生錯誤且暫存遭改寫，不可清理外部內容',async()=>{
     let stage;
     const writer=createAtomicProjectWriter({createToken:()=> 'partial',fsModule:{...fs,...fs.promises,

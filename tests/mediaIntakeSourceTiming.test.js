@@ -29,6 +29,14 @@ function pcm(file) {
   return run(['-i', file, '-map', '0:a:0', '-ar', '4000', '-ac', '1', '-f', 'f32le', 'pipe:1']);
 }
 
+function audioMetadata(file) {
+  const result = spawnSync(FFPROBE, ['-v', 'error', '-select_streams', 'a', '-show_streams', '-of', 'json', file], {
+    windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024,
+  });
+  expect(result.error || result.status, result.stderr?.toString()).toBe(0);
+  return JSON.parse(result.stdout.toString()).streams;
+}
+
 function energy(bytes, start, end, frequency = null) {
   let sum = 0, sine = 0, cosine = 0;
   const first = Math.round(start * 4000), last = Math.round(end * 4000);
@@ -51,6 +59,67 @@ afterEach(() => {
 });
 
 describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來源時間的音訊快取', () => {
+  it.each(['ingest', 'waveform'])('%s 保留 MOV 的八種單聲道 speaker layout 的每軌 PCM 與等權波形', async mode => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-')); roots.push(directory);
+    const source = path.join(directory, 'speaker-labelled-mono.mov'), cache = path.join(directory, 'cache');
+    const layouts = ['DL', 'DR', 'FL', 'FR', 'FC', 'LFE', 'BL', 'BR'];
+    const frequencies = layouts.map((_, index) => 200 * (index + 1));
+    const args = ['-y', '-f', 'lavfi', '-i', 'color=red:s=64x48:r=25:d=1.2'];
+    for (const frequency of frequencies) args.push('-f', 'lavfi', '-i', `sine=frequency=${frequency}:sample_rate=48000:duration=1.2`);
+    args.push('-map', '0:v:0');
+    layouts.forEach((layout, index) => args.push('-map', `${index + 1}:a:0`, `-filter:a:${index}`, `channelmap=map=0:channel_layout=${layout}`));
+    run([...args, '-c:v', 'libx264', '-c:a', 'pcm_s24le', source]);
+    // Do not let fixture muxing silently turn all inputs into ordinary Mono:
+    // AAC rejects DL/DR, and speaker downmixing can also attenuate other tracks.
+    expect(audioMetadata(source).map(stream => [stream.channels, stream.channel_layout])).toEqual(
+      layouts.map(layout => [1, layout === 'FC' ? 'mono' : `1 channels (${layout})`]),
+    );
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => directory });
+    const authority = new FileAuthority({ internalDirectories: [directory] }); authority.grantTrustedFile(source, { read: true });
+    const calls = [];
+    const runtime = createMediaIntakeRuntime({ fileAuthority: authority,
+      ffmpegExecution: { execute: (args, options) => { calls.push(args); return execution.execute(args, options); } },
+      tempRoot: directory, cacheRoot: cache, allowSidecarCache: false,
+      describeAudio: async file => (await probe.describe(file)).audio });
+    try {
+      const descriptor = await probe.describe(source);
+      expect(descriptor.audio.map(stream => [stream.index, stream.streamIndex, stream.channels])).toEqual(
+        layouts.map((_, index) => [index, index + 1, 1]),
+      );
+      const request = { src: source, duration: descriptor.duration, audio: descriptor.audio, needsProxy: false };
+      // A simultaneous -ac 1 waveform output can make filter negotiation
+      // normalize AAC by accident. Reuse a completed wave so only the eight
+      // M4A files are encoded, matching opening a project after priority wave.
+      const completedWave = mode === 'ingest' ? await runtime.waveform({ ...request, continuous: true }) : null;
+      if (completedWave) expect(completedWave).toMatchObject({ complete: true, continuous: true });
+      const result = await runtime[mode](request);
+      expect(result.cached).toBe(false);
+      if (mode === 'ingest') {
+        expect(result.wave).toBe(completedWave.wave);
+        expect(calls).toHaveLength(2);
+        expect(calls[1].filter(value => value.endsWith('.wav'))).toEqual([]);
+        expect(result.channels.map(channel => [channel.sourceStream, channel.sourceChannel])).toEqual(layouts.map((_, index) => [index, 0]));
+        for (const [index, channel] of result.channels.entries()) {
+          expect(path.extname(channel.file)).toBe('.m4a');
+          expect(audioMetadata(channel.file)).toMatchObject([{ codec_name: 'aac', channels: 1, channel_layout: 'mono' }]);
+          const samples = pcm(channel.file);
+          expect(energy(samples, .2, 1, frequencies[index]), layouts[index]).toBeCloseTo(.125, 2);
+          expect(energy(samples, .2, 1), layouts[index]).toBeCloseTo(.125 / Math.SQRT2, 2);
+          for (const frequency of frequencies.filter(value => value !== frequencies[index])) {
+            expect(energy(samples, .2, 1, frequency), `${layouts[index]} must not contain ${frequency} Hz`).toBeLessThan(.002);
+          }
+        }
+      } else {
+        expect(result).toMatchObject({ channels: [], complete: true, start: 0 });
+      }
+      const waveform = pcm(result.wave);
+      expect(waveform.length / 4 / 4000).toBeCloseTo(1.2, 2);
+      for (const frequency of frequencies) expect(energy(waveform, .2, 1, frequency), `${frequency} Hz in ${mode} MIX`).toBeCloseTo(.125 / 8, 3);
+      expect(energy(waveform, .2, 1)).toBeCloseTo(.03125, 3);
+    } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
+  }, 30000);
+
   it.each([0,5])('優先波形分段保留容器起點 %s 的來源時間及所有音訊 stream',async origin=>{
     const directory=fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()),'subtool-intake-source-clock-'));roots.push(directory);
     const source=path.join(directory,'wave-segments.mkv'),cache=path.join(directory,'cache');
@@ -104,7 +173,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
     { name: 'HD 601 缺矩陣', size: '1920x1080', matrix: 'smpte170m', omitted: ['colorSpace'], expectedMatrix: 'bt709', expectedRgb: [255, 23, 0] },
     { name: 'SD 只有 709 矩陣邊轉邊播', size: '320x180', matrix: 'bt709', omitted: ['colorPrimaries', 'colorTransfer'], expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0], mode: 'stream' },
     { name: 'SD 無標籤邊轉邊播', size: '320x180', matrix: null, expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0], mode: 'stream' },
-  ])('$name 母素材在 720p Proxy 保留來源觀感與實際 RGB', async ({ size, sar, matrix, omitted = [], expectedMatrix, expectedRgb, mode = 'ingest' }) => {
+  ])('$name 母素材在 480p Proxy 保留來源觀感與實際 RGB', async ({ size, sar, matrix, omitted = [], expectedMatrix, expectedRgb, mode = 'ingest' }) => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-')); roots.push(directory);
     const source = path.join(directory, 'sd-red.mp4'), cache = path.join(directory, 'cache');
     const untagged = matrix ? path.join(directory, 'untagged.mp4') : source;

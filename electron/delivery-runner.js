@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const QueueStore = require('./queue-store');
 const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
+const { serializeDeliveryChapters } = require('../shared/delivery-chapters.cjs');
 const { buildDeliveryArgv } = require('./export-plan');
 const { assertOutputAuthority, assertDeliveryDestinationEvidence, assertDeliveryDestinationEvidenceAsync } = require('./export-lease');
 const { createDeliveryTemporaryInputs, assertDeliveryInputEvidence } = require('./delivery-temporary-input');
@@ -92,6 +93,7 @@ function createDeliveryRunner(options = {}) {
 
     let assName = null;
     let timecodeFontName = null;
+    let chapterFileName = null;
     const temporaryInputs = createDeliveryTemporaryInputs({ tempDir, rootAuthority: options.tempRootAuthority });
     const abort = new AbortController();
     let finish;
@@ -136,6 +138,8 @@ function createDeliveryRunner(options = {}) {
       await nativeCapabilities.assertReady(payload, { signal: abort.signal });
       checkCancelled();
       fs.mkdirSync(tempDir, { recursive: true });
+      const chapterMetadata = serializeDeliveryChapters(payload.chapters, duration, format);
+      if (chapterMetadata) chapterFileName = temporaryInputs.create('ffmetadata', Buffer.from(chapterMetadata, 'utf8'));
       if (assText && assText.trim()) {
         assName = temporaryInputs.create('ass', Buffer.from(assText, 'utf8'));
       }
@@ -177,6 +181,7 @@ function createDeliveryRunner(options = {}) {
       const plan = buildDeliveryArgv({
         format, clips, videoTracks, width, height, fps, duration, videoKbps,
         audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName: assName, outPath,
+        chapters: payload.chapters, chapterFileName,
       }, {
         hwdecArgs: encoder.hwdecArgs,
         vencArgsBitrate: encoder.bitrateArgs,

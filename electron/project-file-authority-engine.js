@@ -421,6 +421,17 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
         const temporary = path.join(prepared.root, `${path.basename(target)}.${createToken()}.tmp`);
         let handle;
         let temporaryOwner, writtenEvidence, completed, preserveTemporary = false;
+        const readClosedStage = evidence => {
+          prepared.checkRootSync();
+          const closed = statIfPresentSync(temporary);
+          if (!closed?.isFile() || closed.isSymbolicLink() || !sameFile(closed, temporaryOwner)
+            || !['dev', 'ino', 'mode', 'size'].every(field => closed[field] === evidence[field])
+            || closed.size !== BigInt(bytes.length)
+            || digestFileSync(fsModule, temporary, closed) !== contentDigest
+            || !sameSnapshot(statIfPresentSync(temporary), closed)) throw unsafe();
+          prepared.checkRootSync();
+          return closed;
+        };
         try {
           handle = await fsModule.open(temporary, 'wx');
           temporaryOwner = await handle.stat({ bigint: true });
@@ -435,15 +446,7 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
           // Acquire closed-file evidence from the same owned object and exact
           // bytes; do not relax the strict snapshot checks used for publication.
           try {
-            prepared.checkRootSync();
-            const closed = statIfPresentSync(temporary);
-            if (!closed?.isFile() || closed.isSymbolicLink() || !sameFile(closed, temporaryOwner)
-              || !['dev', 'ino', 'mode', 'size'].every(field => closed[field] === completed[field])
-              || closed.size !== BigInt(bytes.length)
-              || digestFileSync(fsModule, temporary, closed) !== contentDigest
-              || !sameSnapshot(statIfPresentSync(temporary), closed)) throw unsafe();
-            prepared.checkRootSync();
-            completed = closed;
+            completed = readClosedStage(completed);
           } catch (_) { preserveTemporary = true; throw unsafe(); }
           await prepared.check();
           // Serialize publication with alias discovery so an earlier atomic
@@ -465,12 +468,17 @@ function createAtomicProjectWriter({ fsModule = { ...fs, ...fsp }, createToken =
           admission = publish.catch(() => {});
           await publish;
         } finally {
-          if (handle) { try { await handle.close(); } catch (error) {} }
+          let closedInCleanup = false;
+          if (handle) { try { await handle.close(); closedInCleanup = true; } catch (error) {} }
           if (temporaryOwner && !preserveTemporary) {
             try {
               prepared.checkRootSync();
+              let evidence = completed || writtenEvidence || temporaryOwner;
+              // fsync can fail after a complete write. Closing that handle may
+              // still finalize SMB timestamps; revalidate its exact contents
+              // just as on success, without publishing or hiding the error.
+              if (closedInCleanup && writtenEvidence) evidence = readClosedStage(evidence);
               const current = statIfPresentSync(temporary);
-              const evidence = completed || writtenEvidence || temporaryOwner;
               if (current?.isFile() && !current.isSymbolicLink() && sameFile(current, temporaryOwner)
                 && (writtenEvidence || temporaryOwner.size === 0n) && sameSnapshot(current, evidence)
                 && (!writtenEvidence || digestFileSync(fsModule, temporary, evidence) === contentDigest)

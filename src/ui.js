@@ -161,7 +161,7 @@ function openModal(title, html, buttons, opts = {}) {
     const first = _focusables(modalEl).find(el => !el.closest('.mhead'));
     (first || modalEl)?.focus({preventScroll:true});
   }, 0);
-  if (!_modalKeepVideo && Media.mpvMode) setMpvWindowVisible(false);
+  if (Media.mpvMode) emit('mpv:sync');
   return session;
 }
 
@@ -185,7 +185,7 @@ function closeModal(arg) {
       }
     }, 0);
   }
-  if (Media.mpvMode) setMpvWindowVisible(true);
+  if (Media.mpvMode) emit('mpv:sync');
   if (!committed && dismiss) {
     try { dismiss(); } catch (e) { console.warn('modal onDismiss:', e); }
   }
@@ -271,7 +271,10 @@ export function bindOverlayDrag(panel, handle, place = keepPanelInViewport) {
     emit('mpv:sync');
   });
   handle.addEventListener('lostpointercapture', () => { drag = null; });
-  if (typeof ResizeObserver === 'function') new ResizeObserver(() => place(panel)).observe(panel);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => {
+    place(panel);
+    emit('mpv:sync');
+  }).observe(panel);
 }
 
 function moveModalInViewport(modal, left, top) {
@@ -336,6 +339,7 @@ function togglePanel(id) {
   document.querySelectorAll('.float-panel.show').forEach(x => x.classList.remove('show'));
   if (willShow) {
     p.classList.add('show');
+    emit('mpv:sync');
     setTimeout(() => {
       _ensurePanelInRightArea(p);
       keepPanelInViewport(p);
@@ -355,34 +359,37 @@ function _fmtBytes(n) {
   return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
 }
 
+// A closed dialog relinquishes its UI, not the cleanup already sent to main.
+// Reopening the same source observes that work instead of submitting it again.
+const cacheClearOperations=new Map();
+
 async function openCacheDialog() {
   const DESK = window.subtool;
   if (!DESK || !DESK.cacheInfo) { showToast('快取管理僅在桌面版可用'); return; }
   const displayedSource=State.mediaPath||null;
+  const ownsSource=()=> (State.mediaPath||null)===displayedSource;
+  const running=cacheClearOperations.get(displayedSource);
   const loading = openModal('轉檔快取', '<p class="cache-loading" role="status">正在讀取快取保存紀錄…</p>', [{ label: '關閉', primary: true, act: closeModal }]);
   
   let info;
   try {
-    info = await DESK.cacheInfo(displayedSource);
+    info = running ? running.info : displayedSource ? await DESK.cacheInfo(displayedSource) : null;
   } catch (e) {
     info = { unavailable: true };
   }
   
   if (!loading.isCurrent()) return;
-  if((State.mediaPath||null)!==displayedSource){loading.close();showToast('目前影片已變更，請重新開啟快取管理');return;}
+  if(!ownsSource()){loading.close();showToast('目前影片已變更，請重新開啟快取管理');return;}
   
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const summary = !info || info.unavailable === true
-    ? '<p class="cache-unavailable">無法確認中央快取狀態，請檢查快取目錄與權限後重新整理。</p>'
-    : `<div>中央快取：<b>${info.folders}</b> 個項目，共 <b>${_fmtBytes(info.bytes)}</b></div>`;
-  const locations=info?.source?.path===displayedSource?info.source.locations||[]:[];
-  const sourceSummary=!displayedSource?'<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-note">尚未載入素材。開啟影片後，可在此查看同資料夾的波形、Proxy 與聲道保存紀錄。</p></section>':`<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-path">${esc(displayedSource)}</p>`+
+  const locations=info?.source?.path===displayedSource?(info.source.locations||[]).filter(location=>location.kind==='sidecar'):[];
+  const sourceSummary=!displayedSource?'<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-note">請先開啟素材，再查看或清除同資料夾的波形、Proxy 與聲道快取。</p></section>':`<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-path">${esc(displayedSource)}</p>`+
     (!info?.source||info.source.path!==displayedSource||info.source.unavailable?'<p class="cache-unavailable">無法確認目前素材的快取紀錄，請檢查來源與目錄權限後重新整理。</p>':locations.length?locations.map(location=>{
       const wave=location.waveform||{};
       const progress=Number.isSafeInteger(wave.completedSamples)&&Number.isSafeInteger(wave.totalSamples)
         ?` ${ (wave.completedSamples/4000).toFixed(1)} / ${(wave.totalSamples/4000).toFixed(1)} 秒`:'';
       const waveText=wave.state==='complete'?'紀錄已完成':wave.state==='partial'?'部分保存紀錄'+progress:wave.state==='unknown'?'無法確認':'未找到完成紀錄';
-      return `<div class="cache-source-location"><h4>${location.kind==='sidecar'?'同資料夾快取':'本機中央快取'}</h4>`+
+      return '<div class="cache-source-location"><h4>同資料夾快取</h4>'+
         `<p class="cache-path">${esc(location.directory)}</p><dl class="cache-records"><dt>波形</dt><dd>${esc(waveText)}</dd>`+
         (Number.isSafeInteger(wave.bytes)?`<dt>波形檔大小</dt><dd>${_fmtBytes(wave.bytes)}</dd>`:'')+
         `<dt>Proxy</dt><dd>${location.proxy?'已有完整紀錄':'未找到完整紀錄'}</dd><dt>聲道</dt><dd>${Number(location.channels)||0} 條</dd></dl></div>`;
@@ -391,61 +398,60 @@ async function openCacheDialog() {
   const html =
     `<div class="cache-dialog-content">` +
     sourceSummary+
-    '<section class="cache-central-summary"><h3>本機中央快取</h3>'+summary +
-    `<p class="cache-path">${esc(info?.root || '')}</p></section>` +
-    `<details class="cache-help"><summary>保存位置與清除範圍</summary><p>Proxy、聲道與波形優先保存在素材同資料夾的 <code>.subtool_Cache</code>，無法寫入時使用本機中央快取。同一 NAS 來源可在核對後跨電腦沿用；中斷的波形可從有效檢查點續算，快取不因放置天數過期。</p><dl class="cache-records"><dt>清理孤兒檔</dt><dd>只處理本機中央快取的無效項目。</dd><dt>清除快取</dt><dd>所有中央快取，以及目前素材的同資料夾快取。其他素材的同資料夾快取不受影響。</dd></dl></details>` +
+    `<details class="cache-help"><summary>保存位置與清除範圍</summary><p>Proxy、聲道與波形只保存在素材同資料夾的 <code>.subtool_Cache</code>，無法寫入時會提示原因。同一 NAS 來源可在核對後跨電腦沿用；中斷的波形可從有效檢查點續算，快取不因放置天數過期。</p><p>Proxy 使用 480p、1000 kb/s 與速度優先的編碼設定，直接讀取同資料夾快取。</p><p>清除只處理目前素材的 Proxy、聲道與原音波形快取，其他素材不受影響。</p></details>` +
+    '<p id="cacheActionStatus" role="status" hidden></p>'+
     '<p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p>'+
     `</div>`;
-  let cleaning=false;
-  const showCacheError=message=>{const error=document.getElementById('cacheActionError');if(error){error.textContent=message;error.hidden=false;}showToast(message);};
+  const observeClear=async(session,work,buttonId,confirmation=false)=>{
+    const button=document.getElementById(buttonId),status=document.getElementById('cacheActionStatus'),error=document.getElementById('cacheActionError');
+    button.disabled=true;button.textContent='清除中…';
+    status.textContent='清除中…可關閉此視窗，清除工作會繼續。';status.hidden=false;error.hidden=true;
+    const outcome=await work.promise;
+    if(!session.isCurrent()||!ownsSource())return;
+    const r=outcome.result;
+    const message=outcome.error?'清除快取失敗：'+(outcome.error.message||String(outcome.error))+'。請重試。'
+      :r?.reason==='busy'?'快取仍在處理或使用中，請完成或停止後再清除'
+      :r?.incomplete===true?`已處理部分快取，釋放 ${_fmtBytes(r.bytes)}；部分項目仍在使用或無法確認，已保留`
+      :r?.incomplete===false?`已清除快取，釋放 ${_fmtBytes(r.bytes)}`
+      :`已處理快取，釋放 ${_fmtBytes(r?.bytes)}`;
+    const failed=!!outcome.error||r?.reason==='busy';
+    status.hidden=failed;error.hidden=!failed;(failed?error:status).textContent=message;
+    const complete=!outcome.error&&r?.incomplete===false;
+    if(complete&&!confirmation){
+      const summary=document.querySelector('.cache-source-summary');
+      if(summary)summary.innerHTML=`<h3>目前素材</h3><p class="cache-path">${esc(displayedSource)}</p><p class="cache-note">快取已清除，重新整理可查看最新保存紀錄。</p>`;
+    }
+    button.disabled=confirmation&&complete;
+    button.textContent=confirmation?(complete?'已完成':'確定清除'):'清除快取';
+    showToast(message);
+  };
   const buttons = [
-    { label: '清理孤兒檔', id:'cacheCleanOrphans', act: async () => {
-        if(!session.isCurrent()||cleaning)return;
-        cleaning=true;
-        const button=document.getElementById('cacheCleanOrphans');button.disabled=true;button.textContent='清理中…';
-        try {
-          const r = await DESK.cacheCleanOrphans();
-          if (!session.isCurrent()) return;
-          const cleaned = `清理 ${r.removed} 個項目，釋放 ${_fmtBytes(r.bytes)}`;
-          if (r.incomplete === true) showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}；部分項目仍在使用或無法確認，已保留`);
-          else if (r.incomplete === false) showToast(`已清理 ${r.removed} 個無效項目，釋放 ${_fmtBytes(r.bytes)}`);
-          else showToast(`已處理孤兒快取，${cleaned}`);
-          await openCacheDialog();
-        } catch (error) {
-          if (session.isCurrent()) showCacheError('清理快取失敗：' + error.message + '。請重試。');
-        } finally {cleaning=false;if(session.isCurrent()){button.disabled=false;button.textContent='清理孤兒檔';}}
-      },
-    },
-    { label: '清除快取', className:'del-btn', act: () => {
-        if (!session.isCurrent()) return;
+    { label: '清除快取', id:'cacheClear', className:'del-btn', act: () => {
+        if (!session.isCurrent()||!displayedSource||cacheClearOperations.has(displayedSource)) return;
         // 清除資格屬於使用者看到的母素材，不能在確認後才讀取新專案的路徑。
-        const sourcePath = State.mediaPath || null;
-        const ownsSource = () => (State.mediaPath || null) === sourcePath;
+        if(!ownsSource()){session.close();showToast('目前影片已變更，請重新開啟快取管理並確認');return;}
         let clearing = false;
-        const sourceLabel = sourcePath ? `<p class="cache-path">${esc(sourcePath)}</p>` : '';
-        const confirmation = openModal('清除快取？', '<div class="cache-dialog-content"><p>將刪除所有中央快取，以及目前影片在 .subtool_Cache 內對應的快取項目；其他素材與舊版留下的項目不受影響。</p>' + sourceLabel + '<p class="cache-note">下次開啟同檔可能需要重新轉檔。</p><p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p></div>', [
+        const sourceLabel = `<p class="cache-path">${esc(displayedSource)}</p>`;
+        const confirmation = openModal('清除快取？', '<div class="cache-dialog-content"><p>將刪除目前素材在 .subtool_Cache 內的 Proxy、聲道與原音波形快取；其他素材不受影響。</p>' + sourceLabel + '<p class="cache-note">下次開啟同檔可能需要重新轉檔。</p><p id="cacheActionStatus" role="status" hidden></p><p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p></div>', [
           { label: '確定清除', primary: true, id:'cacheClearConfirm', act: async () => {
-            if (!confirmation.isCurrent() || clearing) return;
+            if (!confirmation.isCurrent() || clearing || cacheClearOperations.has(displayedSource)) return;
             if (!ownsSource()) {
               confirmation.close();
               showToast('目前影片已變更，請重新開啟快取管理並確認');
               return;
             }
             clearing = true;
-            const button=document.getElementById('cacheClearConfirm');button.disabled=true;button.textContent='清除中…';
-            try {
-              const r = await DESK.cacheClearAll(sourcePath);
-              if (!confirmation.isCurrent() || !ownsSource()) return;
-              if (r.incomplete === true) showToast(`已處理部分快取，釋放 ${_fmtBytes(r.bytes)}；部分項目仍在使用或無法確認，已保留`);
-              else if (r.incomplete === false) showToast(`已清除快取，釋放 ${_fmtBytes(r.bytes)}`);
-              else showToast(`已處理快取，釋放 ${_fmtBytes(r.bytes)}`);
-              confirmation.close();
-            } catch (error) {
-              if (confirmation.isCurrent() && ownsSource()) showCacheError('清除快取失敗：' + error.message + '。請重試。');
-            } finally { clearing = false;if(confirmation.isCurrent()){button.disabled=false;button.textContent='確定清除';} }
+            const work={info};cacheClearOperations.set(displayedSource,work);
+            work.promise=(async()=>{
+              try{return {result:await DESK.cacheClearAll(displayedSource)};}
+              catch(error){return {error};}
+              finally{if(cacheClearOperations.get(displayedSource)===work)cacheClearOperations.delete(displayedSource);}
+            })();
+            try{await observeClear(confirmation,work,'cacheClearConfirm',true);}
+            finally{clearing=false;}
             },
           },
-          { label: '取消', act: openCacheDialog },
+          { label: '關閉', act: ()=>confirmation.close() },
         ]);
       },
     },
@@ -453,6 +459,8 @@ async function openCacheDialog() {
     { label: '關閉', primary: true, act: closeModal },
   ];
   const session = openModal('轉檔快取', html, buttons, {width:'600px'});
+  document.getElementById('cacheClear').disabled=!displayedSource;
+  if(running)void observeClear(session,running,'cacheClear');
 }
 
 export function renderQueueMonitorIndicator(button, snapshot = {}) {

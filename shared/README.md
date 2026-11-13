@@ -21,6 +21,7 @@ import { imageBox } from '../shared/image-geometry.cjs';
 | `clip-fade.cjs` | 片段長度與淡入淡出時間窗 |
 | `clip-visual.cjs` | 固定畫面來源時間、末格索引與靜態視覺片段判斷 |
 | `delivery-formats.cjs` | 九種交付選項、固定規格、BD 模式與音訊編組限制 |
+| `delivery-chapters.cjs` | MP4／MOV 書籤時間範圍、同時點合併與 FFmetadata 序列化 |
 | `delivery-frame-rate.cjs` | 標準交付 FPS、精確 NTSC 有理數、解析與格率比對 |
 | `delivery-resolution.cjs` | 交付尺寸、建議碼率及 TC 規格派生 |
 | `image-geometry.cjs` | 圖片與片段疊層幾何 |

@@ -104,6 +104,23 @@ describe('交付 native 能力的公開 interface', () => {
     expect(spec).toEqual(original);
   });
 
+  it.each(['h264', 'prores'])('%s 能力檢查接受尚未 staging 的章節，保留正式交付規格', async format => {
+    const { engine, calls } = capabilities();
+    const spec = { ...deliverySpec(format), chapters: [
+      { start: 0, end: 0.5, title: '備註：畫格檢查' },
+      { start: 0.5, end: 1, title: '自訂字幕：測試 #;=' },
+    ] };
+    const original = structuredClone(spec);
+    await engine.assertReady(spec);
+    expect(calls).toHaveLength(2);
+    for (const { args } of calls) {
+      expect(args).toContain('lavfi');
+      expect(args.slice(-3)).toEqual(['-f', 'null', '-']);
+      expect(args).not.toContain('master.mov');
+    }
+    expect(spec).toEqual(original);
+  });
+
   it.each(['dvd-iso', 'bd-iso'])('%s 缺少合成工具或其 runtime 時直接拒絕', async format => {
     const { engine } = capabilities({ respond: ({ executable, child }) => {
       if (executable !== '/native/ffmpeg') child.emit('error', Object.assign(new Error('native DLL missing'), { code: 'ENOENT' }));
@@ -264,7 +281,7 @@ describe('原生工具候選路徑', () => {
   it('VideoToolbox 探測成功後，proxy 與交付匯出真的使用該編碼器', () => {
     expect(previewVideoEncoderArgs('h264_videotoolbox')).toEqual([
       '-c:v', 'h264_videotoolbox',
-      '-b:v', '4M',
+      '-b:v', '1000k', '-maxrate', '1000k', '-bufsize', '2000k',
       '-realtime', '1',
       '-allow_sw', '1',
       '-bf', '0',
@@ -282,7 +299,8 @@ describe('原生工具候選路徑', () => {
   it('抽出參數映射後仍保留既有 Windows 與 libx264 行為', () => {
     expect(previewVideoEncoderArgs('h264_nvenc')).toContain('h264_nvenc');
     expect(previewVideoEncoderArgs('libx264')).toEqual([
-      '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '26',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+      '-b:v', '1000k', '-maxrate', '1000k', '-bufsize', '2000k',
     ]);
     expect(deliveryVideoEncoderArgs('h264_qsv', 6000)).toEqual([
       '-c:v', 'h264_qsv', '-b:v', '6000k', '-maxrate', '6000k', '-bufsize', '12000k',

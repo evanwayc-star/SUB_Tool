@@ -24,6 +24,31 @@ function sourceAudioClockFilter(clock, sampleRate = 48000) {
   return `${shift}aresample=${sampleRate}:async=1:first_pts=0`;
 }
 
+function sourceVideoTimestampFilter(clock) {
+  const ratio = value => {
+    if (typeof value !== 'string' || !/^\d+\/\d+$/.test(value)) return NaN;
+    const [n, d] = value.split('/').map(Number);
+    return Number.isSafeInteger(n) && Number.isSafeInteger(d) && n > 0 && d > 0 ? n / d : NaN;
+  };
+  const tick = ratio(clock?.timeBase), rate = ratio(clock?.nominalFrameRate);
+  // A millisecond container cannot represent NTSC frame boundaries exactly.
+  // This is a HALF SOURCE TICK quantization policy, not proof of CFR: only
+  // timestamps already within that bound of a nominal source grid point move.
+  // Never synthesize N/rate timestamps, collapse VFR gaps or use overlay nearest.
+  // Fine clocks, frame-sized ticks and grids exactly representable by the
+  // source timebase need no compensation. The maximum correction is 0.5 ms.
+  if (!(tick > 0.000001 && tick <= 0.001 && rate > 0 && rate <= 240)
+    || Math.abs(1 / (tick * rate) - Math.round(1 / (tick * rate))) < 1e-7) return '';
+  const offset = timestampOffset(clock);
+  const position = `(PTS*TB+${offset})*${rate}`;
+  const restored = `(round(${position})/${rate}-${offset})/TB`;
+  const near = `lte(abs(${position}-round(${position})),${tick * rate / 2 + 1e-9})`;
+  // The first decoded frame may still be the true source start, even after a
+  // seek into a leading gap. Preserve it and never pull later frames before it.
+  // Delivery's existing input pre-roll keeps this boundary before normal trims.
+  return `settb=AVTB,setpts='if(eq(N,0),PTS,if(${near},max(STARTPTS,${restored}),PTS))',`;
+}
+
 function sourceFrameSelectionFilter(time, sourceStart = 0) {
   const targetTick = Math.round((Number(time) - Number(sourceStart)) * 1e6);
   // 保留 seek GOP 的原 PTS，目標以前的畫格壓到零點，遇到第一個
@@ -36,4 +61,4 @@ function sourceFrameSelectionFilter(time, sourceStart = 0) {
   return `settb=AVTB,setpts='max(PTS-${targetTick},0)',trim=end=0.000001,tpad=stop_mode=clone:stop_duration=1,fps=1:round=up:start_time=0,trim=end_frame=1,setpts=PTS-STARTPTS`;
 }
 
-module.exports = { sourceClockSeek, sourceVideoClockSeek, sourceAudioClockFilter, sourceFrameSelectionFilter, timestampOffset };
+module.exports = { sourceClockSeek, sourceVideoClockSeek, sourceAudioClockFilter, sourceVideoTimestampFilter, sourceFrameSelectionFilter, timestampOffset };

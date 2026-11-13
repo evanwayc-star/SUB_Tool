@@ -7,7 +7,7 @@ import { emit, on } from './events.js';
 import { getExactFps, secToEncore } from './time.js';
 import { effStyle, styleToCss, ASS_PLAY_RES, anchorPct } from './substyle.js';
 import { escapeHTML } from './util.js';
-import { getPlayerAdapter } from './media-player-adapter.js';
+import { getPlayerAdapter, getNativePreviewRuntime } from './media-player-adapter.js';
 import { toASSFromState } from './subio.js';
 import { createPreviewDrag } from './timeline-interaction-engine.js';
 import { drawTimeline, updatePlayhead } from './timeline-renderer.js';
@@ -87,62 +87,49 @@ export function refreshMpvSubs(revealAfter=false, live=false){
     }catch(e){}
   },delay);
 }
-/* mpv 是 OS 層子視窗，無法被 HTML z-index 蓋過。
-   只在浮動面板/搜尋視窗「實際重疊」影片區域時才隱藏 mpv，不重疊時影片繼續顯示。 */
+/* mpv 是 OS 層子視窗，HTML z-index 蓋不過它。把可見疊層交給
+   host 局部裁切，保留未遮住的原生畫面，不切換 presenter 或播放時鐘。 */
+let _mpvOverlayObserver=null;
+let _mpvObservedOverlays=new Set();
+function _watchMpvOverlays(elements){
+  if(!_mpvOverlayObserver && elements.length && typeof ResizeObserver==='function')
+    _mpvOverlayObserver=new ResizeObserver(()=>_syncMpvPanel());
+  if(!_mpvOverlayObserver) return;
+  const next=new Set(elements);
+  for(const element of _mpvObservedOverlays) if(!next.has(element)) _mpvOverlayObserver.unobserve(element);
+  for(const element of next) if(!_mpvObservedOverlays.has(element)) _mpvOverlayObserver.observe(element);
+  _mpvObservedOverlays=next;
+}
 export function _syncMpvPanel(){
-  /* 守衛看的是【mpv 視窗這條 IPC 通不通】，不是「現在裝的是哪個 adapter」——
-     兩者會脫鉤，詳見 ui.js setMpvWindowVisible 的註解。 */
-  if(!Media.mpvMode || !window.subtool?.mpv) return;
-  // 對話框比照浮動面板：只有【真的蓋到影片區】才讓位。keepVideo 的對話框（編輯字幕文字）
-  // 靠右停、不重疊 → mpv 續留，編輯時看得到畫面（v4.33.2；否則 openModal 的 keepVideo 會被這裡蓋掉）
-  const _mb=$('modalBg');
-  let modalOpen=false;
-  if(_mb?.classList.contains('show')){
-    const mEl=_mb.querySelector('.modal'), vr0=$('videoWrap')?.getBoundingClientRect();
-    const mr=mEl?.getBoundingClientRect();
-    modalOpen = !(mr && vr0) || !(mr.right<=vr0.left||mr.left>=vr0.right||mr.bottom<=vr0.top||mr.top>=vr0.bottom);
+  if(!Media.mpvMode || !window.subtool?.mpv){ _watchMpvOverlays([]); return; }
+  const wrap=$('videoWrap'),vr=wrap?.getBoundingClientRect();
+  const observed=wrap?[wrap]:[];
+  if(!vr || !(vr.width>0 && vr.height>0)){
+    _watchMpvOverlays(observed); setMpvWindowVisible(false); return;
   }
-  // 快捷鍵設定是獨立於 modalBg 的自訂對話框（settings.js 自建 #settingsModal），
-  // 同樣會被 mpv 蓋住，開啟期間一律讓位
-  const settingsOpen=!!document.getElementById('settingsModal');
-  // 序列間隙（時間軸上無影片的區段）：畫面應為黑 → mpv 讓位
-  // WC 接管（proxy 就緒、WebCodecs 合成呈現中）：mpv 視窗一律讓位（僅供時鐘＋聲音兜底）
-  let hides=modalOpen||settingsOpen||Media.inGap()||Media.webCodecsTakeover();
-  if(!hides){
-    const vr=$('videoWrap')?.getBoundingClientRect();
-    if(vr){
-      const ov=(r)=>!(r.right<=vr.left||r.left>=vr.right||r.bottom<=vr.top||r.top>=vr.bottom);
-      for(const p of document.querySelectorAll('.float-panel.show')){
-        if(ov(p.getBoundingClientRect())){hides=true;break;}
-      }
-      if(!hides){
-        const sd=$('searchDialog');
-        if(sd&&(sd.style.display||'none')!=='none'&&ov(sd.getBoundingClientRect()))hides=true;
-      }
-      if(!hides){
-        // 右鍵選單常直接開在影片上（播放窗右鍵切音源/速度），重疊時也讓位
-        const cm=$('ctxmenu');
-        if(cm&&cm.classList.contains('show')&&ov(cm.getBoundingClientRect()))hides=true;
-      }
-      if(!hides){
-        /* 工具列的下拉選單（.menu.open .items）。這一條是 v6.1.9 補的。
-
-           真實事故：「最近開啟」展開後有最多 10 筆、每筆兩行，高度遠超過工具列，
-           直接伸進影片區。選單有正確 render（CDP 量到 computed style 可見、每一列
-           的 getBoundingClientRect 都有寬高）卻【完全看不到】——因為 mpv 是 OS 層
-           子視窗，HTML 的 z-index 蓋不過它。
-
-           §0.7 說可見性只能看 computed style，那是對的；但它只證明「HTML 這一層
-           把它畫出來了」，證明不了「使用者的眼睛看得到」。上面那幾種疊層（浮動面板、
-           搜尋視窗、右鍵選單）早就接進這裡了，只有工具列選單從一開始就漏掉——
-           先前沒有人發現，是因為在這之前工具列選單都很矮，撐不到影片區。 */
-        for(const it of document.querySelectorAll('.menu.open .items')){
-          if(ov(it.getBoundingClientRect())){hides=true;break;}
-        }
-      }
-    }
-  }
-  setMpvWindowVisible(!hides);
+  const occluders=[];
+  const add=element=>{
+    if(!element) return;
+    const style=getComputedStyle(element);
+    if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse') return;
+    observed.push(element);
+    const r=element.getBoundingClientRect();
+    if(!(r.width>0&&r.height>0)||r.right<=vr.left||r.left>=vr.right||r.bottom<=vr.top||r.top>=vr.bottom) return;
+    occluders.push({x:r.left,y:r.top,w:r.width,h:r.height});
+  };
+  // Only the dialog itself covers the native video, not its full-screen backdrop.
+  if($('modalBg')?.classList.contains('show')) add($('modalBg').querySelector('.modal'));
+  add(document.querySelector('#settingsModal .settings-modal-content'));
+  document.querySelectorAll('.float-panel.show').forEach(add);
+  add($('searchDialog'));
+  if($('ctxmenu')?.classList.contains('show')) add($('ctxmenu'));
+  document.querySelectorAll('.menu.open .items').forEach(add);
+  _watchMpvOverlays(observed);
+  getNativePreviewRuntime().setNativeViewport({
+    bounds:{x:vr.left,y:vr.top,w:vr.width,h:vr.height},
+    visible:!Media.inGap()&&!Media.webCodecsTakeover(),
+    occluders,
+  }).catch(()=>{});
 }
 const _videoSub = $('videoSub');
 const _videoWrap = $('videoWrap');

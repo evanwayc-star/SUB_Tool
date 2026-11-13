@@ -3,7 +3,7 @@
    ==============================================================================
    【維護鐵律】本檔案已納入全專案終極防禦網。
    所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
-   專業級 DAW 調音台通道條 (Channel Strip)，支援立體聲雙電平表、Peak Hold、
+   專業級 DAW 調音台通道條 (Channel Strip)，支援單聲道 bus 電平表、Peak Hold、
    Clipping 削波指示與推子 dB 刻度（聲道由使用者配置指定，無額外聲像回中）。
 ============================================================================== */
 /* SUB Tool — 專案音訊軌混音器（A1…An bus；來源聲道只在配線中處理） */
@@ -23,13 +23,27 @@ function projectBuses(){
 function busLabel(bus,index){ return `A${index+1}`; }
 function busName(bus,index){ return bus?.name||busLabel(bus,index); }
 function busVolume(bus){ return Math.max(0,Math.min(4.0,Number(bus?.volume==null?1:bus.volume)||0)); }
-function busPan(bus){ return Math.max(-1,Math.min(1,Number(bus?.pan==null?0:bus.pan)||0)); }
+const MAX_FADER_DB = 20 * Math.log10(4);
+function volumeFromDb(db){
+  // Preserve small, nonzero gains so 0.5 dB wheel steps remain reversible near
+  // the bottom. Only the floor itself means silence; tolerate rounding noise.
+  if(db <= -60 + 0.0001) return 0;
+  const volume=Math.min(4,Math.pow(10,Math.min(MAX_FADER_DB,db)/20));
+  return Number(volume.toFixed(volume<0.01?8:4));
+}
+
+// 音柱、峰值保持與刻度共用 -60…0 dBFS 的位置，不能將不等距 dB 等距排列。
+const METER_FLOOR_DB = -60;
+const METER_TICKS_DB = [0, -3, -6, -12, -24, -36, -48, METER_FLOOR_DB];
+function meterHeight(db){
+  return Math.max(0, Math.min(100, (db - METER_FLOOR_DB) / -METER_FLOOR_DB * 100));
+}
 
 /**
- * 將增益值 (0~1.5) 換算為分貝字串 (dB)
+ * 將增益值 (0~4) 換算為分貝字串 (dB)
  */
 function volumeToDbText(volume) {
-  if (!volume || volume <= 0.001) return '-∞ dB';
+  if (!volume || volume <= 0) return '-∞ dB';
   const db = 20 * Math.log10(volume);
   if (Math.abs(db) < 0.05) return '0.0 dB';
   return (db > 0 ? '+' : '') + db.toFixed(1) + ' dB';
@@ -129,14 +143,14 @@ function bindBusRow(row,bus,index){
     refreshBusViews();
   };
   bindVolumeRange(volume,bus,index,()=>{
-    volume.value=String(Math.round(busVolume(bus)*100));
+    volume.value=String(busVolume(bus)*100);
     volume.title='音量 '+volume.value+'% ('+volumeToDbText(bus.volume)+')';
   });
   volume.addEventListener('dblclick', async () => {
     if(!owns()) return;
     const edit=beginBusVolumeEdit(bus,index,volume,'設定音訊軌音量');
     const initial=volumeToDbText(busVolume(bus));
-    const input = await promptModal(`${busLabel(bus,index)} 音量`, '請輸入音量 dB（例：-6、0、+2；或 +=1.5、-=2）',initial);
+    const input = await promptModal(`${busLabel(bus,index)} 音量`, '輸入目標 dB（-6、0、2）；相對增減用 +2、+=1.5、-=2',initial);
     if (input !== null && input!==initial) {
       applyDbStringToBus(bus, input, index,edit);
     }else edit?.cancel();
@@ -175,14 +189,14 @@ function renderAudioTracks(){
   }
   if(hint && !panelVisible) hint.textContent=`${buses.length} 條專案音訊軌`;
   buses.forEach((bus,index)=>{
-    const label=busLabel(bus,index), name=busName(bus,index), volume=Math.round(busVolume(bus)*100);
+    const label=busLabel(bus,index), name=busName(bus,index), volume=busVolume(bus)*100;
     const row=document.createElement('div'); row.className='atrack project-bus';
     row.dataset.busId=String(bus.id||'');
     row.innerHTML=
       `<span class="nm" title="${escapeHTML(name)}"><b>${label}</b>${name!==label?` · ${escapeHTML(name)}`:''}</span>`+
       `<button class="mini mute ${bus.muted?'on':''}" title="${bus.muted?'取消靜音':'靜音'} ${label}">M</button>`+
       `<button class="mini solo ${bus.solo?'on':''}" title="${bus.solo?'取消獨奏':'獨奏'} ${label}">S</button>`+
-      `<input type="range" min="0" max="200" step="1" value="${volume}" title="音量 ${volume}% (${volumeToDbText(volume/100)}，雙擊輸入 dB)">`;
+      `<input type="range" min="0" max="400" step="any" value="${volume}" title="音量 ${volume}% (${volumeToDbText(busVolume(bus))}，雙擊輸入 dB)">`;
     bindBusRow(row,bus,index);
     list.appendChild(row);
   });
@@ -218,6 +232,7 @@ let _meterStrips=[];
 function renderMixer(){
   const wrap=$('mixerStrips'); if(!wrap)return;
   cancelVolumeEdits(wrap);
+  const previousMeters=new Map(_meterStrips.map(strip=>[strip.bus,strip]));
   _meterStrips=[];
   const buses=projectBuses();
   if(!buses.length){ wrap.innerHTML='<div class="empty">尚未建立專案音軌。<br>匯入影音或在專案音軌設定中新增音軌。</div>'; return; }
@@ -234,8 +249,8 @@ function renderMixer(){
 
   buses.forEach((bus,index)=>{
     const label=busLabel(bus,index), name=busName(bus,index);
-    const volume=Math.round(busVolume(bus)*100);
-    const faderDb=volumeToDbText(volume/100);
+    const volume=busVolume(bus)*100;
+    const faderDb=volumeToDbText(busVolume(bus));
 
     const strip=document.createElement('div');
     strip.className=`mx-strip project-bus ${bus.muted?'is-muted':''}`;
@@ -252,13 +267,13 @@ function renderMixer(){
       `</div>`+
       `<div class="mx-meter-fader-area">`+
         `<div class="mx-fader-column">`+
-          `<div class="mx-scale mx-fader-scale">`+
-            `<span>+6</span><span class="unity">0</span><span>-∞</span>`+
+          `<div class="mx-scale mx-fader-scale" style="position:relative">`+
+            `<span>+12</span><span class="unity" style="position:absolute;top:75%;right:0;transform:translateY(-50%)">0</span><span>-∞</span>`+
           `</div>`+
           `<div class="mx-fader-track">`+
             `<div class="mx-fader-slot"></div>`+
-            `<div class="mx-unity-mark" title="0 dB 基準線"></div>`+
-            `<input class="mx-fader" type="range" min="0" max="200" step="1" value="${volume}" title="音量 ${volume}% (${faderDb}，雙擊設為 0 dB)">`+
+            `<div class="mx-unity-mark" style="top:calc(75% - 2px)" title="0 dB 基準線"></div>`+
+            `<input class="mx-fader" type="range" min="0" max="400" step="any" value="${volume}" title="音量 ${volume}% (${faderDb}，雙擊設為 0 dB)">`+
           `</div>`+
         `</div>`+
         `<div class="mx-meter-column">`+
@@ -273,13 +288,13 @@ function renderMixer(){
             `</div>`+
           `</div>`+
           `<div class="mx-scale mx-meter-scale">`+
-            `<span class="unity">0</span><span>-3</span><span>-6</span><span>-12</span><span>-24</span><span>-∞</span>`+
+            METER_TICKS_DB.map(db=>`<span${db===0?' class="unity"':''} style="top:${100-meterHeight(db)}%">${db}</span>`).join('')+
           `</div>`+
         `</div>`+
       `</div>`+
       `<div class="mx-readout-box mx-readout-row">`+
         `<div class="mx-meter-val" title="即時動態峰值電平">-∞</div>`+
-        `<div class="mx-fader-val" title="點擊輸入 dB（例：-6、0、+2；或 +=1.5、-=2），滾輪微調，雙擊回 0 dB">${faderDb}</div>`+
+        `<div class="mx-fader-val" title="點擊輸入目標 dB（-6、0、2）；相對增減用 +2、+=1.5、-=2；滾輪微調，雙擊回 0 dB">${faderDb}</div>`+
       `</div>`;
 
     // 1. 綁定推子
@@ -288,7 +303,7 @@ function renderMixer(){
     const owns=captureBusOwnership(bus,strip);
     bindVolumeRange(fader,bus,index,()=>{
       const v = busVolume(bus);
-      fader.value=String(Math.round(v*100));
+      fader.value=String(v*100);
       const dbText = volumeToDbText(v);
       fader.title = `音量 ${fader.value}% (${dbText}，雙擊設為 0 dB)`;
       if (faderValEl) faderValEl.textContent = dbText;
@@ -306,14 +321,14 @@ function renderMixer(){
         e.stopPropagation();
         if (!owns() || faderValEl.querySelector('input')) return;
         const curVol = busVolume(bus);
-        const curDb = curVol <= 0.001 ? -60 : +(20 * Math.log10(curVol)).toFixed(1);
+        const curDb = curVol <= 0 ? -60 : +(20 * Math.log10(curVol)).toFixed(1);
 
         const inlineInput = document.createElement('input');
         inlineInput.type = 'text';
         inlineInput.className = 'mx-fader-inline-input';
-        inlineInput.value = curDb > -59.9 ? (curDb > 0 ? `+${curDb}` : `${curDb}`) : '-inf';
+        inlineInput.value = curVol > 0 ? (curDb > 0 ? `+${curDb}` : `${curDb}`) : '-inf';
         const initialValue=inlineInput.value;
-        inlineInput.title = '輸入目標 dB（例：-6、0、+2）或相對增減（例：+=1.5、-=2）';
+        inlineInput.title = '輸入目標 dB（-6、0、2）；相對增減用 +2、+=1.5、-=2';
 
         faderValEl.textContent = '';
         faderValEl.appendChild(inlineInput);
@@ -355,11 +370,10 @@ function renderMixer(){
         if(!owns() || faderValEl.querySelector('input')) return;
         const step = we.deltaY < 0 ? 0.5 : -0.5;
         const curVol = busVolume(bus);
-        const curDb = curVol <= 0.001 ? -60 : 20 * Math.log10(curVol);
-        const nextDb = Math.max(-60, Math.min(12, curDb + step));
-        const newVol = nextDb <= -59.5 ? 0 : Math.pow(10, nextDb / 20);
-        const next = Number(newVol.toFixed(4));
-        if (Math.abs(next - curVol) <= 0.00001) return;
+        const curDb = curVol <= 0 ? -60 : 20 * Math.log10(curVol);
+        const nextDb = Math.max(-60, Math.min(MAX_FADER_DB, curDb + step));
+        const next = volumeFromDb(nextDb);
+        if (next === curVol) return;
         const edit=beginBusVolumeEdit(bus,index,faderValEl);
         if(edit?.commit(next)) refreshBusViews();
       }, { passive: false });
@@ -421,17 +435,23 @@ function renderMixer(){
 
     wrap.appendChild(strip);
 
-    _meterStrips.push({
+    const previous=previousMeters.get(bus);
+    const meter={
       bus,
       mask: strip.querySelector('.mx-mask'),
       peak: strip.querySelector('.mx-peak'),
       led: strip.querySelector('.mx-clip-led'),
       valEl: strip.querySelector('.mx-meter-val'),
-      level: 0,
-      peakH: 0,
-      peakT: 0,
-      clipped: false,
-    });
+      level: previous?.level || 0,
+      peakH: previous?.peakH || 0,
+      peakT: previous?.peakT || 0,
+      clipped: !!previous?.clipped,
+    };
+    meter.led?.classList.toggle('clip',meter.clipped);
+    meter.valEl?.classList.toggle('is-over',meter.clipped);
+    if(meter.peak) meter.peak.style.bottom=meter.peakH+'%';
+    if(meter.mask) meter.mask.style.height=(100-meterHeight(meter.level>0?20*Math.log10(meter.level):METER_FLOOR_DB))+'%';
+    _meterStrips.push(meter);
   });
 }
 
@@ -440,21 +460,61 @@ function renderMixer(){
    表還在跳但沒有聲音。判定與完整增益的家在 project-audio.js
    （由 Media.routedTrackStatesForBus 暴露）。 */
 function _busRouteStates(interpretation,bus){
-  return interpretation.routedTrackStatesForBus(bus?.id);
+  return interpretation.routedTrackStatesForBus(bus?.id,{requireAnalyser:false});
 }
-function _trackLevel(track){
-  try{
-    if(!track._mbuf) track._mbuf=new Float32Array(track.analyser.fftSize||1024);
-    track.analyser.getFloatTimeDomainData(track._mbuf);
-    let max=0; for(const sample of track._mbuf){ const value=Math.abs(sample); if(value>max)max=value; }
-    return max;
-  }catch(e){ return 0; }
+function _busLevel(inputs,busId,samples){
+  if(!inputs.length) return {level:0};
+  const native=inputs.filter(({track})=>Array.isArray(track.meterBusLevels));
+  const unavailable={level:null,reason:'等待目前來源的音量取樣'};
+  const unrelated={level:null,reason:'此軌的混合來源尚無同步電平資料；音訊快取完成後會恢復'};
+  if(native.length){
+    const levels=native[0].track.meterBusLevels;
+    if(native.length!==inputs.length||native.some(({track})=>track.meterBusLevels!==levels)) return unrelated;
+    const level=levels.find(item=>item.busId===String(busId))?.level;
+    return Number.isFinite(level)&&level>=0?{level}:unavailable;
+  }
+  // A scalar peak is sufficient only for one source. Adding independent peaks
+  // loses phase and can falsely signal both clipping and cancellation.
+  if(inputs.length===1&&!inputs[0].track.analyser&&Number.isFinite(inputs[0].track.meterPeak)){
+    return {level:Math.max(0,inputs[0].track.meterPeak)*inputs[0].gain};
+  }
+  if(inputs.every(({track})=>!track.analyser&&!Number.isFinite(track.meterPeak))) return {level:0};
+  let clock,frames=Infinity;
+  const pcm=[];
+  for(const {track,gain} of inputs){
+    if(!track.analyser) return unavailable;
+    if(pcm.length&&track.analyser.context!==clock) return unrelated;
+    clock=track.analyser.context;
+    if(!samples.has(track)){
+      try{
+        const size=track.analyser.fftSize||1024;
+        if(track._mbuf?.length!==size) track._mbuf=new Float32Array(size);
+        track.analyser.getFloatTimeDomainData(track._mbuf);
+        samples.set(track,track._mbuf);
+      }catch{ samples.set(track,null); }
+    }
+    const data=samples.get(track);
+    if(!data?.length) return unavailable;
+    frames=Math.min(frames,data.length);
+    pcm.push({data,gain});
+  }
+  let level=0;
+  // Same-context analysers share the render clock. End-align different FFT
+  // lengths, multiply the complete route gain, then measure the signed sum.
+  for(let frame=0;frame<frames;frame++){
+    let sum=0;
+    for(const {data,gain} of pcm) sum+=data[data.length-frames+frame]*gain;
+    if(!Number.isFinite(sum)) return unavailable;
+    level=Math.max(level,Math.abs(sum));
+  }
+  return {level};
 }
 
 /**
  * 完整重設混音器（音量推子全部歸零 0 dB，並解除所有靜音與獨奏）
  */
 function mixerReset(){
+  cancelVolumeEdits();
   const buses=projectBuses();
   if(!buses.length){ showToast('尚未建立專案音訊軌'); return; }
   for(const bus of buses){
@@ -462,6 +522,7 @@ function mixerReset(){
     bus.muted=false;
     bus.volume=1.0;
   }
+  clearMeterStrips();
   notifyBusChange(null,'reset',true);
   notifyBusChange(null,'zeroFaders',1.0);
   emit('history:record','重設專案音訊軌混音（推子 0 dB，取消靜音）');
@@ -491,6 +552,7 @@ function mixerMuteAll(){
  * 將所有專案音量推子設為 0.0 dB (Unity Gain 1.0)
  */
 function mixerZeroFaders(){
+  cancelVolumeEdits();
   const buses=projectBuses();
   if(!buses.length){ showToast('尚未建立專案音訊軌'); return; }
   for(const bus of buses){
@@ -523,7 +585,7 @@ function applyDbStringToBus(bus, text, index = 0, pendingEdit=null){
   if(!raw){ edit.cancel();refreshBusViews(); return; }
 
   const currentVol = busVolume(bus);
-  const currentDb = currentVol <= 0.001 ? -60 : 20 * Math.log10(currentVol);
+  const currentDb = currentVol <= 0 ? -60 : 20 * Math.log10(currentVol);
   let targetDb = currentDb;
 
   if(raw === '-inf' || raw === '-∞' || raw === 'inf' || raw === 'mute'){
@@ -545,9 +607,8 @@ function applyDbStringToBus(bus, text, index = 0, pendingEdit=null){
     return;
   }
 
-  targetDb = Math.max(-60, Math.min(12, targetDb));
-  const newVol = targetDb <= -59.5 ? 0 : Math.pow(10, targetDb / 20);
-  const changed=edit.commit(Number(newVol.toFixed(4)));
+  targetDb = Math.max(-60, Math.min(MAX_FADER_DB, targetDb));
+  const changed=edit.commit(volumeFromDb(targetDb));
   const dbText = volumeToDbText(bus.volume);
   if(changed) showToast(`${busLabel(bus, index)} 音量已設為 ${dbText}`);
   refreshBusViews();
@@ -584,10 +645,9 @@ async function mixerAdjustAllDb(deltaInput){
 
   for(const bus of buses){
     const currentVol = busVolume(bus);
-    const currentDb = currentVol <= 0.001 ? -60 : 20 * Math.log10(currentVol);
-    const targetDb = Math.max(-60, Math.min(12, currentDb + delta));
-    const newVol = targetDb <= -59.5 ? 0 : Math.pow(10, targetDb / 20);
-    bus.volume = Number(newVol.toFixed(4));
+    const currentDb = currentVol <= 0 ? -60 : 20 * Math.log10(currentVol);
+    const targetDb = Math.max(-60, Math.min(MAX_FADER_DB, currentDb + delta));
+    bus.volume = volumeFromDb(targetDb);
   }
 
   notifyBusChange(null, 'adjustAllDb', delta);
@@ -597,54 +657,24 @@ async function mixerAdjustAllDb(deltaInput){
 }
 
 function updateMeters(){
-  const panel=$('mixerPanel'); if(!panel||!panel.classList.contains('show')||!_meterStrips.length)return;
+  const panel=$('mixerPanel');
+  if(!panel||!panel.classList.contains('show')||!_meterStrips.length){ Media.clearNativeMeter?.();return; }
   const now=performance.now();
-  const interpretation=Media.projectAudioInterpretation();
+  const interpretation=Media.projectAudioInterpretation({metering:true});
+  const samples=new Map();
 
   for(const strip of _meterStrips){
-    let rawLevelL = 0;
-    let rawLevelR = 0;
-    let hasStereo = false;
-
-    for(const input of _busRouteStates(interpretation,strip.bus)){
-      const raw = _trackLevel(input.track) * input.gain;
-      const name = String(input.track?.name || '').toUpperCase();
-      const ch = input.track?.sourceChannel;
-
-      const isL = name === 'L' || name === 'FL' || ch === 0;
-      const isR = name === 'R' || name === 'FR' || ch === 1;
-
-      if(isL && !isR){
-        rawLevelL = Math.max(rawLevelL, raw);
-        hasStereo = true;
-      }else if(isR && !isL){
-        rawLevelR = Math.max(rawLevelR, raw);
-        hasStereo = true;
-      }else{
-        rawLevelL = Math.max(rawLevelL, raw);
-        rawLevelR = Math.max(rawLevelR, raw);
-      }
-    }
-
-    if(!hasStereo){
-      rawLevelR = rawLevelL;
-    }
-
-    // 應用 Pan 聲像增益
-    const pan = busPan(strip.bus);
-    const panGainL = pan <= 0 ? 1 : Math.cos(pan * Math.PI / 2);
-    const panGainR = pan >= 0 ? 1 : Math.cos(-pan * Math.PI / 2);
-
-    const levelL = rawLevelL * panGainL;
-    const levelR = rawLevelR * panGainR;
-    const maxLevel = Math.max(levelL, levelR);
+    // A1…An 是單聲道 bus。配線已含完整增益，來源名稱／舊 pan 不能再改寫讀值。
+    const measured=State.muted?{level:0}:_busLevel(_busRouteStates(interpretation,strip.bus),strip.bus.id,samples);
+    const maxLevel=measured.level??0;
+    if(measured.level===null) strip.level=0;
 
     // 平滑濾波 (Ballistics: Attack 即時, Decay 緩降)
     strip.level = Math.max(maxLevel, (strip.level || 0) * 0.85);
 
     // 換算為 dB 與電平柱百分比 (0 dBFS ~ -60 dBFS)
-    const db = strip.level > 1e-4 ? 20 * Math.log10(strip.level) : -60;
-    const height = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+    const db = strip.level > 1e-4 ? 20 * Math.log10(strip.level) : METER_FLOOR_DB;
+    const height = meterHeight(db);
 
     // 更新遮罩
     if(strip.mask) strip.mask.style.height = (100 - height) + '%';
@@ -662,8 +692,9 @@ function updateMeters(){
 
     // 更新即時數值標籤（超載時顯示紅色高亮警示）
     if(strip.valEl){
-      const dbText = levelToDbText(maxLevel);
+      const dbText = measured.level===null?'—':levelToDbText(maxLevel);
       strip.valEl.textContent = dbText;
+      strip.valEl.title = measured.reason||'';
       if(maxLevel >= 0.999){
         strip.valEl.classList.add('is-over');
       }else if(!strip.clipped){

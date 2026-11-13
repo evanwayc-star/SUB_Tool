@@ -122,7 +122,14 @@ describe('已呈現 Proxy 的反向首播進展與一次復原',()=>{
   it.each(['missing','first-frame','forward','mother'])('%s 沒有可靠反向下一格或不屬已知 Proxy，不猜期限',async reason=>{
     if(reason==='missing')sourceFrameWindow.mockResolvedValue(null);
     if(reason==='first-frame')sourceFrameWindow.mockResolvedValue({start:0,end:6});
-    if(reason==='forward')clip.reverse=false;
+    if(reason==='forward'){
+      clip.reverse=false;
+      // Finish the legitimate proxy-to-forward-source handoff before measuring
+      // watchdog reloads; the actual player is still on the reverse proxy here.
+      expect(await Media.seek(Media.displayTime())).toMatchObject({status:'presented'});
+      expect(bridge.loadfile).toHaveBeenCalledExactlyOnceWith(clip.path);
+      bridge.loadfile.mockClear();
+    }
     if(reason==='mother')Media._reverseProxyActive=false;
     Media.play();await flush();await vi.advanceTimersByTimeAsync(30000);expect(bridge.loadfile).not.toHaveBeenCalled();
   });

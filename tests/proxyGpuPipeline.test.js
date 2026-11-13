@@ -13,9 +13,11 @@ describe('Proxy GPU 管線與相容退路', () => {
     const args = buildIngestArgs({ ...input, pipeline: { mode: 'cuda', encoder: 'h264_nvenc' } });
     expect(value(args, '-hwaccel')).toBe('cuda');
     expect(value(args, '-hwaccel_output_format')).toBe('cuda');
-    expect(value(args, '-vf')).toBe('setpts=PTS-STARTPTS,scale_cuda=-2:720:format=yuv420p:interp_algo=bicubic');
-    expect(value(args, '-preset')).toBe('p4');
-    expect(value(args, '-cq')).toBe('26');
+    expect(value(args, '-vf')).toBe('setpts=PTS-STARTPTS,scale_cuda=-2:480:format=yuv420p:interp_algo=bicubic');
+    expect(value(args, '-preset')).toBe('p1');
+    expect(value(args, '-b:v')).toBe('1000k');
+    expect(value(args, '-maxrate')).toBe('1000k');
+    expect(args).not.toContain('-cq');
     expect(value(args, '-g')).toBe('2');
     expect(value(args, '-bf')).toBe('0');
     expect(value(args, '-movflags')).toBe('+faststart');
@@ -26,7 +28,7 @@ describe('Proxy GPU 管線與相容退路', () => {
       pipeline: { mode: 'cuda-upload', encoder: 'h264_nvenc' }, isStream: true,
       fc: ['[0:a:0]asplit=2[a][w]'], channels: [{ file: 'ch.m4a' }], chMaps: ['[a]'], waveLabel: '[w]', wavePath: 'wave.wav' });
     expect(args).not.toContain('-hwaccel');
-    expect(value(args, '-vf')).toContain('format=yuv420p,hwupload_cuda,scale_cuda=-2:720');
+    expect(value(args, '-vf')).toContain('format=yuv420p,hwupload_cuda,scale_cuda=-2:480');
     expect(value(args, '-filter_complex')).toBe('[0:a:0]asplit=2[a][w]');
     expect(args).toContain('ch.m4a');
     expect(args).toContain('wave.wav');

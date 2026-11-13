@@ -14,7 +14,7 @@ function ownWaveformProcess(child, own) {
 
 // The worker owns blocking NAS validation. Native writers remain in the main
 // execution owner, and settlement includes both their close and worker exit.
-function runSourceWaveformWorker(config, { describeAudio, execute, progress, publish, session = {} }) {
+function runSourceWaveformWorker(config, { describeAudio, execute, progress, publish, removed, session = {} }) {
   const cancellation = new Int32Array(new SharedArrayBuffer(4));
   const worker = new Worker(require.resolve('./source-waveform-task.js'), { workerData: { ...config, cancellation: cancellation.buffer } });
   let child, failure, result, complete = false;
@@ -32,6 +32,12 @@ function runSourceWaveformWorker(config, { describeAudio, execute, progress, pub
   try { session.ownProcess?.({ kill: cancel }); } catch (error) { failure = error; cancel(); }
   const poll = setInterval(() => { if (session.isCancelled?.()) cancel(); }, 20);
   worker.on('message', message => {
+    if (message.type === 'cacheRemoved') {
+      // This is an already completed deletion, not a late UI result. Process
+      // its identity even after cancellation, before the worker exit settles.
+      try { removed?.(message.result); } catch (error) { failure ||= error; cancel(); }
+      return;
+    }
     if (message.type === 'pcmAck') {
       const waiting = pcmReplies.get(message.id); if (!waiting) return;
       pcmReplies.delete(message.id);

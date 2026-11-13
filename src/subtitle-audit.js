@@ -37,6 +37,20 @@ export function detectOverlaps(cues, eps = 0.001) {
   return set;
 }
 
+// Consecutive equal text forms one editing group. Separated repetitions and
+// another track start new groups; blank subtitles never form a text group.
+export function consecutiveIdenticalGroups(cues=[]){
+  const groups=[];
+  for(let start=0;start<cues.length;){
+    const text=(cues[start].text||'').trim(),track=cues[start].track||0;
+    let end=start+1;
+    while(text&&end<cues.length&&(cues[end].track||0)===track&&(cues[end].text||'').trim()===text)end++;
+    if(end-start>1)groups.push(Array.from({length:end-start},(_,index)=>start+index+1));
+    start=end;
+  }
+  return groups;
+}
+
 /**
  * 對字幕清單進行單次遍歷的完整品質診斷分析。
  * 
@@ -70,7 +84,8 @@ export function auditSubtitles(cues = [], options = {}) {
     nonTraditionalIssues: [],
     noTimeNums: [],
     consecutiveIdenticalNums: [],
-    consecutiveIdenticalJoinedNums: []
+    consecutiveIdenticalJoinedNums: [],
+    consecutiveIdenticalGroups: consecutiveIdenticalGroups(cues)
   };
 
   const consecutiveIdenticalSet = new Set();

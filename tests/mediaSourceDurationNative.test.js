@@ -10,7 +10,8 @@ import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const dom = vi.hoisted(() => {
   const elements = new Map();
-  return { video: { style: {}, pause: vi.fn(), src: '', currentTime: 0, readyState: 0 },
+  return { video: { style: {}, pause: vi.fn(), src: '', currentTime: 0, readyState: 0,
+    hasAttribute(name) { return name === 'src' && !!this.src; } },
     $(id) { if (!elements.has(id)) elements.set(id, { style: {}, textContent: '', innerHTML: '',
       classList: { add: vi.fn(), remove: vi.fn() }, querySelectorAll: () => [],
       getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 360 }) }); return elements.get(id); } };

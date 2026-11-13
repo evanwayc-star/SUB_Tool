@@ -48,6 +48,7 @@ const {
   createSpeechCompressionRuntime,
 } = require('./speech-audio-compressor');
 const { createAudioNormalizationRuntime } = require('./audio-normalization-runtime');
+const { createNativeAudioMeter } = require('./native-audio-meter');
 const { motherSourceFingerprint } = require('./mother-source-evidence');
 const { createVocalWaveformRuntime, validateChunkRequest } = require('./vocal-waveform-runtime');
 const { vocalSourceFingerprint } = require('./vocal-waveform-fingerprint');
@@ -331,11 +332,11 @@ if (!gotTheLock) {
     catch (error) { SHARED_OUTPUT_LOCK = null; console.error('[Export watchdog] 無法建立共用輸出鎖目錄', error); }
     fileAuthority.grantQueueLogDirectory(EXPORT_QUEUE_DIR);
     try {
-      fs.mkdirSync(CACHE, { recursive: true });
-      if (!mediaIntakeRuntime.registerCleanupRoot(CACHE)) console.error('[Cache] 無法確認清理根目錄身分');
+      if (IS_TRANSPORT_ACCEPTANCE) fs.mkdirSync(CACHE, { recursive: true });
+      if (fs.existsSync(CACHE) && !mediaIntakeRuntime.registerCleanupRoot(CACHE)) console.error('[Cache] 無法確認清理根目錄身分');
     } catch (e) { console.error('[Cache] 無法建立清理根目錄', e); }
-    // 孤兒快取驗證可能須讀取大檔；背景執行，關機時由 runtime 等待收尾。
-    void mediaIntakeRuntime.cleanOrphans().catch(() => {});
+    // 舊中央快取只供使用者明確清理；開檔不掃描或複製它的媒體內容。
+    if (IS_TRANSPORT_ACCEPTANCE) void mediaIntakeRuntime.cleanOrphans().catch(() => {});
     let recoveryWarnings = [];
     try {
       const recovery = await ExportWatchdog.recoverExportLeases(EXPORT_QUEUE_DIR);
@@ -369,6 +370,7 @@ app.on('before-quit', (event) => {
         deliveryCapabilities.cancelAllAndWait(),
         speechCompressionRuntime.cancelAllAndWait(),
         vocalWaveformRuntime.cancelAllAndWait(),
+        nativeAudioMeter.stop(),
         mediaIngestCoordinator.cancelAllAndWait(),
         mediaWaveformCoordinator.cancelAllAndWait(),
         directoryOutput.close(),
@@ -833,7 +835,8 @@ const deliveryCapabilities = createDeliveryCapabilities({
     : path.join(__dirname, 'disc')),
 });
 const clipFrameCache = createClipFrameCache({
-  cacheRoot: () => path.join(app.getPath('userData'), 'clip-frames'),
+  cacheRoot: source => IS_TRANSPORT_ACCEPTANCE ? path.join(app.getPath('userData'), 'clip-frames')
+    : path.join(path.dirname(source), '.subtool_Cache', 'clip-frames'),
   fileAuthority,
   probe: source => {
     if (!mediaProbe) throw new Error('找不到 ffprobe');
@@ -844,7 +847,8 @@ const clipFrameCache = createClipFrameCache({
   isClosing: () => _isAppQuitting,
 });
 const clipAudioCache = createClipAudioCache({
-  cacheRoot: () => path.join(app.getPath('userData'), 'clip-audio'),
+  cacheRoot: source => IS_TRANSPORT_ACCEPTANCE ? path.join(app.getPath('userData'), 'clip-audio')
+    : path.join(path.dirname(source), '.subtool_Cache', 'clip-audio'),
   fileAuthority,
   probe: source => {
     if (!mediaProbe) throw new Error('找不到 ffprobe');
@@ -888,6 +892,7 @@ const deliveryRunner = createDeliveryRunner({
    runtime 持有；main 只保留 Electron IPC、FileAuthority 與原生工具的組裝點。 */
 const mediaIntakeRuntime = createMediaIntakeRuntime({
   backgroundWaveforms: true,
+  clipCacheRoots: () => ['clip-frames', 'clip-audio'].map(name => path.join(app.getPath('userData'), name)),
   cacheRoot: () => CACHE,
   tempRoot: TMP,
   tempRootAuthority: TMP_OWNER,
@@ -914,6 +919,11 @@ const speechAudioCompressor = createSpeechAudioCompressor({
   execute: (args, options) => runFF(args, options)
 });
 const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
+const nativeAudioMeter = createNativeAudioMeter({
+  spawn,
+  ffmpeg: () => FFMPEG,
+  describeSource: source => mediaProbe?.describe(source),
+});
 const vocalWaveformRuntime = createVocalWaveformRuntime({
   getFFmpegPath: () => FFMPEG,
   probe: (source, options) => {
@@ -1490,11 +1500,15 @@ ipcMain.handle('dialog:exportDirectory', async (e, files) => {
 
 /* ---- 快取管理 ---- */
 ipcMain.handle('cache:info', (e, sourcePath) => {
-  if (sourcePath != null) requireReadablePath('cache:info', sourcePath);
-  return mediaIntakeRuntime.cacheInfo(sourcePath);
+  if (sourcePath == null) return { source: null };
+  requireReadablePath('cache:info', sourcePath);
+  return mediaIntakeRuntime.cacheInfo(sourcePath, { sourceOnly: true });
 });
-ipcMain.handle('cache:cleanOrphans', () => mediaIntakeRuntime.cleanOrphans());
-ipcMain.handle('cache:clearAll', (e, currentSrc) => mediaIntakeRuntime.clearAll(currentSrc));
+ipcMain.handle('cache:clearAll', (e, currentSrc) => {
+  if (typeof currentSrc !== 'string' || !currentSrc.trim()) throw new Error('請先開啟要清除快取的素材');
+  requireReadablePath('cache:clearAll', currentSrc);
+  return mediaIntakeRuntime.clearSource(currentSrc);
+});
 
 ipcMain.handle('ffprobe', (e, p) => {
   if (!mediaProbe) throw new Error('找不到 ffprobe');
@@ -1558,6 +1572,17 @@ ipcMain.handle('ffmpeg:waveAudio', async (e, { path: src, duration }) => {
       runFF(['-y', '-i', src, '-map', '0:a:0', '-af', sourceAudioClockFilter(audio), '-ar', '4000', '-c:a', 'pcm_s16le', '-f', 'wav', 'fd:'],
         { sender: e.sender, duration, jobId: 'wave', label: '產生波形', outputDescriptor: fd })));
 });
+
+// 電平取樣只讀已授權的母素材，與播放／波形快取的工作資格分開。
+ipcMain.handle('audio:meterRead', (e, request) => {
+  if (_isAppQuitting) return null;
+  const { path: source, time, rate = 1 } = request || {};
+  requireReadablePath('audio:meterRead', source);
+  if (!Number.isFinite(time) || time < 0 || !Number.isFinite(rate) || rate <= 0 || rate > 16)
+    throw new TypeError('無效的音量表來源時間或速度');
+  return nativeAudioMeter.read({ path: source, time, rate, mixes: request?.mixes });
+});
+ipcMain.handle('audio:meterStop', () => nativeAudioMeter.stop());
 
 /* 人聲模型只讀母素材的一小段 PCM；主程序核對原有 read capability，不授權新路徑。 */
 ipcMain.handle('audio:vocal-wave-fingerprint', (e, source) => {
@@ -2077,6 +2102,10 @@ ipcMain.handle('mpv:launch', async (event, request = {}) => {
   return mpvHost.launch(request);
 });
 ipcMain.handle('mpv:setBounds', (event, bounds) => mpvHost.setBounds(bounds));
+ipcMain.handle('mpv:setViewport', (event, viewport) => {
+  if (!mainWin || mainWin.isDestroyed() || event.sender !== mainWin.webContents) throw new Error('原生畫面範圍請求來源無效');
+  return mpvHost.setViewport(viewport);
+});
 ipcMain.handle('mpv:setProjectCanvas', (event, canvas) => {
   if (!mainWin || mainWin.isDestroyed() || event.sender !== mainWin.webContents) throw new Error('專案畫布請求來源無效');
   return mpvHost.setProjectCanvas(canvas);
@@ -2119,6 +2148,10 @@ ipcMain.handle('mpv:play', (_event, options) => mpvHost.play(options));
 ipcMain.handle('mpv:pause', (_event, options) => mpvHost.pause(options));
 ipcMain.handle('mpv:direction', (event, value) => mpvHost.direction(value));
 ipcMain.handle('mpv:mute', (event, value) => mpvHost.mute(value));
+ipcMain.handle('mpv:audioMix', (event, request) => {
+  if (!mainWin || mainWin.isDestroyed() || event.sender !== mainWin.webContents) throw new Error('原生音訊配線請求來源無效');
+  return mpvHost.audioMix(request);
+});
 ipcMain.handle('mpv:rate', (event, value) => mpvHost.rate(value));
 ipcMain.handle('mpv:brightness', (event, value) => mpvHost.brightness(value));
 ipcMain.handle('mpv:quit', () => mpvHost.quit());

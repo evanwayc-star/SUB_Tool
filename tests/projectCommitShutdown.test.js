@@ -33,6 +33,7 @@ it('真 before-quit 等已受理的專案存檔完成及暫存檔收尾才退出
     _quitReady:false, _quitSequenceStarted:false, _isAppQuitting:false, audioNormalizationJobs:new Map(),
     mediaProbe:null, ffmpegExecution:idle(), deliveryCapabilities:idle(), speechCompressionRuntime:idle(),
     vocalWaveformRuntime:idle(), mediaIngestCoordinator:idle(), mediaWaveformCoordinator:idle(),
+    nativeAudioMeter:{ stop:vi.fn().mockResolvedValue() },
     directoryOutput:{ close:async () => {}, resume:async () => {} },
     QueueManager:{ prepareForShutdown:async () => {}, cancelShutdown:async () => {} },
     clipAudioCache:{ waitForIdle:async () => {} }, clipFrameCache:{ waitForIdle:async () => {} },
@@ -48,6 +49,7 @@ it('真 before-quit 等已受理的專案存檔完成及暫存檔收尾才退出
     await stageStarted;
     handler({ preventDefault() {} });
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(context.nativeAudioMeter.stop).toHaveBeenCalledOnce();
     expect(context.app.quit).not.toHaveBeenCalled();
     expect(fs.readFileSync(target, 'utf8')).toBe('原專案');
     await expect(writer(target, Buffer.from('遲到存檔'))).rejects.toMatchObject({ code:'FILE_COMMIT_CLOSED' });

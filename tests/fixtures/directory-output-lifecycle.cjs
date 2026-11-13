@@ -44,13 +44,14 @@ async function main() {
     const tree = parse(source,{ecmaVersion:'latest',sourceType:'script'});
     const node = tree.body.find(item => item.expression?.callee?.object?.name === 'app'
       && item.expression.callee.property?.name === 'on' && item.expression.arguments[0]?.value === 'before-quit');
-    let handler, quitCount = 0, dialogCount = 0;
+    let handler, quitCount = 0, dialogCount = 0, meterStops = 0;
     const idle = {cancelAllAndWait:async()=>{},resume:async()=>{}};
     const context = {
       app:{on:(_event,fn)=>{handler=fn;},quit:()=>{quitCount++;}},
       _quitReady:false,_quitSequenceStarted:false,_isAppQuitting:false,
       audioNormalizationJobs:new Map(),mediaProbe:scenario==='failure'?{...idle,cancelAllAndWait:async()=>{throw new Error('shutdown failed');}}:idle,
       ffmpegExecution:idle,deliveryCapabilities:idle,speechCompressionRuntime:idle,vocalWaveformRuntime:idle,
+      nativeAudioMeter:{stop:async()=>{meterStops++;}},
       mediaIngestCoordinator:idle,mediaWaveformCoordinator:idle,directoryOutput:runtime,
       QueueManager:{prepareForShutdown:async()=>{},cancelShutdown:async()=>{}},
       clipAudioCache:{waitForIdle:async()=>{}},clipFrameCache:{waitForIdle:async()=>{}},
@@ -63,6 +64,7 @@ async function main() {
     handler({preventDefault:()=>{prevented=true;}});
     await sleep(100);
     assert.equal(prevented,true);
+    assert.equal(meterStops,1);
     assert.equal(quitCount,0);
     assert.equal(context._isAppQuitting,true);
     await assert.rejects(write('too-early'), /正在關閉/);

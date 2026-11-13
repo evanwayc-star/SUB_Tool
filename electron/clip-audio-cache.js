@@ -82,7 +82,7 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null,
   if (!cacheRoot || !fileAuthority?.canRead || !fileAuthority?.grantTrustedFile || typeof execute !== 'function') throw new TypeError('反向音訊快取缺少必要 adapter');
   const inFlight = new Map();
   const activeRequests = new Set();
-  const root = () => path.resolve(typeof cacheRoot === 'function' ? cacheRoot() : cacheRoot);
+  const root = source => path.resolve(typeof cacheRoot === 'function' ? cacheRoot(source) : cacheRoot);
   const assertSource = source => {
     if (!fileAuthority.canRead(source)) throw Object.assign(new Error('未授權存取此檔案'), { code: 'UNAUTHORIZED_PATH' });
     if (isClosing()) throw Object.assign(new Error('反向音訊工作已取消'), { name: 'AbortError' });
@@ -115,7 +115,7 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null,
   }
   async function generate(request, identity, key, clock) {
     const duration = request.out - request.in;
-    const store = createClipCacheArtifact(root(), key, 'wav');
+    const store = createClipCacheArtifact(root(request.path), key, 'wav');
     assertSource(request.path);
     for (const existing of store.candidates()) {
       if (!await completeWave(existing.path, duration, existing.verify)) continue;

@@ -234,6 +234,7 @@ function _captureExportDraft(){
   });
   return freezeExportSubmission(snapshot, {
     cues,
+    notes: committed.notes || State.notes,
     tracks: committed.tracks,
     backgroundLayouts: measureSubtitleBackgroundLayouts(cues, committed.tracks),
     fps: State.fps,
@@ -440,6 +441,12 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           <div class="delivery-audio-line"><span class="delivery-options-label">音訊</span><span class="delivery-audio-info">${escapeHTML(audioDesc)}</span><button type="button" class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="獨立設定此輸出檔案的音軌與左右聲道">設定輸出音軌</button></div>
           ${!isWav ? `<div class="delivery-visual-options"><span class="delivery-sub-chip" title="${escapeHTML(activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕')}">${activeSubs.length ? '字幕：'+escapeHTML(activeSubs.join(', ')) : '無字幕'}</span>
             <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 畫面燒入時間碼</label></div>` : ''}
+          ${IS_DESKTOP && ['h264','prores'].includes(r.format) ? `<div class="delivery-visual-options" role="group" aria-label="影片書籤">
+            <span class="delivery-options-label">影片書籤</span>
+            <label class="delivery-tc-label"><input type="checkbox" class="ev-chapter-notes" data-idx="${i}" ${r.chapterNotes?'checked':''}> 備註</label>
+            <label class="delivery-tc-label"><input type="checkbox" class="ev-chapter-styled" data-idx="${i}" ${r.chapterStyled?'checked':''}> 自訂樣式字幕</label>
+            <span class="delivery-format-note">寫入章節，供支援章節的播放器快速跳轉。</span>
+          </div>` : ''}
         </div>
         ${preset ? `<div class="delivery-preset-note">${preset.kind === 'disc' ? `最多 ${preset.maxAudioStreams} 條 Mono / Stereo / Lt/Rt / 5.1` : '單一 Stereo'} · ${escapeHTML(preset.audioLabel)} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps${preset.kind === 'disc' ? '／串流' : ''}</div>` : ''}
         ${preset?.transport === 'airline' ? `<div class="delivery-airline-output delivery-format-note">${preset.displayAspect ? `顯示比例 ${preset.displayAspect} · ` : ''}SubTool 自動合成影音，直接輸出 .mpg（MPEG-TS）。</div>` : ''}
@@ -498,6 +505,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       };
     });
     $$('.ev-tc').forEach(el => el.onchange = e => { list.setBurnTimecode(idxOf(e), e.target.checked); after(); });
+    $$('.ev-chapter-notes').forEach(el => el.onchange = e => { list.setChapterOptions(idxOf(e), { chapterNotes: e.target.checked }); });
+    $$('.ev-chapter-styled').forEach(el => el.onchange = e => { list.setChapterOptions(idxOf(e), { chapterStyled: e.target.checked }); });
 
     const pickDir = async e => {
       const idx = idxOf(e);
@@ -700,6 +709,11 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
   const trackOpts = State.tracks.map((tk, i) => `<option value="${i}">軌道 ${i + 1}：${escapeHTML(tk.name)}</option>`).join('');
   const assImportPreview = kind === 'ass' ? buildSubtitleImportPlan(parsed, { fps: grid.fps, target: 'new' }) : null;
   const hasRoundTripMetadata = assImportPreview?.usedMetadata === true;
+  const importIssues=(parsed.issues||[]).filter(issue=>!hasRoundTripMetadata||issue.code==='invalid-metadata');
+  const issueSummary=importIssues.length?`（${importIssues.length} 處需檢查）`:'';
+  const issueNotice=importIssues.length
+    ? `<section id="subtitleImportIssues" class="subtitle-import-issues" role="note" aria-label="匯入注意事項"><p>發現 ${importIssues.length} 處問題。缺少或無效的時間碼會保留原文為未定時字幕，請依下列位置檢查。</p><pre>${escapeHTML(importIssues.map(issue=>`第 ${issue.line} 行${issue.cue?`／第 ${issue.cue} 句`:''}：${issue.message}${issue.source?`\n${issue.source}`:''}`).join('\n\n'))}</pre></section>`
+    : '';
   const suggestName = hasRoundTripMetadata && assImportPreview.trackPatch?.name
     ? assImportPreview.trackPatch.name : (kind.toUpperCase() + ' 字幕');
   const presets = getAllPresets();
@@ -711,7 +725,7 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
   const session=openModal(title,
     `<label style="display:block;padding:8px 0">目標軌道：<select id="importTkSel" style="margin-left:6px">${trackOpts}<option value="new" selected>＋ 新增軌道…</option></select></label>` +
     `<div id="importNewTkRow" style="padding-bottom:8px">軌道名稱：<input type="text" id="importNewTkName" style="margin-left:6px;width:160px" value="${escapeHTML(suggestName)}"></div>` +
-    styleControl +
+    styleControl + issueNotice +
     `<label style="display:block;padding-bottom:8px"><input type="checkbox" id="importAppend"> 附加（保留現有字幕）</label>`,
     [{
       label: '匯入', primary: true, act: () => {
@@ -779,12 +793,12 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
           if (maxEnd > State.duration) { State.duration = maxEnd; emit('duration:known'); } else drawTimeline();
         }
         recordHistory('匯入字幕 ' + kind.toUpperCase());
-        setStatus(`已匯入 ${newCues.length} 條字幕到「${State.tracks[targetTk]?.name}」(${kind.toUpperCase()})`, 'ok');
-        showToast(importPlan?.usedMetadata && !importPlan.usedFrameTiming
+        setStatus(`已匯入 ${newCues.length} 條字幕到「${State.tracks[targetTk]?.name}」(${kind.toUpperCase()})${issueSummary}`, 'ok');
+        showToast((importPlan?.usedMetadata && !importPlan.usedFrameTiming
           ? `匯入 ${newCues.length} 條字幕（來源 FPS 不同，已依秒數轉換）`
           : importPlan?.usedLegacyTiming
             ? `匯入 ${newCues.length} 條字幕（已修正舊版 ASS 的一格偏移）`
-            : `匯入 ${newCues.length} 條字幕`);
+            : `匯入 ${newCues.length} 條字幕`)+issueSummary);
         };
         const removed=append?[]:State.cues.filter(cue=>(cue.track||0)===+selVal);
         if(removed.length){

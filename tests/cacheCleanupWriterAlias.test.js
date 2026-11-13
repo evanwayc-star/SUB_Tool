@@ -37,14 +37,15 @@ it.runIf(process.platform === 'win32').each(['cleanOrphans', 'clearAll'])(
     const entered = new Promise(resolve => { started = resolve; });
     const authority = new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] });
     authority.grantTrustedFile(source);
-    const runtime = createMediaIntakeRuntime({ cacheRoot, tempRoot, allowSidecarCache: true,
+    // Explicitly isolate this central-cleanup guard from the production sidecar-only policy.
+    const runtime = createMediaIntakeRuntime({ cacheRoot, tempRoot, allowSidecarCache: false,
       fileAuthority: authority, delay: () => { started(); return gate; }, ffmpegExecution: { async execute() {} } });
     const writer = runtime.ingest({ src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] });
     writer.catch(() => {});
     try {
       await Promise.race([entered, writer.then(() => { throw new Error('writer 未開始'); }, error => { throw error; })]);
-      // The short-ancestor sidecar is rejected; ingest falls back to this
-      // active central entry while the original mother remains in ancestor.
+      // The isolated writer uses a central entry while its original mother
+      // remains under the short ancestor that cleanup sees by its long name.
       const activeKeys = fs.readdirSync(cacheRoot).filter(name => /^[a-f0-9]{16}$/.test(name));
       expect(activeKeys).toHaveLength(1);
       const activeDirectory = path.join(cacheRoot, activeKeys[0]);

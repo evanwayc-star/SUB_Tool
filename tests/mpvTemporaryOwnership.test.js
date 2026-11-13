@@ -214,6 +214,7 @@ describe('mpv 暫存檔所有權', () => {
       audioNormalizationJobs:new Map(),mediaProbe:null,ffmpegExecution:owner(),deliveryCapabilities:owner(),
       clipAudioCache:{waitForIdle:async()=>{}},clipFrameCache:{waitForIdle:async()=>{}},
       speechCompressionRuntime:owner(),mediaIngestCoordinator:owner(),mediaWaveformCoordinator:owner(),vocalWaveformRuntime:owner(),
+      nativeAudioMeter:{stop:vi.fn().mockResolvedValue()},
       QueueManager:{prepareForShutdown:async()=>{},cancelShutdown:async()=>{}},
       screenshotOutput:{close:async()=>{},resume:async()=>{}},directoryOutput:{close:async()=>{},resume:async()=>{}},fileCommitCoordinator:{close:async()=>{},resume:async()=>{}},mpvHost:host,
       mediaIntakeRuntime:{close:async()=>{throw new Error('simulated close error');}},
@@ -225,6 +226,7 @@ describe('mpv 暫存檔所有權', () => {
       beforeQuit({preventDefault(){}});
       await vi.waitFor(()=>expect(context._quitSequenceStarted).toBe(false));
       expect(context._quitReady).toBe(false);
+      expect(context.nativeAudioMeter.stop).toHaveBeenCalledOnce();
       await expect(host.launch({src:'movie.mp4'})).resolves.toMatchObject({ok:true});
     } finally { await host.disposeAndWait(); fs.rmSync(dir,{recursive:true,force:true}); }
   });

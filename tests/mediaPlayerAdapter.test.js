@@ -40,6 +40,73 @@ describe('desktop player adapter guide contract', () => {
 });
 
 describe('原生來源 session 歸屬',()=>{
+  it.each(['paused-for-cache','core-idle','seeking'])('%s 只交付已接受來源，拒絕裸事件及舊來源的晚到緩衝狀態',async name=>{
+    let deliver,finishLoad;
+    const bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'initial'})),
+      loadfile:vi.fn(()=>new Promise(resolve=>{finishLoad=resolve;})),
+      onEvent:callback=>{deliver=callback;}};
+    const runtime=resetPlayerAdapter({mpv:bridge}),received=vi.fn();
+    await runtime.enterMpv({src:'C:/initial.mov'});runtime.onEvent(received);
+    const event=(id,data)=>({event:'property-change',name,data,...(id?{sourceSessionId:id}:{})});
+    deliver(event(null,true));deliver(event('older',true));
+    expect(received).not.toHaveBeenCalled();
+    deliver(event('initial',true));expect(received).toHaveBeenCalledExactlyOnceWith(event('initial',true));
+    received.mockClear();
+    const loading=runtime.loadfile('C:/next.mov');
+    deliver(event('initial',false));deliver(event('next',true));
+    expect(received).not.toHaveBeenCalled();
+    finishLoad({ok:true,sourceSessionId:'next'});await loading;
+    await vi.waitFor(()=>expect(received).toHaveBeenCalledExactlyOnceWith(event('next',true)));
+    received.mockClear();deliver(event('initial',false));
+    expect(received).not.toHaveBeenCalled();
+    deliver(event('next',false));expect(received).toHaveBeenCalledExactlyOnceWith(event('next',false));
+  });
+
+  it('nativePlaybackState 是來源專屬快照，在 listener 前更新且不接受非 boolean',async()=>{
+    let deliver,finishLoad;
+    const bridge={launch:vi.fn(async()=>({ok:true,sourceSessionId:'initial'})),
+      loadfile:vi.fn(()=>new Promise(resolve=>{finishLoad=resolve;})),
+      onEvent:callback=>{deliver=callback;},quit:vi.fn()};
+    const runtime=resetPlayerAdapter({mpv:bridge});
+    expect(runtime.nativePlaybackState()).toBeNull();
+    await runtime.enterMpv({src:'C:/initial.mov'});
+    expect(runtime.nativePlaybackState()).toEqual({sourceSessionId:'initial',pause:null,seeking:null,coreIdle:null,pausedForCache:null});
+    const observed=[];
+    runtime.onEvent(()=>observed.push(runtime.nativePlaybackState()));
+    const event=(name,data,sourceSessionId='initial')=>({event:'property-change',name,data,sourceSessionId});
+    deliver(event('paused-for-cache',true));
+    expect(observed.at(-1).pausedForCache).toBe(true);
+    const snapshot=runtime.nativePlaybackState();snapshot.pausedForCache=false;
+    expect(runtime.nativePlaybackState().pausedForCache).toBe(true);
+    deliver(event('core-idle',true));deliver(event('seeking',false));deliver(event('pause',false));
+    expect(runtime.nativePlaybackState()).toEqual({sourceSessionId:'initial',pause:false,seeking:false,coreIdle:true,pausedForCache:true});
+    observed.length=0;
+    deliver(event('core-idle','false'));deliver(event('paused-for-cache',null));
+    expect(observed).toEqual([]);
+    expect(runtime.nativePlaybackState().pausedForCache).toBe(true);
+    const loading=runtime.loadfile('C:/next.mov');
+    expect(runtime.nativePlaybackState()).toBeNull();
+    deliver(event('core-idle',true,'next'));
+    finishLoad({ok:true,sourceSessionId:'next'});await loading;
+    expect(runtime.nativePlaybackState()).toEqual({sourceSessionId:'next',pause:null,seeking:null,coreIdle:true,pausedForCache:null});
+    await runtime.enterHtml5();
+    expect(runtime.nativePlaybackState()).toBeNull();
+  });
+
+  it.each(['quit','disconnect'])('%s 立即清除 nativePlaybackState，晚到事件不能復活快照',async action=>{
+    let deliver;
+    const runtime=resetPlayerAdapter({mpv:{launch:async()=>({ok:true,sourceSessionId:'source'}),
+      onEvent:callback=>{deliver=callback;},quit:vi.fn()}});
+    await runtime.enterMpv({src:'C:/source.mov'});
+    deliver({event:'property-change',name:'paused-for-cache',data:true,sourceSessionId:'source'});
+    expect(runtime.nativePlaybackState().pausedForCache).toBe(true);
+    if(action==='quit') await runtime.quit();
+    else deliver({event:'disconnected',sourceSessionId:'source'});
+    expect(runtime.nativePlaybackState()).toBeNull();
+    deliver({event:'property-change',name:'paused-for-cache',data:false,sourceSessionId:'source'});
+    expect(runtime.nativePlaybackState()).toBeNull();
+  });
+
   it.each([null,{width:1080,height:1920}])('launch carries the restored project canvas %j through the source transaction',async projectCanvas=>{
     const bridge={launch:vi.fn().mockResolvedValue({ok:true,sourceSessionId:'canvas-source'})};
     const runtime=resetPlayerAdapter({mpv:bridge});

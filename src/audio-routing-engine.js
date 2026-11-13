@@ -10,6 +10,7 @@
 
 import { flattenSourceChannels, channelFileName } from '../shared/channel-layout.cjs';
 import { AudioEngine } from './audio-engine.js';
+import { getPlayerAdapter } from './media-player-adapter.js';
 import { Seq } from './sequence.js';
 import { normalizeAudioProject, pruneRemovedAudioBuses, ensureAudioSourceMap, registerAudioSource } from './state.js';
 import { MAX_DELIVERY_AUDIO_BUSES, ensureDeliveryAudioExportDefaults, resizeDeliveryAudioBuses } from './export-job-engine.js';
@@ -96,6 +97,7 @@ export class MediaAudioRouter {
     this.video = video;
     this.state = stateObj;
     this._audioEngineBound = false;
+    this._nativeDriftObservation = null;
   }
 
   bindEngine() {
@@ -136,6 +138,7 @@ export class MediaAudioRouter {
   }
 
   stopElementSources() {
+    this._nativeDriftObservation = null;
     AudioEngine.stopElements();
   }
 
@@ -177,7 +180,22 @@ export class MediaAudioRouter {
   syncDrift() {
     // 呈現切換期間，video/mpv 的來源時間仍可能停在舊畫格。若拿這個停止的
     // clock 校正元素／buffer 音訊，會把同一小段聲音反覆拉回播放。
-    if (this.media.presenterClockMoving?.() === false) return;
+    if (this.media.presenterClockMoving?.() === false) {
+      this._nativeDriftObservation = null;
+      return;
+    }
+    if (this.media.mpvMode && !this.media.inGap() && !this.media.audioOnlyTimeline?.()) {
+      const adapter = getPlayerAdapter(), sourceSessionId = adapter.nativePlaybackState()?.sourceSessionId;
+      const sourceTime = this.media.vTime(), clipId = this.media.activeClipId;
+      // mpv IPC 可能成批抵達；rAF 之間重讀同一筆來源位置不是新的漂移證據。
+      // 只在來源位置更新後校音，不外推來源／UI 時鐘，也不放寬音訊容差。
+      const previous = this._nativeDriftObservation;
+      if (sourceSessionId && Number.isFinite(sourceTime)) {
+        if (previous?.adapter === adapter && previous.sourceSessionId === sourceSessionId
+          && previous.clipId === clipId && previous.sourceTime === sourceTime) return;
+        this._nativeDriftObservation = { adapter, sourceSessionId, clipId, sourceTime };
+      } else this._nativeDriftObservation = null;
+    } else this._nativeDriftObservation = null;
     this.bindEngine();
     AudioEngine.syncReverseSources(this.media.tlTime());
     if (this.media.tracks.some(t => t.kind === 'buffer' && !t._srcHidden)) {

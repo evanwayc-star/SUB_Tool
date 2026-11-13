@@ -33,13 +33,17 @@ parentPort.on('message', message => {
   else entry.resolve(message.value);
 });
 async function run() {
-  const { request, cacheRoot, allowSidecarCache, cacheAuthority } = workerData;
+  const { request, allowSidecarCache, cacheAuthority, sourceOnly = false } = workerData;
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-wave-task-'));
+  // Source-only operations must not even register/stat a legacy central root.
+  const cacheRoot = sourceOnly ? tempRoot : workerData.cacheRoot;
   const tempAuthority = captureOutputDirectory(tempRoot);
   const fileAuthority = new FileAuthority({ internalDirectories: [tempRoot, cacheRoot] });
   if (request.src) fileAuthority.grantTrustedFile(request.src);
-  if (cacheAuthority) captureOutputAuthority(path.join(cacheRoot, '.wave-worker-check'), cacheAuthority);
+  if (cacheAuthority && !sourceOnly) captureOutputAuthority(path.join(cacheRoot, '.wave-worker-check'), cacheAuthority);
   const runtime = createMediaIntakeRuntime({ tempRoot, tempRootAuthority: tempAuthority, cacheRoot, allowSidecarCache, fileAuthority,
+    cleanupState: workerData.cleanupState,
+    onCacheDirectoryRemoved: result => send({ type: 'cacheRemoved', result }),
     describeAudio: () => call('describe'),
     sendProgress: (_target, payload) => send({ type: 'progress', payload: payload.done ? { ...payload, done: false } : payload }),
     ffmpegExecution: { execute: async (args, options) => {
@@ -51,7 +55,11 @@ async function run() {
   let prepared;
   try {
     if (workerData.operation === 'cache-info') {
-      const result = runtime.cacheInfo(request.src, { isCancelled: cancelled });
+      const result = runtime.cacheInfo(request.src, { isCancelled: cancelled, sourceOnly });
+      await call('publish', { result });send({ type: 'complete' });return;
+    }
+    if (workerData.operation === 'cache-clear-source') {
+      const result = await runtime.clearAll(request.src, { sourceOnly: true, isCancelled: cancelled });
       await call('publish', { result });send({ type: 'complete' });return;
     }
     const shared = allowSidecarCache ? sharedSourceFingerprintSync(request.src) : null;

@@ -9,7 +9,7 @@ const { pipeline } = require('stream/promises');
 const { motherSourceFingerprint, motherSourceFingerprintSync, portableSourceFingerprint,
   sharedSourceFingerprintSync } = require('./mother-source-evidence');
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
-const { buildIngestArgs, previewPipelineCandidates, previewFallbackAllowed } = require('./ffmpeg-execution-engine');
+const { buildIngestArgs, previewPipelineCandidates, previewFallbackAllowed, PREVIEW_PROXY_PROFILE } = require('./ffmpeg-execution-engine');
 const { sourceAudioClockFilter, sourceClockSeek, timestampOffset } = require('./media-source-clock');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 const { createTemporaryOutputOwnership } = require('./temporary-output-ownership');
@@ -58,7 +58,11 @@ function buildAudioIngestPlan(audio, { waveOnly = false } = {}) {
     const base = (stream && (stream.title || stream.lang)) || `音軌 ${streamIndex + 1}`;
     // 所有聲道／波形在 split、pan 或 mix 前共用來源秒數：正 PTS 補靜音，
     // 負 PTS 去除來源起點以前的 samples，decoder 已裁掉的 primer 不重裁。
-    filters.push(`[0:a:${streamIndex}]${sourceAudioClockFilter(stream)}[at${streamIndex}]`);
+    // A one-channel stream may carry DL/DR/FL/LFE rather than the standard
+    // Mono layout. Map its sample by index so AAC accepts it without rematrixing
+    // or attenuating it, even when a reused waveform leaves no Mono output.
+    const mono = count === 1 ? ',pan=mono|c0=c0' : '';
+    filters.push(`[0:a:${streamIndex}]${sourceAudioClockFilter(stream)}${mono}[at${streamIndex}]`);
 
     if (count === 1) {
       if (waveOnly) {
@@ -141,6 +145,7 @@ function createMediaIntakeRuntime(options = {}) {
   const portableHits = new Map();
   const portableHashes = new Set();
   const waveformTasks = new Set();
+  const cacheInfoTasks = new Set();
   const completedContinuousWaves = new Map();
   const cleanupTasks = new Map();
   const sidecarCleanups = new Set();
@@ -152,8 +157,12 @@ function createMediaIntakeRuntime(options = {}) {
   // across same-process runtime reconstruction for this exact temp root.
   const temporaryOwnership = tempRoot ? createTemporaryOutputOwnership({ tempRoot, rootAuthority: options.tempRootAuthority }) : null;
   let sourceWaveRoot = temporaryOwnership?.rootAuthority || options.tempRootAuthority || null;
-  const cleanupRoots = new Map();
-  const sidecarRoots = new Map();
+  // Only the internal worker transport supplies this frozen owner state.
+  const cleanupRoots = new Map(options.cleanupState?.roots || []);
+  const sidecarRoots = new Map(options.cleanupState?.sidecars || []);
+  for (const source of options.cleanupState?.sources || []) activeCacheSources.set(source, 1);
+  for (const directory of options.cleanupState?.directories || []) activeCacheDirs.set(directory, 1);
+  for (const [key, value] of options.cleanupState?.portable || []) portableHits.set(key, value);
   const sourceWaveKey = file => {
     const absolute = path.resolve(file);
     return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
@@ -281,9 +290,9 @@ function createMediaIntakeRuntime(options = {}) {
         if (sourceDir && sourceDir !== '.') candidates.push(path.join(sourceDir, '.subtool_Cache', key));
       } catch (error) {}
     }
-    candidates.push(path.join(cacheRoot(), key));
+    else candidates.push(path.join(cacheRoot(), key));
     const portable = portableHits.get(key);
-    if (portable) {
+    if (portable && (!allowSidecarCache || isSidecarCandidate(src, portable.dir))) {
       // 共享目錄可被同步或搬移工作取代；先前驗證的路徑不能替新內容作證。
       // 讀取、補建與清理都必須使用同一份仍有效的母素材證據。
       const current = inspectCacheDirectory(portable.dir, [], !!onUncertain);
@@ -443,7 +452,7 @@ function createMediaIntakeRuntime(options = {}) {
     const relative = file => file ? path.relative(dir, file).split(path.sep).join('/') : file;
     return {
       proxy: relative(meta.proxy),
-      ...(meta.proxy && options.describeVideo ? { proxyColorVersion: 1 } : {}),
+      ...(meta.proxy && options.describeVideo ? { proxyColorVersion: 1, proxyProfileVersion: PREVIEW_PROXY_PROFILE } : {}),
       wave: relative(meta.wave),
       ...(meta.wave ? { waveMixVersion: 1 } : {}),
       channels: (meta.channels || []).map(channel => ({
@@ -597,7 +606,7 @@ function createMediaIntakeRuntime(options = {}) {
   function metadataEntries(entries) {
     return [{ file: 'meta.json', kind: 'index' }, ...entries.flatMap(entry => {
       if (entry.isSymbolicLink()) return [];
-      if (entry.isDirectory() && /^generation-[a-f0-9]{24}$/.test(entry.name)) {
+      if (entry.isDirectory() && /^generation-(?:local-preview-)?[a-f0-9]{24}$/.test(entry.name)) {
         return [{ file: path.join(entry.name, 'cache-meta.json'), kind: 'publication' }];
       }
       if (entry.isFile() && /^source-[a-f0-9]{16}\.json$/.test(entry.name)) {
@@ -662,7 +671,7 @@ function createMediaIntakeRuntime(options = {}) {
       }
       const variants = resolved.map(({ meta, raw }) => {
         const inspected = inspectMeta(meta, sizes);
-        if (options.describeVideo && raw.proxyColorVersion !== 1) inspected.meta.proxy = null;
+        if (options.describeVideo && (raw.proxyColorVersion !== 1 || raw.proxyProfileVersion !== PREVIEW_PROXY_PROFILE)) inspected.meta.proxy = null;
         // Even a previously versioned entry can be a proxy-only publication
         // made from ambiguous old metadata. Reject that wave without dropping
         // the actual file, Proxy, or channel artifacts.
@@ -805,8 +814,7 @@ function createMediaIntakeRuntime(options = {}) {
     const candidates = [];
     let invalidSourceEvidence = false;
     if (!directComplete) {
-      const roots = [cacheRoot()];
-      if (allowSidecarCache) roots.unshift(path.join(path.dirname(src), '.subtool_Cache'));
+      const roots = allowSidecarCache ? [sidecarRoot(src)] : [cacheRoot()];
       const size = fs.statSync(src).size;
       for (const root of new Set(roots)) {
         const sidecar = canonicalCachePath(root) === canonicalCachePath(sidecarRoot(src)) ? sidecarAuthority(src) : null;
@@ -968,12 +976,12 @@ function createMediaIntakeRuntime(options = {}) {
     }
   }
 
-  function writeCacheDir(src, { centralOnly = false } = {}) {
+  function writeCacheDir(src) {
     const key = cacheKeyFor(src), portable = portableHits.get(key);
     const central = cacheRoot();
     // 測試或嵌入式 caller 若尚未建立中央根，只能為本次獨占建立的目錄登記；
     // 已存在但未登記的根不能在清理或後續工作中被默默採信。
-    if (!cleanupRoots.has(sourceWaveKey(central))) {
+    if (!allowSidecarCache && !cleanupRoots.has(sourceWaveKey(central))) {
       try { fs.mkdirSync(path.dirname(central), { recursive: true }); fs.mkdirSync(central); grantManagedCleanupRoot(central); }
       catch (_) {}
     }
@@ -981,7 +989,7 @@ function createMediaIntakeRuntime(options = {}) {
       const hit = inspectSourceCache(dir, [], key, portable, false, src);
       return !hit.error || hit.metadataMissing;
     };
-    for (const dir of centralOnly ? [] : cacheCandidates(src, key)) {
+    for (const dir of cacheCandidates(src, key)) {
       let sidecar = null;
       if (isSidecarCandidate(src, dir)) {
         sidecar = sidecarAuthority(src, { allowMissing: true });
@@ -998,6 +1006,9 @@ function createMediaIntakeRuntime(options = {}) {
       if (!ownsSidecar() || !canUseCacheCandidate(dir) || !admitted(dir) || !isDirWritable(dir)
         || !ownsSidecar() || !canUseCacheCandidate(dir) || !admitted(dir)) continue;
       try { grantManagedCleanupRoot(dir, () => { if (!ownsSidecar()) throw cacheDirectoryChanged(); }); return dir; } catch (_) { continue; }
+    }
+    if (allowSidecarCache) {
+      throw Object.assign(new Error('無法寫入素材同資料夾的 .subtool_Cache，請確認資料夾權限與可用空間'), { code: 'SIDECAR_CACHE_UNAVAILABLE' });
     }
     const fallback = path.join(cacheRoot(), key);
     if (!canUseCacheCandidate(fallback) || !admitted(fallback) || !isDirWritable(fallback)
@@ -1026,16 +1037,19 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   function cacheInfo(currentSrc = null, session = {}) {
+    const sourceOnly = session.sourceOnly === true;
+    if (sourceOnly && !currentSrc) return { source: null };
     if (options.backgroundWaveforms) {
-      const task = runSourceWaveformWorker({ operation: 'cache-info', request: { src: currentSrc }, cacheRoot: cacheRoot(), allowSidecarCache,
-        cacheAuthority: cleanupRoots.get(sourceWaveKey(cacheRoot())) }, {
+      const task = runSourceWaveformWorker({ operation: 'cache-info', sourceOnly, request: { src: currentSrc }, cacheRoot: cacheRoot(), allowSidecarCache,
+        cacheAuthority: cleanupRoots.get(sourceWaveKey(cacheRoot())),
+        cleanupState: { roots: [...cleanupRoots], sidecars: [...sidecarRoots], portable: [...portableHits] } }, {
         execute: () => { throw new Error('快取資訊不能啟動轉檔'); }, progress: () => {}, publish: result => result,
         session: { ...session, isCancelled: () => closed || cancelled(session) },
       });
-      waveformTasks.add(task); task.then(() => waveformTasks.delete(task), () => waveformTasks.delete(task));
+      cacheInfoTasks.add(task); task.then(() => cacheInfoTasks.delete(task), () => cacheInfoTasks.delete(task));
       return task;
     }
-    const central = centralCacheInfo(session);
+    const central = sourceOnly ? {} : centralCacheInfo(session);
     if (!currentSrc) return central;
     try { return { ...central, source: sourceCacheInfo(currentSrc, session) }; }
     catch (_) { return { ...central, source: { path: currentSrc, unavailable: true, locations: [] } }; }
@@ -1500,9 +1514,46 @@ function createMediaIntakeRuntime(options = {}) {
     return { removed, bytes, incomplete };
   }
 
-  function clearAll(currentSrc) {
+  function clearSource(currentSrc, session = {}) {
+    if (typeof currentSrc !== 'string' || !currentSrc) return Promise.reject(new TypeError('請先載入要清理的素材'));
+    if (cancelled(session)) return Promise.reject(new IngestSupersededError());
+    if (closed || drainingCleanup) return Promise.resolve({ bytes: 0, incomplete: true });
+    if (cleanupTasks.size || [...activeCacheSources.keys()].some(source => sourceWaveKey(source) === sourceWaveKey(currentSrc)))
+      return Promise.resolve({ bytes: 0, incomplete: true, reason: 'busy' });
+    // A new source can resolve to this cache only after portable content lookup.
+    // Keep new writer admission behind deletion; existing unrelated work and
+    // read-only cache-info workers do not become cleanup dependencies.
+    const generation = runtimeGeneration, cleanup = { targets: new Set(), uncertain: true, source: currentSrc };
+    const cleanupState = { roots: [...cleanupRoots], sidecars: [...sidecarRoots], portable: [...portableHits],
+      sources: [...activeCacheSources.keys()], directories: [...activeCacheDirs.keys()] };
+    const task = runSourceWaveformWorker({ operation: 'cache-clear-source', sourceOnly: true,
+      request: { src: currentSrc }, cacheRoot: cacheRoot(), allowSidecarCache, cleanupState }, {
+      execute: () => { throw new Error('清理快取不能啟動轉檔'); }, progress: () => {},
+      removed: ({ physicalDirectory, dev, ino }) => {
+        // Deletion is a completed filesystem fact, independent of UI request
+        // cancellation. Match the captured physical path so 8.3 aliases retire
+        // only the exact directory identities handed to this worker.
+        for (const [key, original] of cleanupState.roots)
+          if (original.dev === dev && original.ino === ino && sourceWaveKey(original.path) === sourceWaveKey(physicalDirectory)
+            && cleanupRoots.get(key) === original) cleanupRoots.delete(key);
+      },
+      session: { ...session, isCancelled: () => closed || generation !== runtimeGeneration || cancelled(session),
+        ownProcess: controller => { cleanup.cancel = () => controller.kill(); session.ownProcess?.(controller); } },
+      publish: result => {
+        if (closed || generation !== runtimeGeneration || cancelled(session)) throw new IngestSupersededError();
+        const { removedDirectories: _removed, ...summary } = result;
+        return summary;
+      },
+    });
+    cleanupTasks.set(task, cleanup);
+    task.then(() => cleanupTasks.delete(task), () => cleanupTasks.delete(task));
+    return task;
+  }
+
+  function clearAll(currentSrc, session = {}) {
     const generation = runtimeGeneration;
-    const cleanup = { targets: new Set(), uncertain: false, source: currentSrc || null };
+    const cleanup = { targets: new Set(), uncertain: false, source: currentSrc || null,
+      sourceOnly: session.sourceOnly === true, isCancelled: session.isCancelled, removedDirectories: [] };
     const task = (closed || drainingCleanup) ? Promise.resolve({ bytes: 0, incomplete: true })
       : waveformTasks.size ? Promise.allSettled([...waveformTasks]).then(() => clearAllWork(currentSrc, generation, cleanup)) : clearAllWork(currentSrc, generation, cleanup);
     if (waveformTasks.size) cleanup.uncertain = true;
@@ -1549,7 +1600,29 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   async function clearAllWork(currentSrc, generation, cleanup) {
-    if (generation !== runtimeGeneration) return { bytes: 0, incomplete: true };
+    let sourceSnapshot;
+    const current = () => {
+      if (generation !== runtimeGeneration || cleanup.isCancelled?.()) return false;
+      if (sourceSnapshot) {
+        try {
+          const stat = fs.statSync(currentSrc, { bigint: true });
+          if (['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'birthtimeNs'].some(key => stat[key] !== sourceSnapshot[key])) return false;
+        } catch (_) { return false; }
+      }
+      return true;
+    };
+    if (!current()) return { bytes: 0, incomplete: true };
+    if (cleanup.sourceOnly) {
+      if (!currentSrc || !allowSidecarCache) return { bytes: 0, incomplete: true };
+      try {
+        const selected = sourceSnapshot = fs.statSync(currentSrc, { bigint: true }), selectedPath = sourceWaveKey(fs.realpathSync.native(currentSrc));
+        for (const source of activeCacheSources.keys()) {
+          const active = fs.statSync(source, { bigint: true });
+          if (active.dev === selected.dev && active.ino === selected.ino || sourceWaveKey(fs.realpathSync.native(source)) === selectedPath)
+            return { bytes: 0, incomplete: true, reason: 'busy' };
+        }
+      } catch (_) { return { bytes: 0, incomplete: true }; }
+    }
     const root = cacheRoot();
     const authority = cleanupRoots.get(sourceWaveKey(root));
     const ownsCentralRoot = () => {
@@ -1616,7 +1689,7 @@ function createMediaIntakeRuntime(options = {}) {
       } catch (error) { incomplete = true; return 0; }
     };
     // 根本身是持久授權，不刪除再重建，避免同名新根被誤認為原目錄。
-    if (ownsCentralRoot()) {
+    if (!cleanup.sourceOnly && ownsCentralRoot()) {
       try {
         const writers = activePaths(), budget = { entries: 0, directories: 0 };
         const frozen = [];
@@ -1637,7 +1710,7 @@ function createMediaIntakeRuntime(options = {}) {
         }
       }
       catch (_) { incomplete = true; }
-    } else { incomplete = true; }
+    } else if (!cleanup.sourceOnly) { incomplete = true; }
     if (currentSrc && fileAuthority.canRead(currentSrc)) {
       try {
         const sidecarRoot = canonical(path.join(path.dirname(currentSrc), '.subtool_Cache'));
@@ -1649,13 +1722,27 @@ function createMediaIntakeRuntime(options = {}) {
         }
         const assertSidecar = () => captureOutputAuthority(path.join(sidecarRoot, '.cleanup-root-check'), sidecarOwner);
         const key = cacheKeyFor(currentSrc), portable = portableHits.get(key);
+        const listed = cleanup.sourceOnly ? sourceCacheInfo(currentSrc, { isCancelled: () => !current() }).locations
+          .filter(location => location.kind === 'sidecar').map(location => location.directory) : [];
+        const inspectSelected = dir => {
+          const hit = inspectSourceCache(dir, [], key, portable, true, currentSrc);
+          if (!cleanup.sourceOnly || !listed.includes(dir) || !hit.error) return hit;
+          const shared = sharedSourceFingerprintSync(currentSrc), raw = inspectCacheDirectory(dir, [], true);
+          // Another client key is only a candidate after this source's shared
+          // witness matches; directory spelling alone never expands deletion.
+          if (!raw.error && shared && raw.sharedSourceKeys.includes(shared))
+            return inspectSourceCache(dir, [], key, { dir, sourceContent: raw.sourceContent, sharedSourceKey: shared }, true, currentSrc);
+          if (raw.metadataMissing && ['partial', 'complete'].includes(describeContinuousWaveformCache(dir,
+            { sourceKey: shared, verify: () => { if (!current()) throw cacheDirectoryChanged(); assertSidecar(); } }).state)) return raw;
+          return hit;
+        };
         const removeSidecar = async dir => {
           const target = physical(dir);
           const registered = cleanupRoots.get(sourceWaveKey(dir));
           if (sidecarCleanups.has(target)) { incomplete = true; return 0; }
           if (activePaths().some(writer => {
             return writer === target || writer.startsWith(target + path.sep);
-          })) { incomplete = true; return 0; }
+          })) { incomplete = true; cleanup.busy = true; return 0; }
           const quarantine = path.join(path.dirname(dir), '.subtool-clear-' + crypto.randomBytes(12).toString('hex'));
           if (canonical(path.dirname(quarantine)) !== sidecarRoot) { incomplete = true; return 0; }
           sidecarCleanups.add(target);
@@ -1673,7 +1760,7 @@ function createMediaIntakeRuntime(options = {}) {
           const sameDirectory = (left, right) => left.isDirectory() && !left.isSymbolicLink()
             && right.isDirectory() && !right.isSymbolicLink() && left.dev === right.dev && left.ino === right.ino;
           const check = () => {
-            if (generation !== runtimeGeneration || activePaths().some(writer => writer === target || writer.startsWith(target + path.sep))) throw cacheDirectoryChanged();
+            if (!current() || activePaths().some(writer => writer === target || writer.startsWith(target + path.sep))) throw cacheDirectoryChanged();
             assertSidecar();
             if (directoryIdentity && !sameDirectory(directoryIdentity, fs.lstatSync(ownedDirectory, { bigint: true }))) throw cacheDirectoryChanged();
           };
@@ -1684,7 +1771,7 @@ function createMediaIntakeRuntime(options = {}) {
             directoryIdentity = before;
             const snapshot = await captureCleanupSnapshot(dir, check);
             check();
-            const accepted = inspectSourceCache(dir, [], key, portable, true, currentSrc);
+            const accepted = inspectSelected(dir);
             if (accepted.error && !accepted.metadataMissing) { incomplete = true; return 0; }
             if (!sameDirectory(before, fs.lstatSync(dir, { bigint: true })) || captureCleanupTree(dir).proof !== snapshot.proof) { incomplete = true; return 0; }
             // 先原子取得將刪除的目錄物件，再核對身分與來源；不對先前候選路徑直接刪除。
@@ -1708,12 +1795,14 @@ function createMediaIntakeRuntime(options = {}) {
             const removed=await removeVerifiedCleanupTree(quarantine,snapshot,check);
             if (!removed.complete) { incomplete = true;restore();return removed.removedBytes; }
             if (cleanupRoots.get(sourceWaveKey(dir)) === registered) cleanupRoots.delete(sourceWaveKey(dir));
+            cleanup.removedDirectories.push(dir);
             moved = false;
+            options.onCacheDirectoryRemoved?.({ directory: dir, physicalDirectory: target, dev: String(before.dev), ino: String(before.ino) });
             return size;
           } catch (error) { incomplete = true; restore(); return 0; }
           finally { sidecarCleanups.delete(target); }
         };
-        const sidecarCandidates = cacheCandidates(currentSrc, key, () => { incomplete = true; cleanup.uncertain = true; })
+        const sidecarCandidates = [...new Set([...cacheCandidates(currentSrc, key, () => { incomplete = true; cleanup.uncertain = true; }), ...listed])]
           .filter(dir => canonical(path.dirname(dir)) === sidecarRoot && /^[a-f0-9]{16}$/.test(path.basename(dir)));
         for (const dir of sidecarCandidates) {
           try { cleanup.targets.add(physical(dir)); }
@@ -1729,7 +1818,8 @@ function createMediaIntakeRuntime(options = {}) {
       incomplete = true;
       options.log?.('[sec] cache clear source blocked:', currentSrc);
     }
-    return { bytes, incomplete };
+    return { bytes, incomplete, ...(cleanup.sourceOnly && cleanup.busy ? { reason: 'busy' } : {}),
+      ...(cleanup.sourceOnly ? { removedDirectories: cleanup.removedDirectories } : {}) };
   }
 
   // 舊式 proxy／音訊 IPC 尚未交接輸出路徑時，由同一交易持有暫存。
@@ -1870,10 +1960,25 @@ function createMediaIntakeRuntime(options = {}) {
     let resolved;
     try { resolved = path.resolve(file); } catch (error) { return false; }
     const basename = path.basename(resolved).toLowerCase();
+    const lower = resolved.toLowerCase();
+    const inside = root => {
+      try {
+        const resolvedRoot = path.resolve(root).toLowerCase();
+        return lower === resolvedRoot || lower.startsWith(resolvedRoot + path.sep);
+      } catch (_) { return false; }
+    };
+    // Fixed-frame PNG and reversed PCM live in source-sidecar roots now; old
+    // application-owned roots remain preview-only too. Ordinary same-name
+    // files outside these managed locations are still valid mother sources.
+    if (/\.(png|wav)$/.test(basename)) {
+      const parts = lower.split(path.sep), sidecar = parts.indexOf('.subtool_cache');
+      if (sidecar >= 0 && ['clip-frames', 'clip-audio'].includes(parts[sidecar + 1])) return true;
+      const clipRoots = typeof options.clipCacheRoots === 'function' ? options.clipCacheRoots() : options.clipCacheRoots;
+      if (Array.isArray(clipRoots) && clipRoots.some(inside)) return true;
+    }
     // channelFileName() 產生 ch_01.m4a；舊版無底線聲道與混音波形也只供預覽。
     if (basename !== 'proxy.mp4' && basename !== 'wave.wav' && !basename.endsWith('.source-wave.wav')
       && !/^ch_?\d+\.m4a$/i.test(basename)) return false;
-    const lower = resolved.toLowerCase();
     const inInternalRoot = [cacheRoot(), tempRoot].filter(Boolean).some(root => {
       try {
         const resolvedRoot = path.resolve(root).toLowerCase();
@@ -2422,14 +2527,7 @@ function createMediaIntakeRuntime(options = {}) {
       catch (error) { unprotect(); throw error; }
     };
     const preferred = selected && (selected.state.isComplete || isDirWritable(selected.dir)) ? selected.dir : writeCacheDir(src);
-    let opened;
-    try { opened = openAt(preferred); }
-    catch (error) {
-      // Only storage failures at admission can fall back. A changed source or
-      // replaced directory must retain its original failure and authority fence.
-      if (!isSidecarCandidate(src, preferred) || !['EACCES', 'EPERM', 'EROFS', 'ENOSPC'].includes(error.code)) throw error;
-      opened = openAt(writeCacheDir(src, { centralOnly: true }));
-    }
+    const opened = openAt(preferred);
     const { dir, verify, unprotect, store } = opened;
     try {
       const result = await runContinuousSourceWaveform({ src, duration, audio, sourceKey, store, verify,
@@ -2695,7 +2793,9 @@ function createMediaIntakeRuntime(options = {}) {
               };
               saveSourceWaveformChunk(dir, chunkSpecFor(dir), completedBytes, { verify });
             } catch (error) {
-              // 快取是可重建的加速資料；寫入失敗仍可交付本次已完成的私有波形。
+              // 正式預覽只能持久化在素材旁；不能把這項失敗偽裝為私有暫存成功。
+              if (error.code === 'SIDECAR_CACHE_UNAVAILABLE') throw error;
+              // 其他可重建快取失敗仍可交付本次已完成的私有波形。
               checkPreparedSource(); assertCompletedWave(wave);
               try { options.log?.('[cache] source waveform chunk not saved:', error.code || error.message); } catch (_) {}
             } finally { unprotect(); }
@@ -3013,6 +3113,7 @@ function createMediaIntakeRuntime(options = {}) {
   function close() {
     closed = true;
     runtimeGeneration++;
+    for (const cleanup of cleanupTasks.values()) cleanup.cancel?.();
     if (closeOperation) return closeOperation;
     const operation = closeRuntime();
     closeOperation = operation;
@@ -3024,7 +3125,7 @@ function createMediaIntakeRuntime(options = {}) {
   async function closeRuntime() {
     drainingCleanup = true;
     try {
-      await Promise.allSettled([...waveformTasks, ...cleanupTasks.keys()]);
+      await Promise.allSettled([...waveformTasks, ...cacheInfoTasks, ...cleanupTasks.keys()]);
       const cleanupCloseResults = await Promise.allSettled([...cleanupHandles].map(async handle=>{
         await handle.close();cleanupHandles.delete(handle);
       }));
@@ -3105,6 +3206,7 @@ function createMediaIntakeRuntime(options = {}) {
     hasUnsafeTemporaryFiles,
     hasUnsafeSourceWaveFiles: hasUnsafeTemporaryFiles,
     clearAll,
+    clearSource,
     close,
     resume,
     ingest: withSourceLease(ingest, undefined, true),

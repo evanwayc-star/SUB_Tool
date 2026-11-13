@@ -216,7 +216,7 @@ describe('FileAuthority', () => {
     expect(screenshotOutput).toMatch(/function write\(file, b64, token\)[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);
     expect(main).toMatch(/ipcMain\.handle\('mpv:screenshot',[\s\S]{0,180}fileAuthority\.canWriteScreenshot/);
     expect(main).toMatch(/ipcMain\.handle\('mpv:launch',[\s\S]{0,180}requireReadablePath\('mpv:launch', src\)/);
-    expect(main).toMatch(/cache:clearAll[\s\S]{0,180}mediaIntakeRuntime\.clearAll/);
+    expect(main).toMatch(/requireReadablePath\('cache:clearAll', currentSrc\);[\s\S]{0,100}mediaIntakeRuntime\.clearSource\(currentSrc\)/);
     expect(mediaIntakeRuntime).toMatch(/currentSrc && fileAuthority\.canRead\(currentSrc\)/);
     expect(mediaIntakeRuntime).toMatch(/cache clear source blocked/);
     expect(main).toMatch(/QueueManager\.assertJobCapabilities\(\{ payload: authorizationPayload \}\)/);

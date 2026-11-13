@@ -92,7 +92,7 @@ it('NVENC 實機 Proxy 的畫格、色彩與音訊內容維持正式規格',asyn
         outputs.push(output);
       }
       const [gpu,cpu]=outputs,[actual,reference]=outputs.map(output=>videoInfo(output.proxy));
-      expect(actual.streams[0]).toMatchObject({codec_name:'h264',width:1280,height:720,pix_fmt:'yuv420p',has_b_frames:0});
+      expect(actual.streams[0]).toMatchObject({codec_name:'h264',width:854,height:480,pix_fmt:'yuv420p',has_b_frames:0});
       for(const field of ['color_space','color_primaries','color_transfer']) expect(actual.streams[0][field]).toBe(reference.streams[0][field]);
       expect(actual.frames).toHaveLength(6);
       expect(actual.frames.map(frame=>frame.best_effort_timestamp_time)).toEqual(reference.frames.map(frame=>frame.best_effort_timestamp_time));

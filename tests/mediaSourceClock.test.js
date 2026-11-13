@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { playerClockTime, sourceClockTime, timestampOffset, sourceFrameTargetUs } from '../shared/media-source-clock.cjs';
+import { sourceVideoTimestampFilter } from '../electron/media-source-clock.js';
+
+describe('交付來源時間戳證據', () => {
+  it('只有有限、細於影格而粗於微秒且無法精確表達格點的時基，才允許半 tick 補償', () => {
+    expect(sourceVideoTimestampFilter({ timeBase: '1/1000', nominalFrameRate: '24000/1001' })).not.toBe('');
+    for (const clock of [undefined, {}, { fps: 24000 / 1001 },
+      { timeBase: '1/1000', nominalFrameRate: '25/1' },
+      { timeBase: '1/24000', nominalFrameRate: '24000/1001' },
+      { timeBase: '1/1000000', nominalFrameRate: '24000/1001' },
+      { timeBase: '1/100', nominalFrameRate: '24000/1001' },
+      { timeBase: '1/1000', nominalFrameRate: '0/0' },
+      { timeBase: '0/0', nominalFrameRate: '24000/1001' },
+      { timeBase: '1/1000,unsafe', nominalFrameRate: '24000/1001' }]) {
+      expect(sourceVideoTimestampFilter(clock)).toBe('');
+    }
+  });
+});
 
 describe('video source zero', () => {
   it('only absorbs floating point representation error at half-open trim ticks',()=>{

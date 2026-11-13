@@ -180,9 +180,10 @@ describe('mixer.js 不再自己解讀 Media.tracks 的路由與增益', () => {
     expect(fn).toMatch(/interpretation\.routedTrackStatesForBus\(/);
     expect(fn).not.toMatch(/Media\.tracks\.filter/);
     expect(fn).not.toMatch(/sourceMaps/);
-    expect(src.match(/Media\.projectAudioInterpretation\(\)/g)).toHaveLength(1);
-    expect(src).toMatch(/_trackLevel\(input\.track\)\s*\*\s*input\.gain/);
-    expect(src).not.toMatch(/_trackLevel\(track\).*track\.volume.*busGain/);
+    expect(src.match(/Media\.projectAudioInterpretation\(/g)).toHaveLength(1);
+    expect(src).toMatch(/_busLevel\(_busRouteStates\(interpretation,strip\.bus\),strip\.bus\.id,samples\)/);
+    const meter = src.slice(src.indexOf('function _busLevel'), src.indexOf('function mixerReset'));
+    expect(meter).not.toMatch(/track\.volume|bus\.volume|sourceMaps|busIds/);
   });
 });
 

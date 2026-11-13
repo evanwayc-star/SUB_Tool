@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -9,7 +10,7 @@ const { createDeliveryRunner } = require('../electron/delivery-runner.js');
 const { assertDeliveryInputEvidence } = require('../electron/delivery-temporary-input.js');
 const { createExportQueue } = require('../electron/export-queue.js');
 const QueueStore = require('../electron/queue-store.js');
-const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
+const { createFFmpegExecution, createDeliveryCapabilities, deliveryVideoEncoderArgs } = require('../electron/ffmpeg-execution-engine.js');
 const { spawnExportWatchdog } = require('../electron/export-watchdog.js');
 const { acquireLease, releaseLease, listLeases, stageOutputPath, captureOutputAuthority, captureOutputDirectory, captureDestinationEvidence, captureDestinationEvidenceAsync, prepareSharedLeaseRoot } = require('../electron/export-lease.js');
 const nativeFs = require('node:fs');
@@ -100,6 +101,50 @@ function videoJob(overrides = {}) {
 }
 
 describe('delivery runner public interface', () => {
+  it.each(['h264', 'prores'])('%s 真能力檢查後仍以正式章節 metadata 交付並清理自己的中繼檔', async format => {
+    const spawn = vi.fn(() => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      child.kill = vi.fn();
+      queueMicrotask(() => {
+        child.stdout.emit('data', Buffer.from('frame=3\nout_time_us=100000\nprogress=end\n'));
+        child.emit('close', 0, null);
+      });
+      return child;
+    });
+    const capabilities = createDeliveryCapabilities({ spawn, getFFmpegPath: () => '/native/ffmpeg',
+      encoder: { name: () => 'libx264', bitrateArgs: kbps => deliveryVideoEncoderArgs('libx264', kbps),
+        proresArgs: () => ['-c:v', 'prores_ks', '-c:a', 'pcm_s24le'] } });
+    let staged;
+    const runFfmpeg = vi.fn(async (args, options) => {
+      const metadataFlag = args.indexOf('ffmetadata');
+      expect(metadataFlag).toBeGreaterThan(0);
+      expect(args[metadataFlag - 1]).toBe('-f');
+      expect(args[metadataFlag + 1]).toBe('-i');
+      staged = path.join(options.cwd, args[metadataFlag + 2]);
+      const metadataInput = args.slice(0, metadataFlag + 2).filter(arg => arg === '-i').length - 1;
+      expect(args[args.indexOf('-map_chapters') + 1]).toBe(String(metadataInput));
+      expect(readFileSync(staged, 'utf8')).toBe(';FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=備註：畫格檢查\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=10000\ntitle=自訂字幕：測試 \\#\\;\\=\n');
+      assertDeliveryInputEvidence(options.inputEvidence);
+      expect(options.inputEvidence.some(entry => entry.path === staged)).toBe(true);
+      return { maps: [] };
+    });
+    const setup = make({ nativeCapabilities: capabilities, runFfmpeg });
+    const job = videoJob();
+    job.payload.format = format;
+    job.payload.chapters = [{ start: 0, end: 1, title: '備註：畫格檢查' }, { start: 1, end: 10, title: '自訂字幕：測試 #;=' }];
+    const chapters = structuredClone(job.payload.chapters);
+    try {
+      await setup.runner.run(job);
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(runFfmpeg).toHaveBeenCalledOnce();
+      expect(setup.sent.some(item => item.payload.done && item.payload.result)).toBe(true);
+      expect(setup.sent.some(item => item.payload.error)).toBe(false);
+      expect(job.payload.chapters).toEqual(chapters);
+      expect(existsSync(staged)).toBe(false);
+    } finally { await capabilities.cancelAllAndWait(); }
+  });
+
   it.each(['ass', 'timecode-font'])('交付期間 %s 暫存路徑被替換時，finally 不可刪除外來檔', async extension => {
     let setup, file;
     const runFfmpeg = vi.fn(async (_args, options) => {

@@ -3,6 +3,10 @@
 // 留在模組內部，OS 視窗、guide 與 bounds 不會因 active transport 改變而掉進 no-op。
 import { timestampOffset, sourceClockTime, playerClockTime } from '../shared/media-source-clock.cjs';
 
+const NATIVE_PLAYBACK_FIELDS = Object.freeze({
+  pause: 'pause', seeking: 'seeking', 'core-idle': 'coreIdle', 'paused-for-cache': 'pausedForCache',
+});
+
 function presentationAbortError() {
   const error = new Error('media presentation aborted');
   error.name = 'AbortError';
@@ -224,9 +228,11 @@ export function createNativePreviewRuntime({
   let generation = 0;
   let nativeSourceRequest = 0;
   let nativeSourceSession = null;
+  let nativePlayback = null;
   let nativeSourcePath = null;
   let nativePlaybackSequence = 0, nativePlaybackIntent = null;
   let nativeSourcePending = false;
+  let nativeMixRevision = 0, nativeMixKey = null, nativeMixWork = null;
   let pendingSourceOverflow = false;
   const pendingSourceEvents = new Map();
   const MAX_PENDING_SOURCE_SESSIONS = 128;
@@ -235,8 +241,12 @@ export function createNativePreviewRuntime({
   let deferredEndFile = null, endFileDeliveryScheduled = false;
   let nativeDisconnectDelivery = null;
   const revokeNativeSource = () => {
+    nativeMixRevision += 1;
+    nativeMixKey = null;
+    nativeMixWork = null;
     nativeSourceRequest += 1;
     nativeSourceSession = null;
+    nativePlayback = null;
     nativeSourcePath = null;
     nativePlaybackIntent = null;
     nativeSourcePending = false;
@@ -279,10 +289,22 @@ export function createNativePreviewRuntime({
       const pending=deferredSourceProperties;deferredSourceProperties={};
       for(const event of Object.values(pending)){
         if(event.sourceSessionId===nativeSourceSession
-          &&(event.name!=='pause'||(event.playbackIntentId??null)===nativePlaybackIntent)) nativeEventListener(event);
+          &&(event.name!=='pause'||(event.playbackIntentId??null)===nativePlaybackIntent)) {
+          updateNativePlaybackState(event);
+          nativeEventListener(event);
+        }
       }
     },0);
   }
+
+  function updateNativePlaybackState(event) {
+    if (nativePlayback && event.sourceSessionId === nativeSourceSession
+      && (event.name !== 'pause' || (event.playbackIntentId ?? null) === nativePlaybackIntent)
+      && Object.hasOwn(NATIVE_PLAYBACK_FIELDS,event.name) && typeof event.data === 'boolean') {
+      nativePlayback[NATIVE_PLAYBACK_FIELDS[event.name]] = event.data;
+    }
+  }
+
   function attachNativeEvents() {
     const source = bridge;
     if (!source?.onEvent || source === attachedEventBridge) return;
@@ -290,7 +312,9 @@ export function createNativePreviewRuntime({
     source.onEvent(event => {
       if (bridge !== source) return;
       const duration = event?.event === 'property-change' && event.name === 'duration';
-      const sourceProperty = event?.event === 'property-change' && (event.name === 'time-pos' || event.name === 'pause');
+      const playbackProperty = event?.event === 'property-change' && Object.hasOwn(NATIVE_PLAYBACK_FIELDS,event.name);
+      if (playbackProperty && typeof event.data !== 'boolean') return;
+      const sourceProperty = event?.event === 'property-change' && (event.name === 'time-pos' || playbackProperty);
       const disconnected = event?.event === 'disconnected';
       const endFile = event?.event === 'end-file';
       if (!duration && !sourceProperty && !disconnected && !endFile) { nativeEventListener?.(event); return; }
@@ -305,6 +329,7 @@ export function createNativePreviewRuntime({
           nativeDisconnectDelivery = delivery;
           try { listener?.(event); } finally { if (nativeDisconnectDelivery === delivery) nativeDisconnectDelivery = null; }
         } else if (sourceProperty) {
+          updateNativePlaybackState(event);
           if(deferredSourceProperties[event.name]||!nativeEventListener){
             deferredSourceProperties[event.name]=event;deliverDeferredSourceProperties();
           }else nativeEventListener(event);
@@ -340,12 +365,15 @@ export function createNativePreviewRuntime({
     pendingSourceOverflow = false;
     if (unsafe) return false;
     nativeSourceSession = result?.ok !== false && typeof id === 'string' && id ? id : null;
+    nativePlayback = nativeSourceSession ? { sourceSessionId:nativeSourceSession,
+      pause:null, seeking:null, coreIdle:null, pausedForCache:null } : null;
     nativeSourcePath = nativeSourceSession && typeof path === 'string' ? path : null;
     if (nativeSourceSession && entry?.duration) {
       deferredDuration = entry.duration;
       deliverDeferredDuration();
     }
     if(nativeSourceSession && entry?.properties){
+      for (const event of Object.values(entry.properties)) updateNativePlaybackState(event);
       deferredSourceProperties=entry.properties;deliverDeferredSourceProperties();
     }
     if (nativeSourceSession && entry?.endFile) {
@@ -508,6 +536,12 @@ export function createNativePreviewRuntime({
       nativeVisible = !!visible;
       return bridge?.show ? bridge.show(nativeVisible) : false;
     },
+    async setNativeViewport(viewport) {
+      nativeVisible = !!viewport.visible;
+      if (bridge?.setViewport) return bridge.setViewport(viewport);
+      // Older desktop bridges still need to yield to interactive HTML panels.
+      return bridge?.show ? bridge.show(nativeVisible && !viewport.occluders?.length) : false;
+    },
     async setSubtitleGuide(guide) {
       subtitleGuideActive = !!guide;
       return bridge?.setGuide ? bridge.setGuide(guide || null) : false;
@@ -535,7 +569,44 @@ export function createNativePreviewRuntime({
       if (!runtime.supportsNativeReverse()) return false;
       return activeTransport.direction(value);
     },
-    async mute(value) { return activeTransport.mute(value); },
+    async mute(value) {
+      // A carrier handoff/reverse mute revokes any pending mix's unmute ACK.
+      nativeMixRevision += 1;
+      nativeMixKey = null;
+      return activeTransport.mute(value);
+    },
+    syncAudioMix(channels, muted) {
+      if (mode !== 'mpv' || !bridge?.audioMix) return runtime.mute(muted);
+      if (!nativeSourceSession) return Promise.resolve(false);
+      const sourceSessionId = nativeSourceSession, currentBridge = bridge, transport = activeTransport;
+      const key = JSON.stringify({ sourceSessionId, channels, muted });
+      if (key === nativeMixKey) return nativeMixWork;
+      const revision = ++nativeMixRevision;
+      nativeMixKey = key;
+      const owns = () => revision === nativeMixRevision && mode === 'mpv'
+        && currentBridge === bridge && sourceSessionId === nativeSourceSession;
+      nativeMixWork = (async () => {
+        try {
+          // Send a requested mute immediately; only unmute after the actual
+          // per-channel graph is accepted, while this same request still owns it.
+          const silenced = muted ? transport.mute(true) : Promise.resolve();
+          const [applied] = await Promise.all([
+            currentBridge.audioMix({ sourceSessionId, channels }), silenced,
+          ]);
+          if (!owns()) return false;
+          if (applied === false) throw new Error('原生音訊配線未套用');
+          if (!muted) await transport.mute(false);
+          return owns();
+        } catch (error) {
+          if (!owns()) return false;
+          nativeMixKey = null;
+          await transport.mute(true).catch(() => {});
+          if (owns()) throw error;
+          return false;
+        }
+      })();
+      return nativeMixWork;
+    },
     brightness(value) {
       if (!bridge?.brightness) return false;
       try { return bridge.brightness(value); } catch (error) { return false; }
@@ -557,6 +628,7 @@ export function createNativePreviewRuntime({
       return result;
     },
     ownsNativeSourceSession(id) { return mode === 'mpv' && !!nativeSourceSession && id === nativeSourceSession; },
+    nativePlaybackState() { return mode === 'mpv' && nativePlayback ? { ...nativePlayback } : null; },
     ownsNativeSourcePath(path) {
       return mode === 'mpv' && !!bridge && !!nativeSourceSession && typeof path === 'string' && nativeSourcePath === path;
     },

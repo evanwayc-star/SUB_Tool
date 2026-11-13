@@ -139,8 +139,10 @@ it('來源 key junction 不得准入或作為補建位置，原快取 bytes 保�
   const sidecar=path.join(target,'.subtool_Cache');fs.mkdirSync(sidecar);
   fs.symlinkSync(old,path.join(sidecar,cacheKeyFor(moved)),'junction');
   const before=fs.readFileSync(path.join(old,'meta.json'));
-  const reader=create(async()=>{throw new Error('unsafe key directory rejected');});
-  await expect(reader.ingest({...request,src:moved})).rejects.toThrow('unsafe key directory rejected');
+  const execute=vi.fn(async()=>{throw new Error('unsafe key directory reached writer');});
+  const reader=create(execute);
+  await expect(reader.ingest({...request,src:moved})).rejects.toMatchObject({code:'SIDECAR_CACHE_UNAVAILABLE'});
+  expect(execute).not.toHaveBeenCalled();
   expect(fs.readFileSync(path.join(old,'meta.json'))).toEqual(before);
   expect(fs.readFileSync(original.proxy,'utf8')).toBe('safe proxy.mp4');
 });

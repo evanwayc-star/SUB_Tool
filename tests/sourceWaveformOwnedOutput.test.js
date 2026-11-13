@@ -192,11 +192,14 @@ it.each([
   { allowSidecarCache: true, readOnlySidecar: false },
   { allowSidecarCache: false, readOnlySidecar: false },
   { allowSidecarCache: true, readOnlySidecar: true },
-])('已完成波形片段在 consumer 清理及重開 runtime 後沿用，不重新解碼母素材（sidecar=$allowSidecarCache，唯讀=$readOnlySidecar）', async ({ allowSidecarCache, readOnlySidecar }) => {
+])('已完成波形片段在 consumer 清理及重開 runtime 後沿用，不重新解碼母素材（sidecar=$allowSidecarCache，重開後唯讀=$readOnlySidecar）', async ({ allowSidecarCache, readOnlySidecar }) => {
   root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
+  // cleanOrphans only owns an explicitly established central root; production
+  // sidecar writes no longer create that unrelated directory as a side effect.
+  fs.mkdirSync(cacheRoot);
   const pcm = sourceWaveBytes(60 * 4000);
   const execute = vi.fn(async (_args, options) => { fs.writeSync(options.outputDescriptor, pcm); });
   const runtimes = [];
@@ -214,8 +217,9 @@ it.each([
     return open(file, ...args);
   });
   const openSync = fs.openSync, sidecarRoot = path.join(root, '.subtool_Cache');
+  let sidecarReadOnly = false;
   const sidecarWrite = vi.spyOn(fs, 'openSync').mockImplementation((file, flags, ...args) => {
-    if (readOnlySidecar && typeof file === 'string' && path.resolve(file).startsWith(sidecarRoot + path.sep)
+    if (sidecarReadOnly && typeof file === 'string' && path.resolve(file).startsWith(sidecarRoot + path.sep)
       && flags === 'wx') throw Object.assign(new Error('readonly sidecar'), { code: 'EACCES' });
     return openSync(file, flags, ...args);
   });
@@ -226,7 +230,7 @@ it.each([
     expect(first).toMatchObject({ start: 60, duration: 60, complete: false });
     expect(fs.readFileSync(first.wave)).toEqual(pcm);
     if (first.temporary) expect(firstRuntime.cleanupGeneratedFile(first.wave)).toBe(true);
-    const chunkDirectory = path.join(allowSidecarCache && !readOnlySidecar ? sidecarRoot : cacheRoot,
+    const chunkDirectory = path.join(allowSidecarCache ? sidecarRoot : cacheRoot,
       cacheKeyFor(source), 'source-waveforms');
     const durable = fs.readdirSync(chunkDirectory).map(name => path.join(chunkDirectory, name));
     expect(durable.length).toBeGreaterThan(0);
@@ -235,6 +239,7 @@ it.each([
       expect(fs.existsSync(file)).toBe(true);
     }
     await firstRuntime.close();
+    sidecarReadOnly = readOnlySidecar;
 
     const reopened = openRuntime();
     expect(await reopened.cleanOrphans()).toEqual({ removed: 0, bytes: 0, incomplete: false });
@@ -244,11 +249,19 @@ it.each([
     expect(reused.wave).not.toBe(first.wave);
     expect(fs.readFileSync(reused.wave)).toEqual(pcm);
     expect(reopened.cleanupGeneratedFile(reused.wave)).toBe(true);
-    const rebuilt = await reopened.waveform({ ...request, ignoreCached: true });
-    expect(rebuilt.cached).toBe(false);
+    if (readOnlySidecar) {
+      await expect(reopened.waveform({ ...request, ignoreCached: true }))
+        .rejects.toMatchObject({ code: 'SIDECAR_CACHE_UNAVAILABLE' });
+      expect(fs.readdirSync(tempRoot)).toEqual([]);
+      expect(fs.readdirSync(cacheRoot)).toEqual([]);
+      expect(fs.readdirSync(chunkDirectory).map(name => path.join(chunkDirectory, name))).toEqual(durable);
+    } else {
+      const rebuilt = await reopened.waveform({ ...request, ignoreCached: true });
+      expect(rebuilt.cached).toBe(false);
+      expect(fs.readFileSync(rebuilt.wave)).toEqual(pcm);
+      expect(reopened.cleanupGeneratedFile(rebuilt.wave)).toBe(true);
+    }
     expect(execute).toHaveBeenCalledTimes(2);
-    expect(fs.readFileSync(rebuilt.wave)).toEqual(pcm);
-    expect(reopened.cleanupGeneratedFile(rebuilt.wave)).toBe(true);
     const stillCached = await reopened.waveform(request);
     expect(stillCached.cached).toBe(true);
     expect(execute).toHaveBeenCalledTimes(2);
@@ -258,6 +271,34 @@ it.each([
     sourceOpen.mockRestore(); sidecarWrite.mockRestore();
     await Promise.all(runtimes.map(runtime => runtime.close()));
   }
+});
+
+it('素材旁波形快取不可寫時明確失敗，清掉自己的暫存且不改寫母片或回退中央', async () => {
+  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
+  const cacheRoot = path.join(root, 'cache'), sidecarRoot = path.join(root, '.subtool_Cache');
+  fs.mkdirSync(tempRoot); fs.mkdirSync(sidecarRoot); fs.writeFileSync(source, 'mother source');
+  const foreign = path.join(sidecarRoot, 'keep.txt'); fs.writeFileSync(foreign, 'foreign sidecar content');
+  const execute = vi.fn(async (_args, options) => fs.writeSync(options.outputDescriptor, sourceWaveBytes(4000)));
+  const progress = [], openSync = fs.openSync;
+  const sidecarWrite = vi.spyOn(fs, 'openSync').mockImplementation((file, flags, ...args) => {
+    if (typeof file === 'string' && path.resolve(file).startsWith(sidecarRoot + path.sep) && flags === 'wx')
+      throw Object.assign(new Error('readonly sidecar'), { code: 'EACCES' });
+    return openSync(file, flags, ...args);
+  });
+  const runtime = createMediaIntakeRuntime({ cacheRoot, tempRoot, allowSidecarCache: true,
+    fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }),
+    ffmpegExecution: { execute }, sendProgress: (_target, value) => progress.push(value) });
+  try {
+    await expect(runtime.waveform({ src: source, duration: 1, audio: [{ channels: 1 }] }))
+      .rejects.toMatchObject({ code: 'SIDECAR_CACHE_UNAVAILABLE' });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(progress.at(-1)).toMatchObject({ done: true, outcome: 'failed', errorCode: 'SIDECAR_CACHE_UNAVAILABLE' });
+    expect(fs.readdirSync(tempRoot)).toEqual([]);
+    expect(fs.existsSync(cacheRoot)).toBe(false);
+    expect(fs.readFileSync(source, 'utf8')).toBe('mother source');
+    expect(fs.readFileSync(foreign, 'utf8')).toBe('foreign sidecar content');
+  } finally { sidecarWrite.mockRestore(); await runtime.close(); }
 });
 
 it.each(['cancel', 'source', 'content'])('完成通知後 %s 失權，不留下可重用片段', async reason => {

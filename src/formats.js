@@ -606,23 +606,69 @@ function assApplyLeadingOverrides(baseStyle, baseMargins, text, styles, styleMar
   return {style,margins,explicitPosition};
 }
 
+function parsedSubtitles(cues,issues){
+  // Keep the established array API; diagnostics are not cues or export styles.
+  Object.defineProperty(cues,'issues',{value:issues,enumerable:false});
+  return cues;
+}
+
+function subtitleTimingIssue(a,b,kind,{fps=25,df=false}={}){
+  const valid=value=>{
+    const match=String(value??'').trim().match(kind==='encore'
+      ? /^(\d+):([0-5]\d):([0-5]\d)[:;](\d{2})$/
+      : /^(\d+):([0-5]\d):([0-5]\d)[,.](\d+)$/);
+    if(!match)return false;
+    if(kind!=='encore')return true;
+    const base=Math.round(getExactFps(fps));
+    return Number(match[4])<base&&!(df&&base===30&&Number(match[2])%10!==0&&Number(match[3])===0&&Number(match[4])<2);
+  };
+  if(!valid(a)||!valid(b))return {code:'invalid-timecode',message:'時間碼格式或數值無效，原文已保留為未定時字幕。'};
+  const parse=kind==='encore'?value=>encoreToSec(value,fps,df):kind==='srt'?srtToSec:assToSec;
+  const start=parse(a),end=parse(b);
+  if(!Number.isFinite(start)||!Number.isFinite(end))return {code:'invalid-timecode',message:'時間碼數值超出支援範圍，原文已保留為未定時字幕。'};
+  if(end<=start)return {code:'invalid-range',message:'結束時間須晚於開始時間，原文已保留為未定時字幕。'};
+  return null;
+}
+
 /* ===== 2. 字幕格式 解析 / 序列化 ====================================== */
 const SubFormats = {
   /* ---- SRT ---- */
   parseSRT(text){
     // 分隔空行可能含空格／Tab；檔首空行也不應吞掉第一句。
     // 只在區塊外處理空白，保留句內換行與連續空格。
-    const out=[]; const blocks=text.replace(/\r/g,'').trim().split(/\n(?:[ \t]*\n)+/);
-    for(const blk of blocks){
-      const lines=blk.split('\n');
-      let i=0; while(i<lines.length && /^\s*\d+\s*$/.test(lines[i]))i++;
-      const tline=lines[i]; if(!tline||!tline.includes('-->'))continue;
-      const [a,b]=tline.split('-->');
-      const start=srtToSec(a), end=srtToSec(b);
+    const out=[],issues=[],blocks=[];
+    let block=null,lastTime=0;
+    text.replace(/\r/g,'').split('\n').forEach((line,index)=>{
+      if(!line.trim()){block=null;return;}
+      if(!block){block={line:index+1,lines:[]};blocks.push(block);}
+      block.lines.push(line);
+    });
+    const retain=(lines,line)=>{
+      out.push({start:lastTime,end:lastTime,text:decodeLegacyLineBreaks(lines.join('\n')).trim(),timed:false});
+      issues.push({line,cue:out.length,code:'missing-timecode',message:'缺少完整的起訖時間碼，原文已保留為未定時字幕。',source:lines.join('\n')});
+    };
+    for(const {line,lines} of blocks){
+      const i=lines.findIndex(value=>value.includes('-->'));
+      if(i<0){retain(lines,line);continue;}
+      const prefix=lines.slice(0,i);
+      if(prefix.length&&/^\s*\d+\s*$/.test(prefix.at(-1)))prefix.pop();
+      if(prefix.length)retain(prefix,line);
+      const tline=lines[i],parts=tline.split('-->'),[a,rawEnd]=parts;
+      // SRT positioning fields can follow the end timestamp.
+      const b=rawEnd?.trim().split(/[ \t]+/)[0];
+      const issue=parts.length!==2
+        ?{code:'invalid-timecode',message:'時間碼行須恰有一個 -->，原文已保留為未定時字幕。'}
+        :subtitleTimingIssue(a,b,'srt');
+      const start=issue?lastTime:srtToSec(a),end=issue?lastTime:srtToSec(b);
       const txt=decodeLegacyLineBreaks(lines.slice(i+1).join('\n')).trim();
-      out.push({start,end,text:txt});
+      out.push({start,end,text:txt,...(issue?{timed:false}:{})});
+      if(!issue)lastTime=end;
+      if(issue)issues.push({line:line+i,cue:out.length,...issue,source:tline});
+      if(!txt)issues.push({line:line+i,cue:out.length,code:'empty-text',message:'字幕文字為空，仍保留此列。',source:tline});
+      const nested=lines.findIndex((value,index)=>index>i&&value.includes('-->'));
+      if(nested>=0)issues.push({line:line+nested,cue:out.length,code:'missing-separator',message:'字幕區塊之間缺少空白行；後續內容已完整保留於同一列，請拆分檢查。',source:lines[nested]});
     }
-    return out;
+    return parsedSubtitles(out,issues);
   },
   toSRT(cues){
     return cues.filter(c=>c.timed!==false).map((c,i)=>
@@ -630,11 +676,13 @@ const SubFormats = {
   },
   /* ---- ASS ---- */
   parseASS(text){
-    const out=[]; const lines=text.replace(/\r/g,'').split('\n');
+    const out=[],issues=[]; const lines=text.replace(/\r/g,'').split('\n');
     const subtool=decodeSubtoolMetadata(lines);
+    const metadataLine=lines.findIndex(line=>/^\s*;\s*SUBTOOL-META:/i.test(line));
+    if(metadataLine>=0&&!subtool)issues.push({line:metadataLine+1,code:'invalid-metadata',message:'ASS 無損補充資料損壞或不完整，僅能匯入標準 Dialogue；未定時原稿或完整樣式可能缺失。'});
     const scriptInfo=Object.create(null), rawStyles=[], rawEvents=[];
     let section='', styleFormat=null, eventFormat=null;
-    for(const ln of lines){
+    for(const [index,ln] of lines.entries()){
       const t=ln.trim();
       const sectionMatch=t.match(/^\[([^\]]+)]$/);
       if(sectionMatch){ section=sectionMatch[1].trim().toLowerCase(); continue; }
@@ -654,7 +702,10 @@ const SubFormats = {
       }
       if(/^Dialogue:/i.test(t)){
         const rest=t.replace(/^Dialogue:\s*/i,'');
-        rawEvents.push(assRecord(rest,eventFormat||ASS_DEFAULT_EVENT_FIELDS));
+        const fields=eventFormat||ASS_DEFAULT_EVENT_FIELDS;
+        rawEvents.push({record:assRecord(rest,fields),line:index+1,source:ln,rest,missingFields:splitN(rest,fields.length-1).length<fields.length});
+      }else if(section==='events'&&t&&!/^Comment:/i.test(t)&&!t.startsWith(';')){
+        rawEvents.push({record:assRecord('',eventFormat||ASS_DEFAULT_EVENT_FIELDS),line:index+1,source:ln,rest:ln,missingFields:true});
       }
     }
     const res=assPlayRes(scriptInfo), styles=new Map(), styleMargins=new Map();
@@ -666,8 +717,11 @@ const SubFormats = {
         styleMargins.set(key,record);
       }
     }
-    for(const rec of rawEvents){
-      const txt=decodeAssDialogueText(rec.text||'').trim();
+    let lastTime=0;
+    for(const {record:rec,line,source,rest,missingFields} of rawEvents){
+      const txt=decodeAssDialogueText(missingFields?rest:rec.text||'').trim();
+      const issue=missingFields?{code:'missing-fields',message:'ASS 字幕欄位不完整，原始內容已保留為未定時字幕。'}
+        :subtitleTimingIssue(rec.start,rec.end,'ass');
       let track=0;
       const nm=(rec.name||'').match(/atg?(\d+)/i); if(nm)track=Math.max(0,+nm[1]-1);
       else if(/^\d+$/.test(rec.layer))track=clamp(+rec.layer,0,9);
@@ -675,7 +729,8 @@ const SubFormats = {
       const sourceStyle=styles.get(styleName);
       const sourceMargins=styleMargins.get(styleName);
       const hasOverrides=assLeadingOverrideBlocks(rec.text).length>0;
-      const cue={start:assToSec(rec.start),end:assToSec(rec.end),text:txt,track};
+      const cue={start:issue?lastTime:assToSec(rec.start),end:issue?lastTime:assToSec(rec.end),text:txt,track,...(issue?{timed:false}:{})};
+      if(!issue)lastTime=cue.end;
       if(sourceStyle || hasOverrides){
         const withMargins={...(sourceStyle||STYLE_DEFAULTS)};
         if(sourceMargins) assApplyMargins(withMargins,sourceMargins,res);
@@ -691,6 +746,8 @@ const SubFormats = {
         cue.style=applied.style;
       }
       out.push(cue);
+      if(issue)issues.push({line,cue:out.length,...issue,source});
+      if(!txt)issues.push({line,cue:out.length,code:'empty-text',message:'字幕文字為空，仍保留此列。',source});
     }
     // Array 仍是既有公開介面；metadata 故意做成非列舉屬性，舊的 map/filter/序列化程式
     // 不會把它當成一條字幕。呼叫端只有在存在且已通過完整驗證時才可採用它。
@@ -701,7 +758,7 @@ const SubFormats = {
     const legacyHeader=lines.some(line=>/^\s*;\s*Script generated by SUB Tool\s*$/i.test(line));
     const timingMarker=lines.some(line=>/^\s*;\s*SUBTOOL-ASS-TIME:2\s*$/i.test(line));
     if(!subtool && legacyHeader && !timingMarker) Object.defineProperty(out, 'subtoolLegacy', {value:true, enumerable:false});
-    return out;
+    return parsedSubtitles(out,issues);
   },
   toASS(cues,fps,tracks=[], vww=1000, vwh=562, options={}){
     const backgroundLayouts = options?.backgroundLayouts && typeof options.backgroundLayouts === 'object'
@@ -748,12 +805,21 @@ const SubFormats = {
   },
   /* ---- Adobe Encore ---- */
   parseEncore(text,fps,df=false){
-    const out=[]; const lines=text.replace(/\r/g,'').split('\n');
-    const re=/^\s*(\d{1,2}:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)\s+(\d{1,2}:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)\s+(.*)$/;
+    const out=[],issues=[]; const lines=text.replace(/\r/g,'').split('\n');
+    const re=/^\s*(\d+:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)[ \t]+(\d+:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)(?:[ \t]+(.*))?$/;
     let lastTime = 0;
-    for(const ln of lines){
-      const m=ln.match(re); if(!m)continue;
-      const isUntimed = m[1]==='--:--:--:--' || m[2]==='--:--:--:--';
+    for(const [index,ln] of lines.entries()){
+      if(!ln.trim())continue;
+      const m=ln.match(re);
+      if(!m){
+        out.push({start:lastTime,end:lastTime,text:decodeLegacyLineBreaks(ln),timed:false});
+        issues.push({line:index+1,cue:out.length,code:'missing-timecode',message:'缺少完整的起訖時間碼，原文已保留為未定時字幕。',source:ln});
+        continue;
+      }
+      const placeholders=[m[1],m[2]].filter(value=>value==='--:--:--:--').length;
+      const issue=placeholders===1?{code:'incomplete-timecode',message:'缺少其中一側時間碼，原文已保留為未定時字幕。'}
+        :placeholders===2?null:subtitleTimingIssue(m[1],m[2],'encore',{fps,df});
+      const isUntimed = placeholders>0||!!issue;
       let start = 0, end = 0;
       if(!isUntimed){
         start = encoreToSec(m[1],fps,df);
@@ -765,11 +831,13 @@ const SubFormats = {
       }
       out.push({
         start, end,
-        text: decodeLegacyLineBreaks(m[3].replace(/\s{2,}/g,'\n')).trim(),
+        text: decodeLegacyLineBreaks((m[3]||'').replace(/\s{2,}/g,'\n')).trim(),
         timed: isUntimed ? false : undefined
       });
+      if(issue)issues.push({line:index+1,cue:out.length,...issue,source:ln});
+      if(!out.at(-1).text)issues.push({line:index+1,cue:out.length,code:'empty-text',message:'字幕文字為空，仍保留此列。',source:ln});
     }
-    return out;
+    return parsedSubtitles(out,issues);
   },
   toEncore(cues,fps,df=false){
     return cues.map(c=>{

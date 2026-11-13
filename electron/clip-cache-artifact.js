@@ -18,9 +18,18 @@ function regular(file) {
 }
 
 function createClipCacheArtifact(directoryPath, key, extension) {
+  const parent = path.dirname(directoryPath);
+  let sidecarOwner = null;
+  if (path.basename(parent).toLowerCase() === '.subtool_cache') {
+    fs.mkdirSync(parent, { recursive: true });
+    sidecarOwner = directory(parent); // Reject a junction before creating children.
+  }
+  const verifySidecar = () => { if (sidecarOwner && !same(sidecarOwner, directory(parent))) throw changed(); };
+  verifySidecar();
   fs.mkdirSync(directoryPath, { recursive: true });
+  verifySidecar();
   const rootOwner = directory(directoryPath);
-  const verifyRoot = () => { if (!same(rootOwner, directory(directoryPath))) throw changed(); };
+  const verifyRoot = () => { verifySidecar(); if (!same(rootOwner, directory(directoryPath))) throw changed(); };
   const bucket = path.join(directoryPath, key);
   let bucketOwner = null;
   const verifyBucket = () => { verifyRoot(); if (!bucketOwner || !same(bucketOwner, directory(bucket))) throw changed(); };

@@ -31,11 +31,13 @@
 ============================================================================== */
 let _extTrackIdCounter = 0; // Fix #6：全域遞增序號取代 Date.now()+i，避免同毫秒碰撞
 import { AudioEngine } from './audio-engine.js';
+import { createNativeAudioMeterClient } from './native-audio-meter.js';
+import { createPreviewSourceSession, isNetworkPreviewPath } from './preview-source-session.js';
 import { projectCanvasSize } from './project-canvas.js';
 import { MediaIntakeJobs } from './media-intake-jobs.js';
 import { MediaAudioRouter, AudioPipeline } from './audio-routing-engine.js';
 import { destroyScrubber } from './audio-engine.js';
-import { State, DESK, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect } from './state.js';
+import { State, DESK, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect, saveConfig } from './state.js';
 import { setStatus, showToast, openModal, closeModal, renderCurrentTimecode } from './ui.js';
 import { Seq } from './sequence.js';
 import { createAudioEffects } from './audio-effects.js';
@@ -221,7 +223,7 @@ import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
 
 
 
-import { fadeAlphaAtTimeline } from './image-compositor-engine.js';   // 淡入淡出：預覽與匯出共用同一份規格
+import { fadeAlphaAtTimeline, visualStackPlan } from './image-compositor-engine.js';   // 淡入淡出：預覽與匯出共用同一份規格
 import { sourceChannelLabels } from './audio-routing-engine.js'; // 來源聲道展開順序：與主程序 ingest 同一份約定
 
 import { loadDesktopMedia, _expandChannels, _loadViaMpv, loadVideoFile, canPlayNatively, webAudioCapabilityNotice, FFMPEG_MAX_BYTES, WEB_LARGE_NATIVE_AUDIO_NOTICE, WEB_LARGE_UNSUPPORTED_MEDIA_NOTICE } from './media-loader.js';
@@ -732,6 +734,90 @@ const Media = {
   _deferredPrimaryProxyPromise:null,
   _presentationSession:null,
   _presenterStart:null,
+  _nativeBuffering:null,
+  _previewSources:null,
+  _previewStateKey:null,
+  _previewModeVersion:0,
+  _previewFailure:false,
+  _previewRefreshPending:null,
+  _previewCatalog(){
+    return this._previewSources ||= createPreviewSourceSession({
+      changed:()=>this._publishPreviewState(),
+    });
+  },
+  previewState(){
+    const clip=this._activeClip(),record=clip?this._previewSources?.get(clipSourceFingerprint(clip)):null;
+    const path=this.mpvMode?this._mpvPath:clip?.path;
+    const proxy=!!path&&path!==clip?.path;
+    const position=this.displayTime();
+    // The hidden mpv carrier can use the mother while the visible compositor
+    // still uses preview assets. Keep that distinction separate from preference.
+    const stack=this.mpvMode&&!this.inGap()&&this.seqOn()
+      ?visualStackPlan(Seq.clipsAt(this.tlTime()),State.videoTracks):null;
+    const compositePreview=!!stack?.videos.length&&(stack.needsComposite||this.webCodecsTakeover());
+    const start=this._presenterStart;
+    const phase=this._previewFailure?'error':this.presentationPending()||this.mpvSourceTransitionPending()||this._seqSwitching?'seeking':
+      this._nativeBufferingPending()?'video':start?(start.phase==='waiting'?'video':'audio'):
+      this.playing?'playing':clip?'paused':'idle';
+    return {mode:State.previewMode==='original'?'original':'smooth',available:!!this.mpvMode&&!!clip?.path&&!Seq.isStill(clip)
+        &&!clip.reverse&&!this._nativeReverse&&!this._reverseShuttleMuted,
+      sourceKind:proxy?'proxy':'original',
+      compositePreview,
+      network:isNetworkPreviewPath(path),phase,proxyAvailable:!!record?.assets.proxy,
+      position,sourceTime:this.vTime()};
+  },
+  _publishPreviewState(){
+    const state=this.previewState();
+    const {position,sourceTime,...stable}=state;
+    const key=JSON.stringify(stable);
+    if(key===this._previewStateKey)return;
+    this._previewStateKey=key;emit('media:preview-state',state);
+  },
+  async setPreviewMode(mode){
+    if(mode!=='smooth'&&mode!=='original')return false;
+    if(this._nativeReverse||this._reverseShuttleMuted||this._activeClip()?.reverse)return false;
+    const version=++this._previewModeVersion;
+    const ownsTarget=this.capturePlaybackTargetOwnership();
+    State.previewMode=mode;void saveConfig();
+    this._previewFailure=false;
+    const clip=this._activeClip(),target=this.displayTime();
+    this._publishPreviewState();
+    if(version!==this._previewModeVersion||!ownsTarget())return false;
+    if(!this.mpvMode||!clip?.path||Seq.isStill(clip)||clip.reverse)return true;
+    const path=this._clipPreviewPath(clip);
+    if(path===this._mpvPath&&!this._seqSwitching&&!this.presentationPending()
+      &&getPlayerAdapter().ownsNativeSourcePath?.(path))return true;
+    this.cancelPresentation('preview-mode-changed');
+    const pending=this.seek(target,{resumePlayback:this.playing}),seekVersion=this._seekIntentVersion;
+    const result=await pending;
+    if(version!==this._previewModeVersion||seekVersion!==this._seekIntentVersion)return false;
+    const ok=result===true||result?.status==='presented';
+    this._previewFailure=!ok&&result?.status!=='cancelled';this._publishPreviewState();
+    return ok;
+  },
+  _refreshCompletedPreview(){
+    const pending=this._previewRefreshPending;
+    if(!pending)return;
+    const active=this._activeClip();
+    if(this._previewSources?.get(pending.key)!==pending||!active
+      ||clipSourceFingerprint(active)!==pending.key||State.previewMode==='original'){
+      this._previewRefreshPending=null;return;
+    }
+    // A completed asset never cancels the user's in-flight target or interrupts
+    // playback. The seek/pause terminal retries this one handoff at the latest position.
+    if(this.playing||this.presentationPending()||this._seqSwitching||this._nativeReverse||this._reverseShuttleMuted)return;
+    this._previewRefreshPending=null;
+    if(this.mpvMode&&this._clipPreviewPath(active)!==this._mpvPath)
+      void this.seek(this.displayTime());
+  },
+  _publishPreviewAssets(clip,result,owns){
+    if(!result?.proxy||!owns())return;
+    const key=clipSourceFingerprint(clip),catalog=this._previewCatalog();
+    const record=catalog.register(key,{...result,path:clip.path},owns);
+    if(!record||!owns()||catalog.get(key)!==record)return;
+    if(clipSourceFingerprint(this._activeClip())===key)this._previewRefreshPending=record;
+    queueMicrotask(()=>this._refreshCompletedPreview());
+  },
   _seqSwitchSettled:null,
   _resolveSeqSwitch:null,
   _intakeSession:new MediaIntakeSession(),
@@ -1624,7 +1710,7 @@ const Media = {
       : '正在檢查音訊快取（背景處理，不影響播放）…','busy');
     let res;
     let stagedElements=[],stagedTracks=[];
-    // 需要 Proxy 時同 pass 產 720p 短 GOP 預覽檔：多軌合成時交給 WebCodecs，
+    // 需要 Proxy 時同 pass 產 480p 短 GOP 預覽檔：多軌合成時交給 WebCodecs，
     // 持續倒帶時則暫時交給 mpv，避免母素材的長 GOP 造成反向預解碼停頓。
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
@@ -1706,6 +1792,9 @@ const Media = {
         started:(sourceTime,timelineTime,prepared)=>this._playback.startFollowers(sourceTime,timelineTime,prepared)});
       notifyAudioTracks();
 
+      // Proxy has no embedded audio. Publish its selectable path only after
+      // every original channel is committed; waveform display may finish later.
+      if(current())this._publishPreviewAssets(primary,res,current);
       await waveReady;
       if(current()){recovery.complete();setStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');}
     }catch(error){
@@ -2261,7 +2350,56 @@ const Media = {
   },
   playbackTransitionPending(){
     return !!this._presenterStart||!!this._presentationSession?.isPlaybackPending()
+      ||this._nativeBufferingPending()
       ||!!(this._reverseStartup?.retried&&this._reverseStartup.owns());
+  },
+  _nativeBufferingPending(){
+    if(this._nativeBuffering&&!this._nativeBuffering.owns())this._nativeBuffering=null;
+    return !!this._nativeBuffering;
+  },
+  _nativeNeedsBuffering(){
+    const state=getPlayerAdapter().nativePlaybackState?.();
+    return !!state&&state.pause!==true&&(state.pausedForCache===true||state.coreIdle===true||state.seeking===true);
+  },
+  _holdNativeFollowers(){
+    if(!this.playing||!this.mpvMode||this._gap||this.audioOnlyTimeline()||this._nativeReverse
+      ||(this._seqSwitching&&!this._presenterStart?.owns())||this.presentationPending())return;
+    let work=this._nativeBuffering;
+    if(!work?.owns()){
+      const adapter=getPlayerAdapter(),clip=this._activeClip(),path=this._mpvPath;
+      const sourceSessionId=adapter.nativePlaybackState?.()?.sourceSessionId;
+      const ownsTarget=this.capturePlaybackTargetOwnership();
+      work={resuming:false};this._nativeBuffering=work;
+      work.owns=()=>this._nativeBuffering===work&&this.playing&&this.mpvMode&&!this._gap
+        &&ownsTarget()&&getPlayerAdapter()===adapter&&this._activeClip()===clip&&this._mpvPath===path
+        &&adapter.nativePlaybackState?.()?.sourceSessionId===sourceSessionId;
+      const sourceTime=this.vTime(),time=clip?Seq.toTimeline(sourceTime,clip):sourceTime;
+      this._transport.seek(time,{duration:State.duration,fps:State.fps,dropFrame:State.dropFrame});
+    }
+    work.resuming=false;
+    // Stop only followers. Pausing mpv here would prevent its own buffering
+    // recovery. Revoke a partly committed group before stopping its elements.
+    this._playback.cancelStart({buffering:false});
+    if(!work.owns())return;
+    this.stopBufferSources();
+    if(work.owns())this.stopElementSources();
+  },
+  _observeNativeBuffering(){
+    if(this._nativeNeedsBuffering()){
+      // The normal startup already waits for native readiness. A new buffer
+      // pause during commit must also revoke elements already starting.
+      if(this._presenterStart?.owns()&&this._presenterStart.phase!=='committing')return;
+      this._holdNativeFollowers();return;
+    }
+    const work=this._nativeBuffering;
+    if(!work?.owns()){if(this._nativeBuffering===work)this._nativeBuffering=null;return;}
+    if(work.resuming)return;
+    work.resuming=true;
+    void this._startPresenterPlayback({owns:work.owns,started:(sourceTime,time,prepared)=>{
+      if(!work.owns())return;
+      this._nativeBuffering=null;
+      this._playback.startFollowers(sourceTime,time,prepared);
+    }});
   },
   presenterClockMoving(){
     return !!this.playing&&!this._seqSwitching&&!this.playbackTransitionPending();
@@ -2286,6 +2424,14 @@ const Media = {
   // FPS-SYNC（I4/I6）：mpv 只回報來源時間；播放狀態、時間域與呈現位置在此統一裁定。
   // media-loader 僅負責 intake ownership 與事件註冊，不解讀播放器的內部事件。
   observeMpvEvent(e){
+    try{return this._observeMpvEvent(e);}finally{
+      if(e.name!=='time-pos')this._publishPreviewState();
+    }
+  },
+  _observeMpvEvent(e){
+    if(e.event==='property-change'&&['paused-for-cache','core-idle','seeking'].includes(e.name)){
+      this._observeNativeBuffering();return;
+    }
     if(e.event==='disconnected'){
       const adapter=getPlayerAdapter();
       const ownsDisconnect=adapter.captureNativeDisconnect?.(e);
@@ -2334,6 +2480,9 @@ const Media = {
       }
       if(e.name==='pause'){
         const paused=!!e.data;
+        // The verified unpause reply may arrive after the buffering properties.
+        // Re-evaluate that snapshot without creating a new playback intent.
+        if(!paused)this._observeNativeBuffering();
         if(this._seqSwitching || this.mpvSourceTransitionPending()) return;
         // 舊 suspend 的 property event 與新 play 的 IPC 回覆可交錯；
         // 使用者 pause 會先撤銷此 owner，真正 error/end-file 仍走終止流程。
@@ -2368,7 +2517,7 @@ const Media = {
             &&owner.sessionId===e.sourceSessionId) this._mpvTransitionDurationPending={owner,event:e};
           return;
         }
-        if(this._reverseProxyActive) return;
+        if(this._reverseProxyActive||(durationClip&&this._mpvPath!==durationClip.path)) return;
         // ffprobe 已知的母素材片長不可被 mpv 載入初期或暫存 Proxy 的較短值縮掉。
         const c=durationClip;
         const duration=Math.max(e.data,c?.dur||0,this.seqOn()?0:this._mpvDuration||0);
@@ -2392,8 +2541,8 @@ const Media = {
     }
   },
   resetPresentationSession(reason='media-reset'){
+    this._playback.cancelStart();
     this._cancelReverseStartup();
-    this._presenterStart=null;
     this._presentationSession?.reset(reason);
     this._presentationSession=null;
   },
@@ -2552,8 +2701,12 @@ const Media = {
     emit('mpv:sync');
   },
   _clipPreviewPath(clip){
-    if(!clip?.reverse) return clip?.path||null;
+    if(!clip?.reverse) return this._forwardPreviewPath(clip);
     return this._reverseProxySourcePath===clip.path ? this._reverseProxyPath : null;
+  },
+  _forwardPreviewPath(clip){
+    const assets=clip&&State.previewMode!=='original'?this._previewSources?.get(clipSourceFingerprint(clip))?.assets:null;
+    return assets?.proxy||clip?.path||null;
   },
   /* 把播放器對到指定 clip 的來源時間（必要時換檔）。resume=切換後是否續播 */
   async _ensureClip(c, localT, resume,work={}){
@@ -2656,7 +2809,7 @@ const Media = {
             if(getPlayerAdapter()!==adapter || !adapter.ownsNativeSourcePath?.(previewPath)) return;
             // FFprobe supplied c.dur at intake. A newly loaded mpv source may
             // report a provisional shorter duration; preserve the known end.
-            if(r && r.duration && !c.reverse) Seq.observeSourceDuration(c, maxKnownSourceDuration(c.dur,r.duration));
+            if(r && r.duration && !c.reverse&&previewPath===c.path) Seq.observeSourceDuration(c, maxKnownSourceDuration(c.dur,r.duration));
             this._mpvPath = previewPath;
           }
           this._reverseProxyActive=!!c.reverse;
@@ -2739,7 +2892,7 @@ const Media = {
     }
   },
   _setMpvSeekProfile(clip){
-    const proxy=!!clip?.reverse&&!!this._clipPreviewPath(clip);
+    const preview=this._clipPreviewPath(clip),proxy=!!preview&&preview!==clip?.path;
     this._mpvExactSeek=!proxy&&!!clip?.mpvExactSeek;
     this._mpvSeekOffset=proxy?0:Math.max(0, Number(clip?.mpvSeekOffset)||0);
   },
@@ -3155,7 +3308,7 @@ const Media = {
     this.ensureCtx();
     // queue:true —— 不可搶佔/殺掉進行中的 ingest（可能正是餵播放器的 streamIngest 背景轉檔
     // 或主媒體音軌抽取，殺掉會讓播放中斷）；改為排入佇列、依序執行
-    // needsProxy:true（v4.25）：加入的片段一律備 720p 短 GOP proxy——原檔可能非原生（ProRes/MXF）
+    // needsProxy:true（v4.25）：加入的片段一律備短 GOP proxy（現為 480p）——原檔可能非原生（ProRes/MXF）
     // 或過大（>600MB WebCodecs 讀不進來）；沒有 proxy 時預覽引擎解不了它 →【無法參與疊層合成】
     // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
     if(DESK?.prepareSourceWaveform){
@@ -3207,6 +3360,8 @@ const Media = {
         if(this.playing) this._restartElements();
       }
     }
+    // Keep mother audio available until the cached playback channels can take over.
+    if(owns())this._publishPreviewAssets(c,res,owns);
     await waveReady;
     if(!owns()) return;
     notifyAudioTracks(); setStatus(`影片已加入序列：${this._liveClipForSource(c)?.name||c.name}`, 'ok');
@@ -3607,8 +3762,8 @@ const Media = {
     }
     const owns=typeof detail.owns==='function'?detail.owns:()=>true;
     if(!owns()) return;
+    this._playback.cancelStart();
     this._cancelReverseStartup();
-    this._presenterStart=null;
     // FPS-SYNC（I3/I4）：播放器回報真正停止時只提交時鐘，不再反向控制播放器；
     // 但靜止權威位置仍必須經唯一格網吸附，不能留下 ended 的任意來源秒數。
     const virtual=this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src'));
@@ -3627,7 +3782,7 @@ const Media = {
     video.dispatchEvent(new Event('pause'));
   },
   _suspendPlaybackForPresentation(){
-    this._presenterStart=null;
+    this._playback.cancelStart();
     getPlayerAdapter().pause().catch(()=>{});
     this.stopBufferSources();
     this.stopElementSources();
@@ -3643,7 +3798,7 @@ const Media = {
   },
   _failPlaybackPresentation(result){
     this._cancelReverseStartup();
-    this._presenterStart=null;
+    this._playback.cancelStart();
     this.stopBufferSources();
     this.stopElementSources();
     getPlayerAdapter().pause().catch(()=>{});
@@ -3659,20 +3814,24 @@ const Media = {
     const adapter=getPlayerAdapter(),active=this._activeClip();
     const source=()=>this.mpvMode?this._mpvPath:(video.currentSrc||video.src);
     const sourcePath=source(),ownsTarget=this.capturePlaybackTargetOwnership();
-    const request={};this._presenterStart=request;
+    const request={phase:'preparing'};this._presenterStart=request;
     const owns=()=>this._presenterStart===request&&this.playing&&ownsTarget()&&upstreamOwns()
       &&getPlayerAdapter()===adapter&&this._activeClip()===active&&source()===sourcePath;
     request.owns=owns;
     this.stopBufferSources();this.stopElementSources();
+    this._publishPreviewState();
     try{
       if(pauseBeforePrepare){await adapter.pause();if(!owns())return null;}
       const initialSource=this.vTime(),initialTimeline=active?Seq.toTimeline(initialSource,active):initialSource;
       let prepared=await this._playback.prepareFollowers(initialSource,initialTimeline,{owns});
       if(!prepared||!owns())return null;
+      request.cancel=()=>prepared.cancel();
       // A paused native seek can acknowledge its target while video is still
       // buffering. Only real playback readiness may release cached followers;
       // otherwise drift correction repeatedly replays audio against that clock.
       const waitForReady=this.mpvMode&&prepared.requiresPlayingClock&&!this._nativeReverse&&!active?.reverse;
+      request.phase='waiting';
+      this._publishPreviewState();
       const accepted=await adapter.play(waitForReady?{waitForReady:true}:undefined);
       if(!owns()) return null;
       if(waitForReady){
@@ -3686,11 +3845,17 @@ const Media = {
       // Rebuild the whole group once from that accepted clock; never chase it
       // repeatedly while the individual NAS channels are still seeking.
       if(!prepared.matches(sourceTime,timelineTime)){
+        request.phase='preparing';this._publishPreviewState();
         prepared.cancel();prepared=await this._playback.prepareFollowers(sourceTime,timelineTime,{owns});
         if(!prepared||!owns())return null;
       }
       const retry=this._reverseStartup;
       const recovering=retry?.phase==='restarting'&&retry.owns();
+      if(waitForReady&&this._nativeNeedsBuffering()){
+        this._holdNativeFollowers();return null;
+      }
+      request.phase='committing';
+      this._publishPreviewState();
       if(recovering||this._nativeReverse)prepared.cancel();
       else if(!await prepared.commit()||!owns())return null;
       this._presenterStart=null;
@@ -3714,7 +3879,7 @@ const Media = {
       setStatus(message,'err');
       if(clip) showToast(message);
       return false;
-    }finally{if(this._presenterStart===request)this._presenterStart=null;}
+    }finally{if(this._presenterStart===request)this._presenterStart=null;this._publishPreviewState();}
   },
   _cancelReverseStartup(){
     clearTimeout(this._reverseStartup?.timer);
@@ -3895,6 +4060,10 @@ const Media = {
     this._lastSeekTime=null;
   },
   play(){
+    this._previewFailure=false;
+    try{return this._play();}finally{this._publishPreviewState();}
+  },
+  _play(){
     // mpv 原生倒播只讓影像 transport 運作。Web Audio／外部音訊元素沒有可靠的
     // 反向播放能力，若沿用一般 play() 路徑會聽到「音訊正播、畫面倒播」。
     if(this._nativeReverse&&!this.presentationPending()){
@@ -3911,7 +4080,8 @@ const Media = {
     video.dispatchEvent(new Event('play'));
 
     const hit=this.seqOn()?Seq.clipAt(target):null;
-    const needsActivation=!!hit&&(hit.id!==this.activeClipId||this._gap);
+    const needsActivation=!!hit&&(hit.id!==this.activeClipId||this._gap||
+      (this.mpvMode&&this._clipPreviewPath(hit)!==this._mpvPath));
     // 已送出的 loadfile 不能撤回；較新的 Play 先等它收尾，再呈現最新目標。
     if(this._reverseSourcePromise){
       session.setPlaybackIntent(false);
@@ -3929,11 +4099,14 @@ const Media = {
     }
     session.setPlaybackIntent(true);
   },
-  pause({seekOnPause=true}={}){
-    const starting=!!this._presenterStart||!!this._reverseSourcePromise
+  pause(options={}){
+    try{return this._pause(options);}finally{this._publishPreviewState();this._refreshCompletedPreview();}
+  },
+  _pause({seekOnPause=true}={}){
+    const starting=!!this._presenterStart||this._nativeBufferingPending()||!!this._reverseSourcePromise
       ||!!(this._reverseStartup?.retried&&this._reverseStartup.owns());
     this._cancelReverseStartup();
-    this._presenterStart=null;
+    this._playback.cancelStart();
     if(this._nativeReverse){
       this._presentationSession?.setPlaybackIntent(false);
       const c=this.seqOn()?this._activeClip():null;
@@ -4007,6 +4180,19 @@ const Media = {
   },
   toggle(){ this.playing?this.pause():this.play(); },
   seek(t, options={}){
+    this._previewFailure=false;
+    const result=this._seek(t,options),version=this._seekIntentVersion;
+    this._publishPreviewState();
+    Promise.resolve(result).then(value=>{
+      if(version!==this._seekIntentVersion)return;
+      this._previewFailure=value?.status==='failed'||value?.status==='timeout';this._publishPreviewState();
+      this._refreshCompletedPreview();
+    },()=>{if(version===this._seekIntentVersion){this._previewFailure=true;this._publishPreviewState();}});
+    return result;
+  },
+  _seek(t, options={}){
+    this._nativeBuffering=null;
+    let previewChanged=false;
     const resumeRecovery=!!(this._reverseStartup?.retried&&this._reverseStartup.owns());
     const seekVersion=++this._seekIntentVersion;
     this._seekIntentOwner=options.playbackOwner||null;
@@ -4021,6 +4207,14 @@ const Media = {
     // 停止舊 buffer 與 element（含疊合 clone），再定位或同步通知新目標。
     if(this.playing){ this.stopBufferSources(); this.stopElementSources(); }
     if(replaced()) return cancelled();
+    const targetClip=this.seqOn()?Seq.clipAt(t):null;
+    if(targetClip){
+      if(this.mpvMode&&this._clipPreviewPath(targetClip)!==this._mpvPath){
+        previewChanged=true;
+        this.cancelPresentation('preview-source-changed');
+      }
+    }
+    if(replaced())return cancelled();
     // 外部音檔依 placement 先對到播放目標；真正起播仍要等 session 收到實際畫格。
     for(const tr of this.tracks){
       if(tr.kind!=='element'||!tr.el) continue;
@@ -4044,7 +4238,7 @@ const Media = {
         timeoutMs:10000,
         ...(hasPresentationTolerance?{tolerance:Math.max(0,presentationTolerance)}:{}),
       });
-      if(resumeRecovery&&this.playing)session.setPlaybackIntent(true);
+      if((resumeRecovery||previewChanged||options.resumePlayback)&&this.playing)session.setPlaybackIntent(true);
       return pending;
     };
     const restoringMother=this._reverseRestorePromise;
@@ -4095,6 +4289,7 @@ const Media = {
       video.muted=true;
       getPlayerAdapter().mute(true).catch(()=>{});
     }else this.syncMuteState();
+    this._publishPreviewState();
   },
   reverseShuttleMuted(){ return this._reverseShuttleMuted; },
   syncMuteState(){
@@ -4109,23 +4304,92 @@ const Media = {
     // descriptor 只是同一可聽性規則的輸入，不在這裡另算 bus M/S。
     const sourceId=active?.audioSourceId;
     const routedChannels=channels.length?channels:(State.audioProject?.sourceMaps?.[sourceId]?.channels||[])
-      .map(channel=>({audioSourceId:sourceId,sourceStream:channel.sourceStream,sourceChannel:channel.sourceChannel}));
+      .map(channel=>({source,audioSourceId:sourceId,sourceStream:channel.sourceStream,sourceChannel:channel.sourceChannel,
+        muted:!!active?.muted,_srcHidden:this.activeSource!==null&&this.activeSource!==source}));
     const silent=this.sourceMuted(source)||(routedChannels.length>0&&!routedChannels.some(track=>interpretation.trackState(track).audible));
     video.muted = this._reverseShuttleMuted||mix||silent ? true : (State.muted || !!active?.audioDetached || !!active?.reverse);
     if(this.mpvMode){
       const sourceHasElements=!!source&&this.tracks.some(track=>
         (track.kind==='buffer'||track.kind==='element')&&
         (track.source||'video')===source&&!track._srcHidden);
-      getPlayerAdapter().mute(this._reverseShuttleMuted||State.muted||silent||!!active?.audioDetached||!!active?.reverse||sourceHasElements).catch(()=>{});
+      const adapter=getPlayerAdapter();
+      if(sourceHasElements||this._reverseShuttleMuted||active?.audioDetached||active?.reverse){
+        adapter.mute(true).catch(()=>{});
+      }else{
+        const gains=routedChannels.map(track=>{
+          const state=interpretation.trackState(track);
+          return {sourceStream:track.sourceStream,sourceChannel:track.sourceChannel,gain:state.audible?state.gain:0};
+        });
+        adapter.syncAudioMix(gains,State.muted||silent).catch(error=>{
+          console.warn('native audio mix:',error);
+          setStatus('原生音訊配線套用失敗，請重新開啟素材','err');
+        });
+      }
     }
+  },
+  /* mpv 原音尚無 WebAudio 聲道時，只有可見音量表要求即時母素材取樣。 */
+  _nativeMeter:null,
+  clearNativeMeter(){ this._nativeMeter?.clear(); },
+  _meterTracks(){
+    const clip=this._activeClip();
+    const source=clip?(clip.audioSrc||(clip.primary?'video':'clip:'+clip.id)):null;
+    const cached=this.tracks.some(track=>(track.source||'video')===source
+      &&(track.kind==='element'||track.kind==='buffer')&&!track._srcHidden);
+    if(!DESK?.readAudioMeter||!this.mpvMode||!this.presenterClockMoving()
+      ||this.presentationPending()||this.inGap()||!clip?.path||Seq.isStill(clip)
+      ||clip.audioDetached||clip.reverse||this._reverseShuttleMuted||State.muted
+      ||this.sourceMuted(source)||cached){
+      this.clearNativeMeter();
+      return this.tracks;
+    }
+    this._nativeMeter ||= createNativeAudioMeterClient({
+      read:request=>DESK.readAudioMeter(request),
+      stop:()=>DESK.stopAudioMeter?.(),
+    });
+    // 只給本次電平解讀使用；取樣不能冒充播放器或寫進可儲存的 Media.tracks。
+    const channels=State.audioProject?.sourceMaps?.[clip.audioSourceId]?.channels||[];
+    const meters=channels.map(channel=>{
+      const prior=this.tracks.find(track=>track.audioSourceId===clip.audioSourceId
+        &&track.sourceStream===channel.sourceStream&&track.sourceChannel===channel.sourceChannel);
+      return {...prior,kind:'native',source,audioSourceId:clip.audioSourceId,
+        sourceStream:channel.sourceStream,sourceChannel:channel.sourceChannel,
+        muted:prior?.muted??!!clip.muted,solo:prior?.solo??false,volume:prior?.volume??1,
+        _srcHidden:this.activeSource!==null&&this.activeSource!==source};
+    });
+    const tracks=this.tracks.filter(track=>(track.source||'video')!==source
+      ||(track.kind!=='native'&&track.kind!=='nativeTrack')).concat(meters);
+    const interpretation=createProjectAudioInterpretation({audioProject:State.audioProject,
+      mediaTracks:tracks,externalSources:this.externalAudioSources});
+    const nativeTracks=new Set(meters);
+    const mixes=(State.audioProject?.buses||[]).map(bus=>({busId:String(bus.id),
+      inputs:interpretation.routedTrackStatesForBus(bus.id,{requireAnalyser:false})
+        .filter(({track})=>nativeTracks.has(track))
+        .map(({track,gain})=>({sourceStream:track.sourceStream,sourceChannel:track.sourceChannel,gain})),
+    })).filter(mix=>mix.inputs.length);
+    if(!mixes.length){
+      this.clearNativeMeter();
+      return tracks;
+    }
+    const snapshot=this._nativeMeter.sample({path:audioMotherPath(clip)||clip.path,
+      time:this.vTime(),rate:this.audioSourceRate(source,this.tlTime()),
+      sourceKey:`${this._bgVersion}:${clip.id}:${this._seekIntentVersion}`,mixes});
+    if(snapshot){
+      for(const track of meters){
+        const level=snapshot.levels.find(item=>item.sourceStream===track.sourceStream&&item.sourceChannel===track.sourceChannel);
+        track.meterPeak=level?.level??0;
+        // Shared identity proves all native inputs use one aligned PCM window.
+        track.meterBusLevels=snapshot.busLevels;
+      }
+    }
+    return tracks;
   },
   /* 專案 bus 的 M/S/音量套在每個來源聲道路由之後。
      預覽為立體聲監聽，複製到多個 bus 時取可聽 route 的最大有效增益，避免把同一個
      聲道在瀏覽器預覽中不必要地疊加數次；匯出端則會依 bus 逐一完整混音。 */
-  projectAudioInterpretation(){
+  projectAudioInterpretation({metering=false}={}){
     return createProjectAudioInterpretation({
       audioProject:State.audioProject,
-      mediaTracks:this.tracks,
+      mediaTracks:metering?this._meterTracks():this.tracks,
       externalSources:this.externalAudioSources,
     });
   },
@@ -4545,7 +4809,7 @@ const Media = {
   },
   async _restoreReverseShuttleSource(options){
     if(!this._reverseProxyActive) return true;
-    return this._switchReverseShuttleSource(this._reverseProxySourcePath,false,options);
+    return this._switchReverseShuttleSource(this._forwardPreviewPath(this._activeClip())||this._reverseProxySourcePath,false,options);
   },
   supportsNativeReverse(){
     const adapter=getPlayerAdapter();
@@ -4564,6 +4828,10 @@ const Media = {
       &&Math.abs((Number(clip.out)||0)-(Number(clip.dur)||0))<0.05;
   },
   async setPlaybackDirection(direction){
+    try{return await this._setPlaybackDirection(direction);}
+    finally{this._publishPreviewState();}
+  },
+  async _setPlaybackDirection(direction){
     this._cancelReverseStartup();
     const next=direction==='backward'?'backward':'forward';
     const adapter=getPlayerAdapter();
@@ -4653,6 +4921,11 @@ const Media = {
     return true;
   },
   reset(options={}){
+    this._previewModeVersion++;
+    this._previewFailure=false;
+    this._previewRefreshPending=null;
+    this._previewSources?.reset();
+    this.clearNativeMeter();
     this._playback.reset();
     this._presenterStart=null;
     if(!options.keepExternalAudio){
@@ -4760,6 +5033,7 @@ const Media = {
     const pb=$('playBtn'); if(pb) pb.textContent='▶';
     State.duration=0;
     Wave.live=false; Wave.peaks=null; Wave.clearSources({keep:keptAudio});
+    this._publishPreviewState();
   }
 };
 // timeline 的 bus 控制以事件通知，讓 timeline 不需反向依賴 Media；在載入順序不同時也安全。

@@ -66,6 +66,14 @@ afterEach(() => {
   }
 });
 describe('反轉片段預覽音訊', () => {
+  it('source-aware cache root stores reverse PCM beside the mother source', async () => {
+    const cacheRoot = vi.fn(source => path.join(path.dirname(source), '.subtool_Cache', 'clip-audio'));
+    const s = fixture({ cacheRoot });
+    const result = await s.runtime.reverse(s.request);
+    expect(result.path.startsWith(path.join(s.directory, '.subtool_Cache', 'clip-audio') + path.sep)).toBe(true);
+    expect(cacheRoot).toHaveBeenCalledWith(s.source);
+    expect(fs.existsSync(path.join(s.directory, 'reverse'))).toBe(false);
+  });
   it('來源與快取播放器的時間轉換共用 Seq，包含裁切、offset 和變速', () => {
     const clip = { in: 2, out: 10, offset: 5, speed: 2, reverse: true };
     expect(Seq.toReverseAudio(5, clip)).toBe(0);

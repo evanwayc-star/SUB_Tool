@@ -30,7 +30,7 @@ import {
   pasteClipboardStyle,
 } from './subtitle-style-engine.js';
 import { showCueMenu } from './menus.js';
-import { analyzeSubtitles } from './subtitle-audit.js';
+import { analyzeSubtitles, consecutiveIdenticalGroups } from './subtitle-audit.js';
 
 // Domain imports
 import { 
@@ -306,6 +306,21 @@ function updateTlSel(){
   }
 }
 
+const IDENTICAL_GROUP_COLORS=['red','green','blue'];
+function refreshIdenticalGroupMarkers(){
+  const cues=State.cues.filter(c=>(c.track||0)===State.listTrack),byId=new Map();
+  consecutiveIdenticalGroups(cues).forEach((group,index)=>{
+    for(const number of group)byId.set(cues[number-1].id,{number:index+1,color:IDENTICAL_GROUP_COLORS[index%3]});
+  });
+  for(const row of sublist.querySelectorAll('.sub-row')){
+    for(const color of IDENTICAL_GROUP_COLORS)row.classList.remove('identical-group-'+color);
+    const group=byId.get(row.dataset.id),index=row.querySelector('.idx');
+    if(group){row.classList.add('identical-group-'+group.color);row.dataset.identicalGroup=String(group.number);}
+    else delete row.dataset.identicalGroup;
+    if(index)index.title=group?`第 ${group.number} 組相同字幕`:'';
+  }
+}
+
 function renderCheckPanel(){
   const panel=$('checkPanel'); if(!panel||!panel.classList.contains('show'))return;
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
@@ -324,7 +339,14 @@ function renderCheckPanel(){
   
   const mkNums=nums=>nums.length?nums.map(n=>`<button type="button" class="cp-num" data-idx="${n}" aria-label="前往第 ${n} 句字幕">${n}</button>`).join(' '):'無';
   const joinedIdenticalSet=new Set(consecutiveIdenticalJoinedNums);
-  const mkConsecutiveIdenticalNums=nums=>nums.length?nums.map(n=>`<button type="button" class="cp-num${joinedIdenticalSet.has(n)?' cp-joined-identical':''}" data-idx="${n}" aria-label="前往第 ${n} 句字幕">${n}</button>`).join(' '):'無';
+  const identicalGroups=new Map();
+  report.consecutiveIdenticalGroups.forEach((group,index)=>{
+    for(const number of group)identicalGroups.set(number,{number:index+1,color:IDENTICAL_GROUP_COLORS[index%3]});
+  });
+  const mkConsecutiveIdenticalNums=nums=>nums.length?nums.map(n=>{
+    const group=identicalGroups.get(n),joined=joinedIdenticalSet.has(n);
+    return `<button type="button" class="cp-num identical-group-${group.color}${joined?' cp-joined-identical':''}" data-idx="${n}" data-identical-group="${group.number}" title="第 ${group.number} 組相同字幕${joined?'（頭尾黏接）':''}" aria-label="前往第 ${n} 句字幕">${n}</button>`;
+  }).join(' '):'無';
   const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{
     const detail=[];
     if(simplified.length) detail.push('常見簡體：'+simplified.join('、'));
@@ -485,6 +507,7 @@ function renderSubList(){
     }
     while(cursor){ const next=cursor.nextSibling; cursor.remove(); cursor=next; }
   }
+  refreshIdenticalGroupMarkers();
   renderCheckPanel();
 }
 
@@ -552,6 +575,8 @@ function renderSubRow(id){
   }
   const txt=row.querySelector('.txt');
   if(txt&&txt.contentEditable!=='true') txt.innerHTML=_txtInner(c.text);
+  refreshIdenticalGroupMarkers();
+  renderCheckPanel();
 }
 
 function seekCueFromSelection(target, pointer) {

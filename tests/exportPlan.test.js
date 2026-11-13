@@ -233,6 +233,22 @@ describe('交付 argv：影像合成', () => {
   const env = (over = {}) => ({ hasAudioStream: () => false, ...over });
   const fcOf = args => args[args.indexOf('-filter_complex') + 1];
 
+  it('書籤 metadata input 置於影片與額外音訊之後，保留原 input index；未指定則禁止承襲母檔書籤', () => {
+    const base = spec({ format: 'h264', clips: [clip({ audio: [{ file: 'C:/source/other.wav', volume: 1 }] })] });
+    const plain = P.buildDeliveryArgv(base, env()).args;
+    expect(plain[plain.indexOf('-map_chapters') + 1]).toBe('-1');
+    const chapters = [{ start: 1, title: '第一章' }];
+    const prepared = P.prepareDeliveryPayload({ ...base, chapters });
+    expect(prepared.chapters).toEqual([{ start: 0, end: 1, title: '影片開始' }, { start: 1, end: 10, title: '第一章' }]);
+    const args = P.buildDeliveryArgv({ ...base, chapters, chapterFileName: 'chapters.ffmetadata' }, env()).args;
+    expect(args.filter((_, index) => args[index - 1] === '-i')).toEqual(['C:/source/master.mxf', 'C:/source/other.wav', 'chapters.ffmetadata']);
+    expect(args.slice(args.indexOf('chapters.ffmetadata') - 3, args.indexOf('chapters.ffmetadata') + 1)).toEqual(['-f', 'ffmetadata', '-i', 'chapters.ffmetadata']);
+    expect(args[args.indexOf('-map_chapters') + 1]).toBe('2');
+    expect(fcOf(args)).toBe(fcOf(plain));
+    expect(() => P.buildDeliveryArgv({ ...base, chapters }, env())).toThrow('中繼資料');
+    expect(() => P.prepareDeliveryPayload({ ...base, format: 'mod-fhd', chapters })).toThrow('不支援');
+  });
+
   it('隱藏視訊軌只略過畫面，母素材音訊仍依同一時間軸交付', () => {
     const { args } = P.buildDeliveryArgv(spec({ videoTracks: [{ vt: 0, visible: false }] }), env({ hasAudioStream: () => true }));
     const graph = fcOf(args);

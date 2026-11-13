@@ -445,6 +445,7 @@ const State = {
   overwriteKeep: true,  // 可覆蓋模式下：true=保留被包含句, false=刪除被包含句
   // 播放器監看用疊層。這是使用者偏好，不屬於專案／匯出資料，故只由 config 保存。
   timecodeWatermark: false,
+  previewMode: 'smooth',
   activeTrackKind: 'sub', // 目前焦點軌道類型：'sub' | 'video' | 'audio'
   activeSubTrack: 0,      // 目前選取的字幕軌道（用於上下鍵導航）
   clips: [],            // 影片序列（時間軸上的影片區塊，含 vtrack 視訊轨）：見 sequence.js
@@ -509,6 +510,7 @@ function applyConfig(conf) {
   if (typeof conf.overwriteKeep === 'boolean') State.overwriteKeep = conf.overwriteKeep;
   if (typeof conf.safeFrame === 'boolean') State.safeFrame = conf.safeFrame;
   if (typeof conf.timecodeWatermark === 'boolean') State.timecodeWatermark = conf.timecodeWatermark;
+  if (conf.previewMode === 'smooth' || conf.previewMode === 'original') State.previewMode = conf.previewMode;
 }
 
 async function loadConfig() {
@@ -522,7 +524,8 @@ function saveConfig() {
     overwriteMode: State.overwriteMode,
     overwriteKeep: State.overwriteKeep,
     safeFrame: State.safeFrame,
-    timecodeWatermark: State.timecodeWatermark
+    timecodeWatermark: State.timecodeWatermark,
+    previewMode: State.previewMode
   });
 }
 

@@ -72,6 +72,7 @@ it.each(['close', 'closeAllConnections'])('真 before-quit 的 HTTP %s 拋錯取
     app: { on: (_event, fn) => { beforeQuit = fn; }, quit() {} }, _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false,
     audioNormalizationJobs: new Map(), mediaProbe: null, ffmpegExecution: owner(), deliveryCapabilities: owner(),
     speechCompressionRuntime: owner(), vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(),
+    nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
     QueueManager: { prepareForShutdown: async () => {}, cancelShutdown: async () => {} },
     clipAudioCache: { waitForIdle: async () => {} }, clipFrameCache: { waitForIdle: async () => {} },
     screenshotOutput: { close: async () => {}, resume: async () => {} }, directoryOutput: { close: async () => {}, resume: async () => {} }, fileCommitCoordinator: { close: async () => {}, resume: async () => {} }, mpvHost: { disposeAndWait: async () => true, resume() {} },
@@ -82,6 +83,7 @@ it.each(['close', 'closeAllConnections'])('真 before-quit 的 HTTP %s 拋錯取
     beforeQuit({ preventDefault() {} });
     await vi.waitFor(() => expect(context._quitSequenceStarted).toBe(false));
     expect(faulted).toBe(true); expect(context._quitReady).toBe(false);
+    expect(context.nativeAudioMeter.stop).toHaveBeenCalledOnce();
     const next = await runtime.stream(request);
     if (next.completion) await next.completion;
     expect(await status((next.response || next).streamUrl)).toBe(200);

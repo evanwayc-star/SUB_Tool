@@ -2,6 +2,8 @@ import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { composeDeliveryAudioPlan } from './export-job-engine.js';
 import { renderASS } from './formats.js';
 import { secToEncore } from './time.js';
+import { effStyle, STYLE_DEFAULTS, styleMatchesPreset } from './substyle.js';
+import { normalizeDeliveryChapters } from '../shared/delivery-chapters.cjs';
 
 let nextDeliveryRequest = 0;
 const deliveryRequestId = () => `delivery-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${++nextDeliveryRequest}`}`;
@@ -12,14 +14,14 @@ const deliveryRequestId = () => `delivery-${globalThis.crypto?.randomUUID?.() ||
    the same interface with deferred local adapters. */
 
 export function freezeExportSubmission(snapshot, {
-  cues = [], tracks = [], fps = 25, dropFrame = false,
+  cues = [], tracks = [], notes = [], fps = 25, dropFrame = false,
   backgroundLayouts = {},
   mediaName = '', canvasW = 1920, canvasH = 1080,
   audioProject = null, defaultAudioLayout = {}, hasCustomRange = false,
 } = {}) {
   if (!snapshot) return null;
   return structuredClone({
-    ...snapshot, cues, tracks, backgroundLayouts, fps, dropFrame, mediaName,
+    ...snapshot, cues, tracks, notes, backgroundLayouts, fps, dropFrame, mediaName,
     canvasW, canvasH, audioProject, defaultAudioLayout, hasCustomRange,
   });
 }
@@ -69,6 +71,28 @@ export function burnedSubtitleTrackNames(tracks, cues = null) {
   }).filter(Boolean);
 }
 
+export function chaptersForSubmission(submission, { chapterNotes = false, chapterStyled = false, format = 'h264' } = {}) {
+  const chapters = [];
+  const start = Number(submission?.timelineStart) || 0;
+  const duration = Number(submission?.duration);
+  if (chapterNotes) {
+    for (const note of submission?.notes || []) {
+      if (Number.isFinite(note?.time) && note.time >= start && note.time < start + duration)
+        chapters.push({ start: note.time - start, title: `備註：${String(note.text || '').trim() || '未填寫內容'}` });
+    }
+  }
+  if (chapterStyled) {
+    // Same meaning as the editor's "自訂樣式（非預設）" filter, including
+    // inherited track styles and saved presets that differ from defaults.
+    for (const cue of subtitleCuesForSubmission(submission)) {
+      const track = submission.tracks?.[Number.isInteger(cue.track) ? cue.track : 0];
+      if (!styleMatchesPreset(effStyle(cue, track), STYLE_DEFAULTS))
+        chapters.push({ start: cue.start, title: `自訂字幕：${String(cue.text || '').trim() || '空白字幕'}` });
+    }
+  }
+  return normalizeDeliveryChapters(chapters, duration, format);
+}
+
 function subtitlePayloadForSubmission(submission) {
   const cues = subtitleCuesForSubmission(submission);
   if (!cues.length) return { assText: null, cues };
@@ -90,6 +114,7 @@ function buildExportJobs(submission, list) {
     // FPS-SYNC: output FPS changes the TC spelling, never timeline seconds.
     timecodeForFps: fps => secToEncore(expIn, fps, submission.dropFrame),
     composeAudioPlan: composeDeliveryAudioPlan, compiledAudioPlan: submission.audioPlan,
+    chaptersForRow: row => chaptersForSubmission(submission, row),
   });
 }
 

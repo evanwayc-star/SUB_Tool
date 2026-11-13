@@ -29,6 +29,7 @@
 import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { getDeliveryFormatPreset, getDeliveryFormatOption, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight } from '../shared/delivery-resolution.cjs';
+import { supportsDeliveryChapters } from '../shared/delivery-chapters.cjs';
 
 /** 交付格式對應的副檔名；未知格式一律當 MP4。 */
 export function extensionFor(format) {
@@ -107,6 +108,8 @@ function newRow({ audioOnly, defaultAudioLayout, outDir = '' }) {
     targetH: 0,
     targetFps: 0,
     burnTimecode: false,
+    chapterNotes: false,
+    chapterStyled: false,
     audioPlan: JSON.parse(JSON.stringify(defaultAudioLayout || {})),
     customName: '',
     outDir,
@@ -269,6 +272,12 @@ export function createDeliveryList({
         }
       } 
     },
+    setChapterOptions(i, options) {
+      const r = at(i); if (!r) return;
+      for (const key of ['chapterNotes', 'chapterStyled']) {
+        if (typeof options?.[key] === 'boolean') r[key] = options[key];
+      }
+    },
     setOutDir(i, dir) { const r = at(i); if (r) r.outDir = dir || ''; },
 
     setName(i, value) {
@@ -336,7 +345,7 @@ export function createDeliveryList({
      * 這裡是「交付規格 → 匯出工作」的唯一轉換點：解析度、時間碼浮水印、
      * 輸出路徑都在這裡決定，呼叫端只負責把 snapshot 與 assText 遞進來。
      */
-    toJobs({ clips, videoTracks, duration, assText, subtitleTracks, timelineStartTimecode, timecodeForFps, composeAudioPlan, compiledAudioPlan }) {
+    toJobs({ clips, videoTracks, duration, assText, subtitleTracks, timelineStartTimecode, timecodeForFps, composeAudioPlan, compiledAudioPlan, chaptersForRow }) {
       return rows.map(r => {
         const isWav = r.format === 'wav';
         const preset = getDeliveryFormatPreset(r.format);
@@ -373,6 +382,7 @@ export function createDeliveryList({
           videoKbps: spec.videoKbps,
           audioPlan,
           timecodeWatermark: spec.timecodeWatermark,
+          chapters: supportsDeliveryChapters(r.format) && chaptersForRow ? chaptersForRow(r) : [],
           /* 即使這一列沒有勾燒入 TC 也要存起來：匯出佇列監控可以事後把 TC 打開，
              那時必須用【送出當下的時間軸起點】重建 watermark。少了它就只能猜
              00:00:00:00——設過 In 點的專案會燒出錯的時間碼，而且畫面一切正常。 */
@@ -386,7 +396,7 @@ export function createDeliveryList({
 
   // A later edit owns a new draft even when its fields subsequently return to
   // the captured values. No-op blur/change events do not revoke ownership.
-  for (const method of ['setFormat', 'setTargetHeight', 'setTargetFps', 'setKbps', 'setBurnTimecode', 'setOutDir', 'setName']) {
+  for (const method of ['setFormat', 'setTargetHeight', 'setTargetFps', 'setKbps', 'setBurnTimecode', 'setChapterOptions', 'setOutDir', 'setName']) {
     const mutate = api[method];
     api[method] = (index, ...args) => {
       const row = at(index), before = row ? JSON.stringify(row) : null;

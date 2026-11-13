@@ -105,6 +105,7 @@ function shutdownHandler(vocalRuntime, overrides = {}) {
     clipFrameCache: { waitForIdle: vi.fn().mockResolvedValue() },
     speechCompressionRuntime: nativeOwner(), mediaIngestCoordinator: nativeOwner(), mediaWaveformCoordinator: nativeOwner(),
     vocalWaveformRuntime: vocalRuntime,
+    nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
     QueueManager: { prepareForShutdown: vi.fn().mockResolvedValue(), cancelShutdown: vi.fn().mockResolvedValue(true) },
     mediaIntakeRuntime: { close: vi.fn().mockResolvedValue() },
     screenshotOutput: { close: vi.fn().mockResolvedValue(), resume: vi.fn().mockResolvedValue(true) },
@@ -374,19 +375,25 @@ describe('人聲模型的受限母素材 PCM 邊界', () => {
     expect(runtime.activeCount()).toBe(0);
   });
 
-  it('實際 main shutdown wiring 等人聲 PCM barrier 才清暫存及退出', async () => {
-    let resolveVocal;
+  it('實際 main shutdown wiring 等人聲 PCM 與音量表 barrier 才清暫存及退出', async () => {
+    let resolveVocal, resolveMeter;
     const vocalRuntime = {
       cancelAllAndWait: vi.fn(() => new Promise(resolve => { resolveVocal = resolve; })), resume: vi.fn(),
     };
     const { handler, context } = shutdownHandler(vocalRuntime);
+    context.nativeAudioMeter.stop.mockImplementation(() => new Promise(resolve => { resolveMeter = resolve; }));
     const preventDefault = vi.fn();
     handler({ preventDefault });
     await vi.waitFor(() => expect(vocalRuntime.cancelAllAndWait).toHaveBeenCalledOnce());
+    expect(context.nativeAudioMeter.stop).toHaveBeenCalledOnce();
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(context.mediaIntakeRuntime.close).not.toHaveBeenCalled();
     expect(context.app.quit).not.toHaveBeenCalled();
     resolveVocal();
+    await Promise.resolve(); await Promise.resolve();
+    expect(context.mediaIntakeRuntime.close).not.toHaveBeenCalled();
+    expect(context.app.quit).not.toHaveBeenCalled();
+    resolveMeter();
     await vi.waitFor(() => expect(context.app.quit).toHaveBeenCalledOnce());
     expect(context.clipAudioCache.waitForIdle).toHaveBeenCalledOnce();
     expect(context.mediaIntakeRuntime.close).toHaveBeenCalledOnce();

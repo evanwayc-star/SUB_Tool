@@ -141,7 +141,7 @@ it('母素材旁的 sidecar 是 junction 時，clearAll 不可刪除指向外部
   expect(fs.readFileSync(foreign,'utf8')).toBe('foreign');
 });
 
-it('母素材旁的 sidecar 是 junction 時，ingest 使用授權中央 cache，不寫入外部目錄',async()=>{
+it('母素材旁的 sidecar 是 junction 時，ingest 明確拒絕，不寫入外部或中央目錄',async()=>{
   root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-wave-alias-'));
   const tempRoot=path.join(root,'temp'),cacheRoot=path.join(root,'cache'),media=path.join(root,'media'),outside=path.join(root,'outside');
   for(const dir of [tempRoot,cacheRoot,media,outside])fs.mkdirSync(dir);
@@ -150,8 +150,8 @@ it('母素材旁的 sidecar 是 junction 時，ingest 使用授權中央 cache�
   const authority=new FileAuthority({internalDirectories:[tempRoot,cacheRoot]});authority.grantTrustedFile(source);
   const execute=vi.fn(async args=>{for(const file of args.filter(value=>typeof value==='string'&&/\.(mp4|wav|m4a)$/.test(value))) fs.writeFileSync(file,Buffer.alloc(131072));});
   const runtime=createMediaIntakeRuntime({tempRoot,cacheRoot,fileAuthority:authority,ffmpegExecution:{execute}});
-  const result=await runtime.ingest({src:source,duration:1,needsProxy:true,audio:[]});
-  expect(result.proxy.startsWith(cacheRoot+path.sep)).toBe(true);expect(fs.readdirSync(outside)).toEqual([]);
+  await expect(runtime.ingest({src:source,duration:1,needsProxy:true,audio:[]})).rejects.toMatchObject({code:'SIDECAR_CACHE_UNAVAILABLE'});
+  expect(execute).not.toHaveBeenCalled();expect(fs.readdirSync(outside)).toEqual([]);expect(fs.readdirSync(cacheRoot)).toEqual([]);
 });
 
 it('sidecar 寫入准入期間根被同名替換，不採用新根作快取並保留不確定探針',async()=>{
@@ -171,8 +171,8 @@ it('sidecar 寫入准入期間根被同名替換，不採用新根作快取並�
     }
     return open(file,...args);
   });
-  let result;try{result=await runtime.ingest({src:source,duration:1,needsProxy:true,audio:[]});}finally{spy.mockRestore();}
-  expect(swapped).toBe(true);expect(result.proxy.startsWith(cacheRoot+path.sep)).toBe(true);
+  try{await expect(runtime.ingest({src:source,duration:1,needsProxy:true,audio:[]})).rejects.toMatchObject({code:'SIDECAR_CACHE_UNAVAILABLE'});}finally{spy.mockRestore();}
+  expect(swapped).toBe(true);expect(execute).not.toHaveBeenCalled();expect(fs.readdirSync(cacheRoot)).toEqual([]);
   const foreignDir=path.join(sidecar,cacheKeyFor(source)),entries=fs.readdirSync(foreignDir);
   expect(entries).toContain('foreign');expect(entries.filter(name=>name!=='foreign')).toEqual([expect.stringMatching(/^\.wtest_/)]);
   expect(fs.readFileSync(path.join(foreignDir,'foreign'),'utf8')).toBe('foreign');
@@ -192,7 +192,7 @@ it('合法清除快取保留已授權根身分，後續舊式 cleanup 仍可正�
   expect(runtime.cleanupGeneratedFile(fresh)).toBe(true);expect(fs.existsSync(fresh)).toBe(false);
 });
 
-it.each([false,true])('真 main 啟動對動態 CACHE 根在既有=%s 時即捕獲權威',async alreadyExists =>{
+it.each([false,true].flatMap(alreadyExists=>[false,true].map(acceptance=>({alreadyExists,acceptance}))))('真 main CACHE 既有=$alreadyExists、驗收=$acceptance，只為驗收建立中央根並捕獲既有根權威',async ({alreadyExists,acceptance}) =>{
   root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-wave-alias-'));
   const tempRoot=path.join(root,'temp'),cacheRoot=path.join(root,'cache'),oldCache=path.join(root,'old-cache');fs.mkdirSync(tempRoot);
   if(alreadyExists)fs.mkdirSync(cacheRoot);
@@ -207,7 +207,13 @@ it.each([false,true])('真 main 啟動對動態 CACHE 根在既有=%s 時即捕�
     for(const value of Object.values(node)){if(Array.isArray(value))value.forEach(visit);else if(value&&typeof value==='object')visit(value);}
   };visit(tree);expect(registration).toBeTruthy();
   currentCache=cacheRoot;authority.grantInternalDirectory(cacheRoot);
-  vm.runInNewContext(main.slice(registration.start,registration.end),{fs,CACHE:cacheRoot,mediaIntakeRuntime:runtime,console});
+  vm.runInNewContext(main.slice(registration.start,registration.end),{fs,CACHE:cacheRoot,mediaIntakeRuntime:runtime,console,IS_TRANSPORT_ACCEPTANCE:acceptance});
+  if(!alreadyExists&&!acceptance){
+    expect(fs.existsSync(cacheRoot)).toBe(false);
+    fs.mkdirSync(cacheRoot);const foreign=path.join(cacheRoot,'wave.wav');fs.writeFileSync(foreign,'foreign');
+    expect(runtime.cleanupGeneratedFile(foreign)).toBe(false);expect(fs.readFileSync(foreign,'utf8')).toBe('foreign');
+    return;
+  }
   const original=path.join(cacheRoot,'wave.wav');fs.writeFileSync(original,'owned');expect(runtime.cleanupGeneratedFile(original)).toBe(true);
   fs.renameSync(cacheRoot,oldCache);fs.mkdirSync(cacheRoot);fs.writeFileSync(original,'foreign');
   expect(runtime.registerCleanupRoot(cacheRoot)).toBe(false);expect(runtime.cleanupGeneratedFile(original)).toBe(false);

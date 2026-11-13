@@ -14,14 +14,15 @@ describe('Proxy 聲道接手後的定位與起播同步',()=>{
 
   it.each([[0,'continue'],[80,'continue'],[250,'continue'],[80,'pause'],[80,'reset'],[80,'seek'],[250,'late-ack'],[250,'late-ack-slow'],[80,'ack-error'],
     [0,'video-buffering'],[0,'video-pause'],[0,'video-reset'],[0,'video-seek'],[0,'video-failure'],[0,'video-reply-after-progress'],
-    [0,'video-invalid-true'],[0,'video-invalid-false'],[0,'video-invalid-undefined'],[0,'video-invalid-clock'],[0,'video-buffering-16']])(
+    [0,'video-invalid-true'],[0,'video-invalid-false'],[0,'video-invalid-undefined'],[0,'video-invalid-clock'],[0,'video-buffering-16'],[0,'video-rebuffering']])(
     '同一來源兩個聲道定位準備相差 %i ms，%s 後不應回音或重播舊工作',async(readinessDelay,action)=>{
     vi.resetModules();
     document.body.innerHTML=readFileSync('index.html','utf8');
     const video=document.getElementById('video');
     video.pause=vi.fn();video.play=vi.fn(async()=>{});video.load=vi.fn();
     const ingest=deferred(),elements=[],trace=[],channelCount=action==='video-buffering-16'?16:2;
-    let Media,nativeMuted=false,nativePlaying=false,deferReadiness=false,nextPlayAck=null,nextPresentation=null,nextPlaybackReady=null;
+    let Media,nativeEvent,nativeMuted=false,nativePlaying=false,deferReadiness=false,nextPlayAck=null,nextPresentation=null,nextPlaybackReady=null;
+    const nativeProperty=(name,data)=>nativeEvent({event:'property-change',name,data,sourceSessionId:'mother'});
     const capture=event=>trace.push({event,nativeAudible:nativePlaying&&!nativeMuted,
       channels:elements.filter(element=>element.audible).map(element=>({src:element.src,time:element.currentTime}))});
     class AudioElement extends EventTarget{
@@ -72,12 +73,16 @@ describe('Proxy 聲道接手後的定位與起播同步',()=>{
       }),
       pause:vi.fn(async()=>{nativePlaying=false;capture('native-pause');}),
       present:vi.fn(async time=>{if(nextPresentation)await nextPresentation.promise;return {backend:'mpv',presentedSourceTime:time};}),
-      quit:vi.fn(async()=>{}),onEvent:vi.fn(),mute:vi.fn(async value=>{nativeMuted=value;capture('native-mute');})};
+      quit:vi.fn(async()=>{}),onEvent:vi.fn(callback=>{nativeEvent=callback;}),mute:vi.fn(async value=>{nativeMuted=value;capture('native-mute');})};
     Object.defineProperty(window,'subtool',{configurable:true,value:{isDesktop:true,mpv,
       stat:vi.fn(async()=>({exists:true,size:6_000_000_000})),
       probe:vi.fn(async()=>({duration:12,video:{codec:'mpeg2video',fps:25,width:1920,height:1080},audio:[{channels:channelCount}]})),
       ingest:vi.fn(()=>ingest.promise),fileURL:vi.fn(async path=>`file:///${path}`)}});
     ({Media}=await import('../src/media.js'));
+    const {State}=await import('../src/state.js');
+    // This fixture exercises the mother video's clock with cached audio.
+    // Switching the video to a smooth/local preview has separate coverage.
+    State.previewMode='original';
     try{
       await Media.loadDesktopMedia('C:/mother.mxf');
       Media.play();
@@ -137,15 +142,32 @@ describe('Proxy 聲道接手後的定位與起播同步',()=>{
           await vi.waitFor(()=>expect(elements.every(element=>element.audible)).toBe(true));
           expect(elements.map(element=>element.currentTime)).toEqual([8,8]);return;
         }
-        if(action==='video-reply-after-progress')Media.observeMpvEvent({event:'property-change',name:'time-pos',data:4.3});
+        if(action==='video-reply-after-progress')nativeProperty('time-pos',4.3);
         nextPlaybackReady.resolve({ready:true,sourceTime:4.04});
         await vi.waitFor(()=>expect(elements.every(element=>element.audible)).toBe(true));
         if(action==='video-reply-after-progress'){
           expect(elements.map(element=>element.currentTime)).toEqual([4.3,4.3]);return;
         }
         expect(elements.map(element=>element.play.mock.calls.length)).toEqual(Array(channelCount).fill(1));
+        if(action==='video-rebuffering'){
+          // A NAS source can briefly advance after seek, then run out of data.
+          // The cached audio must not repeatedly replay the same 200 ms while
+          // the native video's source clock remains at the accepted frame.
+          nativeProperty('paused-for-cache',true);
+          const stalledPositions=[];
+          for(let tick=0;tick<5;tick++){
+            for(const element of elements)element.advance(.2);
+            context.currentTime+=.2;
+            Media.syncAudioDrift();await flush();
+            stalledPositions.push(elements.map(element=>element.currentTime));
+          }
+          expect(elements.map(element=>element.play.mock.calls.length),JSON.stringify({stalledPositions,trace}))
+            .toEqual(Array(channelCount).fill(1));
+          expect(elements.some(element=>element.audible)).toBe(false);
+          return;
+        }
         for(const element of elements)element.advance(.2);
-        Media.observeMpvEvent({event:'property-change',name:'time-pos',data:4.24});
+        nativeProperty('time-pos',4.24);
         Media.syncAudioDrift();await flush();
         expect(elements.map(element=>element.play.mock.calls.length)).toEqual(Array(channelCount).fill(1));
         expect(elements.map(element=>element.currentTime)).toEqual(Array(channelCount).fill(4.2));
@@ -184,7 +206,7 @@ describe('Proxy 聲道接手後的定位與起播同步',()=>{
         }
         const elapsed=readinessDelay/1000;
         first.advance(elapsed);context.currentTime+=elapsed;
-        if(nativePlaying)Media.observeMpvEvent({event:'property-change',name:'time-pos',data:target+elapsed});
+        if(nativePlaying)nativeProperty('time-pos',target+elapsed);
         Media.syncAudioDrift();
         second.ready();await flush();
         if(action.startsWith('late-ack')||action==='ack-error'){
@@ -196,14 +218,14 @@ describe('Proxy 聲道接手後的定位與起播同步',()=>{
             expect(elements.some(element=>element.audible)).toBe(false);expect(nativePlaying).toBe(false);
             return null;
           }
-          Media.observeMpvEvent({event:'property-change',name:'time-pos',data:target+elapsed});
+          nativeProperty('time-pos',target+elapsed);
           if(action==='late-ack-slow')for(const element of elements)element.delayNextSeek=true;
           nextPlayAck.resolve();
           if(action==='late-ack-slow'){
             await vi.waitFor(()=>expect(elements.every(element=>element.seeking&&element.currentTime===target+elapsed)).toBe(true));
             first.ready();
             context.currentTime+=.4;
-            Media.observeMpvEvent({event:'property-change',name:'time-pos',data:target+elapsed+.4});
+            nativeProperty('time-pos',target+elapsed+.4);
             Media.syncAudioDrift();expect(first.audible).toBe(false);
             second.ready();
           }

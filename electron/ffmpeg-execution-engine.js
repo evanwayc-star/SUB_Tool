@@ -135,18 +135,20 @@ function videoEncoderCandidates(platform = process.platform) {
   return [];
 }
 
+const PREVIEW_PROXY_PROFILE = '480p-1000k-fast-v1';
 function previewVideoEncoderArgs(encoderName) {
+  const rate = ['-b:v', '1000k', '-maxrate', '1000k', '-bufsize', '2000k'];
   switch (encoderName) {
     case 'h264_videotoolbox':
-      return ['-c:v', 'h264_videotoolbox', '-b:v', '4M', '-realtime', '1', '-allow_sw', '1', '-bf', '0'];
+      return ['-c:v', 'h264_videotoolbox', ...rate, '-realtime', '1', '-allow_sw', '1', '-bf', '0'];
     case 'h264_nvenc':
-      return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '26', '-forced-idr', '1', '-bf', '0', '-delay', '0'];
+      return ['-c:v', 'h264_nvenc', '-preset', 'p1', '-rc', 'vbr', ...rate, '-forced-idr', '1', '-bf', '0', '-delay', '0'];
     case 'h264_qsv':
-      return ['-c:v', 'h264_qsv', '-global_quality', '26', '-bf', '0'];
+      return ['-c:v', 'h264_qsv', '-preset', 'veryfast', ...rate, '-bf', '0'];
     case 'h264_amf':
-      return ['-c:v', 'h264_amf', '-rc', 'cqp', '-qp_i', '26', '-qp_p', '26', '-bf', '0'];
+      return ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'vbr_peak', ...rate, '-bf', '0'];
     default:
-      return ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '26'];
+      return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', ...rate];
   }
 }
 
@@ -226,9 +228,9 @@ function createDeliveryCapabilities(options = {}) {
     signal?.throwIfAborted();
     const ffmpeg = getFFmpegPath();
     if (!ffmpeg) throw fail('DELIVERY_ENCODER_UNAVAILABLE', '找不到交付所需的 ffmpeg');
-    // Font staging belongs to the real delivery runner. This planning pass
-    // reads codec choices only; it must not require a staged drawtext font.
-    const plan = buildDeliveryArgv({ ...spec, timecodeWatermark: null }, {
+    // Font and chapter staging belong to the real delivery runner. This pass
+    // reads codec choices only; neither staged artifact exists at admission.
+    const plan = buildDeliveryArgv({ ...spec, timecodeWatermark: null, chapters: null }, {
       hwdecArgs: encoder.hwdecArgs, vencArgsBitrate: encoder.bitrateArgs,
       proresArgs: encoder.proresArgs, encoderName: encoder.name?.() || null,
     });
@@ -487,7 +489,7 @@ function buildIngestArgs({
   if (fc && fc.length) args.push('-filter_complex', fc.join(';'));
 
   if (needsProxy && proxyPath) {
-    let vf = 'setpts=PTS-STARTPTS,scale=-2:720,format=yuv420p';
+    let vf = 'setpts=PTS-STARTPTS,scale=-2:480,format=yuv420p';
     // Freeze the source interpretation before changing its dimensions. Chromium
     // replaces incomplete H.264 color metadata as a whole using source height,
     // even when a matrix alone was tagged; fully specified sources retain theirs.
@@ -501,13 +503,13 @@ function buildIngestArgs({
       // tagged 709 Proxy; relabeling an implicit 601 conversion would alter color.
       const primaries = missingColor(video.colorPrimaries) ? 'bt709' : 'auto';
       const transfer = missingColor(video.colorTransfer) ? 'bt709' : 'auto';
-      vf = `setpts=PTS-STARTPTS,scale=-2:720:out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=${primaries}:color_trc=${transfer}:range=limited`;
+      vf = `setpts=PTS-STARTPTS,scale=-2:480:out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=${primaries}:color_trc=${transfer}:range=limited`;
     } else if (video?.codec === 'vp9' && vp9FrameMatrix && incompleteColor) {
       // Chromium's VP9 decoder expands the bitstream's SDR color enum into a
       // complete color space. H.264 would discard this partial tag after resize.
       // Complete the tag after scaling so FFmpeg keeps the decoded sample values.
       const range = missingColor(video.colorRange) ? 'limited' : 'auto';
-      vf = `setpts=PTS-STARTPTS,scale=-2:720,format=yuv420p,setparams=colorspace=${vp9FrameMatrix}:color_primaries=${vp9FrameMatrix}:color_trc=${vp9FrameMatrix}:range=${range}`;
+      vf = `setpts=PTS-STARTPTS,scale=-2:480,format=yuv420p,setparams=colorspace=${vp9FrameMatrix}:color_primaries=${vp9FrameMatrix}:color_trc=${vp9FrameMatrix}:range=${range}`;
     } else if (video?.width > 0 && video?.height > 0
       && (usesFrameColor ? missingColor(video.colorSpace) : incompleteColor)) {
       // Chromium's natural size grows height for narrow pixels (SAR < 1).
@@ -518,11 +520,11 @@ function buildIngestArgs({
       const primaries = usesFrameColor && !missingColor(video.colorPrimaries) ? 'auto' : matrix;
       const transfer = usesFrameColor && !missingColor(video.colorTransfer) ? 'auto' : matrix;
       const range = missingColor(video.colorRange) ? 'limited' : 'auto';
-      vf = `setpts=PTS-STARTPTS,setparams=colorspace=${matrix}:color_primaries=${primaries}:color_trc=${transfer}:range=${range},scale=-2:720,format=yuv420p`;
+      vf = `setpts=PTS-STARTPTS,setparams=colorspace=${matrix}:color_primaries=${primaries}:color_trc=${transfer}:range=${range},scale=-2:480,format=yuv420p`;
     }
     if (pipeline?.mode === 'cuda' || pipeline?.mode === 'cuda-upload') {
       const upload = pipeline.mode === 'cuda-upload' ? 'format=yuv420p,hwupload_cuda,' : '';
-      vf = vf.replace('scale=-2:720,format=yuv420p', `${upload}scale_cuda=-2:720:format=yuv420p:interp_algo=bicubic`);
+      vf = vf.replace('scale=-2:480,format=yuv420p', `${upload}scale_cuda=-2:480:format=yuv420p:interp_algo=bicubic`);
     }
     const vencArgs = previewVideoEncoderArgs(encoder);
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
@@ -983,6 +985,7 @@ function createFFmpegExecution(options = {}) {
 }
 
 module.exports = {
+  PREVIEW_PROXY_PROFILE,
   buildIngestArgs,
   bundledNativeRequirements,
   createFFmpegExecution,

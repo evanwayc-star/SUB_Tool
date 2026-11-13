@@ -150,6 +150,9 @@ function mergeRendererConfig(current, incoming) {
       next[key] = incoming[key];
     }
   }
+  if (incoming.previewMode === 'smooth' || incoming.previewMode === 'original') {
+    next.previewMode = incoming.previewMode;
+  }
   if (Array.isArray(incoming.subPresets)) {
     next.subPresets = incoming.subPresets;
   }

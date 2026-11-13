@@ -43,6 +43,25 @@ function fixture(contents, fsModule = fs) {
   return { root, filePath, settings: createSettingsFile({ filePath: () => filePath, fsModule }) };
 }
 
+function fsWithClosedStage(update, overrides = {}) {
+  const writers = new Map();
+  return { ...fs, ...overrides,
+    openSync(file, ...args) {
+      const fd = fs.openSync(file, ...args);
+      if (args[0] === 'wx') writers.set(fd, file);
+      return fd;
+    },
+    closeSync(fd) {
+      const file = writers.get(fd), before = file ? fs.fstatSync(fd, { bigint: true }) : null;
+      writers.delete(fd); fs.closeSync(fd);
+      if (file) {
+        fs.utimesSync(file, before.atime, new Date(Number(before.mtimeMs) + 2000));
+        update(file, before);
+      }
+    },
+  };
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) {
     const resolved = fs.realpathSync(root);
@@ -53,6 +72,76 @@ afterEach(() => {
 });
 
 describe('settings.json 的同步寫入交易', () => {
+  it('NAS 只在關檔更新時間戳時仍儲存設定，不留下本次完整 tmp', () => {
+    let stage, descriptor, beforeClose, afterClose;
+    const injected = { ...fs,
+      openSync(file, ...args) {
+        const fd = fs.openSync(file, ...args);
+        if (args[0] === 'wx') { stage = file; descriptor = fd; }
+        return fd;
+      },
+      closeSync(fd) {
+        if (fd !== descriptor) return fs.closeSync(fd);
+        beforeClose = fs.fstatSync(fd, { bigint: true });
+        fs.closeSync(fd); descriptor = null;
+        fs.utimesSync(stage, beforeClose.atime, new Date(Number(beforeClose.mtimeMs) + 2000));
+        afterClose = fs.lstatSync(stage, { bigint: true });
+      },
+    };
+    const { filePath, settings } = fixture('{"safeFrame":true}', injected);
+    let error;
+    try { settings.update(current => ({ ...current, safeFrame: false })); } catch (caught) { error = caught; }
+    expect(afterClose.ino).toBe(beforeClose.ino); expect(afterClose.size).toBe(beforeClose.size);
+    expect(afterClose.mtimeNs).not.toBe(beforeClose.mtimeNs);
+    expect.soft(error).toBeUndefined();
+    expect.soft(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ safeFrame: false });
+    expect(fs.existsSync(stage)).toBe(false);
+  });
+
+  it.each(['partial-write', 'rename'])('NAS %s 失敗關檔更新時間戳，只清理本次設定 tmp', failure => {
+    let stage;
+    const fault = Object.assign(new Error(failure + ' failed'), { code: 'EIO' });
+    const injected = fsWithClosedStage(file => { stage = file; }, {
+      writeFileSync(target, content, ...args) {
+        if (failure === 'partial-write') { fs.writeFileSync(target, Buffer.from(content).subarray(0, 8)); throw fault; }
+        return fs.writeFileSync(target, content, ...args);
+      },
+      renameSync(...args) { if (failure === 'rename') throw fault; return fs.renameSync(...args); },
+    });
+    const { root, filePath, settings } = fixture('{"safeFrame":true}', injected);
+    expect(() => settings.update(() => ({ safeFrame: false }))).toThrow(fault);
+    expect(fs.readFileSync(filePath, 'utf8')).toBe('{"safeFrame":true}');
+    expect(fs.existsSync(stage)).toBe(false);
+    expect(fs.readdirSync(root)).toEqual(['settings.json']);
+  });
+
+  it.each(['normal', 'failed-write'].flatMap(phase => ['replacement', 'append', 'same-size'].map(change => [phase, change])))
+  ('NAS %s 關檔時間更新並遇到 %s 外部變動，拒絕發布且保留外部 tmp', (phase, change) => {
+    let stage, external;
+    const fault = new Error('partial write failed');
+    const injected = fsWithClosedStage((file, before) => {
+      stage = file;
+      const intended = fs.readFileSync(file);
+      if (change === 'replacement') {
+        fs.renameSync(file, file + '.original'); external = intended; fs.writeFileSync(file, external);
+        expect(fs.lstatSync(file, { bigint: true }).ino).not.toBe(before.ino);
+      } else {
+        external = change === 'append' ? Buffer.concat([intended, Buffer.from('external')]) : Buffer.alloc(intended.length, 0x58);
+        fs.writeFileSync(file, external);
+        expect(fs.lstatSync(file, { bigint: true }).ino).toBe(before.ino);
+      }
+    }, {
+      writeFileSync(target, content, ...args) {
+        if (phase === 'failed-write') { fs.writeFileSync(target, Buffer.from(content).subarray(0, 8)); throw fault; }
+        return fs.writeFileSync(target, content, ...args);
+      },
+    });
+    const { filePath, settings } = fixture('{"safeFrame":true}', injected);
+    expect(() => settings.update(() => ({ safeFrame: false }))).toThrow(phase === 'failed-write' ? fault : /設定檔/);
+    expect(fs.readFileSync(filePath, 'utf8')).toBe('{"safeFrame":true}');
+    expect(fs.readFileSync(stage)).toEqual(external);
+  });
+
   it('設定暫存檔被替換時不發布替代內容，也不刪除替代檔', () => {
     let stage, descriptor, swapped=false;
     const injected = { ...fs,

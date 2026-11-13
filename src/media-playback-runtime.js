@@ -13,6 +13,16 @@ export class MediaPlaybackRuntime {
 
   constructor(media) { this.media = media; }
 
+  // Revoke before cancellation can synchronously deliver element events.
+  // Every stop/seek/reset shares this ordering; buffering may keep its owner
+  // while replacing only an in-flight follower start.
+  cancelStart({buffering=true}={}) {
+    const media=this.media,start=media._presenterStart;
+    media._presenterStart=null;
+    if(buffering)media._nativeBuffering=null;
+    start?.cancel?.();
+  }
+
   reset() {
     this.#overlapKey = null;
     this.invalidateExternalActivity();

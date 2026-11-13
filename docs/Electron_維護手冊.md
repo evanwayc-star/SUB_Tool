@@ -48,10 +48,12 @@ flowchart LR
 | `delivery-consent.js` | main 持有的交付目的檔預檢與單次收據 |
 | `diagnostic-log.js` | 每次執行記錄的身分、保留、讀取及回收 |
 | `audio-normalization-runtime.js` | 聲量量測、平衡階段及原生取消 |
+| `native-audio-meter.js` | 播放快取前的逐 stream／channel PCM 電平取樣與程序生命週期 |
 | `vocal-waveform-runtime.js` | 人聲分析的受限 PCM 讀取與逐 sender 取消 |
 | `vocal-waveform-fingerprint.js` | 人聲波形來源指紋的 namespace adapter |
 | `speech-audio-compressor.js` | 辨識 WAV 的受限壓縮及取消 |
 | `mpv-host.js` | Windows mpv、named pipe、視窗及呈現證據 |
+| `mpv-window-region.js` | 原生畫面範圍驗證、CSS 到 DIP 轉換及浮動視窗遮擋區域 |
 | `compare-window.js` | 比較視窗身分、快照及 revision |
 | `export-queue.js`、`queue-store.js` | 排程、狀態、journal、歷史及復原 |
 | `delivery-runner.js`、`export-plan.js` | 交付准入／probe 與純交付計畫 |
@@ -68,9 +70,9 @@ flowchart LR
 
 Preload 以 `webUtils.getPathForFile()` 從真正的 File 取得路徑。一般媒體送 `fs:authorizeDroppedFile` 授予精確來源能力；`.subtool`／`.json` 走可信專案開啟入口，不使用一般拖放授權。Renderer 提供的 path 或 base64 不能擴張能力。
 
-樣式資料夾匯入只讀所選根目錄內的 JSON，不追 junction／symlink，回傳內容而不授予整目錄讀取權。單檔字幕／XLSX 與目錄批次輸出共用 `directory-output.js`：同時檢查相對名稱與實體父目錄，在所選根內以 `wx+` 建私有暫存檔；寫入及同步後透過同一 handle 分塊比對預期 bytes，再核對 handle 與關閉後的暫存路徑身分、大小及時間，避免將同 inode 被改寫的內容當成完成輸出。發布前重核根目錄及目的檔身分、狀態與完整內容 SHA-256，再次核對暫存檔內容後才 rename 替換；可偵測同 inode、同長度且時間戳相同的內容改寫。暫存檔被修改時保留該檔與原目的檔；目的檔在寫入期間變更時保留對方內容並提示重新確認。內容核對與 rename 仍是分離的系統呼叫，並非跨程序原子操作。合法空檔仍可發布，寫入失敗則保留原檔；尚無完整寫入快照時，只清理身分與狀態仍符預留證據的空暫存檔，保留無法區分來源的部分資料。遇既有 hardlink 只替換該檔名，不能截斷其他位置共用的檔案。批次若有項目被略過，回報實際寫入及略過數；衝突項另提示原因，已成功的檔案保留，不能宣稱整批完成。根目錄身分失效時不按舊路徑清理暫存，避免觸及替換目錄內的檔案。
+樣式資料夾匯入只讀所選根目錄內的 JSON，不追 junction／symlink，回傳內容而不授予整目錄讀取權。單檔字幕／XLSX 與目錄批次輸出共用 `directory-output.js`：同時檢查相對名稱與實體父目錄，在所選根內以 `wx+` 建私有暫存檔；寫入及同步後透過同一 handle 分塊比對預期 bytes。NAS／SMB 可能直到關閉寫入 handle 才更新時間戳，因此關檔後須先確認仍是同一檔案、mode 與大小不變，並以完整內容 SHA-256 及讀取前後快照核對預期 bytes，才採用關檔後的時間戳。不能只因 inode 與大小相同就放行；完成此核對後才檢查目的檔衝突，使正常時間更新不會導致匯出失敗或遺留已驗證的暫存。發布前重核根目錄及目的檔身分、狀態與完整內容 SHA-256，再次核對暫存檔內容後才 rename 替換；可偵測同 inode、同長度且時間戳相同的內容改寫。暫存檔被修改時保留該檔與原目的檔；目的檔在寫入期間變更時保留對方內容並提示重新確認。內容核對與 rename 仍是分離的系統呼叫，並非跨程序原子操作。合法空檔仍可發布，寫入失敗則保留原檔；尚無完整寫入快照時，只清理身分與狀態仍符預留證據的空暫存檔，保留無法區分來源的部分資料。遇既有 hardlink 只替換該檔名，不能截斷其他位置共用的檔案。批次若有項目被略過，回報實際寫入及略過數；衝突項另提示原因，已成功的檔案保留，不能宣稱整批完成。根目錄身分失效時不按舊路徑清理暫存，避免觸及替換目錄內的檔案。
 
-同步失敗後清理已寫入的目錄輸出暫存檔時，須同時確認完整長度及完整內容；只吻合預期前綴不足以刪除他人追加的尾端。檢查與刪除仍不是跨程序原子操作。
+同步失敗後清理已寫入的目錄輸出暫存檔時，須同時確認完整長度及完整內容；只吻合預期前綴不足以刪除他人追加的尾端。若錯誤收尾才關閉 handle，亦須在這次關閉後核對身分、mode、長度及完整內容，才能採用 NAS 最後更新的時間戳；清理不得發布失敗的輸出或掩蓋原始同步錯誤。沒有關檔邊界時仍嚴格比對原快照，不因時間戳變更而重新授權。檢查與刪除仍不是跨程序原子操作。
 
 字幕及樣式輸出在准入時先向 `file-commit-coordinator.js` 預留整批合法目的檔，再由 worker thread 執行寫入與內容核對，避免大檔雜湊卡住主程序。專案存檔、截圖候選保留與截圖寫入共用同一協調器；同一實體目錄項依准入順序交易，不同目的檔可並行。無效或連結項目不取得寫入資格，合法項仍可完成；worker 等待後重核選定根目錄。協調器辨識 Windows 短名稱及不存在的巢狀目錄，不把不同 hardlink 名稱當作同一目錄項。這是程式內排序，不能約束外部程序；退出時停止新准入並等待已接受的 worker、專案寫入及截圖收尾。
 
@@ -80,7 +82,7 @@ Preload 以 `webUtils.getPathForFile()` 從真正的 File 取得路徑。一般�
 
 Save As 的媒體路徑必須已有讀權。`createAtomicProjectWriter()` 同時持有目錄準備、私有暫存及發布；main 不先以遞迴 mkdir 準備 renderer 傳入的路徑。所選根目錄可以是掛載／連結位置，`.subtool_AutoSave` 及其子目錄則逐層核對實體目錄與 dev／ino，不沿連結寫到其他位置。每筆工作等同目標前一筆完成後，透過實際開啟的 handle 分塊讀取目的檔，核對讀前後身分及路徑，記錄完整內容雜湊。暫存放在所選實體根，完成 write／sync／close 後重核目錄、目的檔與暫存的身分及內容，才 rename；寫入期間目的檔新增、移除、替換或內容改變時拒絕發布，保留既有目的檔。未完成寫入時只清理仍符預留證據的空暫存，無法區分來源的部分資料予以保留。檢查與 rename 仍是分離的系統呼叫。
 
-SMB 儲存可能在 writer 關閉時才更新 mtime／ctime。關檔後先確認暫存仍是原 dev／ino、mode 與長度，再透過唯讀 handle 核對完整預期 SHA 及讀前後快照；全部吻合後，以這份關閉後快照作為發布及清理的依據。後續仍嚴格比對時間戳與完整內容，因此正常關檔不會被誤判成外部改寫，同 inode 的內容變更仍會拒絕發布並保留暫存。自動備份收到失敗或未知回覆時，只有仍屬原工作區及儲存路徑才在狀態列提示失敗，不將晚到結果回報到新專案。
+SMB 儲存可能在 writer 關閉時才更新 mtime／ctime。關檔後先確認暫存仍是原 dev／ino、mode 與長度，再透過唯讀 handle 核對完整預期 SHA 及讀前後快照；全部吻合後，以這份關閉後快照作為發布及清理的依據。此核對也涵蓋完整寫入後 sync 失敗、直到 finally 才關檔的情況；只清理本次可驗證的完整暫存，保留原專案及原始錯誤。後續仍嚴格比對時間戳與完整內容，因此正常關檔不會被誤判成外部改寫，同 inode 的內容變更仍會拒絕發布並保留暫存。自動備份收到失敗或未知回覆時，只有仍屬原工作區及儲存路徑才在狀態列提示失敗，不將晚到結果回報到新專案。
 
 原專案儲存與自動備份沿用可信開檔／另存當時的父目錄身分，不能在下一次寫入時把同名替代目錄重新認成原根。備份根重疊時先選最具體的資格再核對，子根失效不能退回祖先資格。原生另存取得新的明確選擇後才建立新資格；writer 在準備、等待後與發布前都重核該資格，不能只依路徑字串或 `canWriteProject()` 的一次布林結果。
 
@@ -102,7 +104,7 @@ Windows 的同步與非同步實體路徑核對都使用 native realpath，將 8
 
 ### 設定檔持久化
 
-`settings-file.js` 分別持有 settings.json 與 key.json。更新先寫相鄰暫存檔，發布前重核暫存與目的檔的身分及實際內容；設定期間目的檔變更即拒絕覆寫。失敗只清理仍屬本次且內容符合已寫入前綴的暫存檔，發布後不再按舊名稱刪檔；無法確認歸屬的內容保留。這些核對與 rename、unlink 仍是分離的系統呼叫，不能排除其他程序在最後檢查後改動。解析失敗須先保存 `.corrupt-*` 原始 bytes，無法備份就拒絕覆寫。失敗須傳回 caller，不能把 false 視為保存成功。設定位置與驗收隔離方式見[CDP 流程](開發與驗證.md#3-真機驗證cdp)。
+`settings-file.js` 分別持有 settings.json 與 key.json。更新先寫相鄰暫存檔，發布前重核暫存與目的檔的身分及實際內容；設定期間目的檔變更即拒絕覆寫。正常及失敗收尾的關檔邊界，都以同一 owner、mode、長度及實際 bytes 驗證後採用關檔時間戳；之後恢復嚴格快照核對。失敗只清理仍屬本次且內容符合已寫入前綴的暫存檔，發布後不再按舊名稱刪檔；無法確認歸屬的內容保留。這些核對與 rename、unlink 仍是分離的系統呼叫，不能排除其他程序在最後檢查後改動。解析失敗須先保存 `.corrupt-*` 原始 bytes，無法備份就拒絕覆寫。失敗須傳回 caller，不能把 false 視為保存成功。設定位置與驗收隔離方式見[CDP 流程](開發與驗證.md#3-真機驗證cdp)。
 
 最近專案讀取失敗只允許暫時顯示空清單，不取得新增或移除項目的合併資格；之後讀取成功才更新，避免以空值覆寫已保存清單。對話框目錄讀錯不快取空物件，記住新目錄時從交易內的 `current.lastDirs` 合併，成功後才更新顯示快取，保留其他種類的開檔目錄。
 
@@ -144,9 +146,8 @@ API 前綴皆為 `window.subtool`。`isDesktop` 是值；`getFilePath(file)` 只
 | `writeScreenshot(path, b64, token)` | `fs:writeScreenshot` | 消耗同一 reservation 憑證並發布 JPEG |
 | `openPath(path)` | `app:openPath` | 開啟允許的路徑 |
 | `openExternal(url)` | `app:openExternal` | 允許的外部 URL |
-| `cacheInfo(src?)` | `cache:info` | 中央統計及已授權目前來源的 sidecar 保存紀錄；省略來源只查中央統計 |
-| `cacheCleanOrphans()` | `cache:cleanOrphans` | 保守清除孤兒 |
-| `cacheClearAll(src)` | `cache:clearAll` | 清中央快取及指定母素材的 sidecar，保留使用中的 writer／reader |
+| `cacheInfo(src?)` | `cache:info` | 只查已授權目前來源的 sidecar 保存紀錄；無來源直接回空結果，不掃描中央快取 |
+| `cacheClearAll(src)` | `cache:clearAll` | 名稱保留相容，實際委派 `clearSource`，只清指定母素材的 sidecar；必須通過來源讀取權限，保留使用中的 writer／reader |
 | `configLoad()` | `config:load` | 讀設定 |
 | `configSave(data)` | `config:save` | 設定交易 |
 | `keysLoad()` | `keys:load` | 讀快捷鍵 |
@@ -179,6 +180,8 @@ API 前綴皆為 `window.subtool`。`isDesktop` 是值；`getFilePath(file)` 只
 | `waveAudio(path, duration)` | `ffmpeg:waveAudio` | 首條音軌波形 |
 | `clipFrame(request)` | `ffmpeg:clipFrame` | 已授權母素材 path、來源 time、fps |
 | `reverseAudio(request)` | `audio:reverse-clip` | path、遞增 in／out、sourceStream |
+| `readAudioMeter(request)` | `audio:meterRead` | 已授權母素材 path、來源 time、rate，及可選 mixes（busId、來源聲道座標與 gain）；回傳聲道及混音 bus 峰值 |
+| `stopAudioMeter()` | `audio:meterStop` | 撤銷取樣並等待自己的解碼程序結束 |
 | `vocalWaveFingerprint(path)` | `audio:vocal-wave-fingerprint` | 人聲波形來源指紋 |
 | `audioSourceFingerprint(path)` | `audio:vocal-wave-fingerprint` | 同一來源指紋介面，供音訊效果核對 |
 | `vocalWaveChunk(request)` | `audio:vocal-wave-chunk` | path、來源 start／duration、requestId、sourceStream／sourceChannel |
@@ -219,9 +222,11 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `pause()` | `mpv:pause` | 暫停 |
 | `direction(value)` | `mpv:direction` | 播放方向 |
 | `mute(value)` | `mpv:mute` | 等待靜音命令成功 ACK；失敗／斷線不能宣稱聲音已交接 |
+| `audioMix(request)` | `mpv:audioMix` | 主 renderer 傳目前 sourceSessionId、逐聲道座標與 gain；host 核對來源後套用混音，不接受濾鏡字串 |
 | `rate(value)` | `mpv:rate` | 速度 |
 | `brightness(value)` | `mpv:brightness` | 亮度 |
 | `setBounds(bounds)` | `mpv:setBounds` | 視窗幾何 |
+| `setViewport(viewport)` | `mpv:setViewport` | 僅主 renderer 可傳影片 bounds、visible 與 occluders；同次更新位置、可見性及局部遮擋 |
 | `setProjectCanvas(size)` | `mpv:setProjectCanvas` | 主視窗傳 `{ width, height }` 或 `null`（自動）。不同比例等比例縮放後補黑邊。等同來源及設定的實際輸出畫格就緒才完成 |
 | `show(value)` | `mpv:show` | 可見性 |
 | `setGuide(guide)` | `mpv:setGuide` | 字幕 guide |
@@ -282,7 +287,9 @@ Callback 包裝不把 Electron event 交給頁面。部分 API 替換舊 listene
 
 ### 媒體 intake
 
-Runtime 接受 probe 結果，建立 720p 預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。
+Runtime 接受 probe 結果，在母素材旁建立 480p、1000 kb/s 的預覽 Proxy、逐聲道音訊與波形。Proxy 與其他管理快取只供預覽，交付准入必須拒絕它們；不能只依 basename 封鎖，快取外同名母素材仍是合法來源。固定畫面 PNG 與反向 PCM 也分別寫入同一素材旁 `.subtool_Cache/clip-frames`、`.subtool_Cache/clip-audio`；隔離驗收明確指定的測試 profile 除外。
+
+單聲道 stream 仍可能帶 `DL`、`DR`、`FL`、`LFE` 等喇叭位置標記。`buildAudioIngestPlan()` 在來源時鐘對齊後以 `pan=mono|c0=c0` 一對一取原聲道，明確給預覽 AAC 標準 Mono layout；不做喇叭混音或音量衰減，來源 stream／channel 座標保持不變。不能依賴同時輸出的 Mono 波形替 filtergraph 協商 layout，因為重用完整波形時不會輸出該 WAV，原標記便可能直接進 AAC 而失敗。`mediaIntakeSourceTiming.test.js` 以八種真實 MOV 單聲道標記、已完成波形重用及獨立頻率驗證各軌與 MIX 內容。
 
 Renderer 的 `MediaIntakeJobs` 分別持有在途請求與可重試的失敗／停止紀錄。停止立即撤銷原 session 的結果資格，保留可核對的保存紀錄；重試建立新請求，先比對原母素材證據及工作區／片段來源資格。載入後的來源指紋在註冊當下凍結，不能在重試時把已原地換檔的片段當成原來源。串流 IPC 先回可播網址、之後轉檔失敗時仍保留重試入口；網址、metadata、初始定位或音訊載入失敗也須回報終態，不能留下永久 `working` 的恢復紀錄。公開入口與競態回歸見[產品驗收](開發與驗證.md#46-產品驗收與證據)。
 
@@ -292,7 +299,7 @@ Renderer 的 `MediaIntakeJobs` 分別持有在途請求與可重試的失敗／�
 
 一般 `ingest` 與 `streamIngest` 的共同計畫都必須帶 `duration`；沿用波形時核對 `round(duration * 4000)`、音訊配置、原共享來源證據及 wave 檔案快照。worker 完成結果將原證據交回 main，不以之後新取得的來源指紋替舊 wave 認證。同目錄直接引用正式 wave，必要時在持有來源資格下複製；完成 metadata 保存相對路徑，下一個 runtime 可沿用。完整波形已命中時不再輸出第二份混音 WAV；這不省略仍缺少的 Proxy 或逐聲道音訊。
 
-側車不可寫時沿用中央快取退路；key 目錄可寫但連續波形子目錄開啟遇到 `EACCES`／`EPERM`／`EROFS`／`ENOSPC`，也只在開始寫入前重試中央快取。來源或目錄身分失效不適用退路；開始保存後的寫入失敗明確回報並保留既有 checkpoint，不假報完成。中央退路不是跨電腦共享。`ignoreCached:true` 建立新的 writer 世代，不沿用舊前綴或完成檔，也不刪除舊成果。
+素材旁快取不可寫時明確回報，不退到本機中央快取；子目錄的權限或容量錯誤也不能轉移儲存位置。開始保存後的寫入失敗保留既有 checkpoint，不假報完成。`ignoreCached:true` 建立新的 writer 世代，不沿用舊前綴或完成檔，也不刪除舊成果。`allowSidecarCache:false` 僅供隔離驗收，避免測試寫入使用者 NAS，並非正式版的自動退路。
 
 保存規格綁定共享來源證據、混音／時鐘版本、音訊配置及總 sample 數。完整命中驗證 PCM SHA-256 後唯讀交接，不另建 writer；partial 命中則核對已保存前綴，再複製到自己的 writer 世代，不接管或覆寫另一台電腦的 writer。續算以整數 sample 決定完成點前三秒的整秒解碼起點，逐樣本比對已保存的最後一秒；若 decoder／resampler 歷史造成不一致，最多回來源起點一次，核對全部既有前綴後再追加，不能拼接錯位 PCM。不同格式的續算成本因此可能不同。
 
@@ -320,21 +327,27 @@ mpv／原生直讀可在主素材註冊後啟動背景波形；需要先做 inta
 
 每個 writer 在自己的 `generation-<隨機識別>/cache-meta.json` 原子發布完成紀錄，這才是真正提交點；根目錄 `meta.json` 只供相容索引使用，寫入失敗不撤銷已完成產物。來源證據一完成就獨立保存 `source-<本機 key>.json` receipt，不等轉檔，也不回寫整份產物索引。只有 receipt 代表該格式的來源核對完成，不能假報 Proxy、聲道或完整波形已完成；之後轉檔失敗或取消，重開仍可沿用來源證據。讀取由同一 owner 合併同格式、相同來源證據及相容聲道配置的完成元件，避免較晚的 writer 或身分補記抹掉另一行程剛補齊的音訊；不以遠端 PID 或逾時搶鎖判定跨電腦所有權。只有既有 `meta.json` 的舊快取仍可讀取。
 
-同一 NAS 檔案以 `sharedSourceFingerprintSync()` 識別：canonical UNC 的 server／share、檔名、size、inode、mtime／ctime／birthtime 的完整奈秒值及前／中／尾取樣共同雜湊，排除 client 的 dev 與掛載路徑；讀取起訖仍核對本次 handle、路徑與完整本機身分。波形片段可直接共用；Proxy 首次在可寫的相鄰 sidecar 建立時，若沒有待驗證的其他來源候選，便使用共享檔案證據，不先全文讀取母素材。不同電腦／掛載路徑只可在相鄰 sidecar 以同一共享證據沿用產物；退到中央快取的副本另須符合本機 strict key。讀取、補建、重試、metadata 發布與交接都重核共享身分，不能只以本機 key 代替奈秒時間戳；來源或目錄失效不能被最佳努力的 receipt 寫入吞掉。複製檔、其他 share 或缺少可靠檔案 ID／時間戳時回退完整驗證；只有 SHA 型舊完成紀錄能依完整內容相等沿用，單有 shared-file 紀錄則重建。無法解析成 UNC 的掛載路徑只在同主機／裝置範圍共享，不猜測跨平台別名。共享證據不是全文 checksum，不能宣稱偵測到保留全部檔案身分與時間戳、只改未取樣區域的外部修改。
+同一 NAS 檔案以 `sharedSourceFingerprintSync()` 識別：canonical UNC 的 server／share、檔名、size、inode、mtime／ctime／birthtime 的完整奈秒值及前／中／尾取樣共同雜湊，排除 client 的 dev 與掛載路徑；讀取起訖仍核對本次 handle、路徑與完整本機身分。波形片段可直接共用；Proxy 首次在可寫的相鄰 sidecar 建立時，若沒有待驗證的其他來源候選，便使用共享檔案證據，不先全文讀取母素材。不同電腦／掛載路徑只可在相鄰 sidecar 以同一共享證據沿用產物；隔離驗收的中央根另須符合本機 strict key，正式流程沒有中央補建退路。讀取、補建、重試、metadata 發布與交接都重核共享身分，不能只以本機 key 代替奈秒時間戳；來源或目錄失效不能被最佳努力的 receipt 寫入吞掉。複製檔、其他 share 或缺少可靠檔案 ID／時間戳時回退完整驗證；只有 SHA 型舊完成紀錄能依完整內容相等沿用，單有 shared-file 紀錄則重建。無法解析成 UNC 的掛載路徑只在同主機／裝置範圍共享，不猜測跨平台別名。共享證據不是全文 checksum，不能宣稱偵測到保留全部檔案身分與時間戳、只改未取樣區域的外部修改。
 
-Runtime 只在既有 sidecar／中央快取根目錄內搜尋可攜 metadata；相符內容才沿用原 generation，磁碟代號、檔案時間或裝置差異不影響內容相等。已確認的本機 key 可免重讀全文；已綁定本機來源但缺少元件時也沿用既有內容證據，只補缺件。唯讀快取無法補記 key 時仍可讀，下次再驗證。完整的舊 metadata 在原本機 key 仍命中時直接交付，不為升級跨機識別阻塞讀取；無證據的外來舊快取不能猜認。處理期間仍核對凍結的本機 key，且沿用原本的色彩版本、聲道完整性與路徑圍堵檢查。
+正式 Runtime 只在素材旁 sidecar 搜尋可攜 metadata；隔離驗收才使用自己的中央根。相符內容才沿用原 generation，磁碟代號、檔案時間或裝置差異不影響內容相等。已確認的本機 key 可免重讀全文；已綁定來源但缺少元件時沿用既有內容證據，只補缺件。唯讀快取無法補記 key 時仍可讀，下次再驗證；需要補建卻不可寫時回報錯誤。Proxy 另以 `proxyProfileVersion` 核對 480p／1000k／最快 preset；舊 720p 只重建 Proxy，已驗證的聲道與波形不因此失效。無證據的外來舊快取不能猜認，處理期間仍核對來源 key、色彩、聲道完整性與路徑圍堵。
+
+NAS 已完成的 Proxy、聲道與波形直接使用同資料夾資產，不再暴露 `prepareLocalPreview` 複製入口。既有本機副本不在快取視窗顯示，也不在開檔時自動搬移或刪除。讀取、進度與完成回覆仍受 session／request 所有權約束，不能把已被新專案取代的工作重新發布。
 
 可攜映射同時保存目錄及已驗證的 `sourceContent`；候選路徑本身不是沿用資格。實際讀取、補建及清理都須重核目前內容，不能在檢查後換入另一母素材時仍回報 cached。新格式的本機 key 目錄若未綁定目前來源，也須先完成內容驗證；舊無內容證據的本機快取仍保留相容規則。失配會撤銷舊映射，暫時 I/O 失敗則只拒絕本次准入，不當成可以刪除的無效資料。
 
-補建同時綁定准入時的目錄 dev／ino 與母素材內容證據；可寫性探測後、建立 generation、發布 metadata 的暫存及 rename 均重新核對。唯讀退路在來源開檔前、取得 handle 後與完成複製後重核原資格，不能以「複製到的檔案自身沒有變動」替另一母素材作證。失敗清理先取得自己建立的實體 generation，重核後才刪除；同名路徑被替換時保留外來內容。
+補建同時綁定准入時的目錄 dev／ino 與母素材內容證據；可寫性探測後、建立 generation、發布 metadata 的暫存及 rename 均重新核對。唯讀 sidecar 只重用已完成且通過來源與路徑核對的元件，缺件時回報無法寫入；不能以快取檔自身沒有變動替另一母素材作證。失敗清理先取得自己建立的實體 generation，重核後才刪除；同名路徑被替換時保留外來內容。
 
 清除目前素材的 sidecar 時，先略過仍有 lease 的目錄，再在相同 sidecar 根內原子移至不可預測的私有隔離名稱，取得將被刪除的那個目錄物件。目錄身分及來源重核通過才刪除；若內容已換入或讀取不確定則復原。原路徑已被另一 writer 重建時，保留隔離內容，不能用舊目錄覆蓋新工作；不對先前檢查過的路徑直接遞迴刪除。
 
-中央快取根在可信啟動建立後記錄實體目錄身分；側車根於首次准入或建立後核對來源父目錄並保存身分。根被替換、側車根為 junction／symlink，或已登記祖先失權時，不以後來的同名目錄重新授權。舊式逐檔清理也核對原根與父層；來源波形另核工作檔身分與撤銷紀錄，不能以 8.3 別名繞過。
+舊中央快取根存在時於可信啟動記錄實體目錄身分，正式版不為此建立新目錄；側車根於首次准入或建立後核對來源父目錄並保存身分。根被替換、側車根為 junction／symlink，或已登記祖先失權時，不以後來的同名目錄重新授權。舊式逐檔清理也核對原根與父層；來源波形另核工作檔身分與撤銷紀錄，不能以 8.3 別名繞過。
 
-`cache:info` 的可選來源參數先經讀取權限守衛；桌面查詢使用既有 waveform worker 的唯讀 `cache-info` 工作，無素材的中央統計也不在 main 同步掃描。sidecar 描述只核對來源、目錄、checkpoint 與檔案大小，回報 `verified:false`，不為開資訊視窗掃描完整 PCM。它不取代續算時的內容驗證，也不授權刪除；查詢失敗與沒有紀錄分開顯示。工作登記在 runtime 的關閉／取消屏障，不能留下退出後才回覆的 worker。
+`cache:info` 有來源時先經讀取權限守衛，再以 `sourceOnly:true` 交給 waveform worker 的唯讀 `cache-info` 工作；無素材直接回空結果，不建立查詢 worker 或掃描舊中央快取。sidecar 描述只核對來源、目錄、checkpoint 與檔案大小，回報 `verified:false`，不為開資訊視窗掃描完整 PCM。它不取代續算時的內容驗證，也不授權刪除；查詢失敗與沒有紀錄分開顯示。唯讀查詢獨立登記於 `cacheInfoTasks`，只參與關閉／取消收尾，不讓清除等候先前的慢查詢。
 
-中央快取與共享 sidecar 清理在原根內隔離候選，以有界並行的非同步分塊讀取核對完整內容；整棵候選准入後逐檔再核內容、身分與資格並刪除，不等待其他大檔讀完才處理已核對的小檔。啟動孤兒清理在背景執行，一般 ingest／串流等待與來源相衝突的清理。背景波形開始前則凍結並等待當時全部清理；後來開始的清理等待當時在途的波形工作，避免 main 與 worker 交錯讀寫。來源尚無 sidecar 時也保護該來源，不能讓晚到掃描刪除新建波形。匯入與清理均跨 await 重核來源、根及 writer 資格。
+桌面清除只進入 `clearSource(src)`，來源必須有讀取資格；檔案掃描、隔離、內容核對及刪除交給 `cache-clear-source` worker，避免 NAS 同步 I/O 阻塞主程序。worker 取得主程序已凍結的目錄權威、可攜來源映射與活躍來源／目錄；遇到相同來源或別名的活躍 writer／reader 時立即回 `{bytes:0,incomplete:true,reason:'busy'}`，不等待整部影片處理。既有無關 writer 不阻擋清理。清理期間的新 writer 准入則暫等本次刪除結束，因為不同檔名的相同內容仍可能在稍後解析可攜映射時共用該快取；`cleanupTasks` 持有此屏障，無關的唯讀查詢不在其中。renderer 關閉快取視窗不取消已送出的工作，重開相同來源沿用同一 Promise，結果只更新仍持有資格的視窗。
+
+實際刪除後，worker 另送 `cacheRemoved` 事實通知，包含既有實體路徑及 dev／ino。主程序只核銷本次凍結、仍為同一物件且身分相符的目錄登記；短路徑與完整路徑指向同一實體時，也能正確核銷各自的登記。此通知不依賴 UI 成功回覆，避免關閉取消發生於刪除與回覆之間時，留下舊權威阻擋下次重建。
+
+清理仍在原 sidecar 根內隔離候選，以有界並行的非同步分塊讀取核對完整內容；整棵候選准入後逐檔再核內容、身分與資格並刪除，不等待其他大檔讀完才處理已核對的小檔。舊式中央清理規則保留供相容與隔離驗收，正式 renderer 不再提供中央查詢或孤兒清理入口。來源尚無 sidecar 時也保護該來源，不能讓晚到掃描刪除新建波形。匯入與清理均跨 await 重核來源、根及 writer 資格。
 
 清理快照最多 20,000 項、2,048 個目錄、48 層；超限、讀取不確定、身分變更或活躍項目予以保留並回報部分完成，釋放位元組數只計實際刪除的內容。隔離項還原前核對原實體與目標位置，無法安全還原時保留隔離資料；讀取 handle 關閉失敗由 runtime 持續追蹤並可重試。關閉中及關閉後拒絕新清理；resume 須先等待或重試 handle 收尾，較新的 close 撤銷等待中的舊 resume。核對、隔離與刪除仍是分開的檔案系統操作，不能保證消除外部程序在最後核對與 unlink 間寫入的競態。快取資訊無法核對時回報不可用，不假報零容量。
 
@@ -344,7 +357,7 @@ Proxy 色彩探測前後核對同一來源 key，描述隨其證據一起進入�
 
 快取完整性須符合本次聲道數、stream／channel 座標及非空產物。新完成紀錄另保存各元件的 `artifactSizes`；同一路徑共用已知完成長度，缺乏長度的相容索引不能繞過檢查。搬移中被截短的 Proxy、聲道或波形只重建受損元件；重用、唯讀複製與提交也核對相同證據，不能把非空截短檔重新認證。長度檢查不是產物全文 checksum，無法據此宣稱已偵測同長度的外部破壞。
 
-Proxy-only 不能滿足有音訊的請求，部分 sidecar 不能遮住完整中央快取。只補缺件，寫本次私有 generation；來源與重用檔案重核、完成紀錄提交成功後才發布成功。失敗、取消或 runtime 關閉後晚到的工作不能發布，清除本次未提交 generation，保留既有完成紀錄及檔案。沒有按天過期規則；孤兒清理也讀取 generation 完成紀錄，不能因缺少相容索引便刪除有效快取，遇權限或暫時 I/O 錯誤同樣保留。
+Proxy-only 不能滿足有音訊的請求；缺件必須在素材旁補建，不能改讀舊中央副本。只補缺件，寫本次私有 generation；來源與重用檔案重核、完成紀錄提交成功後才發布成功。Renderer 另須先提交聲道，再允許無聲 Proxy 接手，不等待波形載入；完成通知遇到定位或播放時保留至可交接邊界。失敗、取消或 runtime 關閉後晚到的工作不能發布，清除本次未提交 generation，保留既有完成紀錄及檔案。沒有按天過期規則；孤兒清理也讀取 generation 完成紀錄，不能因缺少相容索引便刪除有效快取，遇權限或暫時 I/O 錯誤同樣保留。
 
 串流 lease 綁定首次准入的快取根、generation 及 Proxy 檔案 dev／ino；可播檢查及每次 HTTP 開檔前後都重核，不能因同名路徑出現新檔便供應替代內容。新 Proxy 先以 `wx` 預留，FFmpeg 在同一檔案上寫入；這個身分不以母素材仍存在或目前相容索引仍指向舊 generation 為條件，已完成的有效串流可繼續讀取。
 
@@ -420,6 +433,20 @@ Peak 與 True Peak 都先量測母素材的指定 stream，確認無聲時維持
 已保存的量測欄位只接受有內容的數字或數字字串，缺值及錯型不可轉成零冒充量測；非靜音報告也須符合 FFmpeg 的 `measured_*`／`offset` 範圍，否則改用單遍。FFmpeg 的完全靜音報告可能有 `target_offset: "inf"`；只在其餘量測可確認靜音時保留此報告，讓交付與預覽同樣維持無聲保護。
 
 短於整體響度量測窗的可聽音訊可能回報 `input_i: "-inf"`，須參考實際峰值：峰值不超過 −70 dB 時保留原音，避免放大低音量底噪；峰值高於此值而雙遍量測不可用時改用單遍。分析面板以實測 RMS 補足此類平均值，明確標示 RMS。`input_thresh` 是相對量測門檻，不可直接當成 −70 LKFS 的絕對響度門檻。
+
+### 原音電平取樣
+
+mpv 可在完整聲道快取之前出聲，這時沒有 WebAudio analyser。`native-audio-meter.js` 按音量表輪詢啟動一個只讀 FFmpeg 程序，保留每個 stream 的原聲道，以 48 kHz Float32 PCM 計算 50 ms 峰值；不播放音訊、不寫暫存音檔，也不等待完整波形。來源位置與各 stream 原點沿用 `media-source-clock.js`，取樣不能另當播放時鐘。
+
+Renderer 每 100 ms 至多送出一個讀取請求。取樣保存有界時間窗，只交出同一來源時間且仍新鮮的各聲道峰值；換源、定位或速度改變時先停止舊程序，再建立新工作。停止、播放快取接管及關閉音量表撤銷舊回覆；一秒沒有輪詢也會自動停止。退出等待程序 close，取樣結果只供電平顯示，不加入交付或專案資料。
+
+所有專案 bus 靜音、音量歸零或停用配線而沒有有效原生輸入時，也停止額外取樣。單一輸入的 bus 直接使用同窗已計算峰值乘增益；多輸入仍逐 sample 計算 signed PCM 合成峰值，重用 session 暫存陣列並先歸零，不用峰值相加近似。重新開啟配線後沿原新鮮度與來源資格恢復取樣。
+
+同一 bus 接收多個來源聲道時，不能把各聲道峰值取最大或直接相加。取樣器保存有界 signed PCM，從所有 stream 同一個 50 ms 區間套用 bus 配線增益、逐 sample 相加，再取混音峰值；同相疊加與反相抵銷都必須反映。聲道總數最多 128，每來源最多保存 32 個區間，PCM 歷史上限約 39.3 MB，另有當前區間與 pipe buffer；停止立即釋放。推子或配線改變只撤銷舊讀值，沿用同一解碼器重新計算，不重啟母素材讀取。
+
+`tests/nativeAudioMeterPlayback.test.js` 阻擋背景快取，以真實 mpv 與兩個不同音量的 stream 驗證首播、音量變化、暫停及定位重播；`tests/mixerMeterNative.test.js` 比對 PCM、讀數與實際 CSS 刻度位置。
+
+`tests/nativeMixerPlayback.test.js` 對隔離 app 的 mpv 輸出寫出私有 PCM，並觀測快取播放的實際 master 節點；不擷取系統或其他程式的聲音。以不同頻率分辨獨奏、靜音、推子、全靜音、重設與接管後的殘留聲道，再以同一 mpv 切換單一 Stereo stream 與八種 Mono layout。安裝版可指定 `SUBTOOL_ACCEPTANCE_EXE`／`SUBTOOL_ACCEPTANCE_VERSION`，重跑相同內容驗收並核對封裝來源。
 
 ### 人聲波形 PCM
 
@@ -504,7 +531,7 @@ Windows filtergraph 路徑由既有兩層跳脫處理，包含逗號、單引號
 | RGB、full-range、HDR、顯示矩陣／旋轉、交錯或描述不足 | 沿用相容色彩／幾何處理，再使用已選中的硬體 encoder |
 | QSV、AMF、VideoToolbox 或純 CPU | 保留相容路徑；本次 CUDA 縮放不適用 |
 
-`previewPipelineCandidates()` 擁有准入規則，`buildIngestArgs()` 產生實際參數。CUDA 採 `scale_cuda` 的 bicubic；720p、來源畫格時間、NVENC p4／CQ 26、無 B 幀及 GOP 2 維持既有預覽規格。未知色彩先依原尺寸固定解讀，再縮放；不能用縮放後高度猜母素材色彩。CPU 與 CUDA 縮放結果並非逐像素相同，驗證須比較完整畫格與色彩，不能只比輸出標籤。正式交付仍走自己的編碼規格。
+`previewPipelineCandidates()` 擁有准入規則，`buildIngestArgs()` 產生實際參數。Proxy 統一 480p、1000 kb/s 目標碼率、各 encoder 的最快 preset，保留來源畫格時間、無 B 幀及短 GOP。未知色彩先依原尺寸固定解讀，再縮放；不能用縮放後高度猜母素材色彩。CPU 與 CUDA 縮放結果並非逐像素相同，驗證須比較完整畫格與色彩，不能只比輸出標籤。正式交付仍走自己的編碼規格。
 
 只有同次 FFmpeg 的明確硬體／濾鏡相容性錯誤才能重試：依序降至 CPU 解碼加 GPU 縮放、CPU 解碼縮放加硬體編碼，最後 libx264；實際候選依上表省略不適用路徑。磁碟、權限、來源毀損、取消及來源身分變更不屬這個退路。每次都等待原 writer `close`、重核來源與本次 generation、清除自己的未完成檔案，再建立新 generation。已交出串流 URL 後不換輸出或重新編碼，避免同一 URL 前後屬於不同影片。進度標籤回報目前嘗試的「GPU 解碼／縮放／編碼」、「GPU 縮放／編碼」、「GPU 編碼」或「CPU 轉檔」。
 
@@ -570,6 +597,10 @@ BD 的 tsMuxeR 另經工作目錄內的短 junction 存取原輸出父目錄。�
 
 mpv 是 OS 子視窗，不是 DOM。Host 持有 launch／named pipe、bounds／可見性、來源、播放狀態、ASS、透明 guide 與監看 TC。每次 launch 使用獨有 pipe、ASS 暫存及 log；舊 close／error 不得處置新程序資源，log 失敗只停止寫 log，仍排空 stderr。
 
+浮動面板、一般／快捷鍵對話框、搜尋框與選單不再因局部重疊而隱藏整個播放器。`video-renderer.js` 依 computed style 及實際矩形收集遮擋，經 preview runtime 的 `setNativeViewport()` 將影片 bounds、可見性與遮擋一起送往主程序；開關、拖曳及 ResizeObserver 都重算，新來源啟動亦重算已開面板。Host 驗證資料後，同時裁切 mpv host 與透明 guide，只保留未被遮住的區域，不切換 presenter、定位或播放時鐘。序列間隙及 WebCodecs 接管仍完整隱藏原生視窗。
+
+`BrowserWindow.setShape()` 接視窗內部 DIP，host 將主 renderer 的 CSS 座標按 page zoom 換算，不能再乘螢幕的 devicePixelRatio。空清單代表恢復矩形；整個影片被覆蓋時須另外 hide。位置／大小及父視窗恢復時重套裁切，避免留下舊形狀。[Electron 的 API 契約](https://github.com/electron/electron/blob/v44.9.1/docs/api/base-window.md#winsetshaperects-windows-linux-experimental)沒有原生成功回傳，單元測試只證明幾何及接線；畫面與滑鼠穿透須用實際 OS 合成像素與輸入驗證，見[原生疊層驗收](開發與驗證.md#3-真機驗證cdp)。
+
 首次啟動先以 idle／pause 建立程序並接好 pipe，再送來源 loadfile。來源路徑確認、初始 playback-restart 與有限 time-pos 都到齊才宣告就緒；全程維持暫停，不透過短暫播放催出首格。首格有期限，失敗或被新啟動取代時清理原工作，不留下假就緒宿主。首載保留多音軌混音圖，之後換來源才依換檔契約清理。
 
 ### 精準呈現
@@ -583,6 +614,8 @@ Launch／loadfile 透過 probe 取得容器相對來源原點，seek、回報與
 Renderer 在啟動前訂閱 native 事件，將先於載入回覆抵達的長度與失連依 session 暫存；只有回覆確認的 session 可交接長度，已失連的 session 不能因遲到的成功回覆恢復資格。舊來源失連不轉送至目前播放器，當前失連回呼的處理資格只在同步回呼內有效。
 
 `time-pos` 與 `pause` 在來源 entry 確認後各自註冊新的 mpv observer ID；舊 ID 的事件不能驅動播放頭或完成呈現，載入取消時撤銷該次訂閱。時間事件仍直接逐幀轉送，不增加逐幀查詢。暫停通知則只作重新查詢目前 pause 狀態的提示，回覆須符合相同來源與播放命令意圖；renderer 也核對意圖，防止已排隊的舊暫停在新播放後停止聲音。
+
+`core-idle`、`paused-for-cache` 與 `seeking` 同樣沿來源生命週期持續觀察，不能在首次起播完成後就撤銷。事件帶 `sourceSessionId`，adapter 拒絕未知／舊來源及非 boolean 值，再更新 `nativePlaybackState()` 快照並通知 Media。快照未知欄位為 null，切換來源、退出或失連即清空；初次載入回覆前的事件只有被正式接受的來源能交接。它們提供再次緩衝的停止線索，恢復仍需獨立起播證據，見[播放聲音的唯一 owner](技術架構說明.md#播放聲音的唯一-owner)。
 
 來源切換完成前的初始時間讀數不能覆寫新定位目標；新的定位命令須先獲 mpv 確認，暫停呈現再以確認後的讀回或後續時間事件核對。擷取畫格仍等待確認後的 `playback-restart`。mpv 的 restart 事件沒有來源 entry 或請求 ID，命令確認前的舊事件會被排除；確認之後才產生的事件，僅憑其內容無法完全證明屬於該請求。驗收真實畫格仍須比對實際像素，不能把這個事件當成完整的來源身分證明。
 
@@ -659,7 +692,7 @@ mpv 的 `screenshot-to-file` 會覆寫既有同名檔；main 不把 renderer 提
 | 字幕三路不同 | effStyle、PlayResY 高度縮放、ASS alignment／family／跳脫 |
 | 圖框可見不能拖 | guide 是否錯接滑鼠、renderer imageLayer 與讓位 |
 | 音訊或尾音不符 | 母素材、來源時鐘、source→bus→stream、成品 PCM |
-| 跳轉後短暫疊音 | native mute ACK、全部 element／overlap voice 的共同 readiness 與 commit，見 [FPS 排查](FPS_時碼一致性.md#proxy-跳轉後短暫回音原地暫停再播恢復) |
+| 跳轉後短暫疊音 | native mute ACK、共同 readiness／commit，以及起播後 core-idle／paused-for-cache 時的 follower 停止；對照實際時鐘與音訊重啟，見 [FPS 排查](FPS_時碼一致性.md#proxy-跳轉後短暫回音原地暫停再播恢復) |
 | 自動備份留下 `.tmp` | 原目錄資格、write／sync／close 後身分與完整 SHA；SMB 正常關檔時間更新及外部修改須分別判定，保留失敗證據 |
 | 成品路徑無法重試 | 原輸出資料夾授權與 dev／ino、live job、stopping journal、native PID、output lease；舊 lease 缺身分時保留並依使用說明改檔名重送 |
 | 關閉後有半成品 | watchdog／artifact log、owner.json、close 及復原狀態 |

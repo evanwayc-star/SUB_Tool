@@ -151,6 +151,8 @@ mpv 暫停仍可能持續回報非格網 `time-pos`。`TimelineTransport.observe
 
 交付格率預設依專案，也可逐列設定。起點由同一時間軸秒數按該列 FPS 換算；DF 只在 29.97／59.94 生效，其他格率用 NDF。影格率轉換不改片段、字幕或音訊的秒數，監看與燒入也不是同一個開關。
 
+交付合成對 MKV 等粗時基採有界量化補償：probe 同時提供原始 `time_base` 與 `r_frame_rate`；只有來源 PTS 距名義來源格點不超過半個來源 tick 時才恢復該格點，最大移動 0.5 ms。第一個解碼格保持原 PTS，後續不可早於它；固定畫面選格維持既有實際 PTS 規則。這不是 CFR 證明，不以 N／FPS 重排整段，不使用 overlay 全域 nearest，也不能抹去 VFR 缺口。補償在裁切、速度及反轉前進行；`exportCadenceNative.test.js` 以相同像素的 MOV／MKV、裁切、變速、反轉、跨 FPS 及真正缺口驗內容。毫秒時基的 23.976 素材若直接交給 floor framesync，會每幾格重複上一格並跳過下一格，即使輸出 metadata 的 FPS 正確仍不代表影格正確。
+
 ## 3. 呈現生命週期
 
 ```mermaid

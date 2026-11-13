@@ -99,6 +99,17 @@ function writeDirectoryFiles(directory, files, { fsModule = fs, randomUUID = cry
       continue;
     }
     let temporary = null, descriptor = null, temporaryOwner = null, writtenEvidence = null, completed = null, preserveTemporary = false, bytes;
+    const readClosedStage = evidence => {
+      checkParents([{ file: root, owner: rootOwner }]);
+      const closed = statIfPresent(temporary);
+      if (!closed?.isFile() || closed.isSymbolicLink() || !sameFile(closed, temporaryOwner)
+        || !['dev', 'ino', 'mode', 'size'].every(field => closed[field] === evidence[field])
+        || closed.size !== BigInt(bytes.length)
+        || digestFileSync(fsModule, temporary, closed) !== crypto.createHash('sha256').update(bytes).digest('hex')
+        || !sameEvidence(statIfPresent(temporary), closed)) throw unsafe();
+      checkParents([{ file: root, owner: rootOwner }]);
+      return closed;
+    };
     try {
       const parents = prepareParents(target);
       const destinationBefore = checkTarget(target);
@@ -122,11 +133,18 @@ function writeDirectoryFiles(directory, files, { fsModule = fs, randomUUID = cry
       fsModule.closeSync(descriptor);
       descriptor = null;
       checkParents(parents);
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      // SMB can finalize write timestamps when the writer closes. Establish
+      // closed-file evidence only for the same owned object and exact bytes;
+      // publication and cleanup still require a strict, unchanged snapshot.
+      try {
+        completed = readClosedStage(completed);
+      } catch (_) { changedStage(); }
+      checkParents(parents);
       assertTargetUnchanged(target, destinationBefore);
       const current = statIfPresent(temporary);
       if (!sameEvidence(current, completed)) changedStage();
       try {
-        const digest = crypto.createHash('sha256').update(bytes).digest('hex');
         if (digestFileSync(fsModule, temporary, completed) !== digest
           || !sameEvidence(statIfPresent(temporary), completed)) changedStage();
       } catch (_) { changedStage(); }
@@ -138,21 +156,27 @@ function writeDirectoryFiles(directory, files, { fsModule = fs, randomUUID = cry
       blocked++;
       if (error.code === 'DIRECTORY_OUTPUT_CONFLICT') conflicted++;
     } finally {
+      let closedInCleanup = false;
       if (descriptor !== null) {
         if (!temporaryOwner) {
           try { temporaryOwner = fsModule.fstatSync(descriptor, { bigint: true }); } catch (error) {}
         }
         // Retain the first operation error while still closing the owned handle.
-        try { fsModule.closeSync(descriptor); } catch (error) {}
+        try { fsModule.closeSync(descriptor); closedInCleanup = true; } catch (error) {}
       }
       if (temporary && temporaryOwner && !preserveTemporary) {
         try {
           checkParents([{ file: root, owner: rootOwner }]);
+          let evidence = completed || writtenEvidence || temporaryOwner;
+          // A complete write followed by failed fsync still needs closed-file
+          // SMB evidence. Only the same owned object with exact bytes qualifies.
+          if (closedInCleanup && writtenEvidence) {
+            try { evidence = readClosedStage(evidence); } catch (_) { evidence = null; }
+          }
           const current = statIfPresent(temporary);
           // A failed write can leave an arbitrary partial file, including bytes
           // written by another handle. Without a completed write snapshot only
           // the unchanged, empty reservation is safe to remove.
-          const evidence = completed || writtenEvidence || temporaryOwner;
           if (current && !current.isSymbolicLink() && sameFile(current, temporaryOwner)
             && (writtenEvidence || temporaryOwner.size === 0n) && sameEvidence(current, evidence)) {
             let matches = true, readDescriptor;
