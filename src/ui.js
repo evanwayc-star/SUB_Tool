@@ -372,8 +372,9 @@ function togglePanel(id) {
       _ensurePanelInRightArea(p);
       keepPanelInViewport(p);
       if (!$('modalBg')?.classList.contains('show') && !$('settingsModal')) {
-        const first = _focusables(p).find(element => !element.closest('.fp-head'));
-        (first || p).focus({preventScroll:true});
+        // 面板不是表單對話框，不預選歸零、刪除或篩選欄位。
+        // 中性容器保留 Esc 關閉及 Tab 導覽，Space 可直接控制播放。
+        p.focus({preventScroll:true});
       }
       emit('mpv:sync');
     }, 0);

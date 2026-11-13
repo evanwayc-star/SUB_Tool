@@ -52,7 +52,6 @@ import {
 
 const _keysPressed = new Set();
 const ACTIVATION_CONTROL = 'button, a[href], summary, [role="button"], [role="menuitem"]';
-let _pointerActivatedControls = new WeakSet();
 function exportBracketChord(e) {
   if (!['[',']'].includes(e.key) || !_keysPressed.has('[') || !_keysPressed.has(']')) return false;
   const { ctrlKey, metaKey, shiftKey, altKey } = e;
@@ -68,10 +67,9 @@ if (typeof window !== 'undefined') {
   window.addEventListener('click', e => {
     if ($('modalBg')?.classList?.contains('show') || document.getElementById('settingsModal')) return;
     const control = e.target.closest?.(ACTIVATION_CONTROL);
-    if (!control) return;
-    // Other workspace controls still distinguish pointer and keyboard intent.
-    if (e.detail > 0) _pointerActivatedControls.add(control);
-    else _pointerActivatedControls.delete(control);
+    // 滑鼠操作在 handler 重繪按鈕之前釋放焦點，避免 M/S 把焦點傳給新節點。
+    // Tab／Enter 仍可操作按鈕；文字編輯與真正的對話框不在這個範圍。
+    if (e.detail > 0 && control && !e.target.closest?.('input, select, textarea, [contenteditable="true"]')) control.blur();
   }, true);
   window.addEventListener('blur', () => _keysPressed.clear());
   window.addEventListener('keyup', e => {
@@ -87,12 +85,10 @@ if (typeof window !== 'undefined') {
     if (typeof $ === 'function' && $('modalBg')?.classList?.contains('show')) { if (e.key === 'Escape') closeModal(); return; }
     // 快捷鍵設定是獨立於 modalBg 的自訂對話框：開啟期間全域快捷鍵一律不作用（避免 Enter/Space 在背後觸發播放）
     if (document.getElementById('settingsModal')) return;
-    // Only workspace Tab navigation resets pointer intent; Tab inside a modal
-    // must not turn its restored mouse origin into a keyboard activation target.
-    if (e.key === 'Tab') _pointerActivatedControls = new WeakSet();
     const control = e.target.closest?.(ACTIVATION_CONTROL);
-    if ((e.key === ' ' || e.key === 'Enter') && control
-      && !(e.key === ' ' && _pointerActivatedControls.has(control))) return;
+    // Space 是工作區播放快捷鍵，不因按鈕曾被點擊、Tab 聚焦或重繪而改變。
+    // Enter 留給聚焦按鈕的原生啟用；自訂按鍵仍由下方 keymap 決定。
+    if (e.key === 'Enter' && control) return;
     if (e.isComposing || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
     if (document.activeElement?.isContentEditable) {
     // 任何 contenteditable 編輯中（字幕列表 .txt、修改字幕視窗、軌道名稱、備註等）

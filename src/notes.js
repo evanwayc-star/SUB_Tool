@@ -251,7 +251,6 @@ function renderNotes(){
     timeEl.addEventListener('keydown',e=>{
       if(e.isComposing||e.keyCode===229||e.ctrlKey||e.metaKey||e.altKey||e.shiftKey)return;
       if(e.key==='Enter'||e.key==='F2'){e.preventDefault();e.stopPropagation();if(!e.repeat)beginTimeEdit();}
-      else if(e.key===' '){e.preventDefault();e.stopPropagation();if(!e.repeat)timeEl.click();}
     });
 
     // 備註文字：預設唯讀；雙擊進入編輯
@@ -272,13 +271,15 @@ function renderNotes(){
     };
     txt.addEventListener('dblclick',e=>{e.stopPropagation();beginTextEdit();});
     txt.addEventListener('keydown',e=>{
+      // 唯讀備註的空白鍵交回工作區播放；只有編輯中才保留給文字輸入。
+      if(txt.contentEditable!=='true'&&e.key===' ')return;
       if(txt.contentEditable!=='true'&&(e.key==='ContextMenu'||(e.key==='F10'&&e.shiftKey)))return;
       if(txt.contentEditable!=='true'&&e.key==='Escape'&&!e.isComposing&&e.keyCode!==229)return;
       e.stopPropagation();if(e.isComposing||e.keyCode===229)return;
       if(txt.contentEditable==='true'){
         if(e.key==='Enter'){e.preventDefault();finishTextEdit(true);}
         else if(e.key==='Escape'){e.preventDefault();finishTextEdit(false);}
-      }else if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey&&['Enter','F2',' '].includes(e.key)){
+      }else if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey&&['Enter','F2'].includes(e.key)){
         e.preventDefault();if(!e.repeat)beginTextEdit();
       }
     });

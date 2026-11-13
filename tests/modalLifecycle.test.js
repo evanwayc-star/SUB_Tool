@@ -20,9 +20,11 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers(); delete window.subtool; });
 
 describe('modal lifecycle ownership', () => {
-  it('浮動面板開啟後取得焦點，關閉返回原操作且更新開合狀態',()=>{
+  it('浮動面板開啟只聚焦中性容器，不預選按鈕或輸入框；關閉返回原操作',()=>{
     const trigger=document.createElement('button');trigger.setAttribute('aria-controls','notesPanel');
     const panel=document.createElement('div');panel.id='notesPanel';panel.className='float-panel';
+    panel.innerHTML='<button>歸零</button><input aria-label="篩選">';
+    for(const element of panel.children) Object.defineProperty(element,'offsetParent',{get:()=>panel});
     document.body.append(trigger,panel);trigger.focus();
     ui.togglePanel('notesPanel');vi.runAllTimers();
     expect(document.activeElement).toBe(panel);

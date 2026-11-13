@@ -383,7 +383,6 @@ document.addEventListener('mouseout', e=>{ if(e.target.closest&&e.target.closest
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-act]');
   if(b){
-    if(!b.closest(WINDOW_CONTROLS)) b.blur();
     if(_repFired && REP_ACTS.includes(b.dataset.act)){ _repFired=false; return; }
     doAction(b.dataset.act);
   }
@@ -546,13 +545,6 @@ function initUI(){
   renderListTrackSel();
   // 點擊時間軸時解除輸入框焦點
   $('timelinePanel').addEventListener('mousedown',()=>{ const ae=document.activeElement; if(ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'))ae.blur(); },{capture:true});
-
-  // 工作區點擊後交回播放快捷鍵，對話框和面板內保留 Tab 導覽。
-  document.addEventListener('click',e=>{
-    const btn=e.target.closest('button');
-    if(btn&&!btn.closest(WINDOW_CONTROLS)) btn.blur();
-  },{capture:true});
-
 
 }
 

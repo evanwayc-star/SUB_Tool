@@ -8,7 +8,7 @@
    （timeline-renderer.js）。setIn／setOut 這兩個上字幕模式的核心入口完全沒有守衛。
 
    這裡測的是守衛本身：擋下來、而且一定要出提示。沉默地不作用比擋不住更難查。 */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ui = vi.hoisted(() => ({
   showToast: vi.fn(),
@@ -38,12 +38,27 @@ let State;
 let trackLocked;
 let cueTrackLocked;
 let deleteSelected;
+let modalGeneration = 0;
 
 beforeEach(async () => {
+  vi.useFakeTimers();
   vi.resetModules();
   vi.clearAllMocks();
-  ui.openModal.mockReturnValue({isCurrent:()=>true,close:ui.closeModal});
-  document.body.innerHTML = '<div id="sublist"></div><div id="stSel"></div><video id="video"></video>';
+  modalGeneration++;
+  document.body.innerHTML = '<div id="sublist"></div><div id="stSel"></div><video id="video"></video><div id="modalBg"><div id="modalBody"></div></div>';
+  ui.closeModal.mockImplementation(() => {
+    modalGeneration++;
+    document.getElementById('modalBg').classList.remove('show');
+  });
+  ui.openModal.mockImplementation((_title, html) => {
+    const generation = ++modalGeneration;
+    document.getElementById('modalBody').innerHTML = html;
+    document.getElementById('modalBg').classList.add('show');
+    return {
+      isCurrent: () => generation === modalGeneration,
+      close: options => { if(generation === modalGeneration) ui.closeModal(options); },
+    };
+  });
   ({ State } = await import('../src/state.js'));
   ({ trackLocked, cueTrackLocked, deleteSelected } = await import('../src/subtitles.js'));
 
@@ -57,6 +72,11 @@ beforeEach(async () => {
   ];
   State.selectedId = null;
   State.selectedIds = [];
+});
+
+afterEach(() => {
+  try { vi.runOnlyPendingTimers(); }
+  finally { modalGeneration++; vi.clearAllTimers(); vi.useRealTimers(); }
 });
 
 describe('trackLocked：擋下並且一定要提示', () => {
@@ -272,15 +292,10 @@ describe('字幕模型內容與 In/Out 命令鎖定防護', () => {
 
 describe('字幕匯入鎖定防護', () => {
   it('不能把匯入結果寫入已鎖定的既有字幕軌', async () => {
-    document.body.insertAdjacentHTML('beforeend', `
-      <select id="importTkSel"><option value="1" selected>歌詞</option></select>
-      <select id="importPresetSel"><option value="" selected>無</option></select>
-      <input id="importNewTkName" value="新字幕軌">
-      <input id="importAppend" type="checkbox">
-    `);
     const { _openImportModal } = await import('../src/subio.js');
     const original = structuredClone(State.cues);
     _openImportModal('匯入字幕', [{ start: 5, end: 6, text: '新內容' }], 'srt');
+    document.getElementById('importTkSel').value = '1';
     const buttons = ui.openModal.mock.calls.at(-1)?.[2];
 
     buttons[0].act();
@@ -291,14 +306,9 @@ describe('字幕匯入鎖定防護', () => {
   });
 
   it('取代未鎖定軌的字幕時保留其他鎖定軌內容', async () => {
-    document.body.insertAdjacentHTML('beforeend', `
-      <select id="importTkSel"><option value="0" selected>對白</option></select>
-      <select id="importPresetSel"><option value="" selected>無</option></select>
-      <input id="importNewTkName" value="新字幕軌">
-      <input id="importAppend" type="checkbox">
-    `);
     const { _openImportModal } = await import('../src/subio.js');
     _openImportModal('匯入字幕', [{ start: 5, end: 6, text: '取代內容' }], 'srt');
+    document.getElementById('importTkSel').value = '0';
     const buttons = ui.openModal.mock.calls.at(-1)?.[2];
 
     buttons[0].act();

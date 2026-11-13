@@ -222,6 +222,36 @@ it.each(['Enter','F2'])('%s opens a keyboard note text edit and Enter commits wi
  History.undo();expect(State.notes[0].text).toBe('original');History.redo();expect(State.notes[0].text).toBe('鍵盤編輯內容');
 });
 
+it.each(['time','text'])('Space on a read-only note %s reaches workspace playback without seeking or editing',async kind=>{
+ const {Media}=await import('../src/media.js');const seek=vi.spyOn(Media,'seek').mockResolvedValue(true);
+ const play=vi.spyOn(Media,'play').mockResolvedValue(true);Media.playing=false;
+ const workspaceKey=vi.fn();window.addEventListener('keydown',workspaceKey);
+ try{
+  Notes.renderNotes();const field=document.querySelector('.nt-'+kind);field.focus();
+  const event=new KeyboardEvent('keydown',{key:' ',bubbles:true,cancelable:true});field.dispatchEvent(event);
+  await Promise.resolve();
+  expect(workspaceKey).toHaveBeenCalledOnce();expect(play).toHaveBeenCalledOnce();
+  expect(event.defaultPrevented).toBe(true);expect(seek).not.toHaveBeenCalled();
+  expect(document.querySelector('.nt-te')).toBeNull();expect(field.contentEditable).not.toBe('true');
+  expect(document.activeElement).toBe(field);expect(State.notes[0]).toMatchObject({time:1,text:'original'});
+  expect(History.stack).toHaveLength(1);
+ }finally{window.removeEventListener('keydown',workspaceKey);seek.mockRestore();play.mockRestore();}
+});
+
+it.each(['time','text'])('Space and composition stay inside an active note %s editor',kind=>{
+ Notes.renderNotes();const field=document.querySelector('.nt-'+kind);field.focus();key(field,'F2');
+ const editor=kind==='time'?field.querySelector('input'):field;
+ const workspaceKey=vi.fn();window.addEventListener('keydown',workspaceKey);
+ try{
+  for(const options of [{},{isComposing:true},{keyCode:229}]){
+   key(editor,' ',options);key(editor,'Enter',{...options,isComposing:true});
+  }
+  expect(workspaceKey).not.toHaveBeenCalled();expect(document.activeElement).toBe(editor);
+  if(kind==='text')expect(field.contentEditable).toBe('true');else expect(editor.isConnected).toBe(true);
+  expect(State.notes[0]).toMatchObject({time:1,text:'original'});expect(History.stack).toHaveLength(1);
+ }finally{window.removeEventListener('keydown',workspaceKey);key(editor,'Escape');}
+});
+
 it.each(['time','text'])('keyboard Escape cancels the %s draft, preserves a newer committed value and returns to its field',kind=>{
  Notes.renderNotes();const field=document.querySelector('.nt-'+kind);field.focus();key(field,'F2');
  const editor=kind==='time'?field.querySelector('input'):field;expect(editor).not.toBeNull();
