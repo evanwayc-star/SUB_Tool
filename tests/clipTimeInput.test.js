@@ -12,6 +12,10 @@ const dialogs = [
   { kind: 'fade-out', field: 'cfOutV', range: 'cfOut', apply: '套用', open: cue => Menus.showClipFade(cue) },
   { kind: 'crossfade', field: 'xfTV', range: 'xfT', apply: '建立溶接', open: cue => Menus.showCrossfade(cue) },
 ];
+const namedInput=(label,type)=>{
+  const matches=[...document.querySelectorAll('#modalBody input')].filter(input=>input.type===type&&input.getAttribute('aria-label')===label);
+  expect(matches,`具名 ${type} 控制：${label}`).toHaveLength(1);return matches[0];
+};
 
 beforeAll(async () => {
   vi.useFakeTimers();
@@ -39,6 +43,33 @@ beforeEach(async () => {
   await saving;
 });
 afterAll(() => { UI.closeModal(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); delete HTMLElement.prototype.scrollIntoView; });
+
+it('大小與位置的具名百分比控制正確連動，套用與 Undo 保留原始單位',async()=>{
+ const target=clip('geometry',{scale:1,posX:.5,posY:.5});State.clips=[target];History.reset();
+ Menus.showImageGeom(target);await vi.advanceTimersByTimeAsync(0);
+ for(const [label,value] of [['大小（%）',125],['水平位置（%）',30],['垂直位置（%）',70]]){
+   const range=namedInput(label,'range'),number=namedInput(label,'number');
+   range.value=String(value);range.dispatchEvent(new Event('input',{bubbles:true}));expect(+number.value).toBe(value);
+   number.value=String(value+1);number.dispatchEvent(new Event('input',{bubbles:true}));expect(+range.value).toBe(value+1);
+ }
+ click('套用');expect(target).toMatchObject({scale:1.26,posX:.31,posY:.71});expect(History.stack).toHaveLength(2);
+ History.undo();expect(State.clips[0]).toMatchObject({scale:1,posX:.5,posY:.5});
+});
+
+it.each(dialogs.map((dialog,index)=>({...dialog,label:['片段持續時間','淡入時間','淡出時間','影音溶接時間'][index]})))('$kind 的具名時間控制區分秒與時碼，調整後可提交與復原',async dialog=>{
+ const {target}=await open(dialog),original=structuredClone(State.clips);
+ const input=namedInput(dialog.label+'（時:分:秒:格）','text');
+ if(dialog.range){
+   const range=namedInput(dialog.label+'（秒）','range');range.value='2';range.dispatchEvent(new Event('input',{bubbles:true}));
+   expect(input.value).toBe('00:00:02:00');
+ }else input.value='00:00:02:00';
+ click(dialog.apply);
+ if(dialog.kind==='duration')expect(target.out-target.in).toBe(2);
+ else if(dialog.kind==='fade-in')expect(target.fadeIn).toBe(2);
+ else if(dialog.kind==='fade-out')expect(target.fadeOut).toBe(2);
+ else expect(target).toMatchObject({fadeIn:2,offset:8});
+ expect(History.stack).toHaveLength(2);History.undo();expect(State.clips).toMatchObject(original);
+});
 
 async function open(dialog) {
   const target = clip('target', { offset: 10, fadeIn: .4, fadeOut: .8 });

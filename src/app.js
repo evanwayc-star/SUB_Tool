@@ -623,13 +623,15 @@ function initExtras(){
       el.addEventListener('blur', () => formatTcInput(el));
       setupTimecodeInput(el);
       el.addEventListener('keydown', e => {
+        if(e.isComposing||e.keyCode===229){e.stopPropagation();return;}
+        if(e.key==='Escape')return;
         e.stopPropagation();
         if (e.key === 'Enter') { e.preventDefault(); formatTcInput(el); }
       });
     }
   });
-  $('durAdjPctInput')?.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();applyDurAdjPct();} });
-  $('durAdjMode')?.addEventListener('keydown',e=>e.stopPropagation());
+  $('durAdjPctInput')?.addEventListener('keydown',e=>{ if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();applyDurAdjPct();} });
+  $('durAdjMode')?.addEventListener('keydown',e=>{if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation();});
   $('waveSrcSel')?.addEventListener('change',e=>{ Wave.selectSource(+e.target.value); e.target.blur(); });
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
   $('tcCur').addEventListener('contextmenu',e=>{ e.preventDefault();

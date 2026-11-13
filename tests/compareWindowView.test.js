@@ -41,6 +41,16 @@ function planPayload(overrides = {}) {
 }
 
 describe('字幕比對視窗 view adapter', () => {
+  it('每組差異有可聚焦的文字說明，字幕控制也能讀到樣式差異屬性',()=>{
+    const {dom,callbacks}=openCompareView();callbacks[0](planPayload());
+    const document=dom.window.document,cell=document.querySelector('[data-cue-id="left"]');
+    const detail=document.getElementById(cell.getAttribute('aria-describedby'));
+    expect(detail).not.toBeNull();
+    expect(detail.textContent).toContain('時間不同');expect(detail.textContent).toContain('內容不同');
+    expect(detail.textContent).toContain('字級');
+    expect(detail.tabIndex).toBe(0);detail.focus();expect(document.activeElement===detail).toBe(true);
+    dom.window.close();
+  });
   it('字幕與樣式選單可由鍵盤存取，Escape 回到原字幕且不送出編輯', () => {
     const { dom, callbacks, commands } = openCompareView();
     callbacks[0](planPayload());

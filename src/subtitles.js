@@ -335,17 +335,18 @@ function renderCheckPanel(){
   _checkContains=containsRaw.split('||').map(s=>s.trim()===''?s:s.replace(/^[ ]+|[ ]+$/g,'')).filter(s=>s.length>0);
 
   const report = analyzeSubtitles(list, { checkLenLimit: _checkLenLimit, checkContains: _checkContains, fps: State.fps });
-  const { overlapNums, multiNums, twoNums, blankNums, bNums, iNums, uNums, fontNums, posNums, trimNums, overLenNums, containsNums, nonTraditionalIssues, noTimeNums, consecutiveIdenticalNums, consecutiveIdenticalJoinedNums=[] } = report;
+  const { overlapNums, multiNums, twoNums, blankNums, bNums, iNums, uNums, fontNums, posNums, trimNums, overLenNums, containsNums, nonTraditionalIssues, noTimeNums, consecutiveIdenticalRanges=[] } = report;
   
   const mkNums=nums=>nums.length?nums.map(n=>`<button type="button" class="cp-num" data-idx="${n}" aria-label="前往第 ${n} 句字幕">${n}</button>`).join(' '):'無';
-  const joinedIdenticalSet=new Set(consecutiveIdenticalJoinedNums);
   const identicalGroups=new Map();
   report.consecutiveIdenticalGroups.forEach((group,index)=>{
     for(const number of group)identicalGroups.set(number,{number:index+1,color:IDENTICAL_GROUP_COLORS[index%3]});
   });
-  const mkConsecutiveIdenticalNums=nums=>nums.length?nums.map(n=>{
-    const group=identicalGroups.get(n),joined=joinedIdenticalSet.has(n);
-    return `<button type="button" class="cp-num identical-group-${group.color}${joined?' cp-joined-identical':''}" data-idx="${n}" data-identical-group="${group.number}" title="第 ${group.number} 組相同字幕${joined?'（頭尾黏接）':''}" aria-label="前往第 ${n} 句字幕">${n}</button>`;
+  const mkConsecutiveIdenticalNums=ranges=>ranges.length?ranges.map(([start,end])=>{
+    const group=identicalGroups.get(start),joined=end>start;
+    const label=joined?`${start}–${end}`:String(start);
+    const action=joined?`選取第 ${start} 至 ${end} 句字幕，前往第 ${start} 句`:`前往第 ${start} 句字幕`;
+    return `<button type="button" class="cp-num identical-group-${group.color}${joined?' cp-joined-identical':''}" data-idx="${start}" data-end-idx="${end}" data-identical-group="${group.number}" title="第 ${group.number} 組相同字幕${joined?'（頭尾相接）':''}" aria-label="${action}">${label}</button>`;
   }).join(' '):'無';
   const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{
     const detail=[];
@@ -361,7 +362,7 @@ function renderCheckPanel(){
   if(rt)rt.querySelector('.cp-nums').innerHTML=mkNums(trimNums);
   if(r2)r2.querySelector('.cp-nums').innerHTML=mkNums(twoNums);
   if(rb)rb.querySelector('.cp-nums').innerHTML=mkNums(blankNums);
-  if(rci)rci.querySelector('.cp-nums').innerHTML=mkConsecutiveIdenticalNums(consecutiveIdenticalNums);
+  if(rci)rci.querySelector('.cp-nums').innerHTML=mkConsecutiveIdenticalNums(consecutiveIdenticalRanges);
   if(sb)sb.querySelector('.cp-nums').innerHTML=mkNums(bNums);
   if(si)si.querySelector('.cp-nums').innerHTML=mkNums(iNums);
   if(su)su.querySelector('.cp-nums').innerHTML=mkNums(uNums);
@@ -377,6 +378,11 @@ function renderCheckPanel(){
     el.onclick=()=>{
       const idx=parseInt(el.dataset.idx)-1; const c=list[idx]; if(!c)return;
       selectCue(c.id,{seek:true,pointer:true});
+      const end=parseInt(el.dataset.endIdx);
+      if(end>idx+1){
+        setSelection({kind:'sub',ids:list.slice(idx,end).map(cue=>cue.id),primary:c.id});
+        refreshSelectionUI();
+      }
       const row=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);
       if(row)row.scrollIntoView({block:'center'});
     };

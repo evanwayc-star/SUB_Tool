@@ -548,7 +548,7 @@ State.defaultKeymap = {
   'toggle_notes': [{code:'Numpad8'}],
   'toggle_check_panel': [{code:'Numpad9'}],
   'search': [{key:'f', ctrl:true}],
-  'toggle_sub_mode': [{key:'y'}],
+  'toggle_sub_mode': [{key:'y',shift:true}],
   'set_in': [{key:'i'}, {key:'q'}],
   'set_out': [{key:'o'}, {key:'w'}],
   'exp_in': [{key:'['}],
@@ -592,7 +592,8 @@ State.defaultKeymap = {
   'add_note': [{key:'v'}, {key:'m'}],
   'split_clip': [{key:'k', ctrl:true}], // 在播放點切割影片段（影片序列）
   'toggle_safe_frame': [{key:'g', ctrl:true}],
-  'toggle_mixer': [{key:'u'}],
+  'toggle_mixer': [{key:'y'}],
+  'scroll_playhead': [{key:'u'}],
   'screenshot': [{key:'t'}],
   'screenshot_tc': [{key:'t', ctrl:true}],
   'export_video': [{key:'/'}],          // 匯出影片（交付清單）

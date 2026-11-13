@@ -20,6 +20,36 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers(); delete window.subtool; });
 
 describe('modal lifecycle ownership', () => {
+  it('浮動面板開啟後取得焦點，關閉返回原操作且更新開合狀態',()=>{
+    const trigger=document.createElement('button');trigger.setAttribute('aria-controls','notesPanel');
+    const panel=document.createElement('div');panel.id='notesPanel';panel.className='float-panel';
+    document.body.append(trigger,panel);trigger.focus();
+    ui.togglePanel('notesPanel');vi.runAllTimers();
+    expect(document.activeElement).toBe(panel);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    ui.closePanel('notesPanel');
+    expect(document.activeElement).toBe(trigger);
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  });
+  it('連續切換浮動面板只聚焦最後一個，關閉仍回到工作區來源',()=>{
+    const trigger=document.createElement('button');document.body.append(trigger);trigger.focus();
+    for(const id of ['notesPanel','historyPanel']){
+      const panel=document.createElement('div');panel.id=id;panel.className='float-panel';document.body.append(panel);
+    }
+    ui.togglePanel('notesPanel');vi.runAllTimers();
+    ui.togglePanel('historyPanel');vi.runAllTimers();
+    expect(document.activeElement.id).toBe('historyPanel');
+    expect(document.getElementById('notesPanel').classList.contains('show')).toBe(false);
+    ui.closePanel('historyPanel');expect(document.activeElement).toBe(trigger);
+  });
+  it('浮動面板開啟後立刻關閉或被modal取代，不讓延遲聚焦搶走新視窗',()=>{
+    const panel=document.createElement('div');panel.id='notesPanel';panel.className='float-panel';document.body.append(panel);
+    ui.togglePanel('notesPanel');ui.closePanel('notesPanel');vi.runAllTimers();
+    expect(document.activeElement).not.toBe(panel);
+    ui.togglePanel('notesPanel');ui.openModal('較新的視窗','');
+    document.querySelector('.modal').tabIndex=-1;vi.runAllTimers();
+    expect(document.activeElement).toBe(document.querySelector('.modal'));
+  });
   it('無素材時不查中央快取，清除停用且不發出清理 IPC',async()=>{
     const {State}=await import('../src/state.js');State.mediaPath=null;
     window.subtool={cacheInfo:vi.fn(async()=>({root:'C:/cache',folders:0,bytes:0})),cacheClearAll:vi.fn()};

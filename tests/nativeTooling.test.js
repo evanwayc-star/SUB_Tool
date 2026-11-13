@@ -108,7 +108,7 @@ describe('交付 native 能力的公開 interface', () => {
     const { engine, calls } = capabilities();
     const spec = { ...deliverySpec(format), chapters: [
       { start: 0, end: 0.5, title: '備註：畫格檢查' },
-      { start: 0.5, end: 1, title: '自訂字幕：測試 #;=' },
+      { start: 0.5, end: 1, title: '備註：測試 #;=', kind: 'note' },
     ] };
     const original = structuredClone(spec);
     await engine.assertReady(spec);

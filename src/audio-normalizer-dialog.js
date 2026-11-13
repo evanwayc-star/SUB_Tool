@@ -80,6 +80,7 @@ export function openHardLimiterDialog(audioSource) {
       linkChannels: true,
     });
   }
+  const appliedOptions=hasApplied?{...currentOptions}:null;
 
   const presetOptionsHtml = HARD_LIMITER_PRESETS.map(p => `
     <option value="${escapeHTML(p.id)}" ${p.id === currentOptions.preset ? 'selected' : ''}>
@@ -107,7 +108,7 @@ export function openHardLimiterDialog(audioSource) {
         .hl-slider:focus-visible::-moz-range-thumb { outline: 2px solid #bae6fd; outline-offset: 2px; }
         .hl-input-num { flex: 0 0 64px; width: 64px; height: 24px; background: #09090b; border: 1px solid #3f3f46; border-radius: 4px; color: #38bdf8; font-size: 12px; font-weight: 600; text-align: right; padding: 1px 4px; font-family: monospace; outline: none; }
         .hl-input-num:focus { border-color: #38bdf8; }
-        .hl-unit { font-size: 11px; color: #71717a; width: 22px; }
+        .hl-unit { font-size: 12px; color: var(--text-dim); flex: 0 0 34px; white-space: nowrap; }
         .hl-select { background: #18181b; color: #fafafa; border: 1px solid #3f3f46; border-radius: 5px; padding: 3px 8px; font-size: 12px; width: 100%; outline: none; }
         .hl-select:focus { border-color: #38bdf8; }
         .hl-chk-label { font-size: 12px; color: #e4e4e7; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
@@ -211,23 +212,24 @@ export function openHardLimiterDialog(audioSource) {
 
         <!-- 最大聲音 -->
         <div class="hl-row">
-          <span class="hl-label" title="限制之最高聲音峰值上限，絕對不超出此數值">最大聲音 (上限)：</span>
+          <span class="hl-label">峰值上限：</span>
           <div class="hl-ctrl">
             <input type="range" id="hlMaxAmp" class="hl-slider" min="${LIMITER_DB_RANGE.min}" max="${LIMITER_DB_RANGE.max}" step="0.5" value="${currentOptions.maximumAmplitude}" aria-label="最大聲音上限">
             <input type="number" id="hlMaxAmpNum" class="hl-input-num" min="${LIMITER_DB_RANGE.min}" max="${LIMITER_DB_RANGE.max}" step="0.5" value="${currentOptions.maximumAmplitude}" aria-label="最大聲音上限數值">
-            <span class="hl-unit">dB</span>
+            <span id="hlPeakUnit" class="hl-unit">dBTP</span>
           </div>
         </div>
 
         <!-- 最小聲音 -->
         <div class="hl-row">
-          <span class="hl-label" title="整體音訊目標響度，較小聲音將被平衡提升至此">最小聲音 (目標)：</span>
+          <span id="hlTargetLabel" class="hl-label">目標整體響度：</span>
           <div class="hl-ctrl">
             <input type="range" id="hlMinAmp" class="hl-slider" min="${LIMITER_DB_RANGE.min}" max="${LIMITER_DB_RANGE.max}" step="0.5" value="${currentOptions.targetLoudness}" aria-label="最小聲音目標">
             <input type="number" id="hlMinAmpNum" class="hl-input-num" min="${LIMITER_DB_RANGE.min}" max="${LIMITER_DB_RANGE.max}" step="0.5" value="${currentOptions.targetLoudness}" aria-label="最小聲音目標數值">
-            <span class="hl-unit">dB</span>
+            <span id="hlTargetUnit" class="hl-unit">LUFS</span>
           </div>
         </div>
+        <p id="hlModeHelp" style="font-size:11px;line-height:1.5;color:var(--text-dim);margin:8px 0 0;"></p>
       </div>
 
     </div>
@@ -315,18 +317,25 @@ export function openHardLimiterDialog(audioSource) {
         statusBadge.style.borderColor = 'rgba(234, 179, 8, 0.3)';
       }
     } else {
+      const changed=appliedOptions&&[
+        'maximumAmplitude','targetLoudness','inputBoost','isTruePeak',
+        'lookAheadTime','releaseTime','linkChannels','silenceProtection',
+      ].some(key=>currentOptions[key]!==appliedOptions[key]);
       statusBanner.style.background = 'rgba(34, 197, 94, 0.08)';
       statusBanner.style.borderColor = 'rgba(34, 197, 94, 0.35)';
       if (statusIcon) statusIcon.textContent = '🟢';
       if (statusTitle) {
-        statusTitle.textContent = `濾鏡目前狀態：${hasApplied ? '已開啟' : '準備開啟'} (${currentOptions.maximumAmplitude} dB)`;
+        statusTitle.textContent = `濾鏡目前狀態：${changed ? '待套用變更' : hasApplied ? '已開啟' : '準備開啟'} (${currentOptions.maximumAmplitude} ${currentOptions.isTruePeak ? 'dBTP' : 'dBFS'})`;
         statusTitle.style.color = '#4ade80';
       }
       if (statusDesc) {
-        statusDesc.textContent = `最大聲音限制於 ${currentOptions.maximumAmplitude} dB，目標聲音平衡於 ${currentOptions.targetLoudness} dB。`;
+        const description = currentOptions.isTruePeak
+          ? `峰值上限 ${currentOptions.maximumAmplitude} dBTP，目標整體響度 ${currentOptions.targetLoudness} LUFS。`
+          : `峰值上限 ${currentOptions.maximumAmplitude} dBFS，輸入增益 ${currentOptions.inputBoost >= 0 ? '+' : ''}${currentOptions.inputBoost} dB。`;
+        statusDesc.textContent=(changed?'套用後：':'')+description;
       }
       if (statusBadge) {
-        statusBadge.textContent = hasApplied ? '已生效' : '準備開啟';
+        statusBadge.textContent = changed ? '未套用' : hasApplied ? '已生效' : '準備開啟';
         statusBadge.style.color = '#86efac';
         statusBadge.style.background = 'rgba(34, 197, 94, 0.18)';
         statusBadge.style.borderColor = 'rgba(34, 197, 94, 0.35)';
@@ -353,6 +362,22 @@ export function openHardLimiterDialog(audioSource) {
     levelControls.forEach(control => syncLevelControl(control));
     peakRadio.checked = !currentOptions.isTruePeak;
     truePeakRadio.checked = currentOptions.isTruePeak;
+    const truePeak=currentOptions.isTruePeak;
+    const peakUnit=truePeak?'dBTP':'dBFS';
+    const targetLabel=truePeak?'目標整體響度':'增益計算基準';
+    const targetUnit=truePeak?'LUFS':'dB';
+    document.getElementById('hlPeakUnit').textContent=peakUnit;
+    document.getElementById('hlTargetLabel').textContent=targetLabel+'：';
+    document.getElementById('hlTargetUnit').textContent=targetUnit;
+    maxAmpSlider.setAttribute('aria-label',`峰值上限（${peakUnit}）`);
+    maxAmpNum.setAttribute('aria-label',`峰值上限數值（${peakUnit}）`);
+    minAmpSlider.setAttribute('aria-label',`${targetLabel}（${targetUnit}）`);
+    minAmpNum.setAttribute('aria-label',`${targetLabel}數值（${targetUnit}）`);
+    minAmpSlider.setAttribute('aria-describedby','hlModeHelp');
+    minAmpNum.setAttribute('aria-describedby','hlModeHelp');
+    document.getElementById('hlModeHelp').textContent=truePeak
+      ? '調整整段音訊的響度，不代表每一處小聲都會提高至此數值；無法同時達成時優先遵守峰值上限。'
+      : '一般峰值模式不進行響度標準化。調整峰值上限或此基準後，以兩數差值設定輸入增益；目前增益顯示於上方。';
     updateStatusBanner();
   }
 
@@ -391,12 +416,15 @@ export function openHardLimiterDialog(audioSource) {
   peakRadio.onchange = () => {
     currentOptions.isTruePeak = false;
     presetSel.value = 'custom';
+    updateUi();
   };
 
   truePeakRadio.onchange = () => {
     currentOptions.isTruePeak = true;
     presetSel.value = 'custom';
+    updateUi();
   };
+  updateUi();
 
   // 非同步呼叫後台 FFmpeg 進行精準聲量量測 (ITU-R BS.1770)
   const duration = audioSource?.duration || audioSource?.asset?.duration || 0;

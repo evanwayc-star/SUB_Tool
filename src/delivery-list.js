@@ -109,7 +109,6 @@ function newRow({ audioOnly, defaultAudioLayout, outDir = '' }) {
     targetFps: 0,
     burnTimecode: false,
     chapterNotes: false,
-    chapterStyled: false,
     audioPlan: JSON.parse(JSON.stringify(defaultAudioLayout || {})),
     customName: '',
     outDir,
@@ -149,7 +148,11 @@ export function createDeliveryList({
 }) {
   // A row is editable only through this module's methods. Audio plans contain
   // nested arrays, so a shallow copy would still let a dialog bypass presets.
-  const copyRow = row => structuredClone(row);
+  const copyRow = row => {
+    const copy = structuredClone(row);
+    delete copy.chapterStyled; delete copy.customStyles;
+    return copy;
+  };
   const rows = Array.isArray(initial) && initial.length
     ? initial.map(copyRow)
     : [newRow({ audioOnly, defaultAudioLayout })];
@@ -274,9 +277,7 @@ export function createDeliveryList({
     },
     setChapterOptions(i, options) {
       const r = at(i); if (!r) return;
-      for (const key of ['chapterNotes', 'chapterStyled']) {
-        if (typeof options?.[key] === 'boolean') r[key] = options[key];
-      }
+      if (typeof options?.chapterNotes === 'boolean') r.chapterNotes = options.chapterNotes;
     },
     setOutDir(i, dir) { const r = at(i); if (r) r.outDir = dir || ''; },
 

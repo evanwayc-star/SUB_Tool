@@ -104,6 +104,7 @@ const actionCategories = [
       'zoom_out': '縮小時間軸',
       'zoom_in': '放大時間軸',
       'zoom_fit': '切換時間軸縮放模式',
+      'scroll_playhead': '將時間軸視野對齊目前播放點',
     }
   },
   {
@@ -188,6 +189,7 @@ function renderSettingsTable(tbody, isCurrent, onChange, onConflict) {
         input.id = `settings-input-${action}-${i}`;
         input.setAttribute('aria-label', `${label}，第 ${i+1} 組快捷鍵`);
         input.setAttribute('aria-describedby', 'settingsKeyboardHelp settingsError');
+        if(action==='scroll_playhead')input.title='只捲動視野，不移動播放點；對齊時間軸內容區左側 15%';
         input.value = fixedDisplay[action] && i === 0 ? fixedDisplay[action] : formatBind(binds[i]);
         
         const isFixed = fixedActions.includes(action);

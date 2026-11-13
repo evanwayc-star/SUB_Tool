@@ -332,17 +332,49 @@ function _ensurePanelInRightArea(panel) {
   }
 }
 
+const panelOrigins = new WeakMap();
+const panelOpenTokens = new WeakMap();
+function syncPanelTriggers(panel, open) {
+  document.querySelectorAll(`[aria-controls="${panel.id}"]`).forEach(button => button.setAttribute('aria-expanded', String(open)));
+  if (panel.id === 'checkPanel') $('checkPanelBtn')?.classList.toggle('sub-active', open);
+}
+
+export function closePanel(id, { restoreFocus = true } = {}) {
+  const panel = $(id);
+  if (!panel) return;
+  const hadFocus = panel.contains(document.activeElement);
+  panel.classList.remove('show');
+  panelOpenTokens.delete(panel);
+  syncPanelTriggers(panel, false);
+  const origin = panelOrigins.get(panel);
+  panelOrigins.delete(panel);
+  if (restoreFocus && hadFocus && origin?.isConnected) origin.focus({preventScroll:true});
+  emit('mpv:sync');
+}
+
 function togglePanel(id) {
   const p = $(id);
   if (!p) return;
   const willShow = !p.classList.contains('show');
-  document.querySelectorAll('.float-panel.show').forEach(x => x.classList.remove('show'));
+  const focused = document.activeElement === document.body ? _lastFocusedOutsideModal : document.activeElement;
+  const origin = panelOrigins.get(focused?.closest?.('.float-panel')) || focused;
+  document.querySelectorAll('.float-panel.show').forEach(x => closePanel(x.id, {restoreFocus:!willShow}));
   if (willShow) {
+    const token = {};
+    panelOrigins.set(p, origin);
+    panelOpenTokens.set(p, token);
     p.classList.add('show');
+    syncPanelTriggers(p, true);
+    p.tabIndex = -1;
     emit('mpv:sync');
     setTimeout(() => {
+      if (panelOpenTokens.get(p) !== token || !p.classList.contains('show')) return;
       _ensurePanelInRightArea(p);
       keepPanelInViewport(p);
+      if (!$('modalBg')?.classList.contains('show') && !$('settingsModal')) {
+        const first = _focusables(p).find(element => !element.closest('.fp-head'));
+        (first || p).focus({preventScroll:true});
+      }
       emit('mpv:sync');
     }, 0);
   } else {

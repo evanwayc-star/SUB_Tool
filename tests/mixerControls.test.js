@@ -105,6 +105,66 @@ describe('混音器完整控制與持久狀態', () => {
     expect(History.stack).toHaveLength(4);
   });
 
+  it.each([['.mx-mute', 'muted'], ['.mx-solo', 'solo']])('%s 切換及同步重繪後保留同 bus 的按鈕焦點與按下狀態', async (selector, field) => {
+    const { on } = await import('../src/events.js');
+    // 真 Media 的 bus-change 訂閱端會先同步重繪，click handler 隨後還會重繪。
+    on('audio:busChanged', () => mixer.renderAudioTracks());
+    const original = strip(1).querySelector(selector);
+    original.focus(); original.click();
+    const active = strip(1).querySelector(selector);
+    expect(original.isConnected).toBe(false);
+    expect(document.activeElement).toBe(active);
+    expect(bus(1)[field]).toBe(true);
+    expect(active.getAttribute('aria-pressed')).toBe('true');
+    active.click();
+    expect(document.activeElement).toBe(strip(1).querySelector(selector));
+    expect(bus(1)[field]).toBe(false);
+    expect(document.activeElement.getAttribute('aria-pressed')).toBe('false');
+    expect(History.stack).toHaveLength(3);
+  });
+
+  it('M/S 按下狀態反映各自 bus truth，不把其他獨奏造成的不可聽當作靜音', () => {
+    press(0, '.mx-solo');
+    expect(audible()).toEqual([true, false]);
+    expect(strip(0).querySelector('.mx-solo').getAttribute('aria-pressed')).toBe('true');
+    expect(strip(1).querySelector('.mx-mute').getAttribute('aria-pressed')).toBe('false');
+    expect(strip(1).querySelector('.mx-solo').getAttribute('aria-pressed')).toBe('false');
+    History.undo(); mixer.renderMixer();
+    expect(strip(0).querySelector('.mx-solo').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('M/S 重繪以 bus.id 恢復焦點，不因音軌排序改到其他 bus', async () => {
+    const { on } = await import('../src/events.js');
+    on('audio:busChanged', () => State.audioProject.buses.reverse());
+    const original = strip(1).querySelector('.mx-mute');
+    original.focus(); original.click();
+    expect(document.activeElement).toBe(strip(0).querySelector('.mx-mute'));
+    expect(document.activeElement.closest('.mx-strip').dataset.busId).toBe('right');
+    expect(bus(0).muted).toBe(true);
+    expect(bus(1).muted).toBe(false);
+  });
+
+  it.each([false, true])('M/S 切換前或通知期間焦點交給其他控制時不搶回（通知期間：%s）', async duringChange => {
+    const { on } = await import('../src/events.js');
+    const outside = document.createElement('button'); document.body.append(outside);
+    const original = strip(0).querySelector('.mx-mute');
+    if (duringChange) {
+      original.focus(); on('audio:busChanged', () => outside.focus());
+    } else outside.focus();
+    original.click();
+    expect(bus(0).muted).toBe(true);
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it('同 id 的 bus 被替換後不把舊按鈕焦點交給新物件', async () => {
+    const { on } = await import('../src/events.js');
+    on('audio:busChanged', () => { State.audioProject.buses[0] = { ...bus(0) }; });
+    const original = strip(0).querySelector('.mx-solo');
+    original.focus(); original.click();
+    expect(original.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it('時間軸列的 M/S 與混音器使用相同 bus，只有選中的來源可聽', () => {
     document.querySelectorAll('#atList .solo')[1].click();
     expect(audible()).toEqual([false, true]);

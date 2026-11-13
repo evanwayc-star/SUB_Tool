@@ -1265,6 +1265,15 @@ function updatePlayhead(){
   if(State.inPoint!=null){ const ip=$('tlInpoint'); ip.style.display='block'; ip.style.left=timeToX(State.inPoint)+'px'; }
   else $('tlInpoint').style.display='none';
 }
+export function alignTimelineToPlayhead(){
+  const width=viewportW(),scale=State.pxPerSec,time=Media.displayTime();
+  if(!(width>0)||!Number.isFinite(scale)||scale<=0||!Number.isFinite(time))return;
+  // FPS-SYNC: viewport navigation reads timeline time only. The track gutter
+  // lies outside tlScroll; manual alignment is 15% into its content viewport.
+  tlScroll.scrollLeft=Math.max(0,time*scale-width*.15);
+  State.viewStart=tlScroll.scrollLeft/scale; // preserve the browser's end clamp
+  drawRuler();drawWave();renderCueBlocks();updatePlayhead();
+}
 function drawTimeline(){
   syncVideoTracks(); layoutTimeline(); drawRuler(); drawWave(); renderVtrackGutter(); renderAtrackGutter(); renderTrackRows(); updatePlayhead();
 }
@@ -2084,9 +2093,9 @@ export function paintSubtitleBlocks(trackRows, displayList) {
     el.style.left = c.x + 'px';
     el.style.width = Math.max(2, c.w) + 'px';
     el.dataset.id = c.id;
-    const styleMarker = c.hasStyle ? '<span title="此句有樣式覆蓋" style="color:var(--accent)">✱ </span>' : '';
+    const styleMarker = c.hasStyle ? '<span title="此句有樣式覆蓋">✱ </span>' : '';
     const displayIndex = c.isLast ? `${c.cueIndex} ＃` : c.cueIndex;
-    const idxHtml = c.cueIndex ? `<div style="padding:0 8px 0 12px;font-size:12px;font-weight:600;color:rgba(255,255,255,0.7);pointer-events:none;display:flex;align-items:center;">${displayIndex}</div>` : '';
+    const idxHtml = c.cueIndex ? `<div style="padding:0 8px 0 12px;font-size:12px;font-weight:600;color:inherit;pointer-events:none;display:flex;align-items:center;">${displayIndex}</div>` : '';
     el.innerHTML = '<div class="edge l"></div><div style="flex:1;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-height:1.2;pointer-events:none;padding:0 6px;">' + styleMarker + c.htmlText + '</div>' + idxHtml + '<div class="edge r"></div>';
     row.appendChild(el);
   }

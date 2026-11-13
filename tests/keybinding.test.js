@@ -307,6 +307,53 @@ describe('匯入合併', () => {
   });
 });
 
+describe('音量表與播放點視野的預設鍵遷移',()=>{
+  const hit=(keymap,key,shift=false)=>matchAction(keymap,ev(key,{code:'Key'+key.toUpperCase(),shift}));
+  it('新的預設 U 只對齊視野、Y 切音量表、Shift+Y 切上字幕模式',()=>{
+    expect(hit(State.defaultKeymap,'u')).toBe('scroll_playhead');
+    expect(hit(State.defaultKeymap,'y')).toBe('toggle_mixer');
+    expect(hit(State.defaultKeymap,'y',true)).toBe('toggle_sub_mode');
+  });
+  it('完整舊預設遷移後三個動作皆可達，來源與預設未被修改',()=>{
+    const old=structuredClone(State.defaultKeymap);delete old.scroll_playhead;
+    old.toggle_mixer=[{key:'u'}];old.toggle_sub_mode=[{key:'y'}];
+    const before=structuredClone(old),defaults=structuredClone(State.defaultKeymap);
+    const {keymap}=mergeImportedKeymap(State.defaultKeymap,{keymap:old});
+    expect(hit(keymap,'u')).toBe('scroll_playhead');expect(hit(keymap,'y')).toBe('toggle_mixer');
+    expect(hit(keymap,'y',true)).toBe('toggle_sub_mode');expect(old).toEqual(before);expect(State.defaultKeymap).toEqual(defaults);
+    expect(mergeImportedKeymap(State.defaultKeymap,keymap).keymap).toEqual(keymap);
+  });
+  it('自訂音量表 U 加另一按鍵保持原樣，新視野預設避讓而不引入衝突',()=>{
+    const custom={toggle_mixer:[{key:'u'},{key:'b'}],toggle_sub_mode:[{key:'y'}]};
+    const {keymap}=mergeImportedKeymap(State.defaultKeymap,custom);
+    expect(keymap.toggle_mixer).toEqual(custom.toggle_mixer);expect(keymap.scroll_playhead).toEqual([]);
+    expect(hit(keymap,'u')).toBe('toggle_mixer');
+  });
+  it.each([{key:'u'},{code:'KeyU'}])('其他動作自訂 %j 保留，新增 U 不搶鍵',bind=>{
+    const {keymap}=mergeImportedKeymap(State.defaultKeymap,{pause:[bind],toggle_mixer:[{key:'u'}]});
+    expect(keymap.pause).toEqual([bind]);expect(keymap.scroll_playhead).toEqual([]);expect(hit(keymap,'u')).toBe('pause');
+  });
+  it.each([{key:'y'},{code:'KeyY'}])('其他動作自訂 %j 保留，遷移音量表不搶 Y',bind=>{
+    const {keymap}=mergeImportedKeymap(State.defaultKeymap,{pause:[bind],toggle_mixer:[{key:'u'}],toggle_sub_mode:[{key:'y'}]});
+    expect(keymap.pause).toEqual([bind]);expect(keymap.toggle_mixer).toEqual([]);expect(hit(keymap,'y')).toBe('pause');
+    expect(hit(keymap,'u')).toBe('scroll_playhead');
+  });
+  it('自訂 Shift+Y、修飾鍵音量表與刻意清空的動作不被覆寫',()=>{
+    const custom={pause:[{key:'y',shift:true}],toggle_mixer:[{key:'u',ctrl:true}],toggle_sub_mode:[{key:'y'}]};
+    const {keymap}=mergeImportedKeymap(State.defaultKeymap,custom);
+    expect(keymap.toggle_sub_mode).toEqual([]);expect(keymap.toggle_mixer).toEqual(custom.toggle_mixer);
+    expect(hit(keymap,'y',true)).toBe('pause');expect(hit(keymap,'u')).toBe('scroll_playhead');
+    const empty=mergeImportedKeymap(State.defaultKeymap,{toggle_mixer:[],toggle_sub_mode:[],scroll_playhead:[]}).keymap;
+    expect(empty.toggle_mixer).toEqual([]);expect(empty.toggle_sub_mode).toEqual([]);expect(empty.scroll_playhead).toEqual([]);
+  });
+  it('新版設定已明確清空 U 再指定音量表 U，不重複套用舊預設遷移',()=>{
+    const custom={toggle_mixer:[{key:'u'}],toggle_sub_mode:[{key:'y'}],scroll_playhead:[]};
+    const {keymap}=mergeImportedKeymap(State.defaultKeymap,custom);
+    expect(keymap.toggle_mixer).toEqual(custom.toggle_mixer);expect(keymap.toggle_sub_mode).toEqual(custom.toggle_sub_mode);
+    expect(keymap.scroll_playhead).toEqual([]);expect(hit(keymap,'u')).toBe('toggle_mixer');expect(hit(keymap,'y')).toBe('toggle_sub_mode');
+  });
+});
+
 describe('存檔前清空位', () => {
   it('濾掉 null 但保留其餘順序', () => {
     const km = { a: [{ key: 'x' }, null, { key: 'y' }], b: [null] };

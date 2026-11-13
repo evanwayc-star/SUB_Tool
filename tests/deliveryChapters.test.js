@@ -19,14 +19,53 @@ function project() {
 }
 
 describe('optional review chapters', () => {
-  it('uses the frozen notes/effective custom styles, clamps export start and excludes hidden/undated/outside items', () => {
+  it('only exports frozen notes within the range, ignoring old custom style switches', () => {
     const p = project();
     expect(chaptersForSubmission(p)).toEqual([]);
-    expect(chaptersForSubmission(p, { chapterNotes: true, chapterStyled: true })).toEqual([
-      { start: 0, end: 2, title: '自訂字幕：跨越起點' },
-      { start: 2, end: 5, title: '備註：核對 #1;=\\ ／ 自訂字幕：逐句樣式' },
-      { start: 5, end: 10, title: '自訂字幕：繼承軌道' },
+    expect(chaptersForSubmission(p, { chapterStyled: true, customStyles: true })).toEqual([]);
+    expect(chaptersForSubmission(p, { chapterNotes: true, chapterStyled: true, customStyles: true })).toEqual([
+      { start: 0, end: 2, title: '影片開始' },
+      { start: 2, end: 10, title: '備註：核對 #1;=\\', kind: 'note' },
     ]);
+  });
+
+  it('removes frozen legacy styled-only chapters including their generated opening chapter', () => {
+    const old = [{ start: 0, title: '影片開始' }, { start: 2, title: '自訂字幕：舊字幕' }, { start: 4, title: '自訂字幕：另一句' }];
+    expect(normalizeDeliveryChapters(old, 10, 'h264')).toEqual([]);
+    expect(serializeDeliveryChapters(old, 10, 'prores')).toBeNull();
+    expect(normalizeDeliveryChapters([...old, { start: 6, title: '備註：仍要保留' }], 10, 'h264')).toEqual([
+      { start: 0, end: 6, title: '影片開始' }, { start: 6, end: 10, title: '備註：仍要保留' },
+    ]);
+  });
+
+  it('does not guess how to split ambiguous legacy note/style titles', () => {
+    expect(() => normalizeDeliveryChapters([{ start: 1, title: '備註：文字 ／ 自訂字幕：可能也是備註原文' }], 10, 'h264'))
+      .toThrow('重新加入');
+  });
+
+  it('preserves arbitrary typed note text across repeated normalization and serialization', () => {
+    const p = project(); p.notes = [{ time: 11, text: '原文 ／ 自訂字幕：這仍是備註 #;=' }];
+    const chapters = chaptersForSubmission(p, { chapterNotes: true });
+    expect(chapters[1]).toEqual({ start: 1, end: 10, kind: 'note', title: '備註：原文 ／ 自訂字幕：這仍是備註 #;=' });
+    expect(normalizeDeliveryChapters(normalizeDeliveryChapters(chapters, 10, 'h264'), 10, 'prores')).toEqual(chapters);
+    expect(serializeDeliveryChapters(chapters, 10, 'h264')).toContain('title=備註：原文 ／ 自訂字幕：這仍是備註 \\#\\;\\=');
+  });
+
+  it('keeps typed note provenance when an old opening marker shares its millisecond', () => {
+    const title = '備註：原文 ／ 自訂字幕：保留';
+    const clean = normalizeDeliveryChapters([{ start: 0, title: '影片開始' }, { start: 0.0001, title, kind: 'note' }], 1, 'h264');
+    expect(clean).toEqual([{ start: 0, end: 1, title: `影片開始 ／ ${title}`, kind: 'note' }]);
+    expect(normalizeDeliveryChapters(clean, 1, 'h264')).toEqual(clean);
+    expect(serializeDeliveryChapters(clean, 1, 'prores')).toContain(`title=影片開始 ／ ${title}`);
+  });
+
+  it('drops obsolete style switches when restoring delivery rows and keeps the note choice', () => {
+    const first = createDeliveryList({ projectTag: 'review', fps: 25, canvasW: 64, canvasH: 48 });
+    const initial = first.rows().map(row => ({ ...row, chapterNotes: true, chapterStyled: true, customStyles: true }));
+    const restored = createDeliveryList({ projectTag: 'review', fps: 25, canvasW: 64, canvasH: 48, initial });
+    restored.setChapterOptions(0, { chapterStyled: true, customStyles: true });
+    expect(restored.get(0).chapterNotes).toBe(true);
+    expect(restored.get(0)).not.toHaveProperty('chapterStyled'); expect(restored.get(0)).not.toHaveProperty('customStyles');
   });
 
   it('rounds/merges millisecond markers, preserves Unicode and escapes metadata controls', () => {
@@ -58,9 +97,11 @@ describe('optional review chapters', () => {
     await submission.submit();
     const sent = desktop.exportVideo.mock.calls.map(([job]) => job);
     expect(sent).toHaveLength(2);
-    expect(sent[0].chapters).toEqual([{ start: 0, end: 2, title: '影片開始' }, { start: 2, end: 10, title: '備註：核對 #1;=\\' }]);
-    expect(sent[1].chapters.map(item => item.start)).toEqual([0, 2, 5]);
-    expect(sent[1].chapters.every(item => item.title.startsWith('自訂字幕：'))).toBe(true);
+    expect(sent[0].chapters).toEqual([{ start: 0, end: 2, title: '影片開始' }, { start: 2, end: 10, title: '備註：核對 #1;=\\', kind: 'note' }]);
+    expect(sent[1].chapters).toEqual([]);
+    for (const job of sent) {
+      expect(job.assText).toContain('跨越起點'); expect(job.assText).toContain('逐句樣式'); expect(job.assText).toContain('繼承軌道');
+    }
     expect(p.notes[0].text).toBe('範圍外');
   });
 });

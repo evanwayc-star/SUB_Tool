@@ -31,6 +31,23 @@ beforeEach(()=>{
 afterEach(()=>{ui.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('字幕匯入工作歸屬',()=>{
+  it('新增軌道的名稱有標籤且不顯示無作用的附加選項，切回既有軌保留選擇',()=>{
+    subio._openImportModal('匯入 SRT',[{start:1,end:2,text:'新字幕'}],'srt');vi.runAllTimers();
+    const name=document.getElementById('importNewTkName'),append=document.getElementById('importAppend');
+    expect([...name.labels].some(label=>label.textContent.includes('軌道名稱'))).toBe(true);
+    expect(append.disabled).toBe(true);expect(getComputedStyle(append.closest('label')).display).toBe('none');
+    const target=document.getElementById('importTkSel');target.value='0';target.dispatchEvent(new Event('change'));
+    expect(append.disabled).toBe(false);expect(getComputedStyle(append.closest('label')).display).not.toBe('none');
+    append.checked=true;target.value='new';target.dispatchEvent(new Event('change'));
+    expect(append.disabled).toBe(true);
+    target.value='0';target.dispatchEvent(new Event('change'));expect(append.checked).toBe(true);
+  });
+
+  it('FPS 轉換控制有來源與目標標籤，不靠視覺位置辨認',()=>{
+    subio.showFpsConvertDialog();vi.runAllTimers();
+    expect([...document.getElementById('fpsFrom').labels].map(label=>label.textContent).join('')).toContain('來源 FPS');
+    expect([...document.getElementById('fpsTo').labels].map(label=>label.textContent).join('')).toContain('目標 FPS');
+  });
   it('拖入部分缺時間碼 TXT，確認前指出問題行，匯入後原文和未定時狀態均保留',async()=>{
     State.mediaName='video.mov';State.fps=24;
     const request=subio.importDropped({name:'部分少時間碼.txt'});

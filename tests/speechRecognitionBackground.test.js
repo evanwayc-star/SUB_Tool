@@ -68,6 +68,39 @@ function renderModalFromMock() {
 }
 
 describe('語音辨識背景執行與進度視窗切換', () => {
+  it.each([
+    ['completed',3,'已建立 3 句字幕','字幕已加入專案'],
+    ['completed',0,'未產生字幕','沒有可建立的字幕'],
+    ['failed',0,'工作未完成','確認專案內的字幕'],
+    ['cancelled',0,'工作已取消','確認專案內的字幕'],
+  ])('%s 監控摘要只陳述真正的字幕產出（%s 句）', (status,count,title,detail) => {
+    openAsrMonitorDialog({ id:'summary', clips:[], provider:'builtin', taskMode:'transcribe', progress:{status}, result:status==='completed'?{count}:null });
+    renderModalFromMock();
+    expect(document.getElementById('asrMonitorOutcomeTitle').textContent).toBe(title);
+    expect(document.getElementById('asrMonitorOutcomeHelp').textContent).toContain(detail);
+    expect(document.querySelector('.asr-callout').textContent).not.toContain('結果已保留');
+    expect(document.querySelector('.asr-callout').textContent).not.toContain('未新增字幕');
+  });
+
+  it('開著的 monitor 從進行中變成失敗時同步更新摘要，不留下完成承諾',async()=>{
+    const errorLog=vi.spyOn(console,'error').mockImplementation(()=>{});
+    let rejectWork;
+    try {
+      engineMocks.transcribeAudioStream.mockImplementation(()=>new Promise((_resolve,reject)=>{rejectWork=reject;}));
+      openSpeechRecognitionDialog();renderModalFromMock();
+      const call=uiMocks.openModal.mock.calls.at(-1);
+      const completion=call[2].find(button=>button.primary).act();
+      await vi.waitFor(()=>expect(rejectWork).toBeTypeOf('function'));
+      call[3].onReplaced();
+      openAsrMonitorDialog(getAsrSession());renderModalFromMock();
+      expect(document.getElementById('asrMonitorOutcomeTitle').textContent).toBe('可以繼續剪輯');
+      rejectWork(new Error('受控辨識失敗'));await completion;
+      expect(document.getElementById('asrMonitorOutcomeTitle').textContent).toBe('工作未完成');
+      expect(document.getElementById('asrMonitorOutcomeHelp').textContent).toContain('重新開啟辨識設定');
+      expect(State.cues).toEqual([]);
+    } finally { errorLog.mockRestore(); }
+  });
+
   it.each(['dismiss','replace','cancel'])('失敗後以 %s 關閉設定視窗會清除該工作通知',async mode=>{
     const errorLog=vi.spyOn(console,'error').mockImplementation(()=>{});
     try{

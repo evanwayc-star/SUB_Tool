@@ -28,6 +28,23 @@ const route = (channel, busId) => {
 };
 const plan = () => buildProjectAudioPlan({audioProject:State.audioProject,clips:State.clips});
 
+it('輸出聲道格式重畫後焦點留在同一組格式，新增與移除後仍有就近可操作的焦點', () => {
+  open();
+  const original = structuredClone(State.audioProject);
+  const layout = document.querySelector('.audio-output-layout');
+  const streamId = layout.closest('tr').dataset.streamId;
+  layout.focus(); layout.value='stereo'; layout.dispatchEvent(new Event('change')); vi.runAllTimers();
+  expect(document.activeElement.classList.contains('audio-output-layout')).toBe(true);
+  expect(document.activeElement.closest('tr').dataset.streamId).toBe(streamId);
+  const add=document.getElementById('audioOutputAdd'); add.focus(); add.click(); vi.runAllTimers();
+  const rows=[...document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]')];
+  expect(document.activeElement).toBe(rows.at(-1).querySelector('.audio-output-name'));
+  const remove=rows.at(-1).querySelector('.audio-output-remove'); remove.focus(); remove.click(); vi.runAllTimers();
+  expect(document.activeElement.closest('tr')).toBe(rows.at(-2));
+  expect(document.activeElement.isConnected).toBe(true);
+  act('取消'); expect(State.audioProject).toEqual(original);
+});
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.spyOn(window,'confirm').mockReturnValue(true);

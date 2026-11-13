@@ -249,6 +249,14 @@ describe('交付 argv：影像合成', () => {
     expect(() => P.prepareDeliveryPayload({ ...base, format: 'mod-fhd', chapters })).toThrow('不支援');
   });
 
+  it('舊式自訂樣式書籤只剩人工開頭時，主程序准入與實際 argv 都完全移除章節', () => {
+    const base = spec({ format: 'h264', chapterStyled: true, customStyles: true,
+      chapters: [{ start: 0, title: '影片開始' }, { start: 1, title: '自訂字幕：舊內容' }] });
+    expect(P.prepareDeliveryPayload(base).chapters).toEqual([]);
+    const args = P.buildDeliveryArgv(base, env()).args;
+    expect(args[args.indexOf('-map_chapters') + 1]).toBe('-1'); expect(args).not.toContain('ffmetadata');
+  });
+
   it('隱藏視訊軌只略過畫面，母素材音訊仍依同一時間軸交付', () => {
     const { args } = P.buildDeliveryArgv(spec({ videoTracks: [{ vt: 0, visible: false }] }), env({ hasAudioStream: () => true }));
     const graph = fcOf(args);

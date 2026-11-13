@@ -683,6 +683,19 @@ export function openAsrMonitorDialog(session) {
     ? 'is-error'
     : (session.progress?.status === 'completed' ? 'is-success' : 'is-running');
   const statusRole = session.progress?.status === 'failed' ? 'alert' : 'status';
+  const outcomeCopy = snapshot => {
+    const status=snapshot.progress?.status;
+    if(status==='completed'){
+      const count=Math.max(0,Number(snapshot.result?.count)||0);
+      return count>0
+        ? {title:`已建立 ${count} 句字幕`,help:'字幕已加入專案；請查看結果與需校對的行號。關閉後清除這筆工作通知。'}
+        : {title:'未產生字幕',help:'這次工作沒有可建立的字幕。關閉後可重新選擇音訊或調整辨識設定。'};
+    }
+    if(status==='failed') return {title:'工作未完成',help:'請查看上方錯誤並確認專案內的字幕；關閉後可從素材右鍵重新開啟辨識設定。'};
+    if(status==='cancelled') return {title:'工作已取消',help:'請確認專案內的字幕；關閉後可從素材右鍵重新開啟辨識設定。'};
+    return {title:'可以繼續剪輯',help:'縮小視窗後工作仍會在背景執行；完成時會自動建立字幕軌並通知你。'};
+  };
+  const outcome=outcomeCopy(session);
   const html = `
     <div class="asr-form asr-workspace asr-monitor-workspace">
       <section class="asr-card asr-monitor-summary" aria-labelledby="asrMonitorSummaryTitle">
@@ -720,10 +733,8 @@ export function openAsrMonitorDialog(session) {
       <div class="asr-callout">
         ${asrIcon('info')}
         <div>
-          <strong>${terminalStatus ? '結果已保留' : '可以繼續剪輯'}</strong>
-          <span>${terminalStatus
-            ? '確認結果與診斷後按「關閉」即可清除這筆工作通知。'
-            : '縮小視窗後工作仍會在背景執行；完成時會自動建立字幕軌並通知你。'}</span>
+          <strong id="asrMonitorOutcomeTitle">${escapeHTML(outcome.title)}</strong>
+          <span id="asrMonitorOutcomeHelp">${escapeHTML(outcome.help)}</span>
         </div>
       </div>
 
@@ -819,6 +830,11 @@ export function openAsrMonitorDialog(session) {
     const statusEl = document.getElementById('asrStatus');
     const modalFoot = document.getElementById('modalFoot');
     bindMonitorDiagnostic(s);
+    const nextOutcome=outcomeCopy(s);
+    const outcomeTitle=document.getElementById('asrMonitorOutcomeTitle');
+    const outcomeHelp=document.getElementById('asrMonitorOutcomeHelp');
+    if(outcomeTitle) outcomeTitle.textContent=nextOutcome.title;
+    if(outcomeHelp) outcomeHelp.textContent=nextOutcome.help;
 
     if (progressBar && s.progress) {
       if (s.progress.indeterminate) {

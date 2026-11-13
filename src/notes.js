@@ -24,6 +24,7 @@ import { showToast, setStatus, openModal, closeModal } from './ui.js';
 import { showCtx } from './menus.js';
 import { prepareSubtitleFileExport } from './subtitle-file-export.js';
 import { Project } from './project.js';
+import { uiIcon } from './ui-icons.js';
 
 /* ===== 備註 active 狀態 ===== */
 let _activeNoteId=null;
@@ -101,10 +102,10 @@ function updateNoteActive(t){
 }
 
 /* ===== 備註 ===== */
-function addNote(){
+function addNote({toggle=true}={}){
   const t = Media.displayTime();
   const existing = findNoteAtTime(t);
-  if(existing){
+  if(toggle && existing){
     State.notes = State.notes.filter(x => x.id !== existing.id);
     _selectedNoteIds.delete(existing.id);
     if(_activeNoteId === existing.id) _activeNoteId = null;
@@ -120,6 +121,25 @@ function addNote(){
   setNoteActive(n.id);
   renderNotes(); drawRuler();
   recordHistory('新增備註');
+}
+function addNotesFromCues(cues){
+  const targets=[...new Set(cues)];
+  if(!targets.length){showToast('請先選取字幕');return 0;}
+  if(targets.some(cue=>!State.cues.includes(cue))){showToast('字幕已變更，請重新選取');return 0;}
+  const invalid=targets.filter(cue=>cue.timed===false||!Number.isFinite(cue.start)||cue.start<0);
+  if(invalid.length){
+    showToast(`有 ${invalid.length} 條字幕未定時或 IN 無效，請先設定時間碼；未建立任何備註。`);
+    return 0;
+  }
+  // Cue IN and notes share timeline seconds. OUT is irrelevant, and this
+  // explicit creation must never toggle an existing note at the same time.
+  const created=targets.map(cue=>({id:newId(),time:cue.start,text:cue.text||'',done:false})).sort((a,b)=>a.time-b.time);
+  State.notes.push(...created);State.notes.sort((a,b)=>a.time-b.time);
+  _selectedNoteIds=new Set(created.map(note=>note.id));_lastSelectedNoteId=created[0].id;
+  setNoteActive(created[0].id);renderNotes();drawRuler();
+  recordHistory('從字幕建立備註');
+  showToast(`已建立 ${created.length} 條備註`);
+  return created.length;
 }
 function clearAllNotes(){
   if(!State.notes.length){ showToast('沒有備註可清除'); return; }
@@ -160,8 +180,14 @@ function renderNotes(){
     if(kept && candidateOwner.note===n){
       kept.className='note-item'+(n.done?' done':'')+(n.id===_activeNoteId?' nt-active':'')+(_selectedNoteIds.has(n.id)?' nt-selected':'');
       kept.querySelector('.nt-done-cb').checked=!!n.done;
-      if(!editingTime) kept.querySelector('.nt-time').textContent=secToEncore(n.time,State.fps,State.dropFrame);
-      if(!editingText) kept.querySelector('.nt-text').innerHTML=escapeHTML(n.text);
+      if(!editingTime){
+        const time=kept.querySelector('.nt-time'),label=secToEncore(n.time,State.fps,State.dropFrame);
+        time.textContent=label;time.setAttribute('aria-label',`備註時間 ${label}，Enter 或 F2 編輯`);
+      }
+      if(!editingText){
+        const text=kept.querySelector('.nt-text');text.innerHTML=escapeHTML(n.text);
+        text.setAttribute('aria-label',`編輯備註文字：${n.text||'空白備註'}`);
+      }
       beforeKept=false;
       continue;
     }
@@ -172,10 +198,10 @@ function renderNotes(){
     row.className='note-item'+(n.done?' done':'')+(n.id===_activeNoteId?' nt-active':'')+(isSel?' nt-selected':'');
     row.dataset.id=n.id;
     row.innerHTML=
-      `<input type="checkbox" class="nt-done-cb" ${n.done?'checked':''} title="完成">`+
-      `<span class="nt-time">${escapeHTML(secToEncore(n.time,State.fps,State.dropFrame))}</span>`+
-      `<span class="nt-text" contenteditable="false" spellcheck="false">${escapeHTML(n.text)}</span>`+
-      `<button class="nt-del" title="刪除">✕</button>`;
+      `<input type="checkbox" class="nt-done-cb" ${n.done?'checked':''} title="完成" aria-label="備註完成狀態">`+
+      `<span class="nt-time" tabindex="0" role="button" title="點選前往時間；Enter 或 F2 編輯時間" aria-label="備註時間 ${escapeHTML(secToEncore(n.time,State.fps,State.dropFrame))}，Enter 或 F2 編輯">${escapeHTML(secToEncore(n.time,State.fps,State.dropFrame))}</span>`+
+      `<span class="nt-text" tabindex="0" role="button" title="Enter 或 F2 編輯備註文字" aria-label="編輯備註文字：${escapeHTML(n.text||'空白備註')}" contenteditable="false" spellcheck="false">${escapeHTML(n.text)}</span>`+
+      `<button type="button" class="nt-del" title="刪除備註" aria-label="刪除備註">${uiIcon('trash')}</button>`;
 
     // 勾選（完成狀態）
     row.querySelector('.nt-done-cb').onchange=e=>{ if(!owner.current())return; n.done=e.target.checked; row.classList.toggle('done',n.done); recordHistory('備註打勾'); };
@@ -184,55 +210,79 @@ function renderNotes(){
     const timeEl=row.querySelector('.nt-time');
     timeEl.addEventListener('click',e=>{
       e.stopPropagation();
-      if(timeEl.querySelector('input')) return;
+      if(!owner.current()||timeEl.querySelector('input')) return;
       setNoteActive(n.id); requestPointerSeek(n.time); updatePlayhead(); emit('playhead:ensure');
     });
-    timeEl.addEventListener('dblclick',e=>{
-      e.stopPropagation();
+    const beginTimeEdit=()=>{
       if(!owner.current()) return;
       if(timeEl.querySelector('input')) return;
       const edit=beginNoteEdit([n],'time');
       const origText=timeEl.textContent;
       const inp=document.createElement('input');
-      inp.className='nt-te'; inp.value=origText;
-      timeEl.textContent=''; timeEl.appendChild(inp); inp.focus(); inp.select();
+      inp.className='nt-te'; inp.value=origText;inp.setAttribute('aria-label','編輯備註時間');
+      timeEl.textContent='';timeEl.removeAttribute('role');timeEl.tabIndex=-1;
+      timeEl.appendChild(inp); inp.focus(); inp.select();
       setupTimecodeInput(inp);
       let done=false;
-      const fin=(commit)=>{
+      const fin=(commit,restoreFocus=false)=>{
         if(done)return; done=true;
+        const returnToField=restoreFocus&&document.activeElement===inp&&owner.current();
         if(commit){
           const t=parseTimecodeInput(inp.value);
           if(t!==null && edit.commit(t).changed){
             // This editor has committed; remove it before redraw so draft
             // preservation cannot retain an already-finished input.
             inp.remove();
-            State.notes.sort((a,b)=>a.time-b.time); renderNotes(); drawRuler(); recordHistory('修改備註時間'); return;
+            State.notes.sort((a,b)=>a.time-b.time); renderNotes(); drawRuler(); recordHistory('修改備註時間');
+            if(returnToField) [...el.querySelectorAll('.note-item')].find(item=>item.dataset.id===n.id)?.querySelector('.nt-time')?.focus();
+            return;
           }
         }
         edit.cancel();inp.remove(); timeEl.textContent=secToEncore(n.time,State.fps,State.dropFrame);
+        timeEl.setAttribute('role','button');timeEl.tabIndex=0;
+        timeEl.setAttribute('aria-label',`備註時間 ${timeEl.textContent}，Enter 或 F2 編輯`);
+        if(returnToField&&timeEl.isConnected)timeEl.focus();
       };
-      inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.key==='Enter'){e.preventDefault();fin(true);} else if(e.key==='Escape'){e.preventDefault();fin(false);} else if(!tcKeyAllowed(e))e.preventDefault(); });
+      inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();fin(true,true);} else if(e.key==='Escape'){e.preventDefault();fin(false,true);} else if(!tcKeyAllowed(e))e.preventDefault(); });
       inp.addEventListener('blur',()=>fin(true));
       inp.addEventListener('mousedown',e=>e.stopPropagation());
+    };
+    timeEl.addEventListener('dblclick',e=>{e.stopPropagation();beginTimeEdit();});
+    timeEl.addEventListener('keydown',e=>{
+      if(e.isComposing||e.keyCode===229||e.ctrlKey||e.metaKey||e.altKey||e.shiftKey)return;
+      if(e.key==='Enter'||e.key==='F2'){e.preventDefault();e.stopPropagation();if(!e.repeat)beginTimeEdit();}
+      else if(e.key===' '){e.preventDefault();e.stopPropagation();if(!e.repeat)timeEl.click();}
     });
 
     // 備註文字：預設唯讀；雙擊進入編輯
     const txt=row.querySelector('.nt-text');
     let edit=null;
-    txt.addEventListener('dblclick',e=>{
-      e.stopPropagation();
-      if(!owner.current()) return;
+    const beginTextEdit=()=>{
+      if(!owner.current()||txt.contentEditable==='true') return;
       edit=beginNoteEdit([n],'text');
       txt.innerText=n.text||'';
-      txt.contentEditable='true'; txt.focus();
-    });
-    txt.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();txt.blur();} else if(e.key==='Escape'){e.preventDefault();edit?.cancel();txt.contentEditable='false';txt.innerHTML=escapeHTML(n.text);txt.blur();} });
-    txt.addEventListener('blur',()=>{
+      txt.contentEditable='true';txt.setAttribute('role','textbox');txt.setAttribute('aria-label','編輯備註文字');txt.focus();
+    };
+    const finishTextEdit=commit=>{
       if(txt.contentEditable!=='true')return;
-      const val=txt.innerText;
-      const result=edit?.commit(val);edit=null;txt.contentEditable='false';txt.innerHTML=escapeHTML(n.text);
+      const result=commit?edit?.commit(txt.innerText):null;
+      if(!commit)edit?.cancel();
+      edit=null;txt.contentEditable='false';txt.setAttribute('role','button');txt.setAttribute('aria-label',`編輯備註文字：${n.text||'空白備註'}`);txt.innerHTML=escapeHTML(n.text);
       if(result?.changed) recordHistory('編輯備註');
+    };
+    txt.addEventListener('dblclick',e=>{e.stopPropagation();beginTextEdit();});
+    txt.addEventListener('keydown',e=>{
+      if(txt.contentEditable!=='true'&&(e.key==='ContextMenu'||(e.key==='F10'&&e.shiftKey)))return;
+      if(txt.contentEditable!=='true'&&e.key==='Escape'&&!e.isComposing&&e.keyCode!==229)return;
+      e.stopPropagation();if(e.isComposing||e.keyCode===229)return;
+      if(txt.contentEditable==='true'){
+        if(e.key==='Enter'){e.preventDefault();finishTextEdit(true);}
+        else if(e.key==='Escape'){e.preventDefault();finishTextEdit(false);}
+      }else if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey&&['Enter','F2',' '].includes(e.key)){
+        e.preventDefault();if(!e.repeat)beginTextEdit();
+      }
     });
+    txt.addEventListener('blur',()=>finishTextEdit(true));
 
     // 整列點擊 → 多選支援（Ctrl 加選，Shift 範圍，普通單選）
     row.addEventListener('click',e=>{
@@ -263,14 +313,23 @@ function renderNotes(){
     });
 
     // 右鍵 → 備註右鍵選單
-    row.addEventListener('contextmenu',e=>{
-      e.preventDefault(); e.stopPropagation();
+    const openNoteMenu=(x,y)=>{
+      if(!owner.current())return;
       // 如果右鍵的這條不在選取集合中，先選取它
       if(!_selectedNoteIds.has(n.id)){
         _selectedNoteIds.clear(); _selectedNoteIds.add(n.id);
         setNoteActive(n.id); _refreshNoteSelectionUI();
       }
-      _showNoteCtx(e.clientX,e.clientY);
+      _showNoteCtx(x,y);
+    };
+    row.addEventListener('contextmenu',e=>{
+      e.preventDefault();e.stopPropagation();openNoteMenu(e.clientX,e.clientY);
+    });
+    row.addEventListener('keydown',e=>{
+      if(e.isComposing||e.keyCode===229||e.target.classList.contains('nt-te')||txt.contentEditable==='true')return;
+      if(e.key==='ContextMenu'||(e.key==='F10'&&e.shiftKey)){
+        e.preventDefault();e.stopPropagation();const rect=e.target.getBoundingClientRect();openNoteMenu(rect.left,rect.bottom);
+      }
     });
 
     row.querySelector('.nt-del').onclick=e=>{ e.stopPropagation(); if(owner.current()) removeNotes([n]); };
@@ -380,5 +439,5 @@ function exportNotes(){
     }},{label:'取消',act:()=>session.close()}],{width:'240px'});
 }
 
-export { addNote, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes };
+export { addNote, addNotesFromCues, renderNotes, exportNotes, setNoteActive, updateNoteActive, clearAllNotes };
 

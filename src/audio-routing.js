@@ -287,8 +287,13 @@ function outputStreamsFromDialog(buses, existingStreams){
   });
   return streams;
 }
-function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delivery=false}={}){
+function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delivery=false,focusTarget=null}={}){
   if(!editor.isActive()) return;
+  const active=document.activeElement;
+  const activeRow=active?.closest('.audio-output-table tr[data-stream-id]');
+  const focus=focusTarget || (activeRow ? {streamId:activeRow.dataset.streamId,
+    selector:'.'+[...active.classList].find(name=>name.startsWith('audio-output-'))}
+    :active?.closest('.audio-output-dialog')&&active.id?{id:active.id}:null);
   const p=editor.current();
   const wavDelivery=deliveryFormat==='wav';
   const streams=p.exportLayout.streams;
@@ -338,6 +343,10 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
     }}],{width:'860px',rerender:()=>openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery})});
   setTimeout(()=>{
     if(!modalSession.isCurrent()||!editor.isActive()) return;
+    if(focus){
+      const row=focus.streamId?[...document.querySelectorAll('.audio-output-table tr[data-stream-id]')].find(node=>node.dataset.streamId===focus.streamId):null;
+      (row?.querySelector(focus.selector)||document.getElementById(focus.id))?.focus({preventScroll:true});
+    }
     const rerender=()=>{
       // 版面重畫會重新建立聲道選單；先保存畫面上的暫存選擇，
       // 才不會在 Mono / Stereo / 5.1 切換時把使用者剛選的編組還原掉。
@@ -383,6 +392,7 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
       const row=button.closest('tr');
       const rows=[...document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]')];
       if(rows.length<=1){ showToast('至少保留一個輸出 Stream。'); return; }
+      const index=rows.indexOf(row),hadFocus=row?.contains(document.activeElement);
       row?.remove();
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
@@ -396,12 +406,14 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
           select.setAttribute('aria-label',`輸出 ${index+1} ${select.closest('label')?.querySelector('span')?.textContent||'聲道'}`);
         });
       });
+      if(hadFocus)(rows[index+1]||rows[index-1])?.querySelector('.audio-output-name')?.focus();
     }));
     document.getElementById('audioOutputAdd')?.addEventListener('click',()=>{
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
       editor.addStream();
-      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
+      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery,
+        focusTarget:{streamId:editor.current().exportLayout.streams.at(-1)?.id,selector:'.audio-output-name'}});
     });
   },0);
 }

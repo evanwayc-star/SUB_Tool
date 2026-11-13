@@ -39,6 +39,31 @@ beforeEach(() => {
 });
 
 describe('字幕樣式面板選取守衛', () => {
+  it('切換字幕與樣式草稿時，按鈕按下狀態跟隨生效樣式且能反向切換', () => {
+    State.selectedId='cue-1';State.selectedIds=['cue-1'];
+    State.cues[0].style={bold:true,italic:false,vertical:true,bgBox:false,fontSize:45,color:'#ff3333'};
+    const assertPressed=style=>{
+      for(const [id,key] of [['tsBold','bold'],['tsItalic','italic'],['tsVertical','vertical'],['tsBgBox','bgBox']]){
+        const button=document.getElementById(id);
+        expect(button.getAttribute('aria-pressed')).toBe(String(!!style[key]));
+        expect(button.classList.contains('active')).toBe(!!style[key]);
+      }
+      for(const button of document.querySelectorAll('[data-ts-size]'))
+        expect(button.getAttribute('aria-pressed')).toBe(String(+button.dataset.tsSize===style.fontSize));
+      for(const button of document.querySelectorAll('.ts-clr'))
+        expect(button.getAttribute('aria-pressed')).toBe(String(button.dataset.color===style.color));
+    };
+    StylePanelController.renderTrackStyle();assertPressed(State.cues[0].style);
+    document.getElementById('tsBold').click();StylePanelController.renderTrackStyle();
+    expect(State.cues[0].style.bold).toBe(false);assertPressed(State.cues[0].style);
+    const original=structuredClone(State.cues[0].style);
+    State.presetEdit={name:'草稿',trackIdx:0,draft:{bold:true,italic:true,vertical:false,bgBox:true,fontSize:80,color:'#ffee00'}};
+    StylePanelController.renderTrackStyle();assertPressed(State.presetEdit.draft);
+    expect(State.cues[0].style).toEqual(original);
+    State.presetEdit=null;State.tracks[0].locked=true;StylePanelController.renderTrackStyle();
+    assertPressed(original);expect(document.getElementById('tsBold').disabled).toBe(true);
+  });
+
   it('持久化快捷鍵中的錯誤綁定會正規化，設定重啟後仍能格式化全部動作',async()=>{
     const original=structuredClone(State.keymap);
     localStorage.setItem('subtool_keys',JSON.stringify({toggle_play_pause:[{key:42},{key:'P',ctrl:true}],step_boundary_prev:[{code:[]}],step_boundary_next:[]}));

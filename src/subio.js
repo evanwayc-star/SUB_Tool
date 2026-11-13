@@ -42,10 +42,10 @@ function showFpsConvertDialog() {
   const session=openModal('FPS 時間碼轉換',
     `<div style="margin-bottom:12px;font-size:13px;color:var(--text-faint)">軌道：<b>${escapeHTML(tk.name)}</b></div>` +
     `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">` +
-    `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">來源 FPS</div>` +
+    `<div><label for="fpsFrom" style="display:block;font-size:12px;color:var(--text-faint);margin-bottom:4px">來源 FPS</label>` +
     `<select id="fpsFrom" style="font-size:14px;padding:4px 8px">${opts}</select></div>` +
     `<div style="padding-top:18px;display:flex;flex-direction:column;align-items:center;gap:2px"><span style="font-size:20px;color:var(--text-faint)">→</span><button id="fpsSwap" style="font-size:11px;padding:2px 6px;cursor:pointer" title="交換來源與目標">⇄ 交換</button></div>` +
-    `<div><div style="font-size:11px;color:var(--text-faint);margin-bottom:4px">目標 FPS</div>` +
+    `<div><label for="fpsTo" style="display:block;font-size:12px;color:var(--text-faint);margin-bottom:4px">目標 FPS</label>` +
     `<select id="fpsTo" style="font-size:14px;padding:4px 8px">${opts}</select></div>` +
     `</div>` +
     `<div id="fpsPreview" style="margin-top:14px;font-size:12px;color:var(--text-faint)"></div>`,
@@ -110,7 +110,8 @@ function showExportDialog() {
   const ownsWorkspace = Project.captureWorkspaceOwnership();
   // 選項屬於本次視窗；背景辨識新增軌道不能改變單／多軌分支，重排也不能換掉所選目標。
   const tracks = [...State.tracks];
-  const showTrackChoices = State.cues.length > 0 && tracks.length > 1;
+  const hasSubtitles = State.cues.length > 0;
+  const showTrackChoices = hasSubtitles && tracks.length > 1;
   const current = () => {
     if (!session.isCurrent()) return false;
     if (ownsWorkspace()) return true;
@@ -120,7 +121,7 @@ function showExportDialog() {
   const sec = (title, body) => `<fieldset class="subtitle-export-section"><legend>${title}</legend>${body}</fieldset>`;
   const cb = (attrs, label) => `<label class="subtitle-export-option"><input type="checkbox" ${attrs}><span>${label}</span></label>`;
 
-  let html = sec('字幕格式',
+  let html = hasSubtitles ? sec('字幕格式',
     [['encore', 'Adobe Encore (.txt)', true, false], ['srt', 'SRT (.srt)', false, true], ['ass', 'ASS (.ass)', false, true], ['txt', '純文字 (.txt)', false, false], ['xlsx', 'Excel (.xlsx)', false, false]]
       .map(([v, l, d, supportMerge]) => {
         let row = cb(`data-fmt="${v}"${d ? ' checked' : ''}`, escapeHTML(l));
@@ -131,7 +132,7 @@ function showExportDialog() {
           </div>`;
         }
         return row;
-      }).join(''));
+      }).join('')) : '';
 
   if (showTrackChoices)
     html += sec('字幕軌道',
@@ -140,11 +141,15 @@ function showExportDialog() {
 
   if (State.notes.length)
     html += sec(`備註（${State.notes.length} 條）`,
-      cb('id="expNotesEdius"', 'Edius 格式') + cb('id="expNotesGeneral"', '一般格式'));
+      cb('id="expNotesEdius"', 'Edius 格式') + cb(`id="expNotesGeneral"${hasSubtitles ? '' : ' checked'}`, '一般格式'));
 
   html = `<div class="subtitle-export-dialog"><p class="subtitle-export-intro">勾選要輸出的格式與內容。</p><div class="subtitle-export-sections">${html}</div><p id="subtitleExportSummary" class="subtitle-export-summary" role="status" aria-live="polite"></p></div>`;
   const updateSummary = () => {
     if (!session.isCurrent()) return;
+    for (const format of ['srt', 'ass']) {
+      const merge=document.getElementById(`merge_${format}`);
+      if(merge) merge.disabled=!document.querySelector(`.subtitle-export-dialog [data-fmt="${format}"]`)?.checked;
+    }
     const formats = document.querySelectorAll('.subtitle-export-dialog [data-fmt]:checked').length;
     const selectedTracks = showTrackChoices ? document.querySelectorAll('.subtitle-export-dialog [data-tk]:checked').length : tracks.length;
     const notes = Number(!!$('expNotesEdius')?.checked) + Number(!!$('expNotesGeneral')?.checked);
@@ -159,10 +164,11 @@ function showExportDialog() {
         if (!current()) return;
         const fmts = document.querySelectorAll('[data-fmt]');
         for (let i = 0; i < fmts.length; i++) fmts[i].checked = (fmts[i].getAttribute('data-fmt') === 'encore');
+        for (const format of ['srt', 'ass']) { const merge=document.getElementById(`merge_${format}`); if(merge) merge.checked=false; }
         const tks = document.querySelectorAll('[data-tk]');
         for (let i = 0; i < tks.length; i++) tks[i].checked = true;
         const ne = document.getElementById('expNotesEdius'); if(ne) ne.checked = false;
-        const ng = document.getElementById('expNotesGeneral'); if(ng) ng.checked = false;
+        const ng = document.getElementById('expNotesGeneral'); if(ng) ng.checked = !hasSubtitles;
         updateSummary();
       }
     },
@@ -204,6 +210,12 @@ function showExportDialog() {
       } catch (error) {
         const message = error?.message || '無法產生字幕匯出檔案';
         setStatus(message, 'err'); showToast(message);
+        return;
+      }
+      if(!submission.files.length){
+        const message='沒有可匯出的內容，請選擇有字幕的軌道或備註格式。';
+        $('subtitleExportSummary').textContent=message;
+        showToast(message);
         return;
       }
       session.close();
@@ -444,7 +456,6 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           ${IS_DESKTOP && ['h264','prores'].includes(r.format) ? `<div class="delivery-visual-options" role="group" aria-label="影片書籤">
             <span class="delivery-options-label">影片書籤</span>
             <label class="delivery-tc-label"><input type="checkbox" class="ev-chapter-notes" data-idx="${i}" ${r.chapterNotes?'checked':''}> 備註</label>
-            <label class="delivery-tc-label"><input type="checkbox" class="ev-chapter-styled" data-idx="${i}" ${r.chapterStyled?'checked':''}> 自訂樣式字幕</label>
             <span class="delivery-format-note">寫入章節，供支援章節的播放器快速跳轉。</span>
           </div>` : ''}
         </div>
@@ -506,7 +517,6 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     });
     $$('.ev-tc').forEach(el => el.onchange = e => { list.setBurnTimecode(idxOf(e), e.target.checked); after(); });
     $$('.ev-chapter-notes').forEach(el => el.onchange = e => { list.setChapterOptions(idxOf(e), { chapterNotes: e.target.checked }); });
-    $$('.ev-chapter-styled').forEach(el => el.onchange = e => { list.setChapterOptions(idxOf(e), { chapterStyled: e.target.checked }); });
 
     const pickDir = async e => {
       const idx = idxOf(e);
@@ -724,7 +734,7 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
   
   const session=openModal(title,
     `<label style="display:block;padding:8px 0">目標軌道：<select id="importTkSel" style="margin-left:6px">${trackOpts}<option value="new" selected>＋ 新增軌道…</option></select></label>` +
-    `<div id="importNewTkRow" style="padding-bottom:8px">軌道名稱：<input type="text" id="importNewTkName" style="margin-left:6px;width:160px" value="${escapeHTML(suggestName)}"></div>` +
+    `<div id="importNewTkRow" style="padding-bottom:8px"><label for="importNewTkName">軌道名稱：</label><input type="text" id="importNewTkName" style="margin-left:6px;width:160px" value="${escapeHTML(suggestName)}"></div>` +
     styleControl + issueNotice +
     `<label style="display:block;padding-bottom:8px"><input type="checkbox" id="importAppend"> 附加（保留現有字幕）</label>`,
     [{
@@ -814,11 +824,20 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
   setTimeout(() => {
     if(!current()) return;
     const sel = $('importTkSel'), row = $('importNewTkRow'), nm = $('importNewTkName');
-    if (sel) sel.addEventListener('change', () => {
+    const syncTarget=()=>{
       const isNew = sel.value === 'new';
       row.style.display = isNew ? 'block' : 'none';
-      if (isNew) { nm.focus(); nm.select(); }
-    });
+      const append=$('importAppend');
+      append.disabled=isNew;
+      append.closest('label').style.display=isNew?'none':'block';
+    };
+    if(sel){
+      syncTarget();
+      sel.addEventListener('change',()=>{
+        syncTarget();
+        if(sel.value==='new'){ nm.focus(); nm.select(); }
+      });
+    }
   }, 20);
 }
 

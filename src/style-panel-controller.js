@@ -89,6 +89,11 @@ function renderTrackStyle(){
   panel.classList.toggle('per-cue', !!cue);
   const st=effStyle(cue, trk); // 生效值（缺欄位以預設後援）
   const setV=(id,v)=>{ const el=$(id); if(el&&document.activeElement!==el) el.value=v; };
+  const setPressed=(button,pressed)=>{
+    if(!button)return;
+    button.classList.toggle('active',pressed);button.setAttribute('aria-pressed',String(pressed));
+  };
+  $('tsSize')?.setAttribute('aria-label','字幕字級（px）');
   setV('tsSize',st.fontSize); setV('tsColor',(st.color||'#ffffff').toLowerCase());
   setV('tsPosX',(st.posX!=null?st.posX:STYLE_DEFAULTS.posX).toFixed(1)); setV('tsPosY',(st.posY!=null?st.posY:STYLE_DEFAULTS.posY).toFixed(1)); // 座標改為百分比呈現
   setV('tsAngle',st.angle);
@@ -101,13 +106,18 @@ function renderTrackStyle(){
   if(fsel){ if(![...fsel.options].some(o=>o.value===st.font||o.text===st.font)){
       const o=document.createElement('option'); o.text=st.font; o.value=st.font; fsel.appendChild(o); }
     if(document.activeElement!==fsel) fsel.value=st.font; }
-  $('tsBold')?.classList.toggle('active',!!st.bold); $('tsItalic')?.classList.toggle('active',!!st.italic);
-  $('tsVertical')?.classList.toggle('active',!!st.vertical); $('tsBgBox')?.classList.toggle('active',!!st.bgBox);
-  panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(b=>b.classList.toggle('active',+b.dataset.tsSize===st.fontSize));
+  for(const [id,key] of [['tsBold','bold'],['tsItalic','italic'],['tsVertical','vertical'],['tsBgBox','bgBox']]){
+    const button=$(id);setPressed(button,!!st[key]);
+    if(button?.title)button.setAttribute('aria-label',button.title);
+  }
+  panel.querySelectorAll('.ts-preset[data-ts-size]').forEach(button=>{
+    setPressed(button,+button.dataset.tsSize===st.fontSize);
+    button.setAttribute('aria-label',`字幕字級 ${button.dataset.tsSize} px`);
+  });
   setV('tsAlign', st.align||'center'); setV('tsValign', st.valign||'bottom');
   // 底色未啟用時把色框/透明度變暗（消除「改了 bgColor 卻沒反應」的困惑——需先按「底」）
   const bgOn=!!st.bgBox; ['tsBgColor','tsBgAlpha'].forEach(id=>{ const el=$(id); if(el){ el.style.opacity=bgOn?'1':'.4'; el.title=(el.title||'').replace(/（未啟用.*$/,'')+(bgOn?'':'（未啟用：先按「底」）'); } });
-  panel.querySelectorAll('.ts-clr').forEach(b=>b.classList.toggle('active',b.dataset.color===(st.color||'').toLowerCase()));
+  panel.querySelectorAll('.ts-clr').forEach(button=>setPressed(button,button.dataset.color===(st.color||'').toLowerCase()));
   // 常用樣式下拉重建
   const psel=$('tsPresetSel');
   if(psel){

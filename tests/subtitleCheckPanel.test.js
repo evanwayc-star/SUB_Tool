@@ -12,6 +12,7 @@ vi.mock('../src/dom.js', () => ({
   sublist: document.getElementById('sublist'),
 }));
 vi.mock('../src/media.js', () => ({ Media: { displayTime: () => 0, seek: vi.fn() }, Wave: {} }));
+vi.mock('../src/timeline-interaction-engine.js', () => ({ requestPointerSeek: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({
   renderCueBlocks: vi.fn(), updatePlayhead: vi.fn(), refreshTrackGutterActive: vi.fn(),
 }));
@@ -28,7 +29,7 @@ vi.mock('../src/subtitle-model.js', () => ({
   deleteSelectedCues: vi.fn(), deleteCue: vi.fn(), clearSelectedCuesTime: vi.fn(), shiftTextsDown: vi.fn(),
   shiftTextsUp: vi.fn(), sortCues: vi.fn(), copyCues: vi.fn(), pasteCues: vi.fn(), trimTrackSpaces: vi.fn(),
   swapAdjacentCues: vi.fn(), mergeAdjacentCues: vi.fn(), snapAllCuesToFrames: vi.fn(),
-  trackLocked: () => false, cueTrackLocked: () => false, splitCue: vi.fn(),
+  trackLocked: () => false, cueTrackLocked: () => false, splitCue: vi.fn(), finalizeProvisionalCueEnds: vi.fn(),
 }));
 vi.mock('../src/subtitle-search.js', () => ({
   searchSelectAll: vi.fn(), txtHTML: value => String(value ?? ''), isSearchHit: () => false,
@@ -48,6 +49,8 @@ let state;
 let renderCheckPanel,renderSubList,renderSubRow;
 
 beforeAll(async () => {
+  Element.prototype.scrollIntoView = vi.fn();
+  vi.stubGlobal('requestAnimationFrame', vi.fn());
   const style = document.createElement('style');
   style.textContent = css;
   document.head.appendChild(style);
@@ -61,7 +64,7 @@ beforeAll(async () => {
   ({ renderCheckPanel,renderSubList,renderSubRow } = await import('../src/subtitles.js'));
 });
 
-it('同文按組著色，頭尾黏接另保留提示而不覆蓋群組色', () => {
+it('相接字幕壓成範圍，有間隙仍分開，保留原同文組色', () => {
   Object.assign(state.State, {
     fps: 25,
     listTrack: 0,
@@ -76,13 +79,12 @@ it('同文按組著色，頭尾黏接另保留提示而不覆蓋群組色', () =
   renderCheckPanel();
 
   expect([...document.querySelectorAll('#cpConsecutiveIdentical .cp-num')].map(node => ({
-    number: Number(node.textContent),
+    number: node.textContent,
     joined: node.classList.contains('cp-joined-identical'),
   }))).toEqual([
-    { number: 1, joined: false },
-    { number: 2, joined: false },
-    { number: 3, joined: true },
-    { number: 4, joined: true },
+    { number: '1', joined: false },
+    { number: '2', joined: false },
+    { number: '3–4', joined: true },
   ]);
   const [orange, , darkGreen] = document.querySelectorAll('#cpConsecutiveIdentical .cp-num');
   expect(orange.tagName).toBe('BUTTON');
@@ -90,7 +92,8 @@ it('同文按組著色，頭尾黏接另保留提示而不覆蓋群組色', () =
   expect(orange.getAttribute('aria-label')).toBe('前往第 1 句字幕');
   expect(getComputedStyle(darkGreen).color).not.toBe(getComputedStyle(orange).color);
   expect(getComputedStyle(darkGreen).color).toBe('rgb(74, 222, 128)');
-  expect(darkGreen.title).toContain('頭尾黏接');
+  expect(darkGreen.title).toContain('頭尾相接');
+  expect(darkGreen.getAttribute('aria-label')).toBe('選取第 3 至 4 句字幕，前往第 3 句');
 });
 
 it('同文群組紅綠藍循環，三句一組保持同色，列表色標不改字幕樣式且編輯後更新鄰列',()=>{
@@ -100,13 +103,11 @@ it('同文群組紅綠藍循環，三句一組保持同色，列表色標不改�
   const before=structuredClone(cues);
   renderSubList();
   const buttons=[...document.querySelectorAll('#cpConsecutiveIdentical .cp-num')];
+  expect(buttons.map(button=>button.textContent)).toEqual(['1–2','4–6','7–8','9–10']);
   expect(buttons.map(button=>getComputedStyle(button).color)).toEqual([
-    'rgb(248, 113, 113)','rgb(248, 113, 113)',
-    'rgb(74, 222, 128)','rgb(74, 222, 128)','rgb(74, 222, 128)',
-    'rgb(96, 165, 250)','rgb(96, 165, 250)',
-    'rgb(248, 113, 113)','rgb(248, 113, 113)',
+    'rgb(248, 113, 113)', 'rgb(74, 222, 128)', 'rgb(96, 165, 250)', 'rgb(248, 113, 113)',
   ]);
-  expect(buttons.map(button=>Number(button.dataset.identicalGroup))).toEqual([1,1,2,2,2,3,3,4,4]);
+  expect(buttons.map(button=>Number(button.dataset.identicalGroup))).toEqual([1,2,3,4]);
   const rows=[...document.querySelectorAll('.sub-row')];
   expect(getComputedStyle(rows[0].querySelector('.idx')).color).toBe('rgb(248, 113, 113)');
   expect(getComputedStyle(rows[3].querySelector('.idx')).color).toBe('rgb(74, 222, 128)');
@@ -117,6 +118,37 @@ it('同文群組紅綠藍循環，三句一組保持同色，列表色標不改�
   expect(rows[0].className).not.toContain('identical-group-');
   expect(rows[1].className).not.toContain('identical-group-');
   expect(getComputedStyle(rows[3].querySelector('.idx')).color).toBe('rgb(248, 113, 113)');
+});
+
+it('範圍點選選取全段並只定位首句，有間隙的同文不被一併選取', async () => {
+  const { requestPointerSeek } = await import('../src/timeline-interaction-engine.js');
+  const { recordHistory } = await import('../src/history.js');
+  const cues=[
+    {id:'a',text:'同句',start:10,end:11,track:0},
+    {id:'b',text:'同句',start:11,end:12,track:0},
+    {id:'c',text:'同句',start:12,end:13,track:0},
+    {id:'d',text:'同句',start:13.04,end:14,track:0},
+    {id:'other',text:'別軌',start:11,end:12,track:1},
+  ];
+  Object.assign(state.State,{fps:25,listTrack:0,tracks:[{name:'字幕'},{name:'別軌'}],cues});
+  state.setSelection({kind:'sub',ids:['other'],primary:'other'});
+  renderSubList();
+  const before=structuredClone(cues);
+  vi.clearAllMocks();
+  const buttons=[...document.querySelectorAll('#cpConsecutiveIdentical .cp-num')];
+  expect(buttons.map(button=>button.textContent)).toEqual(['1–3','4']);
+  expect(buttons[0].tagName).toBe('BUTTON');
+  expect(buttons[0].getAttribute('type')).toBe('button');
+  buttons[0].click();
+  expect(state.State.selectedIds).toEqual(['a','b','c']);
+  expect(state.State.selectedId).toBe('a');
+  expect([...document.querySelectorAll('.sub-row.sel')].map(row=>row.dataset.id)).toEqual(['a','b','c']);
+  expect(requestPointerSeek).toHaveBeenCalledExactlyOnceWith(10);
+  expect(recordHistory).not.toHaveBeenCalled();
+  expect(cues).toEqual(before);
+  buttons[1].click();
+  expect(state.State.selectedIds).toEqual(['d']);
+  expect(requestPointerSeek).toHaveBeenLastCalledWith(13.04);
 });
 
 it('空軌明確提示尚無字幕，已檢查而無命中顯示無', () => {

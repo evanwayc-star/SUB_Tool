@@ -85,6 +85,7 @@ beforeEach(() => {
   resetAudioProject();
   ensureAudioBusCount(2);
   State.cues = [];
+  State.notes = [];
   State.clips = [{
     id: 'program', path: 'C:/master/program.mov', primary: true,
     in: 0, out: 900, offset: 0, vtrack: 0,
@@ -109,6 +110,22 @@ beforeEach(() => {
 });
 
 describe('匯出交付清單', () => {
+  it('影片書籤只提供備註選項，勾選後仍保留自訂樣式字幕燒錄', async () => {
+    State.notes = [{ time: 14, text: '備註檢查' }];
+    State.cues = [{ start: 14, end: 16, text: '自訂樣式內容', style: { italic: true } }];
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.ev-chapter-notes')).not.toBeNull());
+    expect(document.querySelector('.ev-chapter-styled')).toBeNull();
+    expect(document.querySelector('[aria-label="影片書籤"]').querySelectorAll('input')).toHaveLength(1);
+    const checkbox = document.querySelector('.ev-chapter-notes'); checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+    const dir = document.querySelector('.ev-outdir'); dir.value = 'D:/交付'; dir.dispatchEvent(new Event('input', { bubbles: true }));
+    window.subtool.exportVideo.mockResolvedValue('notes-only');
+    await spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn').act();
+    const job = window.subtool.exportVideo.mock.calls[0][0];
+    expect(job.chapters).toEqual([{ start: 0, end: 2, title: '影片開始' }, { start: 2, end: 20, title: '備註：備註檢查', kind: 'note' }]);
+    expect(job.assText).toContain('自訂樣式內容');
+  });
   it.each([
     ['.ev-format', 'prores'], ['.ev-res', '720'], ['.ev-fps', '24'], ['.ev-tc', true],
   ])('變更 %s 後鍵盤焦點仍在同一份交付的對應欄位', async (selector, value) => {

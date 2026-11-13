@@ -502,7 +502,7 @@ Windows 的 `spawnExportWatchdog()` 使用 `detached`，讓 watchdog 在主程�
 
 復原時，連線建立到回覆之間的 EPIPE、ECONNRESET 或提前關閉，會以原 pipe／token 有限重試。Peer 消失後仍須確認兩個已登記 PID 均不存在，才能沿原規則清理；逾時、無效回覆及 token 拒絕維持保留 stage／lease。
 
-有 PID 後的 `error` 可能是終止失敗，須持續等 close；`exit` 或重複 error 不得提早清檔／釋放 lease。只有未取得 PID 的啟動失敗可立即收尾。Controller `ready` 失敗與 `completion` 分開：程序已啟動時，即使 owner 寫入讓 ready 拒絕，completion 仍等 standalone 收尾或程序結束，runner 保留 active 與 ASS／TC 輸入。
+有 PID 後的 `error` 可能是終止失敗，須持續等 close；`exit` 或重複 error 不得提早清檔／釋放 lease。只有未取得 PID 的啟動失敗可立即收尾。Controller `ready` 失敗與 `completion` 分開：程序已啟動時，即使 owner 寫入讓 ready 拒絕，completion 仍等 standalone 收尾或傳輸關閉，runner 保留 active 與 ASS／TC 輸入。OS `exit` 可能先於最後一筆 IPC 結果抵達；只有 `close` 或「已 exit 且 IPC 已 disconnect」才排一次 `setImmediate`，等已排入 `nextTick` 的結果先送達，再判定是否遺失。主動斷開 IPC 時可能沒有 `close`，因此兩個事件必須分別追蹤，不能只看 `connected=false`。完整 IPC 結果抵達仍立即採用；沒有結果時保留最早的啟動錯誤，避免丟掉 `retainedLease`，將釋鎖失敗誤報成正常停止。
 
 停止先持久化完整 stopped journal，記憶體維持 stopping 到 runner 結束。寫停止意圖失敗要回 running，不能先停 native。測試 adapter 只由可信 Node 注入，不得由 renderer 或持久化工作指定可載入模組。
 

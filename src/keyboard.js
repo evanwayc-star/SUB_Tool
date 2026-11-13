@@ -14,7 +14,7 @@ import { State, setSelection, deselect } from './state.js';
 import { Media } from './media.js';
 import { selectCueSingle, deleteSelected, cancelSwapMode, refreshSelectionUI, filteredSubtitleCues } from './subtitles.js';
 import { sortCues, copyCues, pasteCues, shiftCueTimes } from './subtitle-model.js';
-import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline } from './timeline-renderer.js';
+import { updatePlayhead, zoomFit, zoomFitVideo, setZoom, drawTimeline, alignTimelineToPlayhead } from './timeline-renderer.js';
 import { deleteSelectedClip, clearClipSelection, closeClipGapLeft } from './clip-model.js';
 import { Project } from './project.js';
 import { History, recordHistory } from './history.js';
@@ -169,6 +169,7 @@ if (typeof window !== 'undefined') {
     case 'screenshot': e.preventDefault(); emit('action', 'screenshot'); break;
     case 'screenshot_tc': e.preventDefault(); emit('action', 'screenshot_tc'); break;
     case 'toggle_mixer': e.preventDefault(); emit('action', 'mixer'); break;
+    case 'scroll_playhead': e.preventDefault(); alignTimelineToPlayhead(); break;
     case 'export_video': e.preventDefault(); emit('action', 'exp-video'); break;
     case 'open_queue_monitor': e.preventDefault(); emit('action', 'queue-monitor'); break;
     case 'set_in': e.preventDefault(); setIn(); break;

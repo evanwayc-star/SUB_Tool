@@ -49,7 +49,8 @@ it.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('real runner writes
         await runner.run({ id: `${format}-${enabled}`, outputAuthority: captureDestinationEvidence(captureOutputAuthority(outPath, captureOutputDirectory(root))),
           payload: { clips: [{ path: enabled ? source : sourceWithChapters, in: 0, out: 2, offset: 0, vtrack: 0, natW: 64, natH: 48 }],
             videoTracks: [{ vt: 0 }], width: 64, height: 48, fps: 25, duration: 2, format, outPath, videoKbps: 1000,
-            chapters: enabled ? [{ start: .4, title: '備註：海 #1;=\\' }, { start: 1.2, title: '自訂字幕：你好' }] : [] } });
+            chapters: enabled ? [{ start: .4, title: '備註：海 #1;=\\', kind: 'note' },
+              { start: .8, title: '自訂字幕：舊佇列已移除' }, { start: 1.2, title: '備註：原文 ／ 自訂字幕：你好', kind: 'note' }] : [] } });
         expect(progress.at(-1)).toMatchObject({ done: true });
         expect(fs.readdirSync(tempDir)).toEqual([]);
         const inspected = spawnSync(ffprobe, ['-v', 'error', '-show_chapters', '-show_entries', 'stream=codec_type,width,height', '-of', 'json', outPath], { windowsHide: true });
@@ -57,7 +58,7 @@ it.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('real runner writes
         const media = JSON.parse(inspected.stdout);
         expect(media.streams.find(stream => stream.codec_type === 'video')).toMatchObject({ width: 64, height: 48 });
         expect(media.chapters.map(chapter => [Number(chapter.start_time), chapter.tags.title.trimEnd()])).toEqual(enabled
-          ? [[0, '影片開始'], [.4, '備註：海 #1;=\\'], [1.2, '自訂字幕：你好']] : []);
+          ? [[0, '影片開始'], [.4, '備註：海 #1;=\\'], [1.2, '備註：原文 ／ 自訂字幕：你好']] : []);
         if (enabled) sourceWithChapters = outPath;
       }
     }

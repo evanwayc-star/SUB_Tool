@@ -6,6 +6,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { setImmediate } = require('timers');
 const { createExportArtifact, isDiscOutput } = require('./export-artifact');
 const { assertDeliveryInputEvidence } = require('./delivery-temporary-input');
 const {
@@ -1338,7 +1339,9 @@ function spawnExportWatchdog(config, options = {}) {
     code: error.code || 'WATCHDOG_SPAWN_FAILED',
     message: error.message,
   }));
-  child.once('exit', (code, signal) => {
+  // Process exit can precede the last buffered IPC result. Only conclude no
+  // result arrived after IPC drains; otherwise retained-lease evidence is lost.
+  const finishWithoutResult = (code, signal) => {
     if (!readySettled) {
       rejectStartup({
         code: 'WATCHDOG_EXITED',
@@ -1352,7 +1355,27 @@ function spawnExportWatchdog(config, options = {}) {
         `匯出 watchdog 未回傳結果就結束 (${code ?? signal ?? 'unknown'})`,
       ));
     }
+  };
+  let processExit = null, ipcDisconnected = false, fallbackPending = false;
+  const queueMissingResult = (code, signal) => {
+    if ((readySettled && completionSettled) || fallbackPending) return;
+    fallbackPending = true;
+    // Node queues decoded IPC messages with nextTick, including messages after
+    // the first buffered message that triggers disconnect. Drain those before
+    // deciding there was no result; this is an event boundary, not a timeout.
+    setImmediate(() => { fallbackPending = false; finishWithoutResult(code, signal); });
+  };
+  child.once('exit', (code, signal) => {
+    processExit = { code, signal };
+    if (ipcDisconnected) queueMissingResult(code, signal);
   });
+  // Explicit parent disconnect may not emit ChildProcess 'close' on Node.
+  // Its 'disconnect' event drains IPC, but still must wait for the owner exit.
+  child.once('disconnect', () => {
+    ipcDisconnected = true;
+    if (processExit) queueMissingResult(processExit.code, processExit.signal);
+  });
+  child.once('close', queueMissingResult);
 
   try {
     child.send({ ...config, type: 'start' }, error => {

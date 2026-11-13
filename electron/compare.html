@@ -178,6 +178,8 @@
     }
     
     .comparison-summary{flex:none;padding:10px 24px;border-bottom:1px solid var(--border-light);color:var(--text-dim);font-size:12px;line-height:1.6}
+    .difference-description{grid-column:1/-1;margin:0;padding:6px 24px 10px;border-bottom:1px solid var(--border-light);color:var(--text-dim);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+    .difference-description:focus-visible{outline:2px solid var(--diff-text-text);outline-offset:-3px;background:var(--surface)}
     #emptyState { grid-column: 1 / -1; display: grid; align-content:center; justify-items:center; gap:10px; min-height: 240px; padding: 32px 20px; color: var(--text-dim); text-align: center; font-size: 13px; line-height:1.6; }
     #emptyState strong{color:var(--text);font-size:16px;font-weight:600}
     button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--diff-text-text);outline-offset:3px}
@@ -312,11 +314,17 @@
       };
     }
 
-    function cellHtml(cue, number, startHtml, endHtml, textHtml, sourceCueId) {
+    const styleLabels = { font:'字型',bold:'粗體',italic:'斜體',fontSize:'字級',color:'文字顏色',
+      letterSpacing:'字距',lineSpacing:'行距',outline:'框線粗細',outlineColor:'框線顏色',shadow:'陰影',
+      vertical:'直書',bgBox:'底框',bgColor:'底框顏色',bgAlpha:'底框透明度',
+      posX:'水平位置',posY:'垂直位置',align:'水平對齊',valign:'垂直對齊',angle:'旋轉角度' };
+
+    function cellHtml(cue, number, startHtml, endHtml, textHtml, sourceCueId, descriptionId) {
       if (!cue) return '<div class="cell missing">此側無字幕</div>';
       const source = sourceCueId ? ' data-source-cue-id="' + escapeHtml(sourceCueId) + '"' : '';
       const badge = number == null ? '' : '<span class="badge">#' + number + '</span>';
       return '<button type="button" class="cell" data-cue-id="' + escapeHtml(cue.id) + '"' + source
+        + (descriptionId ? ' aria-describedby="' + descriptionId + '"' : '')
         + ' title="前往此字幕' + (sourceCueId ? '；右鍵或 Shift+F10 可匹配另一側樣式' : '') + '">'
         + '<span class="tc">' + badge + startHtml + ' → ' + endHtml + '</span>'
         + '<span class="txt">' + textHtml + '</span></button>';
@@ -331,6 +339,7 @@
       const focusedCell = document.activeElement?.closest('.cell[data-cue-id]')
         || (ctxMenu.contains(document.activeElement) ? ctxOrigin : null);
       const focusedCueId = focusedCell?.dataset.cueId;
+      const focusedDifference = document.activeElement?.dataset.differenceFor;
       closeContextMenu();
       const status = document.getElementById('comparisonStatus');
       if (!plan || !plan.selection) {
@@ -354,8 +363,11 @@
         const end = highlightDiff(row.left && row.left.endTimecode, row.right && row.right.endTimecode, 'diff-time', row.active.time);
         const text = highlightDiff(row.left && row.left.text, row.right && row.right.text, 'diff-text', row.active.text);
         const styleTitle = row.difference.style
-          ? '不同的屬性: ' + row.difference.styleKeys.join(', ')
+          ? '樣式不同：' + row.difference.styleKeys.map(key=>styleLabels[key]||key).join('、')
           : '';
+        const descriptionId = row.active.any ? `comparisonDifference${shown}` : '';
+        const description = [row.active.missing ? '此側缺少對應字幕' : '', row.active.time ? '時間不同' : '',
+          row.active.text ? '內容不同' : '', row.active.style ? styleTitle : ''].filter(Boolean).join(' · ');
         const leftSource = row.active.style && row.right ? row.right.id : null;
         const rightSource = row.active.style && row.left ? row.left.id : null;
         
@@ -369,13 +381,15 @@
         }
         
         html += '<div class="row" style="' + rowBgStyle + '">';
-        html += cellHtml(row.left, row.leftIndex, start.left, end.left, text.left, leftSource);
-        html += '<div class="icons-col">'
+        html += cellHtml(row.left, row.leftIndex, start.left, end.left, text.left, leftSource, descriptionId);
+        html += '<div class="icons-col" aria-hidden="true">'
           + '<div class="icon ' + (row.active.time ? 'active time' : '') + '" title="' + (row.active.time ? '時間不同' : '') + '">' + iconTime + '</div>'
           + '<div class="icon ' + (row.active.text ? 'active text' : '') + '" title="' + (row.active.text ? '內容不同' : '') + '">' + iconText + '</div>'
           + '<div class="icon ' + (row.active.style ? 'active style' : '') + '" title="' + escapeHtml(row.active.style ? styleTitle : '') + '">' + iconStyle + '</div>'
           + '</div>';
-        html += cellHtml(row.right, row.rightIndex, start.right, end.right, text.right, rightSource);
+        html += cellHtml(row.right, row.rightIndex, start.right, end.right, text.right, rightSource, descriptionId);
+        if(descriptionId) html += '<p class="difference-description" role="note" tabindex="0" id="' + descriptionId
+          + '" data-difference-for="' + escapeHtml(row.left?.id || row.right?.id || '') + '">' + escapeHtml(description) + '</p>';
         html += '</div>';
       }
       const differences = plan.rows.filter(row => row.active.any).length;
@@ -386,6 +400,9 @@
       if (focusedCueId) {
         const next = [...container.querySelectorAll('.cell[data-cue-id]')].find(cell => cell.dataset.cueId === focusedCueId);
         (next || selA).focus({ preventScroll: true });
+      } else if (focusedDifference) {
+        const next = [...container.querySelectorAll('[data-difference-for]')].find(node=>node.dataset.differenceFor===focusedDifference);
+        (next || selA).focus({preventScroll:true});
       }
     }
 

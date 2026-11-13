@@ -66,6 +66,44 @@ it('字幕匯出以具名區分格式、軌道及備註，選擇摘要隨勾選�
   expect(desktop.exportSub).not.toHaveBeenCalled();
 });
 
+it('只有備註時只提供備註格式，直接匯出會寫出實際備註內容', async () => {
+  const project=data('只有備註');project.cues=[];
+  await Project.loadDesktop({path:'C:/projects/notes.subtool',b64:Buffer.from(JSON.stringify(project)).toString('base64')});
+  showExportDialog();
+  expect(document.querySelector('[data-fmt]')).toBeNull();
+  expect(document.getElementById('expNotesGeneral').checked).toBe(true);
+  expect(document.getElementById('subtitleExportSummary').textContent).toBe('1 種備註格式');
+  confirmButton().click();
+  expect(desktop.exportSub).toHaveBeenCalledOnce();
+  const [,b64,ext]=desktop.exportSub.mock.calls[0];
+  expect(ext).toBe('csv');expect(Buffer.from(b64,'base64').toString('utf16le')).toContain('只有備註備註');
+});
+
+it('勾選空字幕軌不會靜默關閉，改選有內容的軌後可重試匯出', () => {
+  State.tracks.push({name:'空白軌'});
+  showExportDialog();
+  for(const input of document.querySelectorAll('[data-tk]')) input.checked=input.dataset.tk==='2';
+  confirmButton().click();
+  expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
+  expect(document.getElementById('subtitleExportSummary').textContent).toContain('沒有可匯出的內容');
+  expect(desktop.exportSub).not.toHaveBeenCalled();
+  document.querySelector('[data-tk="0"]').checked=true;
+  confirmButton().click();
+  expect(desktop.exportSub).toHaveBeenCalledOnce();
+});
+
+it('合併選項只在對應格式啟用時可操作，預設完整重設合併旗標', () => {
+  showExportDialog();
+  const srt=document.querySelector('[data-fmt="srt"]'),merge=document.getElementById('merge_srt');
+  expect(merge.disabled).toBe(true);
+  srt.checked=true;srt.dispatchEvent(new Event('change',{bubbles:true}));
+  expect(merge.disabled).toBe(false);merge.checked=true;
+  document.getElementById('merge_ass').checked=true;
+  [...document.querySelectorAll('#modalFoot button')].find(button=>button.textContent==='預設').click();
+  expect(merge.checked).toBe(false);expect(merge.disabled).toBe(true);
+  expect(document.getElementById('merge_ass').checked).toBe(false);
+});
+
 it.each(['字幕', '備註'])('%s 舊匯出視窗不能在外部開啟另一個專案後提交新資料', async kind => {
   openExport(kind);
   const oldButton = confirmButton();

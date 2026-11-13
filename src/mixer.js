@@ -232,6 +232,12 @@ let _meterStrips=[];
 function renderMixer(){
   const wrap=$('mixerStrips'); if(!wrap)return;
   cancelVolumeEdits(wrap);
+  const focusedButton=document.activeElement;
+  const focusSelector=wrap.contains(focusedButton) && focusedButton.matches('.mx-mute,.mx-solo')
+    ? (focusedButton.classList.contains('mx-mute') ? '.mx-mute' : '.mx-solo') : null;
+  const focusedBusId=focusSelector ? focusedButton.closest('.mx-strip')?.dataset.busId : null;
+  const focusedBus=focusSelector ? _meterStrips.find(({bus})=>String(bus.id||'')===focusedBusId)?.bus : null;
+  const ownsFocus=focusedBus ? captureBusOwnership(focusedBus) : null;
   const previousMeters=new Map(_meterStrips.map(strip=>[strip.bus,strip]));
   _meterStrips=[];
   const buses=projectBuses();
@@ -262,8 +268,8 @@ function renderMixer(){
         `<span class="mx-bus-name" title="${escapeHTML(name)}">${escapeHTML(name!==label?name:'')}</span>`+
       `</div>`+
       `<div class="mx-btns-row">`+
-        `<button class="mx-btn mx-mute ${bus.muted?'on':''}" title="${bus.muted?'取消靜音':'靜音'} ${label}">M</button>`+
-        `<button class="mx-btn mx-solo ${bus.solo?'on':''}" title="${bus.solo?'取消獨奏':'獨奏'} ${label}">S</button>`+
+        `<button class="mx-btn mx-mute ${bus.muted?'on':''}" aria-pressed="${!!bus.muted}" title="${bus.muted?'取消靜音':'靜音'} ${label}">M</button>`+
+        `<button class="mx-btn mx-solo ${bus.solo?'on':''}" aria-pressed="${!!bus.solo}" title="${bus.solo?'取消獨奏':'獨奏'} ${label}">S</button>`+
       `</div>`+
       `<div class="mx-meter-fader-area">`+
         `<div class="mx-fader-column">`+
@@ -453,6 +459,12 @@ function renderMixer(){
     if(meter.mask) meter.mask.style.height=(100-meterHeight(meter.level>0?20*Math.log10(meter.level):METER_FLOOR_DB))+'%';
     _meterStrips.push(meter);
   });
+  // 同步 bus 通知可能重繪數次；只接回本次被移除的 M/S 焦點，不搶走其他控制的焦點。
+  if(ownsFocus?.() && !focusedButton.isConnected && document.activeElement===document.body
+    && $('mixerPanel')?.classList.contains('show')){
+    [...wrap.children].find(strip=>strip.dataset.busId===focusedBusId)
+      ?.querySelector(focusSelector)?.focus({preventScroll:true});
+  }
 }
 
 /* 電平表的 bus 輸入一律問 Media，不要自己過濾 Media.tracks 或重算 gain。

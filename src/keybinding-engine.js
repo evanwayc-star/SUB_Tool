@@ -146,17 +146,43 @@ export function mergeImportedKeymap(defaults, imported) {
     throw new Error('格式不符（不是快捷鍵設定檔）');
   }
   const merged = JSON.parse(JSON.stringify(defaults));
+  const inherited = new Set(Object.keys(defaults));
   let applied = 0;
   for (const action of Object.keys(merged)) {
     if (Array.isArray(source[action])) {
       const bindings = source[action].map(normalizeKeyBinding).filter(Boolean);
       if (source[action].length && !bindings.length) continue;
       merged[action] = bindings;
+      inherited.delete(action);
       applied++;
     }
   }
   if (!applied) throw new Error('檔案裡沒有可用的快捷鍵綁定');
+  migrateTimelineDefaultBindings(defaults,source,merged,inherited);
   return { keymap: merged, applied };
+}
+
+// A saved new action (including []) marks an already-upgraded map. Without it,
+// only the exact old defaults move; custom alternatives and disabled actions
+// stay owned by the user. Loading and importing share this one migration.
+function migrateTimelineDefaultBindings(defaults,source,merged,inherited){
+  const actions=['toggle_mixer','toggle_sub_mode','scroll_playhead'];
+  if(actions.some(action=>!Array.isArray(defaults[action])))return;
+  if(!Object.hasOwn(source,'scroll_playhead')){
+    for(const [action,key] of [['toggle_mixer','u'],['toggle_sub_mode','y']]){
+      if(!inherited.has(action)&&merged[action].length===1&&sameBind(merged[action][0],{key})){
+        merged[action]=structuredClone(defaults[action]);inherited.add(action);
+      }
+    }
+  }
+  const custom=Object.fromEntries(Object.entries(merged).filter(([action])=>!inherited.has(action)));
+  for(const action of actions){
+    if(!inherited.has(action))continue;
+    merged[action]=merged[action].filter(bind=>!matchAction(custom,{
+      key:bind.key||'',code:bind.code||( /^[a-z]$/.test(bind.key||'')?'Key'+bind.key.toUpperCase():undefined),
+      ctrlKey:!!bind.ctrl,shiftKey:!!bind.shift,altKey:!!bind.alt,
+    }));
+  }
 }
 
 /** 存檔前清掉被刪成 null 的空位。原地修改並回傳同一個物件。 */

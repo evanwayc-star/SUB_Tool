@@ -16,6 +16,7 @@ import { secToEncore, getExactFps } from './time.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { History, recordHistory } from './history.js';
 import { Project } from './project.js';
+import { addNotesFromCues } from './notes.js';
 import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 import { beginGeometryEdit } from './timeline-edit-transaction.js';
 import { emit } from './events.js';
@@ -194,6 +195,16 @@ function showCueMenu(x,y,contextCue=null){
   const items=[{heading:true,label:`已選 ${n} 條字幕`}];
   items.push({label:`複製 ${n} 條字幕`,act:()=>copyCues()});
   if(State.clipboard?.length) items.push({label:`貼上 ${State.clipboard.length} 條字幕`,act:()=>pasteCues()});
+  if(n){
+    const ownsHistory=History.captureOwnership();
+    const noteSources=targets.map(({cue})=>({cue,start:cue?.start,text:cue?.text,timed:cue?.timed}));
+    items.push({id:'create-notes-from-subtitles',label:'建立備註',act:()=>{
+      if(!ownsHistory()||noteSources.some(({cue,start,text,timed})=>!Object.is(cue.start,start)||cue.text!==text||cue.timed!==timed)){
+        showToast('字幕已變更，請重新開啟右鍵選單');return;
+      }
+      addNotesFromCues(targets.map(({cue})=>cue));
+    }});
+  }
   items.push({sep:true});
   items.push({label:`<svg viewBox="0 0 512 512" width="13" height="13" fill="currentColor" style="vertical-align:-2px"><path d="M204.3 5C104.9 24.4 24.8 104.3 5.2 203.4c-37 187 131.7 326.4 258.8 306.7 41.2-6.4 61.4-54.6 42.5-91.7-23.1-45.4 9.9-98.4 60.5-98.4h79.7c75.8 0 137.2-61.4 137.2-137.2 0-97-75.1-177.3-172-181.7-68.5-3.1-135.5-2.6-207.6 3.9zM104 224c-22.1 0-40-17.9-40-40s17.9-40 40-40 40 17.9 40 40-17.9 40-40 40zm104-72c-22.1 0-40-17.9-40-40s17.9-40 40-40 40 17.9 40 40-17.9 40-40 40zm128 0c-22.1 0-40-17.9-40-40s17.9-40 40-40 40 17.9 40 40-17.9 40-40 40zm88 96c-22.1 0-40-17.9-40-40s17.9-40 40-40 40 17.9 40 40-17.9 40-40 40z"/></svg> 拷貝樣式`,act:()=>copySelectedStyle()});
   if(hasClipboardStyle()) items.push({label:`<svg viewBox="0 0 384 512" width="13" height="13" fill="currentColor" style="vertical-align:-2px"><path d="M336 64h-80c0-35.3-28.7-64-64-64s-64 28.7-64 64H48C21.5 64 0 85.5 0 112v352c0 26.5 21.5 48 48 48h288c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48zM192 40c13.3 0 24 10.7 24 24s-10.7 24-24 24-24-10.7-24-24 10.7-24 24-24zm144 418c0 3.3-2.7 6-6 6H54c-3.3 0-6-2.7-6-6V118c0-3.3 2.7-6 6-6h42v36c0 6.6 5.4 12 12 12h168c6.6 0 12-5.4 12-12v-36h42c3.3 0 6 2.7 6 6v340z"/></svg> 貼上樣式`,act:()=>pasteStyleToSelected()});
@@ -668,8 +679,8 @@ export function showImageGeom(c){
   if(!canEdit()) return;
   const S=Math.round((c.scale??1)*100), X=Math.round((c.posX??0.5)*100), Y=Math.round((c.posY??0.5)*100);
   const row=(id,label,val,min,max,unit)=>
-    `<div>${label}：<input type="range" id="ig${id}R" min="${min}" max="${max}" step="1" value="${val}" style="width:180px;vertical-align:middle">`+
-    ` <input type="number" id="ig${id}" min="${min}" max="${max}" step="1" value="${val}" style="width:64px">${unit}</div>`;
+    `<div><label for="ig${id}">${label}：</label><input type="range" id="ig${id}R" aria-label="${label}（${unit}）" min="${min}" max="${max}" step="1" value="${val}" style="width:180px;vertical-align:middle">`+
+    ` <input type="number" id="ig${id}" aria-label="${label}（${unit}）" min="${min}" max="${max}" step="1" value="${val}" style="width:64px">${unit}</div>`;
   let edit;
   const current = () => session.isCurrent() && canEdit() && edit?.isCurrent();
   const restore=()=>{ if(edit?.cancel()){ emit('media:timeline'); emit('render:videoSub'); } };
@@ -736,8 +747,8 @@ export function showClipFade(c){
   const fi=Math.min(+(c.fadeIn||0), maxF), fo=Math.min(+(c.fadeOut||0), maxF);
   const session=openModal(`淡入淡出（轉場）— ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.2">`+
-    `<div>淡入：<input type="range" id="cfIn" min="0" max="${maxF}" step="0.001" value="${fi}" style="width:180px;vertical-align:middle"> <input type="text" id="cfInV" value="${secToEncore(fi, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
-    `<div>淡出：<input type="range" id="cfOut" min="0" max="${maxF}" step="0.001" value="${fo}" style="width:180px;vertical-align:middle"> <input type="text" id="cfOutV" value="${secToEncore(fo, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
+    `<div><label for="cfInV">淡入：</label><input type="range" id="cfIn" aria-label="淡入時間（秒）" min="0" max="${maxF}" step="0.001" value="${fi}" style="width:180px;vertical-align:middle"> <input type="text" id="cfInV" aria-label="淡入時間（時:分:秒:格）" value="${secToEncore(fi, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
+    `<div><label for="cfOutV">淡出：</label><input type="range" id="cfOut" aria-label="淡出時間（秒）" min="0" max="${maxF}" step="0.001" value="${fo}" style="width:180px;vertical-align:middle"> <input type="text" id="cfOutV" aria-label="淡出時間（時:分:秒:格）" value="${secToEncore(fo, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">淡入從透明漸顯、淡出漸隱到透明（露出下層／黑底），音訊同步淡變。<b>匯出時生效</b>。若此片段在上層視訊軌且與下層重疊，淡變即為<b>軌間溶接</b>。</div>`+
     `</div>`,
     [{label:'清除',act:()=>{ if(current() && setClipFade(c,0,0)) session.close({committed:true}); }},
@@ -859,7 +870,7 @@ export function showClipDuration(c){
 
   const session=openModal(`修改持續時間 — ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.2">`+
-    `<div>持續時間：<input type="text" id="cdVal" value="${secToEncore(cur, State.fps, State.dropFrame)}" `+
+    `<div><label for="cdVal">持續時間：</label><input type="text" id="cdVal" aria-label="片段持續時間（時:分:秒:格）" value="${secToEncore(cur, State.fps, State.dropFrame)}" `+
     `style="width:120px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:3px 4px;border-radius:3px;text-align:center;font-family:'Cascadia Mono','JetBrains Mono',Consolas,monospace"></div>`+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">`+
     `最長 <b>${secToEncore(Math.min(maxLen, 359999.9), State.fps, State.dropFrame)}</b> ${limitNote}<br>`+
@@ -891,7 +902,7 @@ export function showCrossfade(c){
   const defT=Math.min(1, maxT);
   const session=openModal(`交叉溶接 — ${escapeHTML(prev.name||'')} → ${escapeHTML(c.name||'')}`,
     `<div style="font-size:13px;line-height:2.1">`+
-    `<div>溶接時間：<input type="range" id="xfT" min="${minT}" max="${maxT}" step="0.001" value="${defT}" style="width:180px;vertical-align:middle"> <input type="text" id="xfTV" value="${secToEncore(defT, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
+    `<div><label for="xfTV">溶接時間：</label><input type="range" id="xfT" aria-label="影音溶接時間（秒）" min="${minT}" max="${maxT}" step="0.001" value="${defT}" style="width:180px;vertical-align:middle"> <input type="text" id="xfTV" aria-label="影音溶接時間（時:分:秒:格）" value="${secToEncore(defT, State.fps, State.dropFrame)}" style="width:100px;background:var(--bg-b);color:var(--text);border:1px solid var(--border);padding:2px 4px;border-radius:3px;text-align:center"></div>`+
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">會把此片段移到<b>上一層視訊軌</b>並提前與前一段尾端重疊，兩段在重疊處淡出／淡入＝交叉溶接（匯出時合成）。</div>`+
     `</div>`,
     [{label:'取消',act:()=>session.close()},

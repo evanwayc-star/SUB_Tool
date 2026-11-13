@@ -8,7 +8,7 @@ import { State, IS_DESKTOP, DESK } from './state.js';
 import { Media } from './media.js';
 import { AudioRouting } from './audio-routing.js';
 import { runVideoExportCommand } from './export-job-engine.js';
-import { showToast, openModal, closeModal, togglePanel, openCacheDialog, keepPanelInViewport } from './ui.js';
+import { showToast, openModal, closeModal, togglePanel, closePanel, openCacheDialog, keepPanelInViewport } from './ui.js';
 import { showSettingsModal } from './settings.js';
 import { showProjectSettings } from './project-settings.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
@@ -61,7 +61,7 @@ import {
 import { copySelectedStyle, pasteStyleToSelected } from './subtitles.js';
 import { addNote, renderNotes, clearAllNotes, exportNotes } from './notes.js';
 import { renderMixer, mixerReset, mixerMuteAll, mixerZeroFaders, mixerAdjustAllDb } from './mixer.js';
-import { toggleSafeFrame, toggleTimecodeWatermark, _syncMpvPanel } from './video-renderer.js';
+import { toggleSafeFrame, toggleTimecodeWatermark } from './video-renderer.js';
 import { togglePointerSeekMode } from './timeline-interaction-engine.js';
 import { History, renderHistory } from './history.js';
 import { $ } from './dom.js';
@@ -173,7 +173,7 @@ function createCommands() {
 
     // Notes
     'notes': () => { togglePanel('notesPanel'); renderNotes(); },
-    'add-note': addNote,
+    'add-note': () => addNote({toggle:false}),
     'clear-notes': clearAllNotes,
 
     // Mixer
@@ -199,9 +199,7 @@ function createCommands() {
       if (willShow) renderCheckPanel();
     },
     'close-check': () => {
-      $('checkPanel').classList.remove('show');
-      const btn = $('checkPanelBtn'); if (btn) btn.classList.remove('sub-active');
-      emit('mpv:sync');
+      closePanel('checkPanel');
     },
     'search-open': () => {
       const sd = $('searchDialog');
@@ -233,7 +231,7 @@ function createCommands() {
   };
 
   for (const [id, panel] of Object.entries(CLOSE_PANELS)) {
-    table[id] = () => { $(panel).classList.remove('show'); _syncMpvPanel(); };
+    table[id] = () => closePanel(panel);
   }
 
   const registry = {

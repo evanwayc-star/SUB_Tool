@@ -124,7 +124,7 @@ describe('delivery runner public interface', () => {
       staged = path.join(options.cwd, args[metadataFlag + 2]);
       const metadataInput = args.slice(0, metadataFlag + 2).filter(arg => arg === '-i').length - 1;
       expect(args[args.indexOf('-map_chapters') + 1]).toBe(String(metadataInput));
-      expect(readFileSync(staged, 'utf8')).toBe(';FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=備註：畫格檢查\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=10000\ntitle=自訂字幕：測試 \\#\\;\\=\n');
+      expect(readFileSync(staged, 'utf8')).toBe(';FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=備註：畫格檢查\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=10000\ntitle=備註：原文 ／ 自訂字幕：測試 \\#\\;\\=\n');
       assertDeliveryInputEvidence(options.inputEvidence);
       expect(options.inputEvidence.some(entry => entry.path === staged)).toBe(true);
       return { maps: [] };
@@ -132,7 +132,8 @@ describe('delivery runner public interface', () => {
     const setup = make({ nativeCapabilities: capabilities, runFfmpeg });
     const job = videoJob();
     job.payload.format = format;
-    job.payload.chapters = [{ start: 0, end: 1, title: '備註：畫格檢查' }, { start: 1, end: 10, title: '自訂字幕：測試 #;=' }];
+    job.payload.chapters = [{ start: 0, end: 1, title: '備註：畫格檢查', kind: 'note' },
+      { start: 1, end: 10, title: '備註：原文 ／ 自訂字幕：測試 #;=', kind: 'note' }];
     const chapters = structuredClone(job.payload.chapters);
     try {
       await setup.runner.run(job);
@@ -143,6 +144,38 @@ describe('delivery runner public interface', () => {
       expect(job.payload.chapters).toEqual(chapters);
       expect(existsSync(staged)).toBe(false);
     } finally { await capabilities.cancelAllAndWait(); }
+  });
+
+  it.each(['styles-only', 'notes-and-styles', 'ambiguous'])('舊佇列 %s 不得產生自訂樣式書籤或截斷備註', async kind => {
+    let staged;
+    const runFfmpeg = vi.fn(async (args, options) => {
+      if (kind === 'styles-only') {
+        expect(args[args.indexOf('-map_chapters') + 1]).toBe('-1');
+        expect(args).not.toContain('ffmetadata');
+        expect(options.inputEvidence.some(entry => entry.path.endsWith('.ffmetadata'))).toBe(false);
+      } else {
+        const metadataIndex = args.indexOf('ffmetadata');
+        staged = path.join(options.cwd, args[metadataIndex + 2]);
+        expect(readFileSync(staged, 'utf8')).toBe(';FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=4000\ntitle=影片開始\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=4000\nEND=10000\ntitle=備註：保留完整內容\n');
+      }
+      return { maps: [] };
+    });
+    const setup = make({ runFfmpeg }), job = videoJob();
+    job.payload.customStyles = true; job.payload.chapterStyled = true;
+    job.payload.chapters = [{ start: 0, end: 2, title: '影片開始' }, { start: 2, end: 10, title: '自訂字幕：舊樣式' }];
+    if (kind === 'notes-and-styles') job.payload.chapters.push({ start: 4, title: '備註：保留完整內容' });
+    if (kind === 'ambiguous') job.payload.chapters[1].title = '備註：原文 ／ 自訂字幕：不可猜測';
+    const frozen = structuredClone(job.payload.chapters);
+    await setup.runner.run(job);
+    expect(job.payload.chapters).toEqual(frozen);
+    if (kind === 'ambiguous') {
+      expect(runFfmpeg).not.toHaveBeenCalled();
+      expect(setup.sent.some(item => item.payload.error && item.payload.errorMsg.includes('重新加入'))).toBe(true);
+    } else {
+      expect(runFfmpeg).toHaveBeenCalledOnce();
+      expect(setup.sent.some(item => item.payload.error)).toBe(false);
+    }
+    if (staged) expect(existsSync(staged)).toBe(false);
   });
 
   it.each(['ass', 'timecode-font'])('交付期間 %s 暫存路徑被替換時，finally 不可刪除外來檔', async extension => {
@@ -639,8 +672,9 @@ describe('delivery runner public interface', () => {
     if (mode === 'partial-cleanup') expect(readFileSync(stagePath, 'utf8')).toBe('partial output');
   });
 
-  it.each(['none', 'user-stop', 'shutdown'].flatMap(reason => [false, true].map(releaseFailure => ({ reason, releaseFailure }))))
-  ('光碟啟動失敗後 $reason 依釋鎖結果保留原始原因與終態（releaseFailure=$releaseFailure）', async ({ reason, releaseFailure }) => {
+  it.each([...['none', 'user-stop', 'shutdown'].flatMap(reason => [false, true].map(releaseFailure => ({ reason, releaseFailure, exitBeforeResult: false }))),
+    { reason: 'user-stop', releaseFailure: true, exitBeforeResult: true }])
+  ('光碟啟動失敗後 $reason 依釋鎖結果保留原始原因與終態（releaseFailure=$releaseFailure，exitBeforeResult=$exitBeforeResult）', async ({ reason, releaseFailure, exitBeforeResult }) => {
     const root = mkdtempSync(path.join(tmpdir(), 'subtool-startup-release-')); tempRoots.push(root);
     const queueDir = path.join(root, 'queue'), outPath = path.join(root, 'delivery.iso');
     const adapter = path.join(root, 'watchdog-adapter.cjs');
@@ -666,7 +700,7 @@ describe('delivery runner public interface', () => {
     const execution = createFFmpegExecution({ getFFmpegPath: () => process.execPath, getQueueDir: () => queueDir,
       getSharedOutputLock: () => prepareSharedLeaseRoot(root),
       spawnWatchdog(config, handlers) {
-        return spawnExportWatchdog(config, { ...handlers, scriptPath: adapter, onMessage(message) {
+        const controller = spawnExportWatchdog(config, { ...handlers, scriptPath: adapter, onMessage(message) {
           messages.push(message);
           if (message.type === 'test-startup') {
             if (reason === 'shutdown') shutdown = queue.prepareForShutdown();
@@ -674,6 +708,16 @@ describe('delivery runner public interface', () => {
           }
           handlers.onMessage(message);
         } });
+        if (exitBeforeResult) {
+          // Keep the real watchdog, leases and startup failure. Only schedule
+          // process exit before its already-written IPC result is delivered.
+          const emit = controller.child.emit;
+          controller.child.emit = function(event, ...args) {
+            if (event === 'message' && args[0]?.type === 'exit') emit.call(this, 'exit', 0, null);
+            return emit.call(this, event, ...args);
+          };
+        }
+        return controller;
       },
     });
     const runFfmpeg = vi.fn((args, options) => execution.execute(args, options));

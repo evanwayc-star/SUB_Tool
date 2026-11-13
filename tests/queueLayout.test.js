@@ -57,6 +57,65 @@ describe('佇列更新與讀取恢復', () => {
   const snapshot = jobs => ({ jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: deliveryFormats.DELIVERY_FORMAT_PRESETS });
   const settle = document => new Promise(resolve => document.defaultView.setTimeout(resolve, 0));
 
+  it('同一執行工作的進度更新保留停止按鈕及焦點，同時更新百分比與預估時間', async () => {
+    const { document, queueAPI } = await openQueueWindow([running]);
+    const card = document.querySelector('[data-job-id="running"]');
+    const stop = card.querySelector('[data-action="stop"]');
+    stop.focus();
+    queueAPI.getAll.mockResolvedValue(snapshot([{ ...running, pct: 42, elapsedMs: 12000, etaS: 18 }]));
+    queueAPI.onUpdate.mock.calls[0][0]();
+    await settle(document);
+    expect(document.querySelector('[data-job-id="running"]') === card).toBe(true);
+    expect(document.activeElement === stop).toBe(true);
+    expect(card.querySelector('[role="progressbar"]').getAttribute('aria-valuenow')).toBe('42.0');
+    expect(card.querySelector('.job-status').textContent).toContain('42.0%');
+    expect([...card.querySelectorAll('.job-timing b')].map(node => node.textContent)).toEqual(['00:12', '00:18', '00:30']);
+    stop.click();
+    expect(queueAPI.stopJob).toHaveBeenCalledExactlyOnceWith('running');
+  });
+
+  it('等待工作可由具名按鈕移動順序，跨過非等待項目且保留移動後的操作焦點', async () => {
+    let jobs = [running, { id: 'a', status: 'queued', payload: {} }, failed, { id: 'b', status: 'queued', payload: {} }];
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    queueAPI.reorderJob.mockImplementation(async (id, index) => {
+      const [job] = jobs.splice(jobs.findIndex(item => item.id === id), 1);
+      jobs.splice(index, 0, job);
+      queueAPI.getAll.mockResolvedValue(snapshot(jobs));
+      return true;
+    });
+    const card = document.querySelector('[data-job-id="b"]');
+    const up = card.querySelector('[data-action="move-up"]');
+    expect(up?.tagName).toBe('BUTTON');
+    expect(up.textContent).toContain('上移');
+    expect(card.querySelector('[data-action="move-down"]').disabled).toBe(true);
+    up.focus(); up.click();
+    await vi.waitFor(() => expect(queueAPI.reorderJob).toHaveBeenCalledExactlyOnceWith('b', 1));
+    await settle(document);
+    expect([...document.querySelectorAll('#unfinishedJobList .job')].map(node => node.dataset.jobId)).toEqual(['running', 'b', 'a', 'failed']);
+    expect(document.activeElement.closest('.job')?.dataset.jobId).toBe('b');
+    expect(document.activeElement.disabled).toBe(false);
+    expect(document.querySelector('[data-job-id="b"] [data-action="move-up"]').disabled).toBe(true);
+  });
+
+  it('排序拒絕留在原工作顯示原因，等待時不能重送', async () => {
+    const { document, queueAPI } = await openQueueWindow([{ id: 'a', status: 'queued', payload: {} }, { id: 'b', status: 'queued', payload: {} }]);
+    let reject;
+    queueAPI.reorderJob.mockImplementation(() => new Promise((resolve, fail) => { reject = fail; }));
+    const up = document.querySelector('[data-job-id="b"] [data-action="move-up"]');
+    expect(up).not.toBeNull();
+    up.click(); up.click();
+    expect(queueAPI.reorderJob).toHaveBeenCalledOnce();
+    expect(up.disabled).toBe(true);
+    reject(new Error('佇列儲存失敗'));
+    await vi.waitFor(() => expect(document.querySelector('[data-job-id="b"] [role="status"]').textContent).toContain('佇列儲存失敗'));
+    expect(up.disabled).toBe(false);
+  });
+
+  it.each(['h264', 'prores'])('%s 工作直接顯示實際交付影格率', async format => {
+    const { document } = await openQueueWindow([{ id: 'fps', status: 'queued', payload: { format, fps: 23.976, width: 1920, height: 1080 } }]);
+    expect(document.querySelector('.job-chip--spec').textContent).toContain('23.976 fps');
+  });
+
   it('進度更新與排序變動保留同一失敗詳情及真實鍵盤焦點，其他進度仍更新', async () => {
     const { document, queueAPI } = await openQueueWindow([running, failed]);
     const card = document.querySelector('[data-job-id="failed"]');

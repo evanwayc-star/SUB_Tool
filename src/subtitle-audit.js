@@ -11,7 +11,7 @@
    ============================================================================== */
 
 import { State } from './state.js';
-import { secToEncore, getExactFps } from './time.js';
+import { secToEncore } from './time.js';
 import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 
 /**
@@ -51,6 +51,28 @@ export function consecutiveIdenticalGroups(cues=[]){
   return groups;
 }
 
+function consecutiveIdenticalRanges(cues,groups){
+  const ranges=[];
+  const timed=cue=>cue.timed!==false && Number.isFinite(cue.start) && Number.isFinite(cue.end)
+    && cue.start>=0 && cue.end>cue.start;
+  const joined=(previous,next)=>{
+    if(!timed(previous)||!timed(next))return false;
+    // FPS-SYNC: these are timeline seconds, not rounded frame labels. Absorb
+    // floating-point representation error only; a real gap/overlap stays split.
+    const roundoff=Number.EPSILON*Math.max(1,Math.abs(previous.end),Math.abs(next.start));
+    return Math.abs(previous.end-next.start)<=roundoff;
+  };
+  for(const group of groups){
+    let start=group[0],end=start;
+    for(const number of group.slice(1)){
+      if(joined(cues[end-1],cues[number-1]))end=number;
+      else {ranges.push([start,end]);start=end=number;}
+    }
+    ranges.push([start,end]);
+  }
+  return ranges;
+}
+
 /**
  * 對字幕清單進行單次遍歷的完整品質診斷分析。
  * 
@@ -58,14 +80,14 @@ export function consecutiveIdenticalGroups(cues=[]){
  * @param {Object} [options={}] - 分析選項
  * @param {number} [options.checkLenLimit=0] - 單行長度上限
  * @param {string[]} [options.checkContains=[]] - 包含關鍵字檢查清單
- * @param {number} [options.fps=25] - 影格率
  * @returns {Object} 結構化品質診斷報告
  */
 export function auditSubtitles(cues = [], options = {}) {
   if (!Array.isArray(cues)) cues = [];
   const checkLenLimit = options.checkLenLimit || 0;
   const checkContains = options.checkContains || [];
-  const exactFps = getExactFps(Number(options.fps || State?.fps) || 25);
+  const identicalGroups=consecutiveIdenticalGroups(cues);
+  const identicalRanges=consecutiveIdenticalRanges(cues,identicalGroups);
 
   const overlapSet = detectOverlaps(cues);
   const result = {
@@ -83,13 +105,12 @@ export function auditSubtitles(cues = [], options = {}) {
     containsNums: [],
     nonTraditionalIssues: [],
     noTimeNums: [],
-    consecutiveIdenticalNums: [],
-    consecutiveIdenticalJoinedNums: [],
-    consecutiveIdenticalGroups: consecutiveIdenticalGroups(cues)
+    consecutiveIdenticalNums: identicalGroups.flat(),
+    consecutiveIdenticalJoinedNums: identicalRanges.filter(([start,end])=>end>start)
+      .flatMap(([start,end])=>Array.from({length:end-start+1},(_,index)=>start+index)),
+    consecutiveIdenticalGroups: identicalGroups,
+    consecutiveIdenticalRanges: identicalRanges,
   };
-
-  const consecutiveIdenticalSet = new Set();
-  const consecutiveIdenticalJoinedSet = new Set();
 
   for (let i = 0; i < cues.length; i++) {
     const c = cues[i];
@@ -107,25 +128,6 @@ export function auditSubtitles(cues = [], options = {}) {
       const lineCnt = (t.match(/\n/g) || []).length;
       if (lineCnt >= 2) result.multiNums.push(num);
       else if (lineCnt === 1) result.twoNums.push(num);
-    }
-
-    if (i > 0) {
-      const prevTrimmed = (cues[i - 1].text || '').trim();
-      if (prevTrimmed && prevTrimmed === trimmed) {
-        consecutiveIdenticalSet.add(i);
-        consecutiveIdenticalSet.add(num);
-        const prev = cues[i - 1];
-        if (
-          prev.timed !== false &&
-          c.timed !== false &&
-          Number.isFinite(prev.end) &&
-          Number.isFinite(c.start) &&
-          Math.round(prev.end * exactFps) === Math.round(c.start * exactFps)
-        ) {
-          consecutiveIdenticalJoinedSet.add(i);
-          consecutiveIdenticalJoinedSet.add(num);
-        }
-      }
     }
 
     if (/<\/?b>/i.test(t)) result.bNums.push(num);
@@ -150,8 +152,6 @@ export function auditSubtitles(cues = [], options = {}) {
     }
   }
 
-  result.consecutiveIdenticalNums = Array.from(consecutiveIdenticalSet).sort((a, b) => a - b);
-  result.consecutiveIdenticalJoinedNums = Array.from(consecutiveIdenticalJoinedSet).sort((a, b) => a - b);
   return result;
 }
 

@@ -6,4 +6,7 @@
 ============================================================================== */
 import './styles.css';
 import './app.js';
+import { mountUIIcons } from './ui-icons.js';
+
+mountUIIcons();
 
