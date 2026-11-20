@@ -69,7 +69,7 @@ jobs:
           foreach ($file in 'resources/app.asar','resources/app.asar.unpacked/electron/ffmpeg/ffmpeg.exe','resources/app.asar.unpacked/electron/mpv/mpv.exe') {
             if (!(Test-Path -LiteralPath (Join-Path $target $file) -PathType Leaf)) { throw "Missing installed file $file" }
           }
-          npm run release:verify-install
+          pwsh -NoProfile -File scripts/release/verify-release-install.ps1
           if ($LASTEXITCODE) { throw 'Install validation failed' }
           $out = New-Item -Type Directory -Path publish
           Copy-Item $setup.FullName (Join-Path $out 'SUB-Tool-Setup-9.3.0-x64.exe')
