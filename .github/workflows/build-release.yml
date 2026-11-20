@@ -1,0 +1,99 @@
+name: Build and publish SUB Tool 9.3.0
+on:
+  push:
+    branches: [release/build-windows-9.3.0]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 4e479527821ede128938aad82ed6a7eceedf09cb
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Prepare full FFmpeg for airline acceptance
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'ffmpeg-full.7z'
+          $toolsDir = Join-Path $env:RUNNER_TEMP 'ffmpeg-full'
+          Invoke-WebRequest -Uri 'https://github.com/GyanD/codexffmpeg/releases/download/2026-01-22-git-4561fc5e48/ffmpeg-2026-01-22-git-4561fc5e48-full_build.7z' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '70ad2ba7636385b4f00f16893768add38956e9e40608200a3283b0be8c510a93') { throw 'FFmpeg archive checksum mismatch' }
+          7z x $archive "-o$toolsDir" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg extraction failed' }
+          $ffmpeg = @(Get-ChildItem -LiteralPath $toolsDir -Filter ffmpeg.exe -File -Recurse)
+          if ($ffmpeg.Count -ne 1) { throw 'Expected one FFmpeg binary' }
+          $ffprobe = Join-Path $ffmpeg[0].DirectoryName 'ffprobe.exe'
+          if (-not (Test-Path -LiteralPath $ffprobe)) { throw 'FFprobe missing' }
+          "FFMPEG_PATH=$($ffmpeg[0].FullName)" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "FFPROBE_PATH=$ffprobe" | Add-Content -LiteralPath $env:GITHUB_ENV
+      - name: Prepare verified DVD and BD authoring tools
+        run: npm run native:prepare:disc
+      - name: Stage bundled Windows tools for package verification
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'mpv-x64.7z'
+          $dir = Join-Path $env:RUNNER_TEMP 'mpv-x64'
+          Invoke-WebRequest 'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/mpv-x86_64-20261111-git-bcde6b93cc.7z' -OutFile $archive
+          if ((Get-FileHash $archive).Hash -ne 'f259b5fd4b5c395617c948a4fadcdf55bba1c5282fb7c13e88626b3f71072baf') { throw 'mpv archive checksum mismatch' }
+          7z x $archive "-o$dir" -y | Out-Null
+          if ($LASTEXITCODE) { throw 'mpv extraction failed' }
+          New-Item -ItemType Directory -Force electron/ffmpeg, electron/mpv | Out-Null
+          Copy-Item $env:FFMPEG_PATH, $env:FFPROBE_PATH electron/ffmpeg
+          $mpv = Get-ChildItem $dir -Recurse -File -Filter mpv.exe | Select-Object -First 1
+          Copy-Item $mpv.FullName electron/mpv
+          $dll = Get-ChildItem $dir -Recurse -File -Filter d3dcompiler_43.dll | Select-Object -First 1
+          if ($dll) { Copy-Item $dll.FullName electron/mpv } else { Copy-Item "$env:SystemRoot/System32/d3dcompiler_43.dll" electron/mpv }
+      - name: Package exact release tree
+        shell: pwsh
+        run: |
+          # The release verifier compares prepared manifests against the preceding version.
+          git reset --soft HEAD^
+          if ($LASTEXITCODE) { throw 'Cannot select release evidence base' }
+          git diff --exit-code 4e479527821ede128938aad82ed6a7eceedf09cb --
+          if ($LASTEXITCODE) { throw 'Working tree differs from release commit' }
+          npm run dist -- --publish never
+          if ($LASTEXITCODE) { throw 'Packaging failed' }
+          $setup = Get-Item -LiteralPath 'release/SUB Tool Setup 9.3.0.exe'
+          $target = Join-Path $env:RUNNER_TEMP 'InstalledSubTool'
+          $process = Start-Process -FilePath $setup.FullName -ArgumentList @('/S', "/D=$target") -PassThru -Wait -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw 'Silent installation failed' }
+          $app = Get-Item (Join-Path $target 'SUB Tool.exe')
+          if ($app.VersionInfo.ProductVersion -notmatch '^9\.3\.0(?:\D|$)') { throw "Wrong installed version: $($app.VersionInfo.ProductVersion)" }
+          foreach ($file in 'resources/app.asar','resources/app.asar.unpacked/electron/ffmpeg/ffmpeg.exe','resources/app.asar.unpacked/electron/mpv/mpv.exe') {
+            if (!(Test-Path -LiteralPath (Join-Path $target $file) -PathType Leaf)) { throw "Missing installed file $file" }
+          }
+          npm run release:verify-install
+          if ($LASTEXITCODE) { throw 'Install validation failed' }
+          $out = New-Item -Type Directory -Path publish
+          Copy-Item $setup.FullName (Join-Path $out 'SUB-Tool-Setup-9.3.0-x64.exe')
+          $digest = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  SUB-Tool-Setup-9.3.0-x64.exe" | Set-Content publish/SHA256SUMS.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: publish/
+          compression-level: 0
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+      - name: Publish verified Windows installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sha256sum -c SHA256SUMS.txt
+          gh release create v9.3.0 SUB-Tool-Setup-9.3.0-x64.exe SHA256SUMS.txt --target 4e479527821ede128938aad82ed6a7eceedf09cb --latest --title 'SUB Tool v9.3.0' --notes 'Windows x64 安裝版。MP3 可選 96、128、192、256、320 kbps，轉檔前可查看預估輸出容量。Proxy 和波形可在共用 NAS 素材旁重用。'
