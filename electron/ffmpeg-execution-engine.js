@@ -698,6 +698,7 @@ function createFFmpegExecution(options = {}) {
     inputDescriptor,
     inputBytes,
     outputDescriptor,
+    waveformDescriptor,
     isCancelled,
   } = {}) {
     return new Promise((resolve, reject) => {
@@ -731,6 +732,12 @@ function createFFmpegExecution(options = {}) {
       if (outputDescriptor !== undefined && (isQueueExport || !Number.isSafeInteger(outputDescriptor)
         || outputDescriptor < 3 || !Array.isArray(args) || args.at(-1) !== 'fd:')) {
         reject(new TypeError('outputDescriptor 只接受 direct 工作持有的有效檔案描述符'));
+        return;
+      }
+      if (waveformDescriptor !== undefined && (outputDescriptor === undefined || !Number.isSafeInteger(waveformDescriptor)
+        || waveformDescriptor < 3 || waveformDescriptor === outputDescriptor || waveformDescriptor === inputDescriptor
+        || !args.some((arg,index)=>arg === '-fd' && args[index+1] === '3' && args[index+2] === 'fd:'))) {
+        reject(new TypeError('波形副輸出須有獨立的檔案描述符'));
         return;
       }
       const queueDir = isQueueExport ? getQueueDir() : null;
@@ -916,7 +923,8 @@ function createFFmpegExecution(options = {}) {
         windowsHide: true,
         ...(cwd ? { cwd } : {}),
         ...((inputDescriptor !== undefined || frozenInput || outputDescriptor !== undefined)
-          ? { stdio: [frozenInput ? 'pipe' : inputDescriptor ?? 'ignore', outputDescriptor ?? 'pipe', 'pipe'] } : {}),
+          ? { stdio: [frozenInput ? 'pipe' : inputDescriptor ?? 'ignore', outputDescriptor ?? 'pipe', 'pipe',
+            ...(waveformDescriptor === undefined ? [] : [waveformDescriptor])] } : {}),
       }); }
       catch (error) { void finishProcess(1, null, error); return; }
       let processError = null;

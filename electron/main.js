@@ -903,8 +903,8 @@ const mediaIntakeRuntime = createMediaIntakeRuntime({
   fileAuthority,
   ffmpegExecution,
   getEncoder: () => VENC,
-  describeVideo: async src => (await mediaProbe.describe(src)).video,
-  describeAudio: async src => (await mediaProbe.describe(src)).audio,
+  describeVideo: async src => (await mediaProbe.describe(src,{reusePreview:true})).video,
+  describeAudio: async src => (await mediaProbe.describe(src,{reusePreview:true})).audio,
   createTempPath: tmpPath,
   sendProgress: (target, payload) => safeSend(target, 'task-progress', payload),
   forgetTemporaryFile: file => tempFiles.delete(file),
@@ -942,6 +942,8 @@ const vocalWaveformRuntime = createVocalWaveformRuntime({
 });
 const audioNormalizationRuntime = createAudioNormalizationRuntime({
   createTempPath: tmpPath,
+  withEffectCache: IS_TRANSPORT_ACCEPTANCE ? null : (src,work) => mediaIntakeRuntime.withAudioEffectCache(src,work),
+  grantRead: file => fileAuthority.grantTrustedFile(file,{read:true,write:false}),
   produceTemporaryFile: (file, produce) => mediaIntakeRuntime.produceTemporaryFile(file, produce),
   withTemporaryDescriptor: (file, owner, work) => mediaIntakeRuntime.withTemporaryDescriptor(file, owner, work),
   fingerprintSource: motherSourceFingerprint,
@@ -1525,7 +1527,7 @@ ipcMain.handle('cache:clearAll', (e, currentSrc) => {
 ipcMain.handle('ffprobe', (e, p) => {
   if (!mediaProbe) throw new Error('找不到 ffprobe');
   requireReadablePath('ffprobe', p);
-  return mediaProbe.describe(p);
+  return mediaProbe.describe(p,{reusePreview:true});
 });
 
 ipcMain.handle('ffmpeg:clipFrame', (e, request) => {
@@ -1596,6 +1598,12 @@ ipcMain.handle('audio:meterRead', (e, request) => {
 });
 ipcMain.handle('audio:meterStop', () => nativeAudioMeter.stop());
 
+ipcMain.handle('audio:source-fingerprint', (e, source) => {
+  if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
+  requireReadablePath('audio:source-fingerprint', source);
+  return motherSourceFingerprint(source);
+});
+
 /* 人聲模型只讀母素材的一小段 PCM；主程序核對原有 read capability，不授權新路徑。 */
 ipcMain.handle('audio:vocal-wave-fingerprint', (e, source) => {
   if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
@@ -1611,6 +1619,30 @@ ipcMain.handle('audio:vocal-wave-cancel', (e, { requestId } = {}) =>
   vocalWaveformRuntime.cancel(e.sender, requestId));
 
 const audioNormalizationJobs = new Map();
+const audioEffectLeases = new Map();
+function retainAudioEffect(sender,release){
+  if(sender.isDestroyed()){release();throw new Error('音訊平衡工作已取消');}
+  let leases=audioEffectLeases.get(sender);
+  if(!leases){
+    leases=new Map();audioEffectLeases.set(sender,leases);
+    sender.once('destroyed',()=>{
+      for(const stop of leases.values())stop();
+      audioEffectLeases.delete(sender);
+    });
+  }
+  const id=crypto.randomUUID();
+  leases.set(id,release);return id;
+}
+ipcMain.handle('audio:release-effect', (e,id)=>{
+  const leases=audioEffectLeases.get(e.sender);
+  const release=leases?.get(id);
+  if(!release)return false;
+  leases.delete(id);release();return true;
+});
+ipcMain.handle('audio:effect-peaks', (e,request)=>{
+  requireReadablePath('audio:effect-peaks',request?.path);
+  return audioNormalizationRuntime.displayPeaks?.(request.path,request)??{peaks:null};
+});
 function audioNormalizationKey(sender, requestId) {
   if (typeof requestId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(requestId)) throw new TypeError('無效的音訊工作識別');
   return `${sender.id}:${requestId}`;
@@ -1647,7 +1679,7 @@ ipcMain.handle('audio:normalize', async (e, { path: src, options, duration, requ
   if (!FFMPEG) throw new Error('找不到 ffmpeg，無法執行音訊平衡化');
   requireReadablePath('audio:normalize', src);
   return runAudioNormalizationJob(e, src, duration, requestId,
-    lifecycle => audioNormalizationRuntime.normalize(src, options, lifecycle));
+    lifecycle => audioNormalizationRuntime.normalize(src, options, {...lifecycle,retainPreview:release=>retainAudioEffect(e.sender,release)}));
 });
 
 ipcMain.handle('audio:analyzeLoudness', async (e, { path: src, duration, requestId }) => {
@@ -1952,7 +1984,7 @@ ipcMain.handle('ffmpeg:sourceKey', async (_e, source) => {
 ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
   const owner = mediaIntakeOwner(e, request);
   if (owner.sessionId === undefined) throw new TypeError('波形工作缺少 sessionId/requestId');
-  const { path: src, duration, audio, start, length, ignoreCached, continuous, channel } = request;
+  const { path: src, duration, audio, start, length, ignoreCached, continuous, channel, displayPeaks } = request;
   requireReadablePath('ffmpeg:prepareSourceWaveform', src);
   let prepared;
   const cancel = () => { void mediaWaveformCoordinator.cancel(owner); };
@@ -1960,7 +1992,7 @@ ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
   if (e.sender.isDestroyed?.()) cancel();
   try {
     return await mediaWaveformCoordinator.enqueue(async lease => {
-      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length, ignoreCached, continuous, channel }, mediaIntakeSession(e, lease, owner));
+      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length, ignoreCached, continuous, channel, displayPeaks }, mediaIntakeSession(e, lease, owner));
       return prepared;
     }, owner, channel);
   } catch (error) {

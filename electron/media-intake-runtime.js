@@ -18,6 +18,7 @@ const { readSourceWaveformChunk, saveSourceWaveformChunk, inspectSourceWaveformC
   isSourceWaveformCachePath, validSourceWaveformPcm, MAX_SOURCE_WAVEFORM_BYTES } = require('./source-waveform-cache');
 const { openContinuousWaveformCache, inspectContinuousWaveformCache, describeContinuousWaveformCache, isContinuousWaveformCachePath } = require('./continuous-waveform-cache');
 const { runContinuousSourceWaveform } = require('./continuous-source-waveform');
+const { waveformDisplayCache } = require('./waveform-display-peaks');
 const SOURCE_CACHE_VERSION = 'source-v3';
 const PORTABLE_SOURCE_FORMAT = SOURCE_CACHE_VERSION + '-sha256';
 const SHARED_FILE_SOURCE_FORMAT = 'source-v4-shared-file';
@@ -1056,6 +1057,46 @@ function createMediaIntakeRuntime(options = {}) {
     catch (_) { return { ...central, source: { path: currentSrc, unavailable: true, locations: [] } }; }
   }
 
+  // Effect previews can be large. Keep them under the same source bucket and
+  // cleanup leases as Proxy/WAV, including a reader lease for an installed preview.
+  async function withAudioEffectCache(src, work) {
+    if (!allowSidecarCache || !fileAuthority.canRead(src)) throw new Error('無法使用此素材的音訊平衡快取');
+    const generation = runtimeGeneration;
+    const checkSession = () => { if (closed || generation !== runtimeGeneration) throw new IngestSupersededError(); };
+    const releaseSource = protectSource(src);
+    try {
+      while(sourceCleanupTasks(src).length)await waitSourceCleanups(src);
+      checkSession();
+      const key = await cacheKeyForAsync(src);
+      checkSession();
+      let bucket = path.join(sidecarRoot(src), key);
+      const existingRoot = sidecarAuthority(src);
+      const existing = existingRoot && fs.existsSync(bucket) ? inspectSourceCache(bucket, [], key, null, true, src) : null;
+      if (!existing || (existing.error && !existing.metadataMissing)) bucket = writeCacheDir(src);
+      const rootOwner = sidecarAuthority(src);
+      if (!rootOwner || !isSidecarCandidate(src, bucket)) throw cachePathEscape();
+      const directory = path.join(bucket, 'audio-effects'), probe = path.join(bucket, '.owner-check');
+      const checkRoot = () => {
+        checkSession();
+        assertCleanupAncestors(probe);
+        captureOutputAuthority(probe, rootOwner);
+      };
+      grantManagedCleanupRoot(bucket, checkRoot);
+      checkRoot();
+      try { fs.mkdirSync(directory); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+      const owner = cacheDirectoryOwner(directory);
+      const verify = () => {
+        checkRoot();
+        if (!sameCacheDirectory(owner, cacheDirectoryOwner(directory))) throw cacheDirectoryChanged();
+      };
+      verify();
+      const retain = () => { verify(); return protectCacheDir(bucket, src); };
+      const release = retain();
+      try { return await work({ directory, verify, retain }); }
+      finally { release(); }
+    } finally { releaseSource(); }
+  }
+
   function sourceCacheInfo(src, session) {
     const key = cacheKeyFor(src), shared = allowSidecarCache ? sharedSourceFingerprintSync(src) : null;
     const local = crypto.createHash('sha256').update('strict-source-wave-v1\0' + key).digest('hex');
@@ -1086,10 +1127,16 @@ function createMediaIntakeRuntime(options = {}) {
         || path.basename(directory) === key && (!hit.sourceContent || hit.sourceKeys.includes(key))
           && (!hit.sharedSourceKeys.length || hit.sharedSourceKeys.includes(shared)));
       const waveform = describeContinuousWaveformCache(directory, { sourceKey: shared || local, verify });
-      if (matching || waveform.hasSourceChannels || ['partial', 'complete'].includes(waveform.state)) {
+      let audioEffects = false;
+      if (matching || (isSidecar && path.basename(directory) === key && hit.metadataMissing)) {
+        try { cacheDirectoryOwner(path.join(directory, 'audio-effects')); audioEffects = true; }
+        catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error; }
+      }
+      if (matching || audioEffects || waveform.hasSourceChannels || ['partial', 'complete'].includes(waveform.state)) {
         locations.push({ directory, kind: isSidecar ? 'sidecar' : 'central',
           waveform: waveform.state === 'missing' && matching && hit.meta.wave ? { state: 'complete', verified: false } : waveform,
-          proxy: !!(matching && hit.meta.proxy), channels: matching ? hit.meta.channels.length : 0 });
+          proxy: !!(matching && hit.meta.proxy), channels: matching ? hit.meta.channels.length : 0,
+          ...(audioEffects ? {audioEffects:true} : {}) });
       }
       verify();
     }
@@ -1977,6 +2024,7 @@ function createMediaIntakeRuntime(options = {}) {
     if (/\.(png|wav)$/.test(basename)) {
       const parts = lower.split(path.sep), sidecar = parts.indexOf('.subtool_cache');
       if (sidecar >= 0 && ['clip-frames', 'clip-audio'].includes(parts[sidecar + 1])) return true;
+      if (sidecar >= 0 && /^[a-f0-9]{16}$/.test(parts[sidecar + 1]) && parts[sidecar + 2] === 'audio-effects') return true;
       const clipRoots = typeof options.clipCacheRoots === 'function' ? options.clipCacheRoots() : options.clipCacheRoots;
       if (Array.isArray(clipRoots) && clipRoots.some(inside)) return true;
     }
@@ -2469,10 +2517,13 @@ function createMediaIntakeRuntime(options = {}) {
     if (!observed.isFile() || observed.isSymbolicLink()
       || ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].some(field => observed[field] !== result.waveEvidence?.[field]))
       throw new Error('已保存的連續波形在交接期間變更');
-    if (!result.channel) completedContinuousWaves.set(result.sourceKey, { ...result, src });
+    if (!result.channel) {
+      const { displayPeaks: _display, ...metadata } = result;
+      completedContinuousWaves.set(result.sourceKey, { ...metadata, src });
+    }
   }
 
-  async function continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached }, session, progress) {
+  async function continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached, displayPeaks }, session, progress) {
     const ensureCurrent = () => { if (closed || cancelled(session)) throw new IngestSupersededError(); };
     const totalSamples = Math.round(duration * 4000);
     const localKey = crypto.createHash('sha256').update('strict-source-wave-v1\0' + sourceKey).digest('hex');
@@ -2516,10 +2567,26 @@ function createMediaIntakeRuntime(options = {}) {
         checkSource(); assertCleanupAncestors(path.join(dir, '.wave-continuous-check'));
         if (sidecar) captureOutputAuthority(path.join(sidecar.requestedPath, '.wave-continuous-check'), sidecar);
       };
-      const state = inspectContinuousWaveformCache(dir, { spec: specFor(dir), verify });
+      const state = inspectContinuousWaveformCache(dir, { spec: specFor(dir), verify, displayPeaks });
       if (state.retained && (!selected || state.isComplete || state.completedSamples > selected.state.completedSamples))
         selected = { dir, state };
       if (state.isComplete) break;
+    }
+    const completedResult = (result, dir) => {
+      const observed = fs.lstatSync(result.wave, { bigint: true });
+      const completed = { ...result, ...(channel ? { channel } : {}), channels: [], continuous: true, cacheDir: dir, recipeAudio, totalSamples, sharedSourceKey: sharedKey,
+        waveEvidence: Object.fromEntries(['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].map(field => [field, observed[field]])) };
+      rememberContinuousWaveform(src, completed);
+      progress({ pct: 100, done: true, outcome: 'success', label: result.cached ? '已讀取波形快取' : '波形已就緒' });
+      return completed;
+    };
+    if (selected?.state.displayPeaks) {
+      const {dir,state} = selected;
+      state.verify();checkSource(true);
+      const result = completedResult({wave:state.wavePath, displayPeaks:state.displayPeaks, cached:true,temporary:false,
+        complete:true,start:0,duration,sourceKey,resumedSamples:totalSamples},dir);
+      await Promise.resolve();state.verify();
+      return result;
     }
     const openAt = dir => {
       const directoryOwner = cacheDirectoryOwner(dir), sidecar = isSidecarCandidate(src, dir) ? sidecarAuthority(src) : null;
@@ -2537,15 +2604,17 @@ function createMediaIntakeRuntime(options = {}) {
     const opened = openAt(preferred);
     const { dir, verify, unprotect, store } = opened;
     try {
-      const result = await runContinuousSourceWaveform({ src, duration, audio, channel, sourceKey, store, verify,
+      const result = await runContinuousSourceWaveform({ src, duration, audio, channel, sourceKey, store, verify, displayPeaks,
         buildPlan: buildAudioIngestPlan, execute: (args, opts) => ffmpegExecution.execute(args, opts), progress,
         ownProcess: child => ownWaveformProcess(child, session.ownProcess) });
       verify();
-      const observed = fs.lstatSync(result.wave, { bigint: true });
-      const completed = { ...result, ...(channel ? { channel } : {}), channels: [], continuous: true, cacheDir: dir, recipeAudio, totalSamples, sharedSourceKey: sharedKey,
-        waveEvidence: Object.fromEntries(['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].map(field => [field, observed[field]])) };
-      rememberContinuousWaveform(src, completed);
-      progress({ pct: 100, done: true, outcome: 'success', label: '波形已就緒' });
+      if (displayPeaks) {
+        const display = waveformDisplayCache(dir, result.wave, { ...specFor(), pcmSHA256:store.pcmSHA256 }, verify);
+        if (display && !result.displayPeaks) progress({phase:'reading',label:'讀取已產生的波形',pct:null});
+        const peaks = result.displayPeaks || display?.fromWave();
+        if (peaks) { display.save(peaks);result.displayPeaks=peaks; }
+      }
+      const completed = completedResult(result, dir);
       await Promise.resolve(); verify();
       return completed;
     } finally { unprotect(); }
@@ -2623,11 +2692,12 @@ function createMediaIntakeRuntime(options = {}) {
     }
   }
 
-  async function waveform({ src, duration, audio = [], start = 0, length, ignoreCached = false, continuous = false, channel }, session = {}) {
+  async function waveform({ src, duration, audio = [], start = 0, length, ignoreCached = false, continuous = false, channel, displayPeaks = false }, session = {}) {
     if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(start) || start < 0 || start >= duration
       || (length !== undefined && (!Number.isFinite(length) || length <= 0 || length > 60))
       || (length === undefined && start !== 0)) throw new RangeError('波形範圍必須在來源內，片段不可超過 60 秒');
     if (typeof ignoreCached !== 'boolean') throw new TypeError('波形快取選項無效');
+    if (typeof displayPeaks !== 'boolean' || (displayPeaks && !continuous)) throw new TypeError('顯示峰值需要完整來源波形');
     if (typeof continuous !== 'boolean' || (continuous && (start !== 0 || length !== undefined))) throw new TypeError('連續波形必須使用整份來源範圍');
     if (channel !== undefined) {
       const { sourceStream, sourceChannel } = channel || {};
@@ -2639,7 +2709,7 @@ function createMediaIntakeRuntime(options = {}) {
       || !Number.isInteger(stream.channels) || stream.channels < 1 || stream.channels > 64
       || (stream.timestampOffset !== undefined && !Number.isFinite(stream.timestampOffset)));
     if (!validAudio(audio)) throw new TypeError('波形來源音訊描述無效');
-    if (options.backgroundWaveforms) return backgroundWaveform({ src, duration, audio, start, length, ignoreCached, continuous, channel }, session);
+    if (options.backgroundWaveforms) return backgroundWaveform({ src, duration, audio, start, length, ignoreCached, continuous, channel, displayPeaks }, session);
     const ensureCurrent = () => { if (closed || cancelled(session)) throw new IngestSupersededError(); };
     ensureCurrent();
     while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
@@ -2653,17 +2723,31 @@ function createMediaIntakeRuntime(options = {}) {
     };
     const progress = payload => reportProgress(session, { ...waveformProgressIdentity(channel),
       label: channel ? '產生原音聲道波形' : '優先產生波形', queued: false, start, length: segmentDuration, totalDuration: duration, ...payload });
-    progress({ pct: start / duration * 100 });
+    if (displayPeaks) progress({phase:'cache-check',label:channel?'檢查聲道波形快取':'檢查波形快取',pct:null});
+    else progress({ pct: start / duration * 100 });
     let hit = ignoreCached || channel ? null : readCache(src, audio, false);
     if (!channel && continuous && !ignoreCached && !(hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio)))) {
       await preparePortableCache({ src, audio, needsProxy: false }, session, false, { knownOnly: true });
       check(); hit = readCache(src, audio, false);
     }
     check();
-    if (hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio))) {
+    if (hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio))
+      && !(displayPeaks && isContinuousWaveformCachePath(hit.meta.wave))) {
+      let peaks;
+      if (displayPeaks) {
+        const wave = hit.meta.wave, guard = captureStreamGuard(hit.dir, inspectedCacheOwners.get(hit), wave);
+        const verify = () => { check();guard(); };
+        const identity = {sourceKey, totalSamples:segmentSamples, layout:flattenSourceChannels(audio).map(c=>[c.sourceStream,c.sourceChannel])};
+        const display = waveformDisplayCache(hit.dir,wave,identity,verify);
+        if (display && !(peaks=display.read())) {
+          progress({phase:'reading',label:'讀取已產生的波形',pct:null});
+          peaks=display.fromWave();
+          if (peaks) display.save(peaks);
+        }
+      }
       progress({ pct: 100, done: true, outcome: 'success', label: '波形已就緒' });
       ensureCurrent();
-      return { wave: hit.meta.wave, channels: [], cached: true, temporary: false, start: 0, duration, complete: true, sourceKey };
+      return { wave: hit.meta.wave, ...(peaks?{displayPeaks:peaks}:{}), channels: [], cached: true, temporary: false, start: 0, duration, complete: true, sourceKey };
     }
     // 主程序重用既有 probe owner；renderer 的舊描述不可決定換檔後的聲道或來源時鐘。
     if (options.describeAudio) {
@@ -2673,7 +2757,7 @@ function createMediaIntakeRuntime(options = {}) {
     }
     if (channel && (!audio[channel.sourceStream] || channel.sourceChannel >= audio[channel.sourceStream].channels))
       throw new RangeError(`來源音訊沒有 S${channel.sourceStream + 1} · Ch${channel.sourceChannel + 1}`);
-    if (continuous) return continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached }, session, progress);
+    if (continuous) return continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached, displayPeaks }, session, progress);
     const localWaveKey = crypto.createHash('sha256').update('strict-source-wave-v1\0' + sourceKey).digest('hex');
     // 共享證據仍含 NAS 檔案身分與完整時間戳；不把同樣取樣內容的另一份檔案當成同一來源。
     const sharedWaveKey = allowSidecarCache ? sharedSourceFingerprintSync(src) : null;
@@ -3219,6 +3303,7 @@ function createMediaIntakeRuntime(options = {}) {
 
   return Object.freeze({
     cacheInfo,
+    withAudioEffectCache,
     cancel,
     cleanOrphans,
     cleanupGeneratedFile,

@@ -19,6 +19,7 @@ beforeAll(async () => {
 beforeEach(()=>{desk.probe=vi.fn(async()=>({audio:[{channels:1}]}));});
 
 afterEach(() => {
+  delete desk.audioNormalizationSourceEvidence;
   if (root) {
     const real = fs.realpathSync(root);
     if (path.dirname(real) !== fs.realpathSync(os.tmpdir()) || !path.basename(real).startsWith('subtool-effects-batch-')) {
@@ -28,6 +29,32 @@ afterEach(() => {
     root = null;
   }
   vi.restoreAllMocks();
+});
+
+it.each(['stable','changed-stream','missing','changed-after-last'])('原生逐串流已驗證的證據：%s，保留整批前後檢查',async mode=>{
+  const identity='a'.repeat(64),different='b'.repeat(64);
+  const source={path:'C:/eight.mov',dur:2};
+  const streams=Array.from({length:8},()=>({channels:1}));
+  let completed=0;
+  desk.probe.mockResolvedValue({audio:streams});
+  desk.audioNormalizationSourceEvidence=true;
+  desk.audioSourceFingerprint=vi.fn(async()=>mode==='changed-after-last'&&completed===8?different:identity);
+  desk.releaseAudioEffect=vi.fn(async()=>true);
+  desk.normalizeAudio=vi.fn(async(_file,{sourceStream})=>{
+    completed++;
+    return {outputPath:'preview-'+sourceStream,cacheKey:'cached-'+sourceStream,leaseId:'held-'+sourceStream,
+      sourceFingerprint:sourceStream===3&&mode==='missing'?undefined:sourceStream===3&&mode==='changed-stream'?different:identity};
+  });
+  const work=Media._processAudioEffect(source,{max:-6,min:-12},{id:'native-evidence',signal:new AbortController().signal,progress(){}});
+  if(mode==='stable'){
+    expect((await work).streams).toHaveLength(8);
+    expect(desk.audioSourceFingerprint).toHaveBeenCalledTimes(3);
+    expect(desk.releaseAudioEffect).not.toHaveBeenCalled();
+  }else{
+    await expect(work).rejects.toThrow(/母素材.*變更/);
+    expect(completed).toBe(mode==='changed-after-last'?8:4);
+    expect(desk.releaseAudioEffect).toHaveBeenCalledTimes(completed);
+  }
 });
 
 it('兩音訊串流之間同路徑換母素材，不發布混合新舊來源的處理結果', async () => {

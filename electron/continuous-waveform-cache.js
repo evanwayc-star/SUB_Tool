@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
+const { waveformDisplayCache } = require('./waveform-display-peaks');
 
 const NAMESPACE = 'continuous-waveforms';
 const BLOCK = 65536;
@@ -189,11 +190,14 @@ function describeContinuousWaveformCache(directory, { sourceKey, verify = () => 
   } catch (_) { return { state: 'unknown', verified: false }; }
 }
 
-function inspectContinuousWaveformCache(directory, { spec, verify = () => {} } = {}) {
+function inspectContinuousWaveformCache(directory, { spec, verify = () => {}, displayPeaks = false } = {}) {
   try {
-    const result = scan(directory, spec ? recipe(spec) : null, verify), best = result.candidates[0];
+    const result = scan(directory, spec ? recipe(spec) : null, verify, displayPeaks), best = result.candidates[0];
+    const display = displayPeaks && best?.complete
+      ? waveformDisplayCache(directory, best.file, { ...best.spec, pcmSHA256: best.sha256 }, best.verify)?.read() : null;
     return { retained: !!best, uncertain: result.uncertain, completedSamples: best?.samples || 0,
-      isComplete: !!best?.complete, wavePath: best?.complete ? best.file : null };
+      isComplete: !!best?.complete, wavePath: best?.complete ? best.file : null,
+      ...(display ? { displayPeaks: display, verify: best.verify } : {}) };
   } catch (_) { return { retained: false, uncertain: true, completedSamples: 0, isComplete: false, wavePath: null }; }
 }
 
@@ -228,7 +232,7 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
   if (typeof ignoreCached !== 'boolean') throw new TypeError('波形快取選項無效');
   const normalized = recipe(spec), best = ignoreCached ? null : scan(directory, normalized, verify).candidates[0];
   if (best?.complete) return Object.freeze({ completedSamples: best.samples, writtenSamples: best.samples, totalSamples: normalized.totalSamples, isComplete: true,
-    wavePath: best.file, appendPCM() { throw new Error('完整波形為唯讀'); }, checkpoint: () => { best.verify(); return best.samples; },
+    wavePath: best.file, pcmSHA256: best.sha256, appendPCM() { throw new Error('完整波形為唯讀'); }, checkpoint: () => { best.verify(); return best.samples; },
     complete: () => { best.verify(); readPcmEvidence(best.file, normalized, best.samples, best.sha256, true); best.verify(); return best.file; },
     readPCM: (start, count) => checkedRange(best.file, best.samples, best.blocks, start, count, best.verify), close() {} });
   verify();
@@ -298,6 +302,7 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
     totalSamples: normalized.totalSamples,
     get completedSamples() { return completed; }, get writtenSamples() { return written; },
     get isComplete() { return complete; }, get wavePath() { return complete ? current : null; },
+    get pcmSHA256() { return complete ? hash.copy().digest('hex') : null; },
     appendPCM(bytes) {
       if (closed || complete) throw new Error('連續波形 writer 已關閉');
       if (!Buffer.isBuffer(bytes) || bytes.length % 2 || bytes.length > MAX_TRANSFER_BYTES

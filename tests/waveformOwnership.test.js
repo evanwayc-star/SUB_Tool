@@ -178,6 +178,53 @@ it('只有路由與 MIX 時，S6 可單獨產生，失敗只在手動重試後�
   }finally{delete desktop.prepareSourceWaveform;delete State.clips;}
 });
 
+it('重新開啟後，已保存的 S6 峰值直接顯示，不再取回 PCM', async()=>{
+  const source={audioSourceId:'eight',path:'mother.mov',dur:1.002};
+  const channel={sourceStream:5,sourceChannel:0};
+  const peaks=new Float32Array(202);peaks.set([-.75,.875],200);
+  desktop.prepareSourceWaveform=vi.fn(async()=>({sourceKey:'d'.repeat(16),wave:'s6.wav',duration:source.dur,
+    start:0,complete:true,cached:true,channel,displayPeaks:peaks}));
+  const fetch=vi.fn();vi.stubGlobal('fetch',fetch);
+  try{
+    for(let open=0;open<2;open++){
+      Wave.clearSources();
+      Wave.registerSourceWaveforms(source,{channels:[channel]});
+      expect(await Wave.loadSourceWaveform(source,'5:0')).toEqual(peaks);
+    }
+    expect(desktop.prepareSourceWaveform.mock.lastCall[0]).toMatchObject({displayPeaks:true,channel});
+    expect(desktop.fileURL).not.toHaveBeenCalled();expect(fetch).not.toHaveBeenCalled();
+  }finally{delete desktop.prepareSourceWaveform;}
+});
+
+it('平衡後的 S6 首次只算自己的聲道，重開依效果配方直接還原',async()=>{
+  const source={audioSourceId:'balanced',path:'mother.mov',dur:40};
+  const effectPeaksCache={path:source.path,streams:[{sourceStream:5,cacheKey:'f'.repeat(64)}],
+    resolution:100,channel:{sourceStream:5,sourceChannel:15}};
+  const entry={...effectPeaksCache.channel,pcmChannel:15,file:'effect.wave.wav',effectPeaksCache};
+  const pcm=multichannelPcm(40);
+  let saved=null;
+  desktop.audioEffectPeaks=vi.fn(async request=>{
+    expect(request.channel).toEqual(effectPeaksCache.channel);
+    if(request.peaks){saved=new Float32Array(request.peaks);return {saved:true};}
+    return {peaks:saved};
+  });
+  desktop.fileURL.mockResolvedValue('http://fixture/effect.wave.wav');
+  const fetch=vi.fn(async(_url,{headers:{Range}})=>{
+    const [,a,b]=/^bytes=(\d+)-(\d+)$/.exec(Range);
+    return {status:206,arrayBuffer:async()=>pcm.slice(+a,+b+1)};
+  });
+  vi.stubGlobal('fetch',fetch);
+  try{
+    Wave.registerSourceWaveforms(source,{channels:[entry]});
+    const fresh=await Wave.loadSourceWaveform(source,'5:15');
+    expect([...fresh.slice(-2)]).toEqual([-.25,.5]);expect(fetch).toHaveBeenCalled();
+    Wave.clearSources();fetch.mockClear();
+    Wave.registerSourceWaveforms(source,{channels:[entry]});
+    expect(await Wave.loadSourceWaveform(source,'5:15')).toEqual(fresh);
+    expect(fetch).not.toHaveBeenCalled();
+  }finally{delete desktop.audioEffectPeaks;}
+});
+
 it.each([false, true])('已移除聲道的舊解碼晚到，不會重建或覆蓋同座標（重新加入=%s）', async readded => {
   const oldUrl = deferred();
   const oldPeaks = new Float32Array([-0.1, 0.1]);

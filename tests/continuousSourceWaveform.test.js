@@ -60,6 +60,57 @@ it('單次解碼在整片完成前發布已保存的5秒peak，正式wave逐samp
   expect(f.execute).toHaveBeenCalledOnce();expect(reopened.cleanupGeneratedFile(result.wave)).toBe(false);
 });
 
+it.each([undefined,{sourceStream:0,sourceChannel:0}])('重開 %j 直接讀取已保存的每一桶顯示峰值，舊 WAV 只補建一次',async channel=>{
+  const f=fixture(),old=f.create(),request={...f.request,channel};
+  const legacy=await old.waveform(request);
+  await old.close();
+  const expected=new Float32Array(Math.ceil(f.samples/40)*2);
+  for(let i=0;i<f.samples;i++){
+    const sample=f.pcm.readInt16LE(i*2)/32768,bucket=Math.floor(i/40)*2;
+    expected[bucket]=Math.min(expected[bucket],sample);
+    expected[bucket+1]=Math.max(expected[bucket+1],sample);
+  }
+  const lookup={...request,displayPeaks:true},upgrade=f.create();
+  expect((await upgrade.waveform(lookup)).displayPeaks).toEqual(expected);
+  await upgrade.close();
+  const inspect=vi.spyOn(fs,'openSync');
+  const reader=f.create(),reopened=await reader.waveform(lookup);
+  expect(reopened.displayPeaks).toEqual(expected);
+  expect(inspect.mock.calls.filter(([file])=>file===legacy.wave)).toHaveLength(0);
+  expect(f.execute).toHaveBeenCalledOnce();
+});
+
+it('舊 ingest MIX 在首次從已完成 WAV 補出峰值後，重開只讀顯示快取',async()=>{
+  const f=fixture(),creator=f.create(),asset=await creator.ingest({...f.request,needsProxy:true});
+  await creator.close();
+  const request={...f.request,displayPeaks:true};
+  const first=f.create(),migrated=await first.waveform(request);
+  expect(migrated.wave).toBe(asset.wave);
+  expect(migrated.displayPeaks[0]).toBe(-10000/32768);
+  await first.close();
+  const opened=vi.spyOn(fs,'openSync');
+  const reader=f.create(),ready=await reader.waveform(request);
+  expect(ready.displayPeaks).toEqual(migrated.displayPeaks);
+  expect(opened.mock.calls.filter(([file])=>file===asset.wave)).toHaveLength(0);
+  expect(f.execute).toHaveBeenCalledOnce();
+});
+
+it('損毀的顯示快取從正確 PCM 修復，若連聲道 WAV 被替換則重新解碼',async()=>{
+  const f=fixture(),request={...f.request,channel:{sourceStream:0,sourceChannel:0},displayPeaks:true};
+  const runtime=f.create(),first=await runtime.waveform(request);
+  await runtime.close();
+  const sidecar=first.wave+'.peaks-v1',bad=fs.readFileSync(sidecar);bad[bad.length-4]^=77;fs.writeFileSync(sidecar,bad);
+  const next=f.create(),repaired=await next.waveform(request);
+  expect(repaired.displayPeaks).toEqual(first.displayPeaks);
+  expect(f.execute).toHaveBeenCalledOnce();
+  await next.close();
+  const broken=fs.readFileSync(first.wave);broken[broken.length-2]^=11;fs.writeFileSync(first.wave,broken);
+  const replaced=await f.create().waveform(request);
+  expect(f.execute).toHaveBeenCalledTimes(2);
+  expect(replaced.wave).not.toBe(first.wave);
+  expect(replaced.displayPeaks).toEqual(first.displayPeaks);
+});
+
 it('中斷保留已保存prefix，重新建立runtime可seek續算並重播既有進度',async()=>{
   const f=fixture();let cancelled=false;
   const runtime=f.create((_target,event)=>{if(event.waveform?.completedSamples===40000)cancelled=true;});

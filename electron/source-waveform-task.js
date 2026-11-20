@@ -45,7 +45,11 @@ async function run() {
     cleanupState: workerData.cleanupState,
     onCacheDirectoryRemoved: result => send({ type: 'cacheRemoved', result }),
     describeAudio: () => call('describe'),
-    sendProgress: (_target, payload) => send({ type: 'progress', payload: payload.done ? { ...payload, done: false } : payload }),
+    sendProgress: (_target, payload) => {
+      // The parent publishes completion after receiving this worker's result.
+      // A warm peak lookup has no decoding stage between cache check and ready.
+      if (!request.displayPeaks || !payload.done) send({ type: 'progress', payload: payload.done ? { ...payload, done: false } : payload });
+    },
     ffmpegExecution: { execute: async (args, options) => {
       const { onProgress, onPcm, onProcess: _onProcess, ...plain } = options;
       nativeProgress = onProgress; nativePcm = onPcm;
@@ -82,7 +86,9 @@ async function run() {
       } finally { fs.closeSync(fd); }
     }
     check();
-    await call('publish', { result: { ...prepared, ...(bytes ? { wave: null, bytes } : {}) } }, bytes ? [bytes.buffer] : []);
+    const transfer = bytes ? [bytes.buffer] : [];
+    if (prepared.displayPeaks) transfer.push(prepared.displayPeaks.buffer);
+    await call('publish', { result: { ...prepared, ...(bytes ? { wave: null, bytes } : {}) } }, transfer);
     check();
     send({ type: 'complete' });
   } finally {

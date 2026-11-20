@@ -330,6 +330,20 @@ describe('媒體探測 interface', () => {
     await expect(next).resolves.toMatchObject({ duration: 24 });
   });
 
+  it('開檔與後續波形共用已驗證的預覽音訊描述，換母素材會重新探測', async () => {
+    let identity='original';
+    const spawnProcess=vi.fn(()=>completedProcess({stdout:JSON.stringify({format:{duration:'1'},
+      streams:[{codec_type:'audio',channels:identity==='original'?8:1}]})}));
+    const {createMediaProbe}=require('../electron/media-probe');
+    const probe=createMediaProbe({executable:'ffprobe',fingerprintSource:()=>identity,spawnProcess});
+    await probe.describe('movie.mov',{reusePreview:true});
+    expect((await probe.describe('movie.mov',{reusePreview:true})).audio[0].channels).toBe(8);
+    expect(spawnProcess).toHaveBeenCalledOnce();
+    identity='replacement';
+    expect((await probe.describe('movie.mov',{reusePreview:true})).audio[0].channels).toBe(1);
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+  });
+
   it('同路徑母素材被替換後，新探測不共用舊 descriptor，舊工作也不發布過期資訊', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-probe-identity-'));
     const source = path.join(root, 'source.mov');

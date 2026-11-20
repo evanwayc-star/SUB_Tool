@@ -9,10 +9,17 @@ let nextWorkId = 0;
 export function createAudioEffects({ sources, process, prepare, install, fingerprintSource, sourceLayout = () => '', discardResult = () => {}, isInstalled = () => true, changed = () => {}, record = () => {}, failed = () => {} }) {
   const jobs = new Map();
   const installed = new Map();
+  const retainedPreviews = new Map();
   const cache = new Map();
   const failures = new Map();
   const intents = new Map();
   let epoch = 0;
+  function releasePreview(key){
+    const result=retainedPreviews.get(key);
+    if(!result)return;
+    retainedPreviews.delete(key);
+    Promise.resolve(discardResult(result)).catch(()=>{});
+  }
 
   function publish(change = {}) {
     const active = [...jobs.values()].filter(job => job.progress).map(job => ({ ...job.progress }));
@@ -141,8 +148,10 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
         if (evidence !== sourceFingerprint) throw new Error('母素材已變更，請重新執行音訊平衡');
       }
       // 從安裝開始，播放端可能同步接手輸出，不再由未交接工作清理。
-      discardable = false;
       install(source, prepared, finalSpec);
+      discardable = false;
+      releasePreview(key);
+      if(result?.persistent)retainedPreviews.set(key,result);
       if (!owns()) return { status: 'replaced' };
       for (const target of targets(source)) {
         // 舊版外部素材曾以快取覆寫 path；母素材永遠保留在正式欄位。
@@ -152,7 +161,7 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
         if (result?.outputPath) target.normalizedAudioPath = result.outputPath;
         else delete target.normalizedAudioPath;
       }
-      if (result && sourceFingerprint && typeof fingerprintSource === 'function') {
+      if (result && !result.persistent && sourceFingerprint && typeof fingerprintSource === 'function') {
         const entry = { result, sourceFingerprint };
         cache.set(stamp, entry);
         cache.set(fingerprint(source, finalSpec, layout), entry);
@@ -178,6 +187,7 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
 
   function sync() {
     const live = new Map(sources().map(s => [keyOf(s), s]));
+    for(const key of retainedPreviews.keys())if(!live.has(key))releasePreview(key);
     for (const [key, job] of [...jobs]) {
       if (live.has(key) && job.owns()) continue;
       const restart=live.has(key) && job.ownsSource() && sourceLayout(job.source)!==job.layout;
@@ -202,7 +212,10 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
   function invalidate({ clear = false } = {}) {
     epoch++;
     failures.clear();
-    if (clear) { installed.clear(); cache.clear(); }
+    if (clear) {
+      for(const key of retainedPreviews.keys())releasePreview(key);
+      installed.clear(); cache.clear();
+    }
     const previousJobs = [...jobs];
     for (const [key, job] of previousJobs) cancel(key, job);
     if (previousJobs.length) publish();

@@ -216,10 +216,14 @@ import { MediaIntakeSession, maxKnownSourceDuration, probeAudioChannelDescriptor
 import { ResetEpoch, createMediaPresentationSession, SOURCE_ACTIVATION_TIMEOUT_MS } from './media-presentation-core.js';
 import { MediaPlaybackRuntime } from './media-playback-runtime.js';
 import { clipSourceFingerprint, liveClipForSource, sourceWaveformChunkLength } from './media-intake-engine.js';
-import { createSourceWaveformProgress } from './source-waveform-progress.js';
+import { createSourceWaveformProgress, sourceDisplayPeaks } from './source-waveform-progress.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
 import { emit, on } from './events.js';
 import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
+
+// An ingest can return a second WAV for a mother source whose complete MIX
+// has already been delivered. Only a verified, complete buffer may be reused.
+const completedMotherWaves=new WeakMap();
 
 
 
@@ -292,8 +296,10 @@ const Media = {
           ? path=>DESK.audioSourceFingerprint(path) : undefined,
         sourceLayout:source=>JSON.stringify(_audioEffectDescriptors(source).map(({sourceStream,sourceChannel})=>[sourceStream,sourceChannel])),
         discardResult:async result=>{
-          const paths=new Set((result?.streams||[]).map(stream=>stream.outputPath).filter(Boolean));
-          if(result?.outputPath) paths.add(result.outputPath);
+          const streams=result?.streams||[];
+          const paths=new Set(streams.filter(s=>!s.cacheKey).map(stream=>stream.outputPath).filter(Boolean));
+          if(result?.outputPath&&!streams.length)paths.add(result.outputPath);
+          await Promise.allSettled(streams.filter(s=>s.leaseId).map(s=>DESK.releaseAudioEffect(s.leaseId)));
           await Promise.allSettled([...paths].map(path=>Promise.resolve().then(()=>DESK?.cleanupAudio?.(path))));
         },
         prepare:(source,result,owns,progress)=>this._prepareAudioEffect(source,result,owns,progress),
@@ -324,6 +330,7 @@ const Media = {
     let unsubscribe;
     const check=()=>{ if(signal.aborted||!owns()) throw new DOMException('工作已取消','AbortError'); };
     const fingerprint=typeof DESK.audioSourceFingerprint==='function' ? DESK.audioSourceFingerprint.bind(DESK) : null;
+    const streamEvidence=fingerprint&&DESK.audioNormalizationSourceEvidence===true;
     const sourceChanged=cause=>Object.assign(new Error('母素材在音訊處理期間變更或無法核對',{cause}),{code:'AUDIO_SOURCE_CHANGED'});
     const capture=async()=>{
       check();
@@ -353,7 +360,7 @@ const Media = {
       if(streams.length>1 && !fingerprint) throw sourceChanged();
       unsubscribe=DESK.onAudioNormalizeProgress?.(data=>{
         if(data.requestId!==activeRequest||signal.aborted) return;
-        const phase = data.stage==='pass1' ? '分析響度'
+        const phase = data.stage==='cached' ? '讀取音訊平衡快取' : data.stage==='pass1' ? '分析響度'
           : data.stage==='silence' ? '保留無聲段落' : '處理音訊';
         progress({label:`${phase}（串流 ${outputs.length+1}/${streams.length}）`,
           pct:90*(outputs.length+Math.min(100,Math.max(0,Number(data.pct)||0))/100)/streams.length});
@@ -361,10 +368,10 @@ const Media = {
       const reports={};
       for(const sourceStream of streams){
         check();
-        await verify();
+        if(!streamEvidence)await verify();
         check();
         activeRequest=`${id}-${sourceStream}`;
-        progress({label:`分析響度（串流 ${outputs.length+1}/${streams.length}）`,pct:90*outputs.length/streams.length});
+        progress({label:`檢查音訊平衡快取（串流 ${outputs.length+1}/${streams.length}）`,pct:90*outputs.length/streams.length});
         const result=await DESK.normalizeAudio(path,{
           maximumAmplitude:spec.max,targetLoudness:spec.min,inputBoost:spec.inputBoost,
           lookAheadTime:spec.lookAhead,releaseTime:spec.release,isTruePeak:spec.isTruePeak,
@@ -373,14 +380,19 @@ const Media = {
         if(!result?.outputPath) throw new Error('沒有傳回音訊檔案');
         outputs.push({...result,sourceStream,descriptors:descriptors.filter(d=>d.sourceStream===sourceStream)});
         check();
-        await verify();
+        if(streamEvidence){
+          if(result.sourceFingerprint!==sourceFingerprint)throw sourceChanged();
+        }else await verify();
         check();
         if(result.report) reports[sourceStream]=result.report;
       }
+      if(streamEvidence)await verify();
       return {streams:outputs,outputPath:outputs[0].outputPath,spec:normalizeAudioLimiterSpec({...spec,reports}),
+        ...(outputs.every(s=>s.cacheKey)?{persistent:true}:{}),
         ...(sourceFingerprint ? {sourceFingerprint} : {})};
     }catch(error){
-      await Promise.allSettled(outputs.map(output=>Promise.resolve().then(()=>DESK.cleanupAudio?.(output.outputPath))));
+      await Promise.allSettled(outputs.map(output=>Promise.resolve().then(()=>output.cacheKey
+        ?output.leaseId&&DESK.releaseAudioEffect?.(output.leaseId):DESK.cleanupAudio?.(output.outputPath))));
       throw error;
     }finally{ unsubscribe?.(); signal.removeEventListener('abort',cancel); }
   },
@@ -410,18 +422,25 @@ const Media = {
       // 波形只需低取樣率預覽，不能把數小時的高取樣率 PCM 整份載入 renderer。
       const duration=source.dur||source.duration||0,wavePaths=[];
       for(const stream of prepared.streams){
-        progress({pct:93+4*wavePaths.length/prepared.streams.length,label:'產生平衡後的波形'});
-        stream.wavePath=DESK.waveAudio?await DESK.waveAudio(stream.outputPath,duration):stream.outputPath;
-        if(stream.wavePath && stream.wavePath!==stream.outputPath) generatedWaves.add(stream.wavePath);
+        progress({pct:93+4*wavePaths.length/prepared.streams.length,label:stream.wavePath?'讀取平衡後的波形':'產生平衡後的波形'});
+        stream.wavePath=stream.wavePath||(DESK.waveAudio?await DESK.waveAudio(stream.outputPath,duration):stream.outputPath);
+        if(!stream.cacheKey && stream.wavePath && stream.wavePath!==stream.outputPath) generatedWaves.add(stream.wavePath);
         wavePaths.push(stream.wavePath);
         if(!owns()){ prepared.dispose(); return null; }
       }
       progress({pct:97,label:'載入平衡後的波形'});
-      const waveform=await Wave.preparePcmMix(wavePaths,{duration,owns,
-        onProgress:fraction=>progress({pct:97+2*fraction,label:'載入平衡後的波形'}),
-      });
+      const effectPeaksCache=result.persistent&&DESK.audioEffectPeaks?{path:audioMotherPath(source),resolution:Wave.resolution,
+        streams:prepared.streams.map(({sourceStream,cacheKey})=>({sourceStream,cacheKey}))}:null;
+      let cached=null;
+      if(effectPeaksCache)try{cached=(await DESK.audioEffectPeaks(effectPeaksCache))?.peaks;}catch{/* recover from valid preview PCM */}
+      if(!owns()){prepared.dispose();return null;}
+      const waveform=cached?.length?{path:{paths:Object.freeze([...wavePaths]),duration},peaks:cached}
+        :await Wave.preparePcmMix(wavePaths,{duration,owns,onProgress:fraction=>progress({pct:97+2*fraction,label:'載入平衡後的波形'})});
+      if(effectPeaksCache&&!cached?.length&&waveform?.peaks&&owns()){
+        try{await DESK.audioEffectPeaks({...effectPeaksCache,peaks:waveform.peaks});}catch(error){console.warn('保存平衡波形失敗',error);}
+      }
       if(!owns()){ prepared.dispose(); return null; }
-      prepared.waveformPath=waveform?.path?Object.freeze({...waveform.path,
+      prepared.waveformPath=waveform?.path?Object.freeze({...waveform.path,effectPeaksCache,
         sourceStreams:Object.freeze(prepared.streams.map(stream=>stream.sourceStream)),
       }):null;
       prepared.peaks=waveform?.peaks;
@@ -461,6 +480,8 @@ const Media = {
     const peaks=prepared?.peaks||this._effectOriginalPeaks.get(key)||null;
     const waveformChannels=prepared?replacement.map(track=>({sourceStream:track.sourceStream,sourceChannel:track.sourceChannel,
       label:track.name,file:prepared.streams.find(stream=>stream.sourceStream===track.sourceStream)?.wavePath,
+      ...(prepared.waveformPath?.effectPeaksCache?{effectPeaksCache:{...prepared.waveformPath.effectPeaksCache,
+        channel:{sourceStream:track.sourceStream,sourceChannel:track.sourceChannel}}}:{}),
       pcmChannel:track.sourceChannel})):null;
     for(const target of this.audioEffects.targets(source)){
       target.peaks=peaks;
@@ -516,6 +537,7 @@ const Media = {
   },
   _commitOriginalWave(source,wave,details){
     const buffer=wave&&(Array.isArray(wave)||typeof wave.getChannelData==='function');
+    if(wave instanceof Float32Array&&details?.sourceKey)completedMotherWaves.set(wave,details.sourceKey);
     if(this.tracks.some(track=>track.audioSourceId===source.audioSourceId&&track._audioEffect)){
       this._effectOriginalPeaks.set(source.audioSourceId,buffer?Wave.calcPeaks(wave,-1):wave);
       return;
@@ -524,9 +546,26 @@ const Media = {
     if(buffer) source.peaks=Wave.setSourceBuffer(source,wave,details);
     else{ source.peaks=wave; Wave.setSourceMixPeaks(source,wave,details); }
   },
-  async _loadOriginalWave(source,{wave,channels},owns,{decodeFallback=false,temporary=false,duration=0,transform=null,sourceWaveform=false}={}){
+  async _reuseOriginalWave(source,{wave,channels,sourceKey},owns){
+    const peaks=this._effectOriginalPeaks.get(source.audioSourceId)||Wave.getSourceMixPeaks(source);
+    const expected=completedMotherWaves.get(peaks);
+    if(!expected||!owns())return false;
+    let observed=sourceKey;
+    if(!observed&&DESK?.mediaSourceKey){
+      try{observed=await DESK.mediaSourceKey(audioMotherPath(source));}catch{return false;}
+    }
+    if(!owns()||observed!==expected)return false;
+    const live=this._liveClipForSource(source);
+    if(!live||(this._effectOriginalPeaks.get(source.audioSourceId)||Wave.getSourceMixPeaks(live))!==peaks)return false;
+    this._commitOriginalWave(live,peaks,{mixPath:wave,channels,sourceKey:expected});
+    emit('media:waveform',{controls:true});
+    return true;
+  },
+  async _loadOriginalWave(source,{wave,channels,sourceKey},owns,{decodeFallback=false,temporary=false,duration=0,transform=null,sourceWaveform=false}={}){
     if(!wave||!owns()) return false;
     try{
+      if(!sourceWaveform&&!transform&&!temporary&&await this._reuseOriginalWave(source,{wave,channels,sourceKey},owns))return true;
+      if(!owns())return false;
       return await MediaIntakeJobs.prepareWaveform(async({report,owns:ownsJob})=>{
         const current=()=>ownsJob()&&owns();
         report({label:'讀取波形',pct:null});
@@ -551,7 +590,7 @@ const Media = {
         const sourceClip=this._liveClipForSource(source);
         if(!sourceClip) return false;
         // 獨立母素材波形的暫存檔由 caller 釋放；已讀 peaks 可繼續使用，不能留下失效路徑。
-        this._commitOriginalWave(sourceClip,peaks,{mixPath:temporary?null:wave,channels});
+        this._commitOriginalWave(sourceClip,peaks,{mixPath:temporary?null:wave,channels,sourceKey});
         report({label:'波形已就緒',pct:100});
         emit('media:waveform',{controls:true});
         return true;
@@ -614,14 +653,16 @@ const Media = {
             }});
             let result;
             try{
-              result=await MediaIntakeJobs.prepareSourceWaveform({path,audio,duration,continuous:true},data=>progress.accept(data));
+              result=await MediaIntakeJobs.prepareSourceWaveform({path,audio,duration,continuous:true,displayPeaks:true},data=>progress.accept(data));
               if(!active())return false;
               progress.verifyResult(result);
-              if(progress.complete){
-                this._commitOriginalWave(this._liveClipForSource(source),published,{mixPath:result.temporary?null:result.wave});
+              const cached=progress.complete?null:sourceDisplayPeaks(result,duration,Wave.resolution);
+              if(cached){published=cached;publishedViews.add(cached);}
+              if(progress.complete||cached){
+                this._commitOriginalWave(this._liveClipForSource(source),published,{mixPath:result.temporary?null:result.wave,sourceKey:result.sourceKey});
                 emit('media:waveform');
               }else{
-                const loaded=await this._loadOriginalWave(source,{wave:result.wave},active,{
+                const loaded=await this._loadOriginalWave(source,{wave:result.wave,sourceKey:result.sourceKey},active,{
                   temporary:!!result.temporary,duration,sourceWaveform:true,
                   transform:peaks=>{published=peaks;publishedViews.add(peaks);return peaks;},
                 });

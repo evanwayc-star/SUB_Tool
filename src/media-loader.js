@@ -280,9 +280,9 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       const ownsPrimary=()=>owns()&&primaryCurrent();
       if(provisional) void provisional.handoff(res.sourceKey,peaks=>{
         if(!ownsPrimary()||primary.peaks||Wave.getSourceMixPeaks(primary)) return false;
-        ctx._commitOriginalWave(primary,peaks,{mixPath:null});emit('media:waveform',{controls:true});
+        ctx._commitOriginalWave(primary,peaks,{mixPath:null,sourceKey:provisional.complete?provisional.sourceKey:null});emit('media:waveform',{controls:true});
         return true;
-      }).then(adopted=>{if(adopted&&ownsPrimary())void ctx._prepareSourceWaveform(primary,p,audio,dur,ownsPrimary);})
+      }).then(adopted=>{if(adopted&&!provisional.complete&&ownsPrimary())void ctx._prepareSourceWaveform(primary,p,audio,dur,ownsPrimary);})
         .catch(error=>{if(ownsPrimary())console.warn('來源波形交接失敗:',error);});
       AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
       ctx.activeSource='video';
@@ -328,8 +328,9 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         }finally{ clearProgress?.(); if(ownsPrimary()){ self.pendingChannels=[]; emit('media:audioTracks'); } }
         if(!ownsPrimary()) return;
         self.syncMuteState(); emit('media:audioTracks');
-        if(r.wave){
+        if(r.wave&&!(await self._reuseOriginalWave(primary,r,ownsPrimary))){
           try{
+            if(!ownsPrimary())return;
             const u=await DESK.fileURL(r.wave);
             if(!ownsPrimary()) return;
             const fb=await fetch(u);
@@ -400,7 +401,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         if(!ownsPrimary())return;
         adoptedWaveform=await provisional.handoff(sourceKey,peaks=>{
           if(!ownsPrimary()||primary.peaks||Wave.getSourceMixPeaks(primary))return false;
-          ctx._commitOriginalWave(primary,peaks,{mixPath:res.wave||null,channels:res.channels||[]});
+          ctx._commitOriginalWave(primary,peaks,{mixPath:res.wave||null,channels:res.channels||[],sourceKey:provisional.complete?provisional.sourceKey:null});
           emit('media:waveform',{controls:true});return true;
         });
       }

@@ -1,6 +1,6 @@
 /* 唯讀來源波形的獨立生命週期；不持有正式 clip、播放位置或 History。 */
 import { sourceWaveformChunkLength } from './media-intake-engine.js';
-import { createSourceWaveformProgress } from './source-waveform-progress.js';
+import { createSourceWaveformProgress, sourceDisplayPeaks } from './source-waveform-progress.js';
 let displayOwner=null;
 export const registerProvisionalSourceWaveform=owner=>{
   const previous=displayOwner;displayOwner=owner;
@@ -45,10 +45,13 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
         }});
         let result;
         try{
-          result=await jobs.prepareSourceWaveform({path,audio,duration,continuous:true},data=>progress.accept(data));
+          result=await jobs.prepareSourceWaveform({path,audio,duration,continuous:true,...(resolution===100?{displayPeaks:true}:{})},data=>progress.accept(data));
           if(!active())return;
           progress.verifyResult(result);entry.sourceKey=result.sourceKey;
-          if(!progress.complete){
+          const cached=progress.complete?null:sourceDisplayPeaks(result,duration,resolution);
+          if(cached){
+            entry.peaks=cached;entry.resolveFirst(true);changed();
+          }else if(!progress.complete){
             const url=await bridge.fileURL(result.wave);if(!active())return;
             const bytes=await read(url);if(!active())return;
             const peaks=await decode(bytes,duration,{owns:active});if(!active())return;

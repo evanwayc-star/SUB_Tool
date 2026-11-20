@@ -33,7 +33,7 @@ function buildReverseAudioArgs(request, output, clock = null) {
     '-ar', String(SAMPLE_RATE), '-c:a', 'pcm_s16le', '-rf64', 'auto', '-f', 'wav', output];
 }
 
-async function completeWave(file, duration, verify = null) {
+async function completeWave(file, duration, verify = null, { sampleRate = SAMPLE_RATE, expectedChannels } = {}) {
   let handle;
   try {
     verify?.();
@@ -45,7 +45,7 @@ async function completeWave(file, duration, verify = null) {
     const type = header.toString('ascii', 0, 4);
     if (!['RIFF', 'RF64'].includes(type) || header.toString('ascii', 8, 12) !== 'WAVE') return false;
     if (type === 'RIFF' && header.readUInt32LE(4) + 8 !== stat.size) return false;
-    let position = 12, channels = 0, dataLength = 0, rf64Length = 0;
+    let position = 12, channels = 0, rate = 0, dataLength = 0, rf64Length = 0;
     while (position + 8 <= stat.size) {
       const chunk = Buffer.alloc(8);
       if ((await handle.read(chunk, 0, 8, position)).bytesRead !== 8) return false;
@@ -63,7 +63,8 @@ async function completeWave(file, duration, verify = null) {
         const code = format.readUInt16LE(0);
         if (code !== 1 && !(code === 0xFFFE && format.length >= 40 && format.readUInt16LE(24) === 1)) return false;
         channels = format.readUInt16LE(2);
-        if (!channels || format.readUInt32LE(4) !== SAMPLE_RATE || format.readUInt16LE(14) !== 16
+        rate = format.readUInt32LE(4);
+        if (!channels || (expectedChannels && channels !== expectedChannels) || !rate || (sampleRate && rate!==sampleRate) || format.readUInt16LE(14) !== 16
           || format.readUInt16LE(12) !== channels * 2) return false;
       }
       if (name === 'data') dataLength += length;
@@ -72,7 +73,7 @@ async function completeWave(file, duration, verify = null) {
     const samples = dataLength / (channels * 2);
     verify?.(await handle.stat({ bigint: true }));
     return position === stat.size && channels > 0 && Number.isInteger(samples)
-      && Math.abs(samples - Math.round(duration * SAMPLE_RATE)) <= 1;
+      && Math.abs(samples - Math.round(duration * rate)) <= 1;
   } catch (_) { return false; }
   finally { await handle?.close().catch(() => {}); }
 }
@@ -174,4 +175,4 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null,
   }
   return Object.freeze({ reverse, waitForIdle, activeCount: () => inFlight.size });
 }
-module.exports = { createClipAudioCache, validateReverseAudioRequest, buildReverseAudioArgs };
+module.exports = { createClipAudioCache, validateReverseAudioRequest, buildReverseAudioArgs, completeWave };

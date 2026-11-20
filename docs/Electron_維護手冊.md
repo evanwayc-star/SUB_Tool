@@ -297,9 +297,9 @@ Renderer 的 `MediaIntakeJobs` 分別持有在途請求與可重試的失敗／�
 
 `ffmpeg:prepareSourceWaveform` 優先供應來源波形，使用獨立 coordinator 與相同 session／request 取消契約，退出時也等待程序 close。桌面 bridge 以 `sourceWaveformContinuous` 宣告連續處理能力，renderer 傳 `continuous:true`、整份來源時長及音訊配置，不能同時傳分段範圍。有效完整波形可直接沿用；沒有時由一次 FFmpeg 連續解碼成 4000 Hz Mono、16-bit PCM，經有背壓的 stdout 交給 worker。混音、來源時鐘與尾端整數 sample 補零／裁切沿用既有規則。低優先序、單 decoder／filter thread 及隱藏 console 不改變音訊內容或取消關閉屏障。
 
-`continuous-waveform-cache.js` 在 `.subtool_Cache/<key>/continuous-waveforms/<規格與工作識別>/` 保存一個 `partial.wav` 與原子更新的 `checkpoint.json`。每五秒來源 PCM 寫入並同步保存後，才把該範圍的峰值交給 renderer；未提交的尾端不算已完成。partial 的 WAV header 預告最終總樣本數，讀取只能採信 checkpoint 確認的前綴，不能當成完整 WAV。完成時關閉 writer，重核同一檔案及完整 PCM SHA-256，原子改名為 `wave.wav` 並發布完成紀錄。
+`continuous-waveform-cache.js` 在 `.subtool_Cache/<key>/continuous-waveforms/<規格與工作識別>/` 保存一個 `partial.wav` 與原子更新的 `checkpoint.json`。每段來源 PCM 寫入並同步保存後，才把該範圍的峰值交給 renderer。partial 的 WAV header 預告最終總樣本數，讀取時採用 checkpoint 確認的前綴。完成時關閉 writer，重核同一檔案及完整 PCM SHA-256，原子改名為 `wave.wav` 並發布完成紀錄。
 
-stdout 的任意小區塊先在 worker 累積，最多保留 40,000 bytes，對齊上述五秒保存邊界後才驗證來源、比對續算 PCM 與寫入。這避免 pipe 分塊大小放大 NAS 的檔案身分與目錄核對次數；不足五秒的最後一塊須等解碼正常結束、總 sample 數吻合才提交。波形峰值及續算比較仍逐 sample 依原規則產生。
+Worker 對齊來源音訊的保存邊界後，再驗證來源、比對續算 PCM 與寫入。前四段每段五秒。達兩分鐘的素材其後每段三十秒，最多緩衝 240,000 bytes，減少對 NAS 的同步寫入。最後不足一段時，等解碼正常結束、總 sample 數吻合才提交。要求 `displayPeaks:true` 會一併提供每秒 100 對最小／最大值，原音 MIX 和各聲道各自保存。已完成的舊快取可從原有 WAV 補建顯示資料。
 
 一般 `ingest` 與 `streamIngest` 的共同計畫都必須帶 `duration`；沿用波形時核對 `round(duration * 4000)`、音訊配置、原共享來源證據及 wave 檔案快照。worker 完成結果將原證據交回 main，不以之後新取得的來源指紋替舊 wave 認證。同目錄直接引用正式 wave，必要時在持有來源資格下複製；完成 metadata 保存相對路徑，下一個 runtime 可沿用。完整波形已命中時不再輸出第二份混音 WAV；這不省略仍缺少的 Proxy 或逐聲道音訊。
 
@@ -317,7 +317,7 @@ checkpoint 原子改名若遇 `EPERM`、`EACCES` 或 `EBUSY`，worker 最多嘗�
 
 mpv／原生直讀可在主素材註冊後啟動背景波形；需要先做 intake 的 HTML 路徑則先顯示獨立唯讀來源波形，不提早提交正式片段。這包含非原生串流退路、單 stream 多聲道與沒有 `streamIngest` 的一般退路，均先完成同來源波形再做 Proxy／聲道 intake；同來源切片共用準備工作。`MediaIntakeJobs` 只把增量峰值交給仍持有同一 session／request 的 consumer，不把大批峰值留在狀態列快照。`source-waveform-progress.js` 核對連續 sample、100 Hz 桶界線、總長度及來源 key，換檔或失敗只撤回本輪結果。已顯示全片峰值仍須等 WAV 正式保存成功，不能提前啟動 Proxy；保存失敗時回報並保留可續算前綴。
 
-`task-progress.waveform` 帶 `sourceKey`、`startSample`、`sampleRate:4000`、`resolution:100`、min/max 成對的 `peaks`、`completedSamples` 及 `totalSamples`。每桶 40 個 sample；除最後尾段外，起訖都對齊桶界線。恢復先從 sample 0 重送已確認前綴，再追加新峰值；完整快取可不發增量，renderer 由正式 WAV 有界分段計算峰值。`completedSamples === totalSamples` 是資料進度，不是成功終態；最後仍需完成結果與同一 request 的資格。
+`task-progress.waveform` 帶 `sourceKey`、`startSample`、`sampleRate:4000`、`resolution:100`、min/max 成對的 `peaks`、`completedSamples` 及 `totalSamples`。每桶 40 個 sample，除最後尾段外，起訖都對齊桶界線。恢復先從 sample 0 重送已確認前綴，再追加新峰值。完整快取可直接回傳 `displayPeaks`。Renderer 核對時間、聲道、桶數與峰值範圍，缺少可用的顯示資料時才從 WAV 整理。`completedSamples === totalSamples` 只表示資料進度，最後仍需完成結果與同一 request 的資格。
 
 來源波形私有檔交接後，主程序保留原檔與父目錄身分，跨 IPC 清理前重核；失權或已刪除的路徑保留撤銷紀錄，同一 runtime 不重用該名稱。退出前另核對啟動時的暫存根；根或波形所有權無法確認、writer 尚未關閉時，保留整個暫存根，不遞迴清理。正常情況仍回收私有暫存；身分檢查與刪除不是作業系統的原子操作。
 
@@ -325,7 +325,7 @@ mpv／原生直讀可在主素材註冊後啟動背景波形；需要先做 inta
 
 舊式 `ffmpeg:proxy`、`ffmpeg:extractAudio`、`ffmpeg:waveAudio` 的未交接輸出由 `produceTemporaryFile()` 持有：在私有暫存根以 `wx` 保留檔案，記錄 dev／ino，讓 FFmpeg 透過持有的描述元寫入並等待 writer 結束。整項工作失敗時只清除仍屬本次的檔案；extract 的 copy→AAC 退路屬同一交易，不在中間失敗時清檔。成功才交出路徑並保留所有權紀錄供 renderer 清理；退出時只回收仍能確認歸屬的檔案，未知或已替換的內容及非空暫存根會保留。舊式 Proxy 在完整轉檔後才交接，這條描述元寫入路徑不啟用 `faststart`；新式串流路徑不受此變更影響。
 
-音訊平衡、舊式私有來源波形及辨識壓縮共用 `withTemporaryDescriptor()`，由 `temporary-output-ownership.js` 開啟與關閉輸出 handle，核對父目錄、路徑及 handle 的同一檔案身分；連續波形的持久 writer 則由 `continuous-waveform-cache.js` 管理。多遍處理可在每一遍前後重核，不能只核對整項工作的起訖；工作結束後撤銷該核對資格，close 失敗不得回報完成。來源證據、取消、聲道、來源時鐘、PCM 長度及交接仍由各領域 caller 持有，輸入 stdin 與讀取 position 不併入輸出 handle 的規則。
+舊式私有來源波形及辨識壓縮共用 `withTemporaryDescriptor()`，由 `temporary-output-ownership.js` 核對父目錄、路徑及輸出 handle 的同一檔案身分。連續波形由 `continuous-waveform-cache.js` 管理。桌面音訊平衡由 `audio-effect-cache.js` 管理素材旁的預聽、低取樣率波形及量測結果，依母素材指紋、串流及效果參數重用。主程序在預聽使用期間持有快取目錄，歸還後才允許清理。各工作在執行與交接時核對來源、聲道、來源時鐘與 PCM 長度。
 
 來源證據包含完整路徑、size／mtime／ctime／dev／ino 及前／中／尾段取樣。讀取前後核對檔案身分，來源途中替換或截斷即拒絕。這不是整檔 checksum，也不授權路徑。各 owner 仍持有自己的 namespace、規格與 capability／realpath 檢查；`source-v3` 隔離未依影片時鐘對齊的舊 intake。
 

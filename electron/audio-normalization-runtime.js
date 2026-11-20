@@ -14,6 +14,7 @@ const {
 } = require('../shared/audio-loudness.cjs');
 const { sourceAudioClockFilter } = require('./media-source-clock.js');
 const { buildAudioIngestPlan } = require('./media-intake-runtime.js');
+const { createAudioEffectCache } = require('./audio-effect-cache.js');
 
 function extractLoudnormJson(stderrText) {
   if (typeof stderrText !== 'string') return null;
@@ -34,6 +35,8 @@ function createAudioNormalizationRuntime({
   withTemporaryDescriptor = null,
   fingerprintSource = null,
   probe = null,
+  withEffectCache = null,
+  grantRead = null,
 } = {}) {
   if (typeof createTempPath !== 'function' || typeof execute !== 'function') {
     throw new TypeError('音訊平衡化 runtime 缺少必要 adapter');
@@ -70,7 +73,7 @@ function createAudioNormalizationRuntime({
     }
   }
 
-  return {
+  const runtime = {
     /**
      * 快速分析來源音訊聲量 (ITU-R BS.1770 / RMS)
      */
@@ -116,7 +119,7 @@ function createAudioNormalizationRuntime({
       return report;
     },
 
-    async normalize(src, rawOptions = {}, { duration = 0, onProgress = null, signal = null } = {}) {
+    async normalize(src, rawOptions = {}, { duration = 0, onProgress = null, signal = null } = {}, cachedOutput = null) {
       if (typeof src !== 'string' || !src.trim()) {
         throw new TypeError('缺少有效的來源音訊路徑');
       }
@@ -127,8 +130,9 @@ function createAudioNormalizationRuntime({
       const check = () => { if (signal?.aborted) { const error = new Error('音訊工作已取消'); error.name = 'AbortError'; throw error; } };
       // Do not register an output name for a request that can never start.
       check();
-      const outWav = createTempPath('wav');
-      let ownedOutput = null;
+      const outWav = cachedOutput?.path || createTempPath('wav');
+      let ownedOutput = cachedOutput;
+      let reusable = false;
       let sourceEvidence = null;
       const verifyOutput = () => {
         if (!ownedOutput) return;
@@ -143,10 +147,19 @@ function createAudioNormalizationRuntime({
         verifyOutput();
         // 16 聲道長片的預聽 PCM 可超過 RIFF 的 32 位元大小欄位。
         const writesOutput = args.at(-1) === outWav;
-        const actualArgs = writesOutput ? [...args.slice(0, -1), '-rf64', 'auto', '-f', 'wav',
+        let actualArgs = writesOutput ? [...args.slice(0, -1), '-rf64', 'auto', '-f', 'wav',
           ownedOutput ? 'fd:' : outWav] : args;
+        if(writesOutput && cachedOutput){
+          // Quantize once, then derive the 4 kHz view from those same preview samples.
+          const filter=args[args.indexOf('-af')+1];
+          actualArgs=['-y','-hide_banner','-i',src,'-filter_complex',
+            `[0:a:${sourceStream}]${filter},aformat=sample_fmts=s16,asplit=2[preview][wave]`,
+            '-map','[wave]','-ar','4000','-c:a','pcm_s16le','-rf64','auto','-f','wav','-fd','3','fd:',
+            '-map','[preview]','-c:a','pcm_s16le','-rf64','auto','-f','wav','fd:'];
+        }
         const result = await executeWithCancellation(actualArgs, { ...executionOptions,
-          ...(writesOutput && ownedOutput ? { outputDescriptor: ownedOutput.fd } : {}) }, signal);
+          ...(writesOutput && ownedOutput ? { outputDescriptor: ownedOutput.fd } : {}),
+          ...(writesOutput && cachedOutput ? { waveformDescriptor: cachedOutput.waveFd } : {}) }, signal);
         if (sourceEvidence !== null) { await verifySource(src, sourceEvidence); check(); }
         verifyOutput();
         return result;
@@ -197,6 +210,7 @@ function createAudioNormalizationRuntime({
             },
           });
           pass1Succeeded = true;
+          reusable = true;
         } catch (err) {
           check();
           if (['UNSAFE_NORMALIZATION_OUTPUT', 'AUDIO_SOURCE_CHANGED'].includes(err?.code)) throw err;
@@ -303,12 +317,12 @@ function createAudioNormalizationRuntime({
           options,
         };
       } catch (error) {
-        if (!produceTemporaryFile && typeof removeFile === 'function') { try { await removeFile(outWav); } catch (_) {} }
+        if (!cachedOutput && !produceTemporaryFile && typeof removeFile === 'function') { try { await removeFile(outWav); } catch (_) {} }
         check();
         throw error;
       } };
       let result;
-      if (!produceTemporaryFile) result = await perform();
+      if (cachedOutput || !produceTemporaryFile) result = await perform();
       else await produceTemporaryFile(outWav, (file, owner) =>
         withTemporaryDescriptor(file, owner, async (fd, verify) => {
           ownedOutput = { fd, verify };
@@ -317,10 +331,15 @@ function createAudioNormalizationRuntime({
             check();
           } finally { ownedOutput = null; }
         }));
-      if (typeof onProgress === 'function') onProgress({ pct: 100, stage: 'done', label: '完成' });
+      if (!cachedOutput && typeof onProgress === 'function') onProgress({ pct: 100, stage: 'done', label: '完成' });
+      if(cachedOutput){result.sourceDuration=duration;result.reusable=reusable;}
+      if(sourceEvidence)result.sourceFingerprint=sourceEvidence;
       return result;
     },
   };
+  if(!withEffectCache)return runtime;
+  return createAudioEffectCache({ withEffectCache,grantRead,probe,fingerprintSource:captureSource,
+    normalize:runtime.normalize,analyze:runtime.analyze });
 }
 
 module.exports = {

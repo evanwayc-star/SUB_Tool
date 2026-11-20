@@ -11,9 +11,9 @@ const MAX_SPEECH_WAV_BYTES = 20_000_000;
 const isSpeechCompressionRequestId = value => typeof value === 'string' && /^speech-[A-Za-z0-9_-]{1,96}$/.test(value);
 const isSpeechAudioRequestId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
 const isVocalWaveRequestId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value);
-const audioSourceFingerprint = source => {
+const readSourceFingerprint = (channel,source) => {
   if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')) throw new TypeError('缺少有效的母素材路徑');
-  return ipcRenderer.invoke('audio:vocal-wave-fingerprint', source);
+  return ipcRenderer.invoke(channel, source);
 };
 
 contextBridge.exposeInMainWorld('subtool', {
@@ -88,8 +88,8 @@ contextBridge.exposeInMainWorld('subtool', {
   },
   extractAudio: (p, idx, duration, codec) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:extractAudio', { path: p, idx, duration, codec }); },
   waveAudio:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:waveAudio', { path: p, duration }); },
-  vocalWaveFingerprint: audioSourceFingerprint,
-  audioSourceFingerprint,
+  vocalWaveFingerprint: source => readSourceFingerprint('audio:vocal-wave-fingerprint',source),
+  audioSourceFingerprint: source => readSourceFingerprint('audio:source-fingerprint',source),
   vocalWaveChunk: (request) => {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少人聲波形片段參數');
     const { path, start, duration, requestId, sourceStream = 0, sourceChannel = null } = request;
@@ -106,7 +106,10 @@ contextBridge.exposeInMainWorld('subtool', {
     return ipcRenderer.invoke('audio:vocal-wave-cancel', { requestId });
   },
   normalizeAudio: (p, options, duration, requestId) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:normalize', { path: p, options, duration, requestId }); },
+  audioNormalizationSourceEvidence: true,
   cancelAudioNormalization: requestId => ipcRenderer.invoke('audio:normalize-cancel', { requestId }),
+  releaseAudioEffect: id => ipcRenderer.invoke('audio:release-effect',id),
+  audioEffectPeaks: options => ipcRenderer.invoke('audio:effect-peaks',options),
   analyzeAudioLoudness: (p, duration, requestId) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:analyzeLoudness', { path: p, duration, requestId }); },
   onAudioNormalizeProgress: (callback) => {
     if (typeof callback !== 'function') return () => {};

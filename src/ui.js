@@ -490,7 +490,8 @@ async function openCacheDialog() {
       return '<div class="cache-source-location"><h4>同資料夾快取</h4>'+
         `<p class="cache-path">${esc(location.directory)}</p><dl class="cache-records"><dt>波形</dt><dd>${esc(waveText)}</dd>`+
         (Number.isSafeInteger(wave.bytes)?`<dt>波形檔大小</dt><dd>${_fmtBytes(wave.bytes)}</dd>`:'')+
-        `<dt>Proxy</dt><dd>${location.proxy?'已有完整紀錄':'未找到完整紀錄'}</dd><dt>聲道</dt><dd>${Number(location.channels)||0} 條</dd></dl></div>`;
+        `<dt>Proxy</dt><dd>${location.proxy?'已有完整紀錄':'未找到完整紀錄'}</dd><dt>聲道</dt><dd>${Number(location.channels)||0} 條</dd>`+
+        (location.audioEffects?'<dt>音訊平衡</dt><dd>有預聽快取目錄</dd>':'')+'</dl></div>';
     }).join(''):'<p class="cache-note">尚未找到屬於目前素材的保存紀錄。</p>')+
     '<p class="cache-note">此處只查保存紀錄與檔案大小；使用前重新驗證來源與內容，不代表已完成內容查核。</p></section>';
   const html =

@@ -147,12 +147,16 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
     const request = { src: source, duration: 1, continuous: true };
     const channel = sourceChannel => ({ sourceStream: 5, sourceChannel });
     try {
-      const right = await runtime.waveform({ ...request, channel: channel(1) }, { owner: { sessionId: 'test', requestId: 'S6R' } });
+      const right = await runtime.waveform({ ...request, channel: channel(1), displayPeaks:true }, { owner: { sessionId: 'test', requestId: 'S6R' } });
       expect(right).toMatchObject({ complete: true, cached: false, temporary: false, channel: channel(1) });
       expect(right.wave).toContain('.subtool_Cache'); expect(authority.canRead(right.wave)).toBe(true);
       expect(events.filter(event => event.requestId === 'S6R').every(event => event.jobId === 'source-channel-wave')).toBe(true);
       expect(events).toContainEqual(expect.objectContaining({ jobId: 'source-channel-wave', pct: 100, done: true, channel: channel(1) }));
       const rightSamples = pcm(right.wave);
+      expect(right.displayPeaks).toBeInstanceOf(Float32Array);
+      expect(right.displayPeaks.length).toBe(200);
+      expect(right.displayPeaks[101]).toBeCloseTo(.5,2);
+      expect(events.filter(event=>event.requestId==='S6R').map(event=>event.phase)).toEqual(expect.arrayContaining(['cache-check','generating']));
       expect(energy(rightSamples, .2, .8, 880)).toBeCloseTo(.5, 3);
       expect(energy(rightSamples, .2, .8, 440)).toBeLessThan(.001);
       expect(calls).toHaveLength(1);

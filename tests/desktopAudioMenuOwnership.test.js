@@ -72,7 +72,7 @@ it('八條單聲道原音在右鍵點選 S6，保留選單焦點並同步顯示�
     open();
     const active=item();
     active.focus();
-    expect(active.textContent).toContain('產生中');
+    expect(active.textContent).toContain('檢查快取');
     expect(active.querySelector('.chk')).not.toBeNull();
     MediaIntakeJobs.progress({sessionId:first.sessionId,requestId:first.requestId,pct:40});
     await vi.advanceTimersByTimeAsync(32);

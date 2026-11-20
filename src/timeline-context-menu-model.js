@@ -47,7 +47,7 @@ export function normalizeWaveOptions(rawOptions) {
       ready: item?.ready !== false,
       ...(item?.statusLabel ? { statusLabel: true } : {}),
       ...(item?.kind === 'channel' ? {
-        kind: 'channel', preparing: !!item.preparing, progress: item.progress,
+        kind: 'channel', preparing: !!item.preparing, progress: item.progress, phase:item.phase,
         error: item.error?.message || item.error, stopped: item.error?.name === 'AbortError', detail: item.detail,
       } : {}),
     };
@@ -59,8 +59,9 @@ export function waveOptionLabel(option, { menu = false } = {}) {
   if (option.stopped || option.error?.name === 'AbortError') return option.label + (menu ? '（已停止，點選重試）' : '（已停止）');
   if (option.error) return option.label + (menu ? '（產生失敗，點選重試）' : '（產生失敗）');
   if (option.preparing) {
+    if (option.phase === 'cache-check') return option.label + '（檢查快取）';
     const percent = Number.isFinite(option.progress) ? ' ' + Math.round(option.progress) + '%' : '';
-    return option.label + '（產生中' + percent + '）';
+    return option.label + (option.phase === 'reading' ? '（讀取中' : '（產生中') + percent + '）';
   }
   return option.label;
 }

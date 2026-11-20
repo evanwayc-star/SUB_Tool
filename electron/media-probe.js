@@ -141,6 +141,7 @@ function createMediaProbe({
   let terminationBarrier = Promise.resolve();
   const uncertainProcesses = new Set();
   const inFlight = new Map();
+  const previewDescriptions = new Map();
   const queue = [];
   const jobs = new Set();
   const pending = new Set();
@@ -220,7 +221,7 @@ function createMediaProbe({
     return result;
   }
 
-  function run(args, { signal } = {}) {
+  function run(args, { signal, reusePreview = false } = {}) {
     if (shuttingDown) return Promise.reject(abortError());
     const generation = requestGeneration;
     const assertCurrent = () => {
@@ -243,6 +244,7 @@ function createMediaProbe({
       // 使用既有前／中／尾取樣，非同步 I/O 不阻塞主程序，也不讀整支母帶。
       const identity = await fingerprint();
       const key = JSON.stringify([args, identity]);
+      if (reusePreview && !signal && previewDescriptions.has(key)) return previewDescriptions.get(key);
       const existing = !signal && inFlight.get(key);
       if (existing) return existing;
       const operation = (async () => {
@@ -257,6 +259,16 @@ function createMediaProbe({
           error.code = 'PROBE_SOURCE_CHANGED'; throw error;
         }
         if (failure) throw failure;
+        // Intake asks for the same descriptor when the editor opens a mother,
+        // produces a channel waveform and later starts the Proxy. Keep only
+        // successful JSON from that exact source identity, in the app process.
+        if (reusePreview && !signal && stdout.length <= 1024*1024) {
+          try {
+            JSON.parse(stdout);
+            previewDescriptions.set(key, stdout);
+            if (previewDescriptions.size > 16) previewDescriptions.delete(previewDescriptions.keys().next().value);
+          } catch (_) { /* describe() reports the normal parse error. */ }
+        }
         return stdout;
       })();
       // 有取消所有者的工作各自保留 native lifecycle，避免中止其他 caller。
@@ -471,6 +483,7 @@ function createMediaProbe({
   function cancelAllAndWait({ timeoutMs: closeTimeoutMs = 5000 } = {}) {
     if (shutdownPromise) return shutdownPromise;
     shuttingDown = true;
+    previewDescriptions.clear();
     requestGeneration += 1;
     resumeWhenIdle = false;
     for (const job of jobs) job.controller.abort();

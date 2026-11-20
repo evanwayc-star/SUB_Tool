@@ -78,6 +78,26 @@ it('sourceOnly 資訊不列舉中央，也不回傳中央統計', async () => {
   expect(info).toEqual({ source: { path: f.source, locations: [] } });
 });
 
+it('音訊平衡存於來源快取，讀寫時清理會等待使用者重試，釋放後可清除',async()=>{
+  const f=fixture(),name='preview.wav';
+  let closePreview;
+  const target=await f.runtime.withAudioEffectCache(f.source,async({directory,verify,retain})=>{
+    expect(directory).toBe(path.join(f.root,'.subtool_Cache',cacheKeyFor(f.source),'audio-effects'));
+    verify();fs.writeFileSync(path.join(directory,name),'balanced');
+    expect(await f.runtime.clearSource(f.source)).toMatchObject({incomplete:true,reason:'busy'});
+    closePreview=retain();
+    return path.join(directory,name);
+  });
+  expect(f.runtime.isPreviewCacheMedia(target)).toBe(true);
+  expect((await f.runtime.cacheInfo(f.source,{sourceOnly:true})).source.locations).toEqual([
+    expect.objectContaining({audioEffects:true,kind:'sidecar'}),
+  ]);
+  expect(await f.runtime.clearSource(f.source)).toMatchObject({incomplete:true,reason:'busy'});
+  closePreview();
+  expect(await f.runtime.clearSource(f.source)).toMatchObject({incomplete:false});
+  expect(fs.existsSync(target)).toBe(false);
+});
+
 it('clearSource 只清目前素材 sidecar，主執行緒不讀取來源／快取檔案', async () => {
   const f = fixture({ backgroundWaveforms: true });
   const own = path.join(f.root, '.subtool_Cache', cacheKeyFor(f.source)); fs.mkdirSync(own, { recursive: true });

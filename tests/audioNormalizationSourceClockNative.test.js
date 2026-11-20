@@ -5,6 +5,8 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import vm from 'node:vm';
+import { parse } from 'acorn';
 import { nativeTestTools } from './fixtures/native-tools.cjs';
 
 const require = createRequire(import.meta.url);
@@ -16,6 +18,30 @@ const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.j
 const { createMediaProbe } = require('../electron/media-probe.js');
 const { audioLimiterFilter } = require('../shared/audio-loudness.cjs');
 const { ffmpeg: FFMPEG, ffprobe: FFPROBE } = nativeTestTools();
+
+function sourceEvidenceBridge(source) {
+  const main=fs.readFileSync('electron/main.js','utf8'),handlers=new Map();
+  const ast=parse(main,{ecmaVersion:'latest',sourceType:'script'});
+  const authority=new FileAuthority();
+  const context={motherSourceFingerprint,
+    ...require('../electron/vocal-waveform-fingerprint'),
+    requireReadablePath:require('../electron/ipc-guards').createIpcGuards(authority).requireReadablePath,
+    ipcMain:{handle:(channel,handler)=>handlers.set(channel,handler)}};
+  const channels=['audio:source-fingerprint','audio:vocal-wave-fingerprint'];
+  const registrations=ast.body.filter(n=>n.expression?.callee?.object?.name==='ipcMain'
+    && channels.includes(n.expression.arguments[0]?.value));
+  vm.runInNewContext(registrations.map(n=>main.slice(n.start,n.end)).join('\n'),context);
+  const declaration=ast.body.flatMap(n=>n.declarations||[]).find(d=>d.id.name==='audioNormalizationRuntime');
+  const adapter=declaration.init.arguments[0].properties.find(p=>p.key.name==='fingerprintSource').value;
+  const fingerprintSource=vm.runInNewContext(main.slice(adapter.start,adapter.end),context);
+  let api;
+  vm.runInNewContext(fs.readFileSync('electron/preload.js','utf8'),{
+    require:()=>({contextBridge:{exposeInMainWorld:(_name,exposed)=>{api=exposed;}},
+      ipcRenderer:{invoke:(channel,...args)=>handlers.get(channel)({},...args)},webUtils:{}}),
+    ArrayBuffer,Uint8Array,Promise,TypeError,RangeError});
+  authority.grantTrustedFile(source,{read:true,write:false});
+  return {api,fingerprintSource};
+}
 function amplitude(bytes, frequency, start = .62, end = .78) {
   const first = Math.round(start * 4000), last = Math.round(end * 4000);
   let sine = 0, cosine = 0;
@@ -27,6 +53,59 @@ function amplitude(bytes, frequency, start = .62, end = .78) {
 }
 
 describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預覽 WAV 的來源時鐘', () => {
+  it('以同一遍產生預聽及真實逐聲道波形，重啟重用兩者、精準報告和顯示峰值',async()=>{
+    const directory=fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()),'subtool-normalization-hot-'));
+    try{
+      const source=path.join(directory,'stereo.wav'),outdir=path.join(directory,'.subtool_Cache','source-bucket','audio-effects');
+      fs.mkdirSync(outdir,{recursive:true});
+      const run=args=>{
+        const r=spawnSync(FFMPEG,['-hide_banner','-loglevel','error',...args],{windowsHide:true,maxBuffer:8*1024*1024});
+        expect(r.status,r.stderr?.toString()).toBe(0);return r.stdout;
+      };
+      const generate=f=>run(['-y','-f','lavfi','-i',`aevalsrc=0.1*sin(2*PI*${f}*t)|0.04*sin(2*PI*890*t):s=48000:d=2.5`,'-c:a','pcm_s16le',source]);
+      const execution=createFFmpegExecution({getFFmpegPath:()=>FFMPEG,getUserDataDir:()=>directory});
+      const jobs=[],probe=createMediaProbe({executable:FFPROBE});
+      const {api,fingerprintSource}=sourceEvidenceBridge(source);
+      const make=(cached)=>createAudioNormalizationRuntime({createTempPath:()=>path.join(directory,'old-preview.wav'),
+        execute:(args,options)=>{jobs.push(options.jobId);return execution.execute(args,{...options,executionKind:'direct'});},
+        probe:(file,options)=>probe.describe(file,options),fingerprintSource,
+        ...(cached?{withEffectCache:(_src,work)=>work({directory:outdir,verify(){}}),grantRead(){}}:{})});
+      const options={maximumAmplitude:-3,targetLoudness:-14,sourceStream:0};
+      generate(440);
+      const baseline=await make(false).normalize(source,options);
+      jobs.length=0;
+      const cold=await make(true).normalize(source,options);
+      const evidence=await api.audioSourceFingerprint(source);
+      expect(cold.sourceFingerprint).toBe(evidence);
+      expect(await api.vocalWaveFingerprint(source)).not.toBe(evidence);
+      expect(jobs).toEqual(['loudnorm-p1','loudnorm-p2']);
+      expect(cold.cacheHit).toBe(false);
+      const pcm=(src,rate)=>run(['-i',src,...(rate?['-ar',String(rate)]:[]),'-c:a','pcm_s16le','-f','s16le','pipe:1']);
+      expect(pcm(cold.outputPath).equals(pcm(baseline.outputPath))).toBe(true);
+      expect(pcm(cold.wavePath).equals(pcm(baseline.outputPath,4000))).toBe(true);
+      const picks={resolution:100,streams:[{sourceStream:0,cacheKey:cold.cacheKey}]};
+      const peaks=Float32Array.of(-.75,.25,-.125,.5);
+      await make(true).displayPeaks(source,{...picks,peaks});
+      const mixed=await make(true).analyze(source);
+      jobs.length=0;
+      const reopened=make(true),warm=await reopened.normalize(source,options);
+      expect(warm).toMatchObject({cacheHit:true,outputPath:cold.outputPath,wavePath:cold.wavePath,report:cold.report,
+        sourceFingerprint:await api.audioSourceFingerprint(source)});
+      expect(await reopened.analyze(source)).toEqual(mixed);
+      expect((await reopened.displayPeaks(source,picks)).peaks).toEqual(peaks);
+      expect((await reopened.displayPeaks(source,{...picks,channel:{sourceStream:0,sourceChannel:1}})).peaks).toBeNull();
+      expect(jobs).toHaveLength(0);
+      fs.truncateSync(cold.wavePath,1024);
+      expect((await reopened.normalize(source,options)).cacheHit).toBe(false);
+      jobs.length=0;generate(660);
+      expect((await reopened.normalize(source,options)).cacheKey).not.toBe(cold.cacheKey);
+      expect((await reopened.displayPeaks(source,picks)).peaks).toBeNull();
+      expect(jobs).toEqual(['loudnorm-p1','loudnorm-p2']);
+    }finally{
+      if(path.dirname(directory)!==fs.realpathSync(tmpdir())||!path.basename(directory).startsWith('subtool-normalization-hot-'))throw new Error('快取測試目錄衝突');
+      fs.rmSync(directory,{recursive:true,force:true});
+    }
+  },30000);
   it.each([false,true])('獨占 handle 產出 %s 模式 WAV 可 seek 且保留選取 stream 與來源時鐘',async isTruePeak=>{
     const directory=fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()),'subtool-normalization-clock-native-'));
     const source=path.join(directory,'multiple.mkv');

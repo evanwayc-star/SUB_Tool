@@ -37,7 +37,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     const channel=options.channel;
     const waveStage=channel?'source-channel-waveform':local?'waveform':'source-waveform';
     const job={owner,requestId,path:options.path||null,recoveryId:channel?null:recoveries.get(options.path)?.id,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,onWaveform,onProgress,
-      progress:local?{stage:waveStage,label:channel?'讀取聲道波形':'準備波形',pct:null}:sourceWave?{stage:waveStage,label:channel?'等候產生聲道波形':'等候優先產生波形',pct:null,queued:true}:null};
+      progress:local?{stage:waveStage,label:channel?'讀取聲道波形':'準備波形',pct:null}:sourceWave?{stage:waveStage,label:channel?'檢查聲道波形快取':'等候優先產生波形',pct:null,queued:true}:null};
     if(job.proxy&&job.path)proxyStates.set(job.path,{requestId,state:'preparing',pct:null});
     if(!local) owner.used=true;
     pending.set(requestId,job);awaitingReply.add(job);publish();

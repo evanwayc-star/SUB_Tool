@@ -12,6 +12,19 @@ const clip=id=>({id,audioSourceId:id,path:`C:/${id}.mp4`,in:0,out:10,dur:10,offs
 const splitClip=source=>({id:source.id+'-split',...Seq.planSplit(source,5).right});
 
 describe('音訊效果母素材證據',()=>{
+  it('已安裝的持久音訊在更換、還原、移除及換案釋放讀取保護',async()=>{
+    const source=clip('keep'),live=[source],released=[];
+    let serial=0;
+    const effects=createAudioEffects({sources:()=>live,process:async(_s,options)=>({
+      persistent:true,serial:++serial,spec:options,outputPath:'effect.wav',
+    }),prepare:async(_s,result)=>result,install(){},discardResult:r=>released.push(r.serial)});
+    await effects.apply(source,spec);expect(released).toEqual([]);
+    await effects.apply(source,{...spec,max:-5});expect(released).toEqual([1]);
+    await effects.apply(source,null);expect(released).toEqual([1,2]);
+    await effects.apply(source,spec);live.pop();effects.sync();expect(released).toEqual([1,2,3]);
+    live.push(source);await effects.apply(source,spec);effects.invalidate({clear:true});
+    expect(released).toEqual([1,2,3,4]);
+  });
   async function withSource(run){
     const dir=fs.mkdtempSync(path.join(os.tmpdir(),'subtool-audio-evidence-'));
     const file=path.join(dir,'mother.wav');fs.writeFileSync(file,'first source');

@@ -1,29 +1,22 @@
 'use strict';
 
 const { sourceClockSeek, sourceAudioClockFilter, timestampOffset } = require('./media-source-clock');
+const { peaksForPCM, fitsDisplayPeaks, peakCount } = require('./waveform-display-peaks');
 
 const SAMPLE_RATE = 4000, RESOLUTION = 100, BUCKET_SAMPLES = SAMPLE_RATE / RESOLUTION;
 const CHECKPOINT_SAMPLES = SAMPLE_RATE * 5;
 
-function peaksForPCM(bytes) {
-  const samples = bytes.length / 2, peaks = new Float32Array(Math.ceil(samples / BUCKET_SAMPLES) * 2);
-  for (let sample = 0; sample < samples; sample++) {
-    const value = bytes.readInt16LE(sample * 2) / 32768, bucket = Math.floor(sample / BUCKET_SAMPLES) * 2;
-    if (value < peaks[bucket]) peaks[bucket] = value;
-    if (value > peaks[bucket + 1]) peaks[bucket + 1] = value;
-  }
-  return peaks;
-}
-
 // The store and all PCM work live in the background worker. The parent retains
 // the native process owner; a checkpoint is published only after durable write.
-async function runContinuousSourceWaveform({ src, duration, audio, channel, sourceKey, store, verify,
+async function runContinuousSourceWaveform({ src, duration, audio, channel, sourceKey, store, verify, displayPeaks = false,
   execute, buildPlan, ownProcess, progress }) {
   const totalSamples = Math.round(duration * SAMPLE_RATE);
   const initiallyComplete = store.isComplete, resumedSamples = store.completedSamples;
-  let publishedSamples = 0;
-  const publish = completedSamples => {
-    if (channel) {
+  const display = !initiallyComplete && displayPeaks && fitsDisplayPeaks(totalSamples)
+    ? new Float32Array(peakCount(totalSamples)) : null;
+  let publishedSamples = 0, phase = 'reading';
+  const publish = (completedSamples, newPcm) => {
+    if (channel && !display) {
       // Channel display reads the verified WAV once ready. Only the MIX uses
       // progressive PCM peaks; avoid reading the NAS file back at every step.
       if (completedSamples > publishedSamples) progress({ pct: completedSamples / totalSamples * 100 });
@@ -33,11 +26,13 @@ async function runContinuousSourceWaveform({ src, duration, audio, channel, sour
     while (publishedSamples < completedSamples) {
       verify();
       const count = Math.min(CHECKPOINT_SAMPLES, completedSamples - publishedSamples);
-      const pcm = store.readPCM(publishedSamples, count);
+      const offset = newPcm ? (publishedSamples - completedSamples) * 2 + newPcm.length : -1;
+      const pcm = offset >= 0 ? newPcm.subarray(offset,offset+count*2) : store.readPCM(publishedSamples,count);
       const waveform = { sourceKey, startSample: publishedSamples, sampleRate: SAMPLE_RATE, resolution: RESOLUTION,
         peaks: peaksForPCM(pcm), completedSamples: publishedSamples + count, totalSamples };
+      if (display) display.set(waveform.peaks, publishedSamples / BUCKET_SAMPLES * 2);
       publishedSamples += count;
-      progress({ pct: publishedSamples / totalSamples * 100, waveform });
+      progress({ pct: publishedSamples / totalSamples * 100, ...(displayPeaks ? {phase} : {}), ...(channel ? {} : { waveform }) });
     }
   };
   try {
@@ -47,6 +42,8 @@ async function runContinuousSourceWaveform({ src, duration, audio, channel, sour
     publish(resumedSamples);
 
     const decode = async (startSample, compareFrom) => {
+      phase = 'generating';
+      if (displayPeaks) progress({ phase, pct:resumedSamples/totalSamples*100 });
       const sourceStart = startSample / SAMPLE_RATE, seek = sourceClockSeek(sourceStart, audio[channel?.sourceStream ?? 0]);
       const clocks = audio.map(stream => ({ ...stream, timestampOffset: timestampOffset(stream) + seek.seek - sourceStart }));
       const plan = channel ? {
@@ -63,7 +60,16 @@ async function runContinuousSourceWaveform({ src, duration, audio, channel, sour
       // Pipe chunks can be only a few samples. Keep at most one checkpoint in
       // memory so source/directory checks and durable writes do not turn each
       // tiny chunk into several synchronous NAS round trips.
-      const pending = Buffer.alloc(CHECKPOINT_SAMPLES * 2);
+      // Keep the first four rapid previews. After that, a long film commits
+      // at most 30 seconds of new audio per checkpoint instead of repeatedly
+      // flushing the two NAS files and replacing the receipt every five seconds.
+      const longCheckpoint = totalSamples >= 120*SAMPLE_RATE ? 6*CHECKPOINT_SAMPLES : CHECKPOINT_SAMPLES;
+      const nextBoundary = sample => {
+        const firstWindow=4*CHECKPOINT_SAMPLES;
+        if(sample<firstWindow)return (Math.floor(sample/CHECKPOINT_SAMPLES)+1)*CHECKPOINT_SAMPLES;
+        return firstWindow+(Math.floor((sample-firstWindow)/longCheckpoint)+1)*longCheckpoint;
+      };
+      const pending = Buffer.alloc(longCheckpoint * 2);
       const consume = data => {
         verify();
         const samples = data.length / 2;
@@ -75,10 +81,11 @@ async function runContinuousSourceWaveform({ src, duration, audio, channel, sour
         }
         let offset = Math.max(0, resumedSamples - decodedSamples) * 2;
         while (offset < data.length) {
-          const boundary = Math.min(totalSamples, (Math.floor(store.writtenSamples / CHECKPOINT_SAMPLES) + 1) * CHECKPOINT_SAMPLES);
+          const boundary = Math.min(totalSamples, nextBoundary(store.writtenSamples));
           const count = Math.min(data.length - offset, (boundary - store.writtenSamples) * 2);
-          store.appendPCM(data.subarray(offset, offset + count)); offset += count;
-          if (store.writtenSamples === boundary) { verify(); store.checkpoint(); publish(store.completedSamples); }
+          const fresh = data.subarray(offset, offset + count);
+          store.appendPCM(fresh); offset += count;
+          if (store.writtenSamples === boundary) { verify(); store.checkpoint(); publish(store.completedSamples, fresh); }
         }
         decodedSamples += samples;
       };
@@ -90,7 +97,7 @@ async function runContinuousSourceWaveform({ src, duration, audio, channel, sour
           receivedBytes += data.length;
           let offset = 0;
           while (offset < data.length) {
-            const boundaryBytes = (CHECKPOINT_SAMPLES - decodedSamples % CHECKPOINT_SAMPLES) * 2;
+            const boundaryBytes = (nextBoundary(decodedSamples) - decodedSamples) * 2;
             const count = Math.min(data.length - offset, boundaryBytes - pendingLength);
             data.copy(pending, pendingLength, offset, offset + count); pendingLength += count; offset += count;
             if (pendingLength === boundaryBytes) { consume(pending.subarray(0, pendingLength)); pendingLength = 0; }
@@ -126,7 +133,8 @@ async function runContinuousSourceWaveform({ src, duration, audio, channel, sour
     }
     verify(true);
     const wave = store.complete(); publish(totalSamples); verify();
-    return { wave, cached: false, temporary: false, complete: true, start: 0, duration, sourceKey, resumedSamples };
+    return { wave, cached: false, temporary: false, complete: true, start: 0, duration, sourceKey, resumedSamples,
+      ...(display ? { displayPeaks: display } : {}) };
   } finally { store.close(); }
 }
 

@@ -8,6 +8,7 @@ import { Seq } from './sequence.js';
 import { $ } from './dom.js';
 import { setMediaProcessingStatus } from './ui.js';
 import { MediaIntakeJobs } from './media-intake-jobs.js';
+import { sourceDisplayPeaks } from './source-waveform-progress.js';
 import { audioMotherPath } from '../shared/audio-loudness.cjs';
 
 export const WAVE_DECODE_MAX = 5e8;    // 超過此大小不整檔解碼波形，改即時擷取
@@ -211,6 +212,8 @@ export const Wave = {
           label:track.name,
           file,
           pcmChannel:track._audioEffect?track.sourceChannel:null,
+          ...(track._audioEffect&&mix?.effectPeaksCache?{effectPeaksCache:{...mix.effectPeaksCache,
+            channel:{sourceStream:track.sourceStream,sourceChannel:track.sourceChannel}}}:{}),
           peaks:track.peaks
         });
       }
@@ -248,6 +251,7 @@ export const Wave = {
         const nextPath=raw.file||raw.path||old?.path||null;
         const nextPeaks=raw.peaks||null;
         const pcmChannel=raw.pcmChannel??old?.pcmChannel??null;
+        const effectPeaksCache=raw.effectPeaksCache||(old?.path===nextPath?old.effectPeaksCache:null);
         if(!old||nextPath!==old.path||pcmChannel!==old.pcmChannel||(nextPeaks&&nextPeaks!==old.peaks)){
           old?.controller?.abort();
           state.channels.set(desc.key,{
@@ -255,10 +259,14 @@ export const Wave = {
             label:raw.label||old?.label||`Ch ${desc.sourceChannel+1}`,
             path:nextPath,
             pcmChannel,
+            effectPeaksCache,
             peaks:nextPeaks||(old&&nextPath===old.path&&pcmChannel===old.pcmChannel?old.peaks:null)||null,
             loading:null
           });
-        }else old.label=raw.label||old.label||`Ch ${desc.sourceChannel+1}`;
+        }else{
+          old.label=raw.label||old.label||`Ch ${desc.sourceChannel+1}`;
+          old.effectPeaksCache=effectPeaksCache;
+        }
       }
       // An explicit list describes the complete source, including zero audio.
       // Removing the entry also revokes any decode still waiting for its file.
@@ -339,7 +347,7 @@ export const Wave = {
         label:multiStream?`S${item.sourceStream+1} Ch ${item.sourceChannel+1}`:`Ch ${item.sourceChannel+1}`,
         sourceLabel:item.label,
         selected:selected===item.key,
-        ready:!!item.peaks,preparing:!!item.loading,error:item.error||null,progress:item.progress??null,statusLabel:true
+        ready:!!item.peaks,preparing:!!item.loading,error:item.error||null,progress:item.progress??null,phase:item.phase,statusLabel:true
       })),
       {
         id:'vocals',kind:'vocals',
@@ -382,6 +390,8 @@ export const Wave = {
         ready:corresponding.every(item=>item.ready!==false),
         ...(option.kind==='channel'?{
           preparing:corresponding.some(item=>item.preparing),
+          phase:corresponding.find(item=>item.preparing&&item.phase==='generating')?.phase
+            ||corresponding.find(item=>item.preparing)?.phase,
           error:corresponding.find(item=>item.error&&item.error.name!=='AbortError')?.error
             ||corresponding.find(item=>item.error)?.error||null,
           progress:corresponding.every(item=>item.ready||item.progress!=null)
@@ -435,14 +445,16 @@ export const Wave = {
     entry.controller=controller;
     entry.error=null;
     entry.progress=null;
+    entry.phase=key!=='mix'&&(entry.effectPeaksCache||entry.pcmChannel==null&&DESK?.prepareSourceWaveform)?'cache-check':'reading';
     const generation=this._generation;
     const owns=()=>!controller.signal.aborted&&this._generation===generation&&
       [...this.sourceWaveforms.values()].some(value=>value===state)&&
       (key==='mix'?state.mix===entry:state.channels.get(key)===entry);
-    const updateProgress=value=>{
-      const percent=Math.max(0,Math.min(99,Math.round(value)));
-      if(owns()&&Number.isFinite(percent)&&percent!==entry.progress){
+    const updateProgress=(value,phase)=>{
+      const percent=Number.isFinite(value)?Math.max(0,Math.min(99,Math.round(value))):null;
+      if(owns()&&(percent!==entry.progress||phase!==entry.phase)){
         entry.progress=percent;
+        entry.phase=phase;
         emit('media:waveform',{controls:true});
       }
     };
@@ -456,17 +468,20 @@ export const Wave = {
           await Promise.resolve();
           if(!owns())return null;
           const channel={sourceStream:entry.sourceStream,sourceChannel:entry.sourceChannel};
-          const result=await MediaIntakeJobs.prepareSourceWaveform({path,duration,continuous:true,
+          const result=await MediaIntakeJobs.prepareSourceWaveform({path,duration,continuous:true,displayPeaks:true,
             channel},null,{
-            signal:controller.signal,onProgress:data=>{if(Number.isFinite(data.pct))updateProgress(data.pct*.95);},
+            signal:controller.signal,onProgress:data=>updateProgress(Number.isFinite(data.pct)?data.pct*.95:null,data.phase||'generating'),
           });
           if(!owns())return null;
           if(!result?.complete||!result.wave)throw new Error('聲道波形未完成，請重試');
+          const cached=sourceDisplayPeaks(result,duration,this.resolution,channel);
+          if(cached){entry.peaks=cached;return cached;}
           const peaks=await MediaIntakeJobs.prepareWaveform(({owns:ownsRead,report})=>{
+            updateProgress(null,'reading');
             report({label:'讀取聲道波形',pct:0});
             return this._loadPcmMix({paths:[result.wave]},()=>owns()&&ownsRead(),0,value=>{
               report({label:'讀取聲道波形',pct:Math.round(value*100)});
-              updateProgress(95+value*5);
+              updateProgress(value*100,'reading');
             });
           },{path,channel},{signal:controller.signal});
           if(!owns())return null;
@@ -479,10 +494,22 @@ export const Wave = {
           throw new Error('尚未取得此聲道的音訊，請確認素材可讀後重試');
         }
         if(Array.isArray(entry.path.paths)||entry.pcmChannel!=null){
+          const effectCache=entry.effectPeaksCache;
+          if(effectCache&&DESK.audioEffectPeaks){
+            let saved;
+            try{saved=await DESK.audioEffectPeaks(effectCache);}catch{/* Read the prepared PCM if the display cache is unavailable. */}
+            if(!owns())return null;
+            if(saved?.peaks instanceof Float32Array&&saved.peaks.length){entry.peaks=saved.peaks;return entry.peaks;}
+          }
           const descriptor=Array.isArray(entry.path.paths)?entry.path:{paths:[entry.path]};
+          if(effectCache)updateProgress(null,'reading');
           const peaks=await this._loadPcmMix(descriptor,owns,entry.pcmChannel);
           if(!owns())return null;
           if(!peaks?.length)throw new Error('聲道波形檔案無法讀取，請重試');
+          if(effectCache&&DESK.audioEffectPeaks){
+            try{await DESK.audioEffectPeaks({...effectCache,peaks});}catch(error){console.warn('保存平衡後聲道波形失敗',error);}
+            if(!owns())return null;
+          }
           entry.peaks=peaks;
           return peaks;
         }
