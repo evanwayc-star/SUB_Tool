@@ -225,9 +225,10 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
   it.each(['stop', 'recovery'])('合成期間 %s 會先終止 native process，清理後才釋放鎖', async action => {
     const { controller } = launch('author-wait');
     await controller.ready;
-    await waitFor(() => fs.existsSync(path.join(tempDir, 'author.log')));
-    const authorPid = Number(fs.readFileSync(path.join(tempDir, 'author.log'), 'utf8'));
-    const [lease] = listLeases(queueDir);
+    const pidFile = path.join(tempDir, 'author.log');
+    const authorPid = await waitFor(() => fs.existsSync(pidFile) && Number(fs.readFileSync(pidFile, 'utf8')));
+    // The native child can write its PID before the watchdog persists ownership.
+    const lease = await waitFor(() => listLeases(queueDir).find(entry => entry.owner?.ffmpegPid === authorPid));
     expect(lease.owner).toMatchObject({ ffmpegPid: authorPid, outputStarted: true });
     expect(fs.readFileSync(outPath, 'utf8')).toBe('original ISO');
     expect(fs.readFileSync(lease.owner.stagePath, 'utf8')).toBe('partial ISO');
