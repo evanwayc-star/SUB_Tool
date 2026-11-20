@@ -1293,9 +1293,7 @@ ipcMain.handle('queue:reorderJob', (e, jobId, newIndex) => {
    （同資料夾、同主檔名、只換副檔名）。renderer 給不了路徑，所以沒有注入空間；
    未知格式由 expectedExportExtension 直接擋掉（fail-closed）。
 
-   為什麼改 payload 就夠：delivery runner 是在【執行時】才從 job.payload 重新推導
-   format / isWav / isPro / audioPlan / timecodeWatermark 的，不是在入列時凍結的。
-   （TC 浮水印在轉成 WAV 時會自動變成 null，因為那條路徑本來就寫 `isWav ? null : …`。） */
+   delivery runner 在執行時從更新後的快照建立交付計畫；純音訊格式不燒錄 TC。 */
 ipcMain.handle('queue:updateDelivery', (e, jobId, patch) => {
   return QueueManager.updateDelivery(jobId, patch);
 });
@@ -1310,6 +1308,8 @@ function prepareQueueDeliveryUpdate(job, patch) {
   const preset = getDeliveryFormatPreset(format);
   // 已入列工作的 TC 起點依原交付 FPS 凍結；切入固定 FPS 必須從交付清單重建。
   if (preset && p.format !== format) throw new Error(`請回交付清單新增 ${preset.label}，以重新套用影格率、時間碼與音軌設定`);
+  if ((p.format === 'mp3' || p.format === 'wav') && format !== 'mp3' && format !== 'wav' && !p.clips?.length)
+    throw new Error('這份純音訊工作沒有影像片段，請選擇 MP3 或 WAV。');
   const audioPlan = normalizeDeliveryPresetAudio(format, p.audioPlan);
   const audioProblem = deliveryPresetAudioProblem(format, audioPlan);
   if (audioProblem) throw new Error(audioProblem);
@@ -1345,6 +1345,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
      失敗時 job 必須維持原狀，不可以留下改到一半的狀態。 */
   const nextPayload = { ...p, format, outPath: newPath, ...spec, audioPlan, canvasW, canvasH };
   if (spec.targetW == null) delete nextPayload.targetW;
+  if (format === 'mp3') delete nextPayload.chapters;
   const outputAuthority = ExportLease.retargetOutputAuthority(job.outputAuthority, newPath);
   // 修改格式或 TC 自動衍生的檔名沒有經過交付清單的覆寫確認。
   // 即使檔案身分可驗證，也不能把它當成使用者同意覆蓋。
@@ -1400,15 +1401,14 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   if (preset) payload = { ...payload, targetH: preset.height };
   const { assText, format, defaultName, outPath: presetOut } = payload;
   const ext = expectedExportExtension(format);
-  const isWav = format === 'wav';
-  const isPro = format === 'prores';
-  
   let outPath = presetOut || null;
   let admittedOutput;
   if (!outPath) {
+    const names = { wav: 'WAV 多聲道 PCM', mp3: 'MP3 音訊', prores: 'ProRes 422 HQ (MOV)', h264: 'MP4 (H.264)' };
+    const name = preset ? `${preset.label} (${preset.kind === 'disc' ? 'ISO' : 'MPEG-TS'})` : names[format];
     const r = await dialog.showSaveDialog(mainWin, {
-      title: isWav ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
-      filters: [{ name: preset ? `${preset.label} (${preset.kind === 'disc' ? 'ISO' : 'MPEG-TS'})` : (isWav ? 'WAV 多聲道 PCM' : (isPro ? 'ProRes 422 HQ (MOV)' : 'MP4 (H.264)')), extensions: [ext] }],
+      title: format === 'wav' || format === 'mp3' ? '匯出音訊' : '匯出影片', defaultPath: (defaultName || 'sequence') + '.' + ext,
+      filters: [{ name, extensions: [ext] }],
     });
     preparationSignal?.throwIfAborted();
     if (r.canceled) return null;

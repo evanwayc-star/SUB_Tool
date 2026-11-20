@@ -65,6 +65,7 @@ const DELIVERY_FORMAT_OPTIONS = Object.freeze([
   Object.freeze({ format: 'prores', label: 'ProRes422HQ-MOV', extension: '.mov' }),
   Object.freeze({ format: 'h264', label: 'H264-MP4', extension: '.mp4' }),
   Object.freeze({ format: 'wav', label: 'WAV', extension: '.wav' }),
+  Object.freeze({ format: 'mp3', label: 'MP3', extension: '.mp3' }),
   ...DELIVERY_FORMAT_PRESETS,
 ]);
 
@@ -76,26 +77,44 @@ function getDeliveryFormatOption(format) {
   return DELIVERY_FORMAT_OPTIONS.find(option => option.format === format) || null;
 }
 
+function isAudioDeliveryFormat(format) {
+  return format === 'wav' || format === 'mp3';
+}
+
 function validStreamBuses(stream, count) {
   return Number.isInteger(count) && Array.isArray(stream?.busIds) && stream.busIds.length === count
     && stream.busIds.every(id => typeof id === 'string' && id.trim().length > 0)
     && new Set(stream.busIds).size === count;
 }
 
-// 兩條 mono 可無損地編組為 L/R；其他多串流或 5.1 配置必須由使用者選擇。
-// 不可直接取前兩條 bus，否則會安靜地丟掉主混音或 M&E。
+// 兩條 mono 可依序編組為 L/R。MP3 也能將單一 5.1 混為立體聲。
+// 多套主混音、語言或 M&E 由使用者選定，不能擷取前兩條 bus 當作輸出。
 function normalizeDeliveryPresetAudio(format, plan) {
   const preset = getDeliveryFormatPreset(format);
-  if (!preset || preset.kind === 'disc' || !Array.isArray(plan?.streams)) return plan;
+  if (format === 'mp3' && Array.isArray(plan?.buses) && (plan.streams == null || (Array.isArray(plan.streams) && !plan.streams.length))) {
+    // WAV 快照只有選取順序；能無歧義重建的只有一或兩個聲道。
+    const busIds = plan.buses.map(bus => bus?.id);
+    if (busIds.length === 1 || busIds.length === 2) {
+      return { ...plan, streams: [{ id: 'mp3-output', layout: busIds.length === 1 ? 'mono' : 'stereo', busIds }] };
+    }
+  }
+  if ((format !== 'mp3' && !preset) || preset?.kind === 'disc' || !Array.isArray(plan?.streams)) return plan;
   const streams = plan.streams;
   if (streams.length !== 2 || !streams.every(s => s?.layout === 'mono' && validStreamBuses(s, 1))) return plan;
   const busIds = streams.flatMap(s => s.busIds);
   if (new Set(busIds).size !== 2) return plan;
-  return { ...plan, streams: [{ id: `${format}-stereo`, name: `${preset.label} Stereo`, layout: 'stereo', busIds }] };
+  return { ...plan, streams: [{ id: `${format}-stereo`, name: `${preset?.label || 'MP3'} Stereo`, layout: 'stereo', busIds }] };
 }
 
 function deliveryPresetAudioProblem(format, plan) {
   const preset = getDeliveryFormatPreset(format);
+  if (format === 'mp3') {
+    const streams = normalizeDeliveryPresetAudio(format, plan)?.streams;
+    const stream = Array.isArray(streams) && streams.length === 1 ? streams[0] : null;
+    const channels = { mono: 1, stereo: 2, stereoLtRt: 2, '5.1': 6 };
+    if (stream && validStreamBuses(stream, channels[stream.layout])) return null;
+    return 'MP3 需要一組音軌，請在「音軌」選擇 Mono、Stereo、Lt/Rt 或一組 5.1（混為立體聲）。';
+  }
   if (!preset || plan == null) return null;
   const normalized = normalizeDeliveryPresetAudio(format, plan);
   const streams = normalized.streams;
@@ -115,5 +134,5 @@ module.exports = {
   MOD_FHD, AIRLINE_EXW, AIRLINE_DMPES, AIRLINE_DMPES_4M, DVD_ISO, BD_ISO,
   BD_VIDEO_MODES, bdVideoMode, availableBdVideoModes,
   DELIVERY_FORMAT_PRESETS, DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, getDeliveryFormatOption,
-  normalizeDeliveryPresetAudio, deliveryPresetAudioProblem,
+  isAudioDeliveryFormat, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem,
 };

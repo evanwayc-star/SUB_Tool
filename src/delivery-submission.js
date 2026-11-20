@@ -217,7 +217,7 @@ export function createDeliverySubmission({
       let reason = null;
       if (!project) reason = '目前沒有可匯出的影片或外部音訊';
       else if (sourceError) reason = sourceError;
-      else if (project.audioOnly && !project.audioPlan) reason = '純音訊 WAV 匯出需要專案音軌路由';
+      else if (project.audioOnly && !project.audioPlan) reason = '純音訊匯出需要專案音軌路由';
       else if (!!project.audioOnly !== audioOnly) {
         reason = '匯出素材在交付清單開啟後已變更，請重新開啟清單確認交付格式。';
       } else if (!receipt.rows.length) reason = '清單不能為空';

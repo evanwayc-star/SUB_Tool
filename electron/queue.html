@@ -812,12 +812,13 @@
         + ` · ${pad2(h12)}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ${suffix}`;
     };
 
-    const FORMAT_LABEL = { prores: 'ProRes422HQ-MOV', h264: 'H264-MP4', wav: 'WAV' };
+    const FORMAT_LABEL = { prores: 'ProRes422HQ-MOV', h264: 'H264-MP4', wav: 'WAV', mp3: 'MP3' };
+    const isAudioDelivery = format => format === 'wav' || format === 'mp3';
     const deliveryPreset = format => _deliveryFormatPresets.find(preset => preset.format === format);
-    const burnsTimecode = payload => !!payload?.timecodeWatermark;
+    const burnsTimecode = payload => !isAudioDelivery(payload?.format) && !!payload?.timecodeWatermark;
 
     const fmtSubtitles = payload => {
-      if (String(payload?.format || '') === 'wav') return null;
+      if (isAudioDelivery(payload?.format)) return null;
       const list = payload?.subtitleTracks;
       if (!Array.isArray(list)) return null;
       return list.length ? '字幕：' + list.join('、') : '無字幕';
@@ -826,12 +827,14 @@
       const format = String(payload?.format || '');
       const preset = deliveryPreset(format);
       const parts = [preset?.label || FORMAT_LABEL[format] || format.toUpperCase() || '—'];
+      if (format === 'mp3') return 'MP3 / 48 kHz / 320 kbps';
+      if (format === 'wav') return parts[0];
       const w = Number(payload?.width), h = Number(payload?.height);
-      if (format !== 'wav' && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+      if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
         parts.push(`${w} x ${h} px`);
       }
       const kbps = Number(payload?.videoKbps);
-      if (format !== 'wav' && Number(payload?.fps) > 0) parts.push(`${Number(payload.fps)} fps`);
+      if (Number(payload?.fps) > 0) parts.push(`${Number(payload.fps)} fps`);
       if (preset?.kind === 'disc') parts.push(`${preset.capacityBytes / 1000000000} GB 上限`, '自動碼率');
       else if ((format === 'h264' || preset) && Number.isFinite(kbps) && kbps > 0) parts.push(`${kbps} kbps`);
       return parts.join(' / ');
@@ -1130,7 +1133,8 @@
       const known = !p.targetW && RES_OPTIONS.some(([v]) => v === curTargetH);
       const initialW = Number(p.targetW) || Number(p.width) || Number(p.canvasW) || 1920;
       const initialH = curTargetH || Number(p.height) || Number(p.canvasH) || 1080;
-      const formatOptions = Object.entries(FORMAT_LABEL);
+      const audioOnly = isAudioDelivery(curFormat) && Array.isArray(p.clips) && !p.clips.length;
+      const formatOptions = Object.entries(FORMAT_LABEL).filter(([format]) => !audioOnly || isAudioDelivery(format));
       // 固定格式的 TC／音訊在送出前完成設定，既有一般工作要從交付清單新增。
       if (currentPreset) formatOptions.push([currentPreset.format, currentPreset.label]);
 
@@ -1177,7 +1181,7 @@
           ? { ...preset, width: p.width, height: p.height, fps: p.fps,
             scan: Number(p.height) === 1080 && Number(p.fps) > 24 ? 'interlaced' : 'progressive' }
           : preset;
-        box.querySelectorAll('[data-only="video"]').forEach(n => { n.hidden = (f === 'wav'); });
+        box.querySelectorAll('[data-only="video"]').forEach(n => { n.hidden = isAudioDelivery(f); });
         box.querySelectorAll('[data-only="h264"]').forEach(n => { n.hidden = (f !== 'h264'); });
         q('[data-f="res"]').disabled = !!preset;
         q('[data-f="kbps"]').disabled = !!preset;
@@ -1206,7 +1210,7 @@
           : '';
         const isCustom = q('[data-f="res"]').value === 'custom';
         const customGroup = q('[data-custom]');
-        customGroup.hidden = (f === 'wav') || !!preset || !isCustom;
+        customGroup.hidden = isAudioDelivery(f) || !!preset || !isCustom;
         for (const input of customGroup.querySelectorAll('input')) input.disabled = customGroup.hidden;
       };
       q('[data-f="format"]').addEventListener('change', syncVisibility);
@@ -1224,9 +1228,10 @@
         if (!ownsEditor()) return;
         const format = q('[data-f="format"]').value;
         const resVal = q('[data-f="res"]').value;
-        const isCustom = format !== 'wav' && resVal === 'custom';
+        const audioDelivery = isAudioDelivery(format);
+        const isCustom = !audioDelivery && resVal === 'custom';
         const customW = q('[data-f="customW"]'), customH = q('[data-f="customH"]');
-        const targetH = isCustom ? customH.valueAsNumber : Number(resVal) || 0;
+        const targetH = audioDelivery ? 0 : isCustom ? customH.valueAsNumber : Number(resVal) || 0;
         const patch = { format, targetH };
         if (isCustom) {
           if (!customW.reportValidity() || !customH.reportValidity()) return;
@@ -1236,7 +1241,7 @@
           }
         }
         if (format === 'h264') patch.kbps = Number(q('[data-f="kbps"]').value) || 0;
-        if (format !== 'wav') patch.burnTimecode = q('[data-f="tc"]').checked;
+        if (!audioDelivery) patch.burnTimecode = q('[data-f="tc"]').checked;
         q('[data-f="save"]').disabled = true;
         errEl.hidden = true;
         try {

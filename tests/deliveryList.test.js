@@ -20,6 +20,7 @@ describe('副檔名', () => {
     expect(extensionFor('h264')).toBe('.mp4');
     expect(extensionFor('prores')).toBe('.mov');
     expect(extensionFor('wav')).toBe('.wav');
+    expect(extensionFor('mp3')).toBe('.mp3');
     expect(extensionFor('mod-fhd')).toBe('.ts');
     expect(extensionFor('airline-exw')).toBe('.mpg');
     expect(extensionFor('airline-s3k')).toBe('.mp4');
@@ -54,6 +55,28 @@ describe('預設檔名', () => {
   it('WAV 不帶解析度標記', () => {
     expect(defaultDeliveryName({ projectTag: '拼桌', fps: 25, format: 'wav', targetH: 1080 }))
       .toBe('ST_拼桌_25fps.wav');
+  });
+  it.each([
+    [[{layout:'mono',busIds:['b7']}], 'Mono'],
+    [[{layout:'mono',busIds:['b7']},{layout:'mono',busIds:['b3']}], 'Stereo'],
+    [[{layout:'5.1',busIds:['b1','b2','b3','b4','b5','b6']}], 'Stereo'],
+  ])('MP3 檔名標示成品聲道，切回影片仍可使用同列的自訂寬高及時間碼', (streams, layout) => {
+    const audioPlan = { streams };
+    const list = base({defaultAudioLayout:audioPlan});
+    list.setCustomResolution(0, 384, 480);
+    list.setBurnTimecode(0, true);
+    list.setChapterOptions(0,{ chapterNotes:true });
+    list.setFormat(0, 'mp3');
+    const options = {compiledAudioPlan:audioPlan,timelineStartTimecode:'01:00:00:00',chaptersForRow:()=>[{start:1,title:'備註'}]};
+    expect(list.toJobs(options)[0]).toMatchObject({
+      defaultName:`ST_拼桌_29.97fps_${layout}.mp3`, timecodeWatermark:null, chapters:[],
+    });
+    list.setName(0, '客戶檔名');
+    list.setFormat(0, 'h264');
+    expect(list.toJobs(options)[0]).toMatchObject({
+      defaultName:'客戶檔名.mp4', width:384, height:480, timecodeWatermark:{ start:'01:00:00:00' },
+      chapters:[{start:1,title:'備註'}],
+    });
   });
   it('聲道編組寫進檔名，多條 stream 以 + 相連', () => {
     const audioPlan = { streams: [{ layout: '5.1' }, { layout: 'stereo' }] };

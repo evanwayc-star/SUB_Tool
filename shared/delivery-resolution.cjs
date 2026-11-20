@@ -89,7 +89,7 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetW, 
   projectFps, bdMode = null,
   fps, videoKbps = 0, previousWidth, previousHeight, kbpsOverride, resetVideoBitrate = false,
   burnTimecode = false, timecodeStart = null } = {}) {
-  const isWav = format === 'wav';
+  const audioOnly = format === 'wav' || format === 'mp3';
   if (format === 'bd-iso' && (!bdMode || Math.abs(bdMode.fps - Number(fps)) > 0.001
       || (Number.isFinite(Number(projectFps)) && bdMode.fps + 0.001 < Number(projectFps)))) {
     throw new Error('BD 輸出影格率必須是支援的光碟格式，且不得低於專案 FPS');
@@ -98,22 +98,22 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetW, 
   const height = fixed?.height || normalizeTargetHeight(targetH);
   const { w, h } = fixed
     ? { w: fixed.width, h: fixed.height }
-    : deliveryResolution({ canvasW, canvasH, targetW, targetH, isWav });
+    : deliveryResolution({ canvasW, canvasH, targetW, targetH, isWav: audioOnly });
   let kbps = preset ? preset.videoKbps : (resetVideoBitrate ? 0 : Number(videoKbps) || 0);
   if (format === 'h264') {
     if (kbpsOverride != null) kbps = Math.max(1, Math.floor(Number(kbpsOverride) || 0));
     else if (resetVideoBitrate || kbps <= 0 || (previousWidth != null && previousHeight != null
       && (w !== Number(previousWidth) || h !== Number(previousHeight)))) kbps = suggestKbps({ w, h });
   }
-  if (!isWav && burnTimecode && !timecodeStart) {
+  if (!audioOnly && burnTimecode && !timecodeStart) {
     throw new Error('這份工作沒有記錄時間軸起點，無法補上燒入 TC；請重新從交付清單送出');
   }
   return {
     width: w, height: h, targetH: height,
-    ...(!fixed && !isWav && targetW ? { targetW: w } : {}),
+    ...(!fixed && !audioOnly && targetW ? { targetW: w } : {}),
     fps: bdMode?.fps || preset?.fps || fps,
-    videoKbps: kbps,
-    timecodeWatermark: !isWav && burnTimecode ? { start: timecodeStart } : null,
+    videoKbps: format === 'mp3' ? null : kbps,
+    timecodeWatermark: !audioOnly && burnTimecode ? { start: timecodeStart } : null,
   };
 }
 

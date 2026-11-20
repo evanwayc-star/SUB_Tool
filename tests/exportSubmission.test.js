@@ -172,7 +172,7 @@ describe('frozen export submission', () => {
   it('fails closed for the unsupported web video delivery surface', () => {
     expect(videoExportCapability(false)).toEqual({
       supported: false,
-      message: '網頁版不支援影片／多聲道 WAV 交付，請使用 Electron 桌面版',
+      message: '影片、WAV 與 MP3 交付請使用 Electron 桌面版',
     });
     expect(videoExportCapability(true).supported).toBe(true);
   });
@@ -187,7 +187,7 @@ describe('frozen export submission', () => {
     })).resolves.toBe(false);
 
     expect(opened).toEqual([]);
-    expect(notices).toEqual(['網頁版不支援影片／多聲道 WAV 交付，請使用 Electron 桌面版']);
+    expect(notices).toEqual(['影片、WAV 與 MP3 交付請使用 Electron 桌面版']);
   });
 
   it('keeps the desktop-only delivery button hidden until desktop initialization', () => {

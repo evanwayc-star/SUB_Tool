@@ -28,6 +28,26 @@ const route = (channel, busId) => {
 };
 const plan = () => buildProjectAudioPlan({audioProject:State.audioProject,clips:State.clips});
 
+it('MP3 多組音軌由使用者指名，保存 Lt/Rt 的左右對應並保留專案原編組', () => {
+  const original=structuredClone(State.audioProject);
+  const ids=original.buses.map(bus=>bus.id);
+  const spec=createDeliveryAudioSpec(original,{audioPlan:{streams:[
+    {id:'mix',name:'主混音',layout:'5.1',busIds:ids.slice(0,6)},
+    {id:'lang',name:'第二語言',layout:'stereoLtRt',busIds:[ids[7],ids[6]]},
+  ]}});
+  const onBack=vi.fn();
+  AudioRouting.openDeliveryOutputSettings(spec,onBack,{deliveryFormat:'mp3'}); vi.runAllTimers();
+  expect(document.querySelector('#audioOutputAllMono,#audioOutputAdd')).toBeNull();
+  act('儲存輸出設定');
+  expect(onBack).not.toHaveBeenCalled();
+  const choose=document.getElementById('audioMp3Stream');
+  choose.value='lang'; choose.dispatchEvent(new Event('change')); vi.runAllTimers();
+  expect([...document.querySelectorAll('.audio-output-bus')].map(select=>select.value)).toEqual([ids[7],ids[6]]);
+  act('儲存輸出設定');
+  expect(onBack.mock.calls[0][0].spec.streams).toEqual([spec.streams[1]]);
+  expect(State.audioProject).toEqual(original);
+});
+
 it('輸出聲道格式重畫後焦點留在同一組格式，新增與移除後仍有就近可操作的焦點', () => {
   open();
   const original = structuredClone(State.audioProject);

@@ -30,7 +30,7 @@ const { fixedFrameTime } = require('../shared/clip-visual.cjs');
 const { deliveryFrameRateRatio, exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
 const { normalizeDeliveryChapters } = require('../shared/delivery-chapters.cjs');
 const { deliveryResolution } = require('../shared/delivery-resolution.cjs');
-const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
+const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, isAudioDeliveryFormat } = require('../shared/delivery-formats.cjs');
 const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter, HARD_LIMITER_PRESETS } = require('../shared/audio-loudness.cjs');
 const { airlineEncoding } = require('./airline-encoding');
 const { discEncoding } = require('./disc-encoding');
@@ -437,17 +437,17 @@ function imageBoxForExport({ frameW, frameH, natW, natH, scale = 1, posX = 0.5, 
    呼叫端只負責 spawn 與回報，不預先配對 codec／mux 或計算容量時長。 */
 function prepareDeliveryPayload(spec = {}) {
   const preset = getDeliveryFormatPreset(spec.format);
-  const isWav = spec.format === 'wav';
+  const audioOnly = isAudioDeliveryFormat(spec.format);
   const normalizedAudio = normalizeDeliveryPresetAudio(spec.format, spec.audioPlan);
   const problem = deliveryPresetAudioProblem(spec.format, normalizedAudio);
   if (problem) throw new Error(problem);
-  const normalizedPlan = _normalizeAudioPlan(normalizedAudio, { requireStreams: !isWav });
+  const normalizedPlan = _normalizeAudioPlan(normalizedAudio, { requireStreams: spec.format !== 'wav' });
   const bdMode = spec.format === 'bd-iso' ? bdVideoMode(spec.fps) : null;
   if (spec.format === 'bd-iso' && (!bdMode || (spec.projectFps != null && bdMode.fps + 0.001 < Number(spec.projectFps)))) {
     throw new Error('BD 輸出影格率必須是支援的光碟格式，且不得低於專案 FPS');
   }
   const fixedMode = bdMode || preset;
-  const customSize = !fixedMode && !isWav && spec.targetW != null
+  const customSize = !fixedMode && !audioOnly && spec.targetW != null
     ? deliveryResolution({ targetW: spec.targetW, targetH: spec.targetH }) : null;
   const prepared = { ...spec, audioPlan: normalizedPlan,
     ...(customSize ? { width: customSize.w, height: customSize.h } : {}),
@@ -455,20 +455,20 @@ function prepareDeliveryPayload(spec = {}) {
       videoKbps: preset.videoKbps } : {}) };
   if (!customSize) delete prepared.targetW;
   // The persisted job keeps SMPTE ';'. FFmpeg's '.' spelling belongs only in argv.
-  if (!isWav) _normaliseExportTimecodeWatermark(prepared.timecodeWatermark, prepared.fps);
+  if (!audioOnly) _normaliseExportTimecodeWatermark(prepared.timecodeWatermark, prepared.fps);
   const duration = Math.max(0.05, _finiteNumber(prepared.duration, 0), _planDuration(normalizedPlan));
   return {
     ...prepared,
     duration,
     ...(prepared.chapters != null ? { chapters: normalizeDeliveryChapters(prepared.chapters, duration, prepared.format) } : {}),
-    timecodeWatermark: isWav ? null : prepared.timecodeWatermark,
+    timecodeWatermark: audioOnly ? null : prepared.timecodeWatermark,
   };
 }
 
 function buildDeliveryArgv(spec = {}, env = {}) {
   spec = prepareDeliveryPayload(spec);
   const preset = getDeliveryFormatPreset(spec.format);
-  const isWav = spec.format === 'wav';
+  const audioOnly = isAudioDeliveryFormat(spec.format);
   const {
     format, clips, videoTracks, width, height, fps, duration,
     videoKbps, audioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName, outPath,
@@ -493,12 +493,32 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const airline = isAirline ? airlineEncoding(format) : null;
   const disc = isDisc ? discEncoding(format, { duration: D, audioPlan, fps }) : null;
   const isInterlaced = (disc || preset)?.scan === 'interlaced';
-  const timecodeWatermark = isWav ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
+  const timecodeWatermark = audioOnly ? null : _normaliseExportTimecodeWatermark(rawTimecodeWatermark, fps);
 
-  if (isWav) {
-    if (!audioPlan) _exportPlanError('WAV 匯出需要專案音軌路由資料。');
+  if (audioOnly) {
+    if (!audioPlan) _exportPlanError(`${format.toUpperCase()} 匯出需要專案音軌路由資料。`);
     const inputs = [], fc = [];
-    const planned = _buildPlannedAudio(audioPlan, inputs, fc, 0, D, null, env.audioVideoStartOffset, env.sourceClock);
+    const surroundMp3 = format === 'mp3' && audioPlan.streams[0].layout === '5.1';
+    const planned = _buildPlannedAudio(surroundMp3 ? { ...audioPlan, loudness: null } : audioPlan,
+      inputs, fc, 0, D, null, env.audioVideoStartOffset, env.sourceClock);
+    if (format === 'mp3') {
+      const { stream, label } = planned.streamLabels[0];
+      let output = label;
+      if (surroundMp3) {
+        // 正規化每側權重以保留餘裕；中心與 LFE 進入雙側，環繞聲保持方向。
+        let filter = 'pan=stereo|FL<FL+0.707*FC+0.707*BL+0.5*LFE|FR<FR+0.707*FC+0.707*BR+0.5*LFE';
+        if (audioPlan.loudness?.enabled) filter += ',' + buildLimiterFilter(audioPlan.loudness).filter;
+        output = '[mp3Stereo]';
+        fc.push(label + filter + output);
+      }
+      const channels = Math.min(2, stream.spec.channels);
+      return {
+        args: ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', output, '-vn', '-map_metadata', '-1',
+          '-map_chapters', '-1', '-ar', '48000', '-c:a', 'libmp3lame', '-b:a', '320k', outPath],
+        label: `匯出 MP3（${channels === 1 ? 'Mono' : 'Stereo'}，320 kbps）`,
+        duration: D, plannedEncoder: 'libmp3lame', isGpu: false, kbps: null, audioBitrates: ['320k'], audioChannels: channels,
+      };
+    }
     const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', wav.label,

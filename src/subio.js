@@ -14,7 +14,7 @@ import { applyDeliveryAudioSpec, createDeliveryAudioSpec, videoExportCapability 
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
+import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, isAudioDeliveryFormat, normalizeDeliveryPresetAudio, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, deliveryResolution, projectTagFrom } from './delivery-list.js';
 import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission, exportSourceError, formatOverwriteConfirmation } from './delivery-submission.js';
 import { escapeHTML, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
@@ -329,7 +329,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     showToast(sourceError);
     return;
   }
-  if (data.audioOnly && !data.audioPlan) { showToast('純音訊 WAV 匯出需要專案音軌路由'); return; }
+  if (data.audioOnly && !data.audioPlan) { showToast('純音訊匯出需要專案音軌路由'); return; }
 
   const audioOnly = !!data.audioOnly;
   const hasProjectAudio = !!data.audioPlan;
@@ -369,14 +369,15 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
 
   function renderRow(r, i) {
     const isWav = r.format === 'wav';
+    const audioDelivery = isAudioDeliveryFormat(r.format);
     const preset = getDeliveryFormatPreset(r.format);
     const bdMode = r.format === 'bd-iso' ? bdVideoMode(r.targetFps) : null;
     const displayMode = bdMode || preset;
-    const customSize = !isWav && !preset &&
+    const customSize = !audioDelivery && !preset &&
       (r.targetW != null || (r.targetH > 0 && ![720,1080,2160].includes(r.targetH)));
     const sizeOption = customSize ? 'custom' : r.targetH;
 
-    const ap = r.audioPlan;
+    const ap = r.format === 'mp3' ? normalizeDeliveryPresetAudio(r.format, r.audioPlan) : r.audioPlan;
     let audioDesc = '依專案音軌順序';
     const streams = ap?.streams || ap?.groups;
     const wavBusIds = isWav ? (Array.isArray(r.wavBusIds) ? r.wavBusIds
@@ -396,13 +397,16 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       const tCount = streams.reduce((acc, g) => acc + (g.layout === '5.1' ? 6 : (g.layout === 'mono' ? 1 : 2)), 0);
       audioDesc = gCounts.length ? `${gCounts.join(' + ')} (${tCount} 軌)` : '無';
     }
+    if (r.format === 'mp3' && streams?.length === 1) {
+      audioDesc = streams[0].layout === 'mono' ? 'Mono' : streams[0].layout === '5.1' ? '5.1 降混為 Stereo' : 'Stereo';
+    }
     const projectBuses = data.audioProject?.buses || [];
     const busNames = new Map(projectBuses.map((bus, index) => [String(bus.id), `A${index + 1}`]));
     const channelMapping = (ids, stereo = false) => ids.map((id, channel) =>
       `${stereo ? ['左', '右'][channel] : `Ch ${channel + 1}`} ← ${busNames.get(String(id)) || '未指定'}`).join('、');
     if (wavBusIds?.length) {
       audioDesc += ` · ${channelMapping(wavBusIds, wavBusIds.length === 2)}`;
-    } else if (!isWav && Array.isArray(r.audioBuses) && streams?.length) {
+    } else if (!isWav && (Array.isArray(r.audioBuses) || r.format === 'mp3') && streams?.length) {
       audioDesc += ` · ${streams.map(stream => channelMapping(stream.busIds || [], stream.layout === 'stereo' || stream.layout === 'stereoLtRt')).join(' / ')}`;
     }
 
@@ -416,10 +420,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         <div class="delivery-spec-grid">
           <label class="delivery-field delivery-field--format"><span>交付格式</span>
             <select class="ev-format delivery-select" data-idx="${i}">
-              ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(option.format === 'wav' ? !hasProjectAudio : audioOnly) || (option.format === 'bd-iso' && availableBdVideoModes(data.fps).length === 0)?'disabled':''}>${option.label}</option>`).join('')}
+              ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(isAudioDeliveryFormat(option.format) ? !hasProjectAudio : audioOnly) || (option.format === 'bd-iso' && availableBdVideoModes(data.fps).length === 0)?'disabled':''}>${option.label}</option>`).join('')}
             </select>
           </label>
-          ${!isWav ? `
+          ${!audioDelivery ? `
             <div class="delivery-field"><label for="evRes${i}">畫面尺寸</label>
               <select id="evRes${i}" class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 此格率為 ${displayMode.width}×${displayMode.height}，${displayMode.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
                 ${preset ? `<option value="${displayMode.height}" selected>${displayMode.width}×${displayMode.height}${displayMode.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
@@ -461,7 +465,8 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         </div>
         <div class="delivery-card-options">
           <div class="delivery-audio-line"><span class="delivery-options-label">音訊</span><span class="delivery-audio-info">${escapeHTML(audioDesc)}</span><button type="button" class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="獨立設定此輸出檔案的音軌與左右聲道">設定輸出音軌</button></div>
-          ${!isWav ? `<div class="delivery-visual-options"><span class="delivery-sub-chip" title="${escapeHTML(activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕')}">${activeSubs.length ? '字幕：'+escapeHTML(activeSubs.join(', ')) : '無字幕'}</span>
+          ${r.format === 'mp3' ? '<span class="delivery-audio-info">48 kHz · 320 kbps</span>' : ''}
+          ${!audioDelivery ? `<div class="delivery-visual-options"><span class="delivery-sub-chip" title="${escapeHTML(activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕')}">${activeSubs.length ? '字幕：'+escapeHTML(activeSubs.join(', ')) : '無字幕'}</span>
             <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 畫面燒入時間碼</label></div>` : ''}
           ${IS_DESKTOP && ['h264','prores'].includes(r.format) ? `<div class="delivery-visual-options" role="group" aria-label="影片書籤">
             <span class="delivery-options-label">影片書籤</span>

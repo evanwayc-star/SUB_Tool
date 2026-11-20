@@ -21,7 +21,7 @@ afterEach(()=>{for(const root of roots.splice(0)){
   if(path.dirname(real)!==fs.realpathSync(os.tmpdir())||!path.basename(real).startsWith('subtool-queue-consent-')) throw new Error('拒絕刪除測試目錄以外資料');
   fs.rmSync(real,{recursive:true,force:true});
 }});
-function setup({existingOutput=false,outputName='delivery.mp4'}={}){
+function setup({existingOutput=false,outputName='delivery.mp4',payload={}}={}){
   const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'subtool-queue-consent-'));roots.push(root);
   const directory=path.join(root,'out'),queueDir=path.join(root,'queue');fs.mkdirSync(directory);
   const mother=path.join(root,'source.mp4');fs.writeFileSync(mother,'mother');
@@ -42,7 +42,7 @@ function setup({existingOutput=false,outputName='delivery.mp4'}={}){
     runJob:vi.fn(),onChanged(){}});
   queue.setPaused(true);
   queue.addJob({id:'job',status:'queued',createdAt:1,payload:{outPath,format:'h264',width:640,height:360,fps:25,duration:1,timelineStartTimecode:'00:00:00:00',
-    clips:[{path:mother,in:0,out:1,offset:0}]}});
+    clips:[{path:mother,in:0,out:1,offset:0}],...payload}});
   const call=tree.body.map(node=>node.expression).find(node=>node?.callee?.object?.name==='ipcMain'
     &&node.callee.property?.name==='handle'&&node.arguments?.[0]?.value==='queue:updateDelivery');
   let invoke;
@@ -85,6 +85,38 @@ it('自訂尺寸持久化，保留其他欄位修改；切回高度預設後，�
   f.invoke({},'job',{targetH:720});
   expect(persisted()).not.toHaveProperty('targetW');
   expect(persisted()).toMatchObject({width:1280,height:720,targetH:720,outPath:f.outPath});
+});
+
+it('影片工作改 MP3 時清除影片專用選項，保留選軌與單一音檔權限',()=>{
+  const audioPlan={buses:[{id:'L'},{id:'R'}],streams:[{layout:'mono',busIds:['R']},{layout:'mono',busIds:['L']}]};
+  const f=setup({outputName:'delivery_TC.mp4',payload:{audioPlan,timecodeWatermark:{start:'00:00:00:00'},
+    targetW:800,targetH:640,chapters:[{kind:'note',title:'備註',start:0}]}});
+  f.invoke({},'job',{format:'mp3',burnTimecode:true});
+  const saved=QueueStore.loadJobs(f.queueDir).jobs[0].payload;
+  expect(saved).toMatchObject({outPath:path.join(path.dirname(f.outPath),'delivery.mp3'),timecodeWatermark:null,
+    videoKbps:null,audioPlan:{streams:[{layout:'stereo',busIds:['R','L']}]}});
+  expect(saved).not.toHaveProperty('chapters');
+  expect(saved).not.toHaveProperty('targetW');
+  f.invoke({},'job',{format:'prores'});
+  expect(f.queue.get('job').payload).toMatchObject({outPath:path.join(path.dirname(f.outPath),'delivery.mov'),
+    audioPlan:{streams:[{layout:'stereo',busIds:['R','L']}]}});
+});
+
+it('舊 WAV 依選定 bus 順序改 MP3；純音訊工作經任一格式都需有影片才能改回影片',()=>{
+  const f=setup({outputName:'delivery.wav',payload:{format:'wav',clips:[],audioPlan:{buses:[{id:'B'},{id:'A'}],streams:[]}}});
+  f.invoke({},'job',{format:'mp3'});
+  expect(f.queue.get('job').payload.audioPlan.streams[0]).toMatchObject({layout:'stereo',busIds:['B','A']});
+  expect(()=>f.invoke({},'job',{format:'h264'})).toThrow(/沒有影像/);
+  f.invoke({},'job',{format:'wav'});
+  expect(()=>f.invoke({},'job',{format:'prores'})).toThrow(/沒有影像/);
+});
+
+it('多套影片語言／M&E 未選單一交付組時，改 MP3 被拒並維持原本工作',()=>{
+  const ids=['主左','主右','配樂左','配樂右'];
+  const f=setup({payload:{audioPlan:{buses:ids.map(id=>({id})),
+    streams:[{layout:'stereo',busIds:ids.slice(0,2)},{layout:'stereo',busIds:ids.slice(2)}]}}});
+  expect(()=>f.invoke({},'job',{format:'mp3'})).toThrow(/MP3 需要一組音軌/);
+  expect(QueueStore.loadJobs(f.queueDir).jobs[0].payload.outPath).toBe(f.outPath);
 });
 
 it('只修改解析度時保留原副檔名大小寫，另一個大小寫不同的目錄項目不受影響',()=>{

@@ -36,7 +36,7 @@ describe('Apple Silicon 原生執行檔準備', () => {
           }
           if (args.includes('-filters')) return { status: 0, stdout: ' ... ass ... ' };
           if (args.includes('-encoders')) {
-            return { status: 0, stdout: ' libx264 prores_ks pcm_s24le ' };
+            return { status: 0, stdout: ' libx264 prores_ks pcm_s24le libmp3lame ' };
           }
           if (args.includes('-demuxers')) return { status: 0, stdout: ' ... mxf ... ' };
           return { status: 0, stdout: 'ffprobe version 6.1.1' };

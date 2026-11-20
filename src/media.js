@@ -543,7 +543,7 @@ const Media = {
         // 獨立母素材波形的暫存檔由 caller 釋放；已讀 peaks 可繼續使用，不能留下失效路徑。
         this._commitOriginalWave(sourceClip,peaks,{mixPath:temporary?null:wave,channels});
         report({label:'波形已就緒',pct:100});
-        emit('media:timeline');
+        emit('media:waveform',{controls:true});
         return true;
       });
     }catch(error){
@@ -600,7 +600,7 @@ const Media = {
             const progress=createSourceWaveformProgress({duration,resolution:Wave.resolution,owns:active,publish:peaks=>{
               published=peaks;publishedViews.add(peaks);
               this._commitOriginalWave(this._liveClipForSource(source),peaks,{mixPath:null});
-              emit('media:timeline');
+              emit('media:waveform');
             }});
             let result;
             try{
@@ -609,7 +609,7 @@ const Media = {
               progress.verifyResult(result);
               if(progress.complete){
                 this._commitOriginalWave(this._liveClipForSource(source),published,{mixPath:result.temporary?null:result.wave});
-                emit('media:timeline');
+                emit('media:waveform');
               }else{
                 const loaded=await this._loadOriginalWave(source,{wave:result.wave},active,{
                   temporary:!!result.temporary,duration,sourceWaveform:true,
@@ -681,7 +681,7 @@ const Media = {
           }
           for(const peaks of publishedViews) Wave.clearSourceMixPeaks(source,peaks);
           if(publishedViews.has(this._effectOriginalPeaks.get(source.audioSourceId))) this._effectOriginalPeaks.delete(source.audioSourceId);
-          emit('media:timeline');
+          emit('media:waveform');
         }
         if(current()&&error?.name!=='AbortError'){
           console.warn('優先波形準備失敗:',error);
@@ -1210,7 +1210,7 @@ const Media = {
       }
       if(DESK.prepareSourceWaveform&&res?.wave) await this._loadOriginalWave(clip,res,current);
       if(!current()) return;
-      emit('media:timeline');
+      emit('media:waveform',{controls:true});
       recovery.complete();
     }catch(e){ if(current())recovery.fail(e);console.warn('native audio cache:',e); }
   },
@@ -1230,7 +1230,7 @@ const Media = {
       if(channels.length) await this._replaceExternalTracksWithCached(asset,channels,descriptors,myVer);
       if(res?.wave) await this._setExternalWaveFromPath(asset,res.wave,myVer);
       if(this._bgVersion===myVer && sourceCurrent()){
-        this.applyGains(); notifyAudioTracks(); emit('media:timeline');
+        this.applyGains(); notifyAudioTracks(); emit('media:waveform',{controls:true});
         recovery.complete();
         setMediaProcessingStatus('音軌與波形已就緒','ok');
       }

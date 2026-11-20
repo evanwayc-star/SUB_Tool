@@ -320,17 +320,28 @@ function refreshIdenticalGroupMarkers(){
   }
 }
 
+const checkResultMarkup=new WeakMap();
+function setCheckResult(id, html){
+  const result=$(id)?.querySelector('.cp-nums');
+  if(!result || checkResultMarkup.get(result)===html)return;
+  result.innerHTML=html;
+  checkResultMarkup.set(result,html);
+}
+
 function renderCheckPanel(){
   const panel=$('checkPanel'); if(!panel||!panel.classList.contains('show'))return;
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
   const summary=$('checkSummary');
   if(summary){
     const trackName=State.tracks[State.listTrack]?.name||'目前字幕軌';
-    summary.textContent=list.length?`${trackName} · ${list.length} 句。點選編號可前往字幕。`:`${trackName}尚無字幕，請先匯入或新增字幕。`;
+    const label=list.length?`${trackName} · ${list.length} 句。點選編號可前往字幕。`:`${trackName}尚無字幕，請先匯入或新增字幕。`;
+    if(summary.textContent!==label)summary.textContent=label;
   }
   const lenEl=$('cpLenInput');
+  const previousLimit=_checkLenLimit;
   _checkLenLimit = lenEl ? (parseInt(lenEl.value)||0) : 0;
   const containsRaw=($('cpContainsInput')||{}).value||'';
+  const previousContains=_checkContains;
   _checkContains=containsRaw.split('||').map(s=>s.trim()===''?s:s.replace(/^[ ]+|[ ]+$/g,'')).filter(s=>s.length>0);
 
   const report = analyzeSubtitles(list, { checkLenLimit: _checkLenLimit, checkContains: _checkContains, fps: State.fps });
@@ -353,39 +364,51 @@ function renderCheckPanel(){
     if(unsupported.length) detail.push('非允許字元：'+unsupported.map(ch=>/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/u.test(ch)?`U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}`:ch).join('、'));
     return `<button type="button" class="cp-num" data-idx="${num}" aria-label="前往第 ${num} 句字幕：${escapeHTML(detail.join('；'))}" title="${escapeHTML(detail.join('；'))}">${num}</button>`;
   }).join(' '):'無';
-  const ro=$('cpOverlap'),rm=$('cpMulti'),r2=$('cpTwo'),rb=$('cpBlank'),rl=$('cpOverLen'),rc=$('cpContains'),rnt=$('cpNonTraditional'),rt=$('cpTrim'),rn=$('cpNoTime'),rci=$('cpConsecutiveIdentical');
-  const sb=$('cpSrtB'),si=$('cpSrtI'),su=$('cpSrtU'),sf=$('cpSrtFont'),sp=$('cpSrtPos');
-  if(rn)rn.querySelector('.cp-nums').innerHTML=mkNums(noTimeNums);
-  if(ro)ro.querySelector('.cp-nums').innerHTML=mkNums(overlapNums);
-  if(rm)rm.querySelector('.cp-nums').innerHTML=mkNums(multiNums);
-  if(rt)rt.querySelector('.cp-nums').innerHTML=mkNums(trimNums);
-  if(r2)r2.querySelector('.cp-nums').innerHTML=mkNums(twoNums);
-  if(rb)rb.querySelector('.cp-nums').innerHTML=mkNums(blankNums);
-  if(rci)rci.querySelector('.cp-nums').innerHTML=mkConsecutiveIdenticalNums(consecutiveIdenticalRanges);
-  if(sb)sb.querySelector('.cp-nums').innerHTML=mkNums(bNums);
-  if(si)si.querySelector('.cp-nums').innerHTML=mkNums(iNums);
-  if(su)su.querySelector('.cp-nums').innerHTML=mkNums(uNums);
-  if(sf)sf.querySelector('.cp-nums').innerHTML=mkNums(fontNums);
-  if(sp)sp.querySelector('.cp-nums').innerHTML=mkNums(posNums);
-  if(rl)rl.querySelector('.cp-nums').innerHTML=_checkLenLimit?mkNums(overLenNums):'未設定';
-  if(rc)rc.querySelector('.cp-nums').innerHTML=_checkContains.length?mkNums(containsNums):'未設定';
-  if(rnt)rnt.querySelector('.cp-nums').innerHTML=mkCharacterIssueNums(nonTraditionalIssues);
+  setCheckResult('cpNoTime',mkNums(noTimeNums));
+  setCheckResult('cpOverlap',mkNums(overlapNums));
+  setCheckResult('cpMulti',mkNums(multiNums));
+  setCheckResult('cpTrim',mkNums(trimNums));
+  setCheckResult('cpTwo',mkNums(twoNums));
+  setCheckResult('cpBlank',mkNums(blankNums));
+  setCheckResult('cpConsecutiveIdentical',mkConsecutiveIdenticalNums(consecutiveIdenticalRanges));
+  setCheckResult('cpSrtB',mkNums(bNums));
+  setCheckResult('cpSrtI',mkNums(iNums));
+  setCheckResult('cpSrtU',mkNums(uNums));
+  setCheckResult('cpSrtFont',mkNums(fontNums));
+  setCheckResult('cpSrtPos',mkNums(posNums));
+  setCheckResult('cpOverLen',_checkLenLimit?mkNums(overLenNums):'未設定');
+  setCheckResult('cpContains',_checkContains.length?mkNums(containsNums):'未設定');
+  setCheckResult('cpNonTraditional',mkCharacterIssueNums(nonTraditionalIssues));
+  const limitChanged=previousLimit!==_checkLenLimit;
+  const containsChanged=previousContains.length!==_checkContains.length || previousContains.some((word,i)=>word!==_checkContains[i]);
+  if(limitChanged||containsChanged){
+    const byId=new Map(list.map(cue=>[cue.id,cue]));
+    const hits=new Set(containsNums.map(num=>list[num-1].id));
+    for(const row of sublist.children){
+      const cue=byId.get(row.dataset.id);
+      if(!cue)continue;
+      if(containsChanged)row.classList.toggle('contains-match',hits.has(cue.id));
+      if(limitChanged){
+        const text=row.querySelector('.txt'), value=cue.text||'';
+        if(text && text.contentEditable!=='true'){
+          const html=_txtInner(value);
+          if(html!==_txtInner(value,previousLimit))text.innerHTML=html;
+        }
+      }
+    }
+  }
   const locked=!!State.tracks[State.listTrack]?.locked;
   const trimButton=panel.querySelector('[data-act="trim-track"]');
   if(trimButton)trimButton.disabled=locked||!trimNums.length;
-  panel.querySelectorAll('.cp-num').forEach(el=>{
-    el.onclick=()=>{
-      const idx=parseInt(el.dataset.idx)-1; const c=list[idx]; if(!c)return;
-      selectCue(c.id,{seek:true,pointer:true});
-      const end=parseInt(el.dataset.endIdx);
-      if(end>idx+1){
-        setSelection({kind:'sub',ids:list.slice(idx,end).map(cue=>cue.id),primary:c.id});
-        refreshSelectionUI();
-      }
-      const row=sublist.querySelector(`.sub-row[data-id="${c.id}"]`);
-      if(row)row.scrollIntoView({block:'center'});
-    };
-  });
+  panel.onclick=event=>{
+    const button=event.target.closest('.cp-num');
+    if(!button)return;
+    const index=Number(button.dataset.idx)-1, cue=list[index];
+    if(!cue)return;
+    const end=Number(button.dataset.endIdx);
+    selectCue(cue.id,{seek:true,pointer:true,revealBlock:'center',
+      group:end>index+1?list.slice(index,end).map(item=>item.id):null});
+  };
 }
 
 let _styleSumT = null;
@@ -478,6 +501,7 @@ function renderSubList(){
         : '匯入字幕檔，或點上方「⬇＋」在播放點新增字幕。';
     sublist.innerHTML=`<div class="empty"><strong>${title}</strong><p>${nextStep}</p></div>`;
     $('subCount').textContent=list.length+' 句' + (allList.length !== list.length ? ` / ${allList.length} 句` : '');
+    renderCheckPanel();
     return;
   }
   $('subCount').textContent=list.length+' 句' + (allList.length !== list.length ? ` / ${allList.length} 句` : '');
@@ -533,17 +557,17 @@ function _rowClass(c){
   return classes.join(' ');
 }
 
-function _lineLenHTML(line){
-  if(!_checkLenLimit||line.length<=_checkLenLimit) return escapeHTMLWithSpaces(line);
-  return escapeHTMLWithSpaces(line.slice(0,_checkLenLimit))+`<span class="over-len">${escapeHTMLWithSpaces(line.slice(_checkLenLimit))}</span>`;
+function _lineLenHTML(line,limit){
+  if(line.length<=limit) return escapeHTMLWithSpaces(line);
+  return escapeHTMLWithSpaces(line.slice(0,limit))+`<span class="over-len">${escapeHTMLWithSpaces(line.slice(limit))}</span>`;
 }
 
 const LINE_BREAK_MARK_HTML = '<span class="line-break-mark" role="img" aria-label="換行" title="換行" data-symbol="↵"></span><br>';
 
-function _txtInner(text){
+function _txtInner(text,limit=_checkLenLimit){
   if(!(text||'').trim()) return '<span class="blank-label">(空白字幕)</span>';
-  if(!_checkLenLimit) return txtHTML(text||'').replace(/\r?\n/g, LINE_BREAK_MARK_HTML);
-  return (text||'').split(/\r?\n/).map(_lineLenHTML).join(LINE_BREAK_MARK_HTML);
+  if(!limit) return txtHTML(text||'').replace(/\r?\n/g, LINE_BREAK_MARK_HTML);
+  return (text||'').split(/\r?\n/).map(line=>_lineLenHTML(line,limit)).join(LINE_BREAK_MARK_HTML);
 }
 
 function _subRowHTML(c,i,overlaps){
@@ -618,7 +642,7 @@ function selectCue(id,opts){
     const a=ids.indexOf(State.selectedId), b=ids.indexOf(id);
     picked = (a>=0&&b>=0) ? ids.slice(Math.min(a,b),Math.max(a,b)+1) : [...State.selectedIds];
     primary=State.selectedId; 
-  }else{ picked=[id]; primary=id; }
+  }else{ picked=opts.group || [id]; primary=id; }
   
   setSelection({ kind:'sub', ids:picked, primary });
   State.activeEdge='start';
@@ -671,7 +695,6 @@ function commitCueTimeEdit(c, edge){
     renderSubRow(c.id);
     const ov=detectOverlaps(State.cues.filter(x=>x.timed!==false&&(x.track||0)===tk), 0.001);
     for(const row of sublist.children){ const id=row.dataset?.id; if(id) row.classList.toggle('overlap', ov.has(id)); }
-    renderCheckPanel();
     emit('render:videoSub'); emit('mpv:refreshSubs');
   } else {
     emit('render:all');
@@ -700,7 +723,7 @@ function refreshSelectionUI(opts={}){
       if(_selectionRevealSeq!==revealSeq||State.selectedId!==selectedId)return;
       const currentRow=sublist.querySelector(`.sub-row[data-id="${selectedId}"]`);
       if(!currentRow)return;
-      if(State.subMode){
+      if(State.subMode && !opts.revealBlock){
         const allRows = Array.from(sublist.querySelectorAll('.sub-row'));
         const idx = allRows.indexOf(currentRow);
         if (idx !== -1) {
@@ -708,7 +731,7 @@ function refreshSelectionUI(opts={}){
           sublist.scrollTop = targetRow.offsetTop;
         }
       } else {
-        currentRow.scrollIntoView({block:'nearest'});
+        currentRow.scrollIntoView({block:opts.revealBlock || 'nearest'});
       }
     };
     reveal();

@@ -67,19 +67,20 @@ it('凍結交付的 A7/A8 摘要跨重開保存，名稱與交付重排不改原
   expect(JSON.stringify(entry)).not.toContain('opaque-');
 });
 
-it.each(['prores','h264','wav'])('%s 經正式 prepare、queue 保存重開及完成歷史仍顯示原 A7/A8，編碼 argv 不變', format => {
+it.each(['prores','h264','wav','mp3'])('%s 經正式 prepare、queue 保存重開及完成歷史仍顯示原 A7/A8，編碼 argv 不變', format => {
   const buses=Array.from({length:8},(_,index)=>({id:`frozen-${index}`,name:`自訂 ${index}`}));
   const compiled=buildProjectAudioPlan({audioProject:{buses,sourceMaps:{},exportLayout:{streams:[]}}});
   const audioPlan=composeDeliveryAudioPlan(compiled,{audioBuses:[buses[7],buses[6]],audioPlan:{streams:[
     {id:'mix',layout:'stereo',busIds:[buses[6].id,buses[7].id]},
   ]}});
-  const raw={format,outPath:`C:/out/job.${format==='wav'?'wav':format==='prores'?'mov':'mp4'}`,
+  const raw={format,outPath:`C:/out/job.${format==='prores'?'mov':format==='h264'?'mp4':format}`,
     width:640,height:360,canvasW:640,canvasH:360,fps:25,duration:1,audioPlan,
     clips:[{id:'clip',path:'C:/source.mov',in:0,out:1,offset:0,track:0}],videoTracks:[{visible:true}]};
   const prepared=prepareDeliveryPayload(raw);
   const dir=makeDir();QueueStore.persistJob(dir,{id:'pipeline',status:'queued',createdAt:1,payload:prepared});
   const restored=QueueStore.loadJobs(dir).jobs[0];
-  const expected=format==='wav'?'Stereo WAV · 左 ← A8、右 ← A7':'Stereo · 左 ← A7、右 ← A8';
+  const expected=format==='wav'?'Stereo WAV · 左 ← A8、右 ← A7'
+    :format==='mp3'?'Stereo MP3 · 左 ← A7、右 ← A8':'Stereo · 左 ← A7、右 ← A8';
   expect(QueueHistory.audioSummary(restored.payload)).toBe(expected);
   expect(QueueHistory.audioSummary(prepareDeliveryPayload(restored.payload))).toBe(expected);
   QueueHistory.append(dir,{...restored,status:'done'});

@@ -620,7 +620,9 @@ function subtitleTimingIssue(a,b,kind,{fps=25,df=false}={}){
     if(!match)return false;
     if(kind!=='encore')return true;
     const base=Math.round(getExactFps(fps));
-    return Number(match[4])<base&&!(df&&base===30&&Number(match[2])%10!==0&&Number(match[3])===0&&Number(match[4])<2);
+    // FPS-SYNC: Encore TXT may spell the frame after :23 as :24. encoreToSec
+    // already carries that frame, including across a drop-frame minute.
+    return Number(match[4])<=base&&!(df&&base===30&&Number(match[2])%10!==0&&Number(match[3])===0&&Number(match[4])<2);
   };
   if(!valid(a)||!valid(b))return {code:'invalid-timecode',message:'時間碼格式或數值無效，原文已保留為未定時字幕。'};
   const parse=kind==='encore'?value=>encoreToSec(value,fps,df):kind==='srt'?srtToSec:assToSec;
@@ -806,17 +808,23 @@ const SubFormats = {
   /* ---- Adobe Encore ---- */
   parseEncore(text,fps,df=false){
     const out=[],issues=[]; const lines=text.replace(/\r/g,'').split('\n');
-    const re=/^\s*(\d+:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)[ \t]+(\d+:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)(?:[ \t]+(.*))?$/;
+    const token=String.raw`(?:\d+:\d{2}:\d{2}[:;]\d{2}|--:--:--:--)`;
+    const pair=new RegExp('('+token+')[ \\t]+('+token+')');
+    const row=new RegExp('^\\s*'+pair.source+'(?:[ \\t]+(.*))?$');
     let lastTime = 0;
     for(const [index,ln] of lines.entries()){
       if(!ln.trim())continue;
-      const m=ln.match(re);
-      if(!m){
+      const m=ln.match(row);
+      // A leading tab is the two omitted timecode columns. Keep a damaged
+      // timecode prefix on the diagnostic path, including a lone In or Out.
+      const shorthand=!m && ln.startsWith('\t') && !/^\s*[\d-]+:[^\s:;]*[:;]/.test(ln);
+      if(!m && !shorthand){
         out.push({start:lastTime,end:lastTime,text:decodeLegacyLineBreaks(ln),timed:false});
         issues.push({line:index+1,cue:out.length,code:'missing-timecode',message:'缺少完整的起訖時間碼，原文已保留為未定時字幕。',source:ln});
         continue;
       }
-      const placeholders=[m[1],m[2]].filter(value=>value==='--:--:--:--').length;
+      const placeholders=shorthand?2:[m[1],m[2]].filter(value=>value==='--:--:--:--').length;
+      const body=shorthand?ln.trimStart():(m[3]||'');
       const issue=placeholders===1?{code:'incomplete-timecode',message:'缺少其中一側時間碼，原文已保留為未定時字幕。'}
         :placeholders===2?null:subtitleTimingIssue(m[1],m[2],'encore',{fps,df});
       const isUntimed = placeholders>0||!!issue;
@@ -831,10 +839,11 @@ const SubFormats = {
       }
       out.push({
         start, end,
-        text: decodeLegacyLineBreaks((m[3]||'').replace(/\s{2,}/g,'\n')).trim(),
+        text: decodeLegacyLineBreaks(body.replace(/\s{2,}/g,'\n')).trim(),
         timed: isUntimed ? false : undefined
       });
       if(issue)issues.push({line:index+1,cue:out.length,...issue,source:ln});
+      if(pair.test(body))issues.push({line:index+1,cue:out.length,code:'embedded-timecode',message:'正文中另有一組起訖時間碼，請檢查是否漏了換行。',source:ln});
       if(!out.at(-1).text)issues.push({line:index+1,cue:out.length,code:'empty-text',message:'字幕文字為空，仍保留此列。',source:ln});
     }
     return parsedSubtitles(out,issues);

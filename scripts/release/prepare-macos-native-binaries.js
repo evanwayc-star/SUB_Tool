@@ -68,7 +68,7 @@ function prepareMacNativeBinaries(options = {}) {
   assertAppleSiliconBinary(spawnSync, ffprobePath);
 
   probe(spawnSync, ffmpegPath, ['-hide_banner', '-filters'], ['ass']);
-  probe(spawnSync, ffmpegPath, ['-hide_banner', '-encoders'], ['libx264', 'prores_ks', 'pcm_s24le']);
+  probe(spawnSync, ffmpegPath, ['-hide_banner', '-encoders'], ['libx264', 'prores_ks', 'pcm_s24le', 'libmp3lame']);
   probe(spawnSync, ffmpegPath, ['-hide_banner', '-demuxers'], ['mxf']);
   probe(spawnSync, ffprobePath, ['-version'], []);
 

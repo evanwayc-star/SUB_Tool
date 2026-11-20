@@ -461,6 +461,7 @@ function audioSummary(payload) {
     '5.1': { title: '5.1', labels: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'] },
   };
   if (!Array.isArray(plan.streams) || !plan.streams.length || plan.streams.length > 32) return undefined;
+  if (payload.format === 'mp3' && plan.streams.length !== 1) return undefined;
   const assigned = new Set();
   const parts = [];
   for (const stream of plan.streams) {
@@ -469,6 +470,10 @@ function audioSummary(payload) {
     if (!layout || !Array.isArray(selected) || selected.length !== layout.labels.length
       || selected.some(id => !ids.includes(id) || assigned.has(id)) || new Set(selected).size !== selected.length) return undefined;
     selected.forEach(id => assigned.add(id));
+    if (payload.format === 'mp3') {
+      const title = stream.layout === 'mono' ? 'Mono' : stream.layout === '5.1' ? 'Stereo（5.1 混音）' : layout.title;
+      return `${title} MP3 · ${mapping(selected, layout.labels)}`;
+    }
     const name = typeof stream.name === 'string' ? stream.name.trim().slice(0, 120) : '';
     parts.push(`${layout.title}${name ? `（${name}）` : ''} · ${mapping(selected, layout.labels)}`);
   }

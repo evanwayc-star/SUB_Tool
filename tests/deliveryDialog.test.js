@@ -331,11 +331,11 @@ describe('匯出交付清單', () => {
     }));
   });
 
-  it('依需求列出九種交付格式與兩種獨立 DMPES 碼率', async () => {
+  it('依需求列出十種交付格式，MP3 緊接 WAV，兩種 DMPES 碼率獨立', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-format')).not.toBeNull());
     expect([...document.querySelector('.ev-format').options].map(option => option.textContent)).toEqual([
-      'ProRes422HQ-MOV', 'H264-MP4', 'WAV', 'DVD-ISO (4.5G)', 'BD-ISO (24G)', 'MOD-FHD',
+      'ProRes422HQ-MOV', 'H264-MP4', 'WAV', 'MP3', 'DVD-ISO (4.5G)', 'BD-ISO (24G)', 'MOD-FHD',
       '航空-DMPES-H264-1.5M (立體聲)', '航空-DMPES-H264-4M (立體聲)', '航空-exW-H264-500K (立體聲)',
     ]);
   });
@@ -568,7 +568,7 @@ describe('匯出交付清單', () => {
     expect(document.querySelector('.ev-outdir')?.value).toBe('');
   });
 
-  it('WAV 列仍可設定音軌，並顯示實際輸出範圍的時長', async () => {
+  it.each(['wav','mp3'])('%s 列仍可設定音軌，隱藏所有影像選項並顯示實際輸出範圍的時長', async formatName => {
     await showExportVideoDialog();
     await new Promise(resolve => setTimeout(resolve, 25));
 
@@ -578,8 +578,10 @@ describe('匯出交付清單', () => {
     expect(duration?.textContent).not.toContain('00:15:00:00');
 
     const format = document.querySelector('.ev-format');
-    format.value = 'wav';
+    format.value = formatName;
     format.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(document.querySelector('.ev-res,.ev-fps,.ev-tc,.ev-kbps,.ev-chapter-notes,.delivery-sub-chip')).toBeNull();
+    expect(document.querySelector('.ev-name').value.endsWith('.'+formatName)).toBe(true);
 
     const audioButton = document.querySelector('.ev-audio-btn');
     expect(audioButton).not.toBeNull();
@@ -590,7 +592,7 @@ describe('匯出交付清單', () => {
         buses: State.audioProject.buses,
         streams: State.audioProject.exportLayout.streams,
       }),
-      expect.any(Function), { deliveryFormat: 'wav' }
+      expect.any(Function), { deliveryFormat: formatName }
     );
     // 交付列的設定視窗只拿深複製草稿，不暫時覆寫正在播放專案的 State。
     expect(State.audioProject.buses).toHaveLength(2);

@@ -371,7 +371,7 @@ export const Wave = {
     // A lane can contain several mother files. Keep its existing waveforms until
     // every requested result is ready, then commit the still-owned intents together.
     const requests=unique.map(source=>this._prepareVocalSelection(source));
-    emit('media:timeline');
+    emit('media:waveform',{controls:true});
     return Promise.all(requests.map(request=>request?.promise)).then(async()=>{
       const remembered=[];
       if(requests.every(request=>this._ownsVocalIntent(request)&&request.state.vocals.peaks)){
@@ -379,12 +379,12 @@ export const Wave = {
       }else{
         for(const request of requests) if(this._ownsVocalIntent(request)) this._cancelSourceVocals(request.state);
       }
-      emit('media:timeline');
+      emit('media:waveform',{controls:true});
       await Promise.all(remembered);
       return unique.map(source=>this.getSourceWaveSelection(source));
     }).catch(error=>{
       for(const request of requests) if(this._ownsVocalIntent(request)) this._cancelSourceVocals(request.state);
-      emit('media:timeline');
+      emit('media:waveform',{controls:true});
       throw error;
     });
   },
@@ -408,7 +408,7 @@ export const Wave = {
           const peaks=await this._loadPcmMix(entry.path,owns);
           if(!owns())return null;
           entry.peaks=peaks;
-          emit('media:timeline');
+          emit('media:waveform',{controls:true});
           return peaks;
         }
         const url=await DESK.fileURL(entry.path);
@@ -428,7 +428,7 @@ export const Wave = {
         if(!owns()) return null;
         entry.peaks=peaks;
         if(key==='mix'&&peaks) this.setSourceMixPeaks(source,peaks,{mixPath:entry.path});
-        emit('media:timeline');
+        emit('media:waveform',{controls:true});
         return peaks;
       }catch(error){
         if(!owns()) return null;
@@ -497,7 +497,7 @@ export const Wave = {
         state.vocals.label='已讀取人聲波形快取';
         state.originalSelection=state.selection||'mix';
         state.selection='vocals';
-        emit('media:timeline');
+        emit('media:waveform',{controls:true});
       }catch{/* A missing or unreadable cache must keep the original waveform usable. */}
       finally{if(state.vocalRestore===restore) state.vocalRestore=null;}
     })();
@@ -560,7 +560,7 @@ export const Wave = {
             if(!owns()) return;
             entry.percent=Math.min(100,Math.max(0,Math.round(Number(percent)||0)));
             entry.label=label||'分離人聲';
-            emit('media:timeline');
+            emit('media:waveform',{controls:true});
           }
         });
         if(!owns()) return null;
@@ -568,19 +568,19 @@ export const Wave = {
         entry.peaks=peaks;
         entry.percent=100;
         entry.label=entry.label.includes('快取')?'已讀取人聲波形快取':'人聲波形已完成';
-        emit('media:timeline');
+        emit('media:waveform',{controls:true});
         return peaks;
       }catch(error){
         if(!owns()) return null;
         entry.error=error;
         state.selection=state.originalSelection||'mix';
-        emit('media:timeline');
+        emit('media:waveform',{controls:true});
         throw error;
       }finally{
         if(entry.loading===promise){
           entry.loading=null;
           entry.controller=null;
-          emit('media:timeline');
+          emit('media:waveform',{controls:true});
         }
       }
     })();
@@ -608,16 +608,16 @@ export const Wave = {
     const next=this._normaliseSelection(selection);
     if(next==='vocals'){
       const request=this._prepareVocalSelection(source);
-      emit('media:timeline');
+      emit('media:waveform',{controls:true});
       return request.promise.then(async()=>{
         const remembered=this._commitVocalSelection(request);
         if(this._ownsVocalIntent(request)) state.vocalIntent=null;
-        emit('media:timeline');
+        emit('media:waveform',{controls:true});
         await remembered;
         return state.selection;
       }).catch(error=>{
         if(this._ownsVocalIntent(request)) state.vocalIntent=null;
-        emit('media:timeline');
+        emit('media:waveform',{controls:true});
         throw error;
       });
     }
@@ -628,7 +628,7 @@ export const Wave = {
     void this._rememberVocalSelection(source,state,state.selection==='vocals');
     // 立即重繪 MIX／已快取聲道；尚未解碼的單聲道會在背景載入後再重繪。
     this.getSourceWaveform(source);
-    emit('media:timeline');
+    emit('media:waveform',{controls:true});
     return state.selection;
   },
   forgetSourceWaveforms(source){
@@ -660,7 +660,7 @@ export const Wave = {
       this.setSourceWaveSelection(src.sourceKey||src.sourceId,src.kind==='channel'
         ? this._channelKey(src.sourceStream||0,src.sourceChannel||0) : 'mix');
     }
-    if(src.peaks){ this.peaks=src.peaks; emit('media:timeline'); return; }
+    if(src.peaks){ this.peaks=src.peaks; emit('media:waveform',{controls:true}); return; }
     if(!DESK||!AudioEngine.isReady) return;
     const generation=this._generation;
     const owns=()=>this._generation===generation&&this.srcIdx===idx&&this.sources[idx]===src;
@@ -677,7 +677,7 @@ export const Wave = {
       if(!owns()) return;
       this.live=false; this.peaks=peaks;
       src.peaks=peaks;
-      emit('media:timeline');
+      emit('media:waveform',{controls:true});
     }catch(e){ if(owns()) console.warn('wave selectSource',e); }
   },
   clearSources({keep=[]}={}){
@@ -708,7 +708,7 @@ export const Wave = {
     if(source&&typeof source==='object') Media.recomputeTimelineDuration?.();
     else if(ab.duration>State.duration){State.duration=ab.duration;emit('duration:known');}
     if(!sourceIsCurrent()) return false;
-    this.setSourceBuffer(currentSource(),ab); emit('media:timeline');
+    this.setSourceBuffer(currentSource(),ab); emit('media:waveform',{controls:true});
     setMediaProcessingStatus('波形已產生','ok');
     return true;
   },
@@ -720,7 +720,7 @@ export const Wave = {
     this.peaks=new Float32Array(len*2); this.live=true;
     // 這裡只初始化主播放器的即時波形；其他仍在時間軸上的來源不隨之重設。
     this.clearSources({keep:[...State.clips,...Media.externalAudioSources]});
-    emit('media:timeline');
+    emit('media:waveform',{controls:true});
     if(!Media.audioPanelState().notice&&!Media.audioPanelState().extraction) $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
   },
   captureLive(){ // 由 rafLoop 於播放時呼叫

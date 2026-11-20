@@ -927,7 +927,7 @@ describe('匯出佇列監控緊湊工作區', () => {
       { format: 'h264', targetH: 720, kbps: 3000, burnTimecode: false });
   });
 
-  it('交付編輯器：WAV 隱藏解析度與碼率，且不送 kbps', async () => {
+  it.each(['wav','mp3'])('交付編輯器：%s 隱藏影片選項，且不送視訊碼率', async format => {
     const jobs = [{
       id: 'q1', status: 'queued',
       payload: { outPath: 'C:\\out\\a.mp4', format: 'h264', width: 1920, height: 1080, targetH: 0, videoKbps: 8000 }
@@ -938,7 +938,8 @@ describe('匯出佇列監控緊湊工作區', () => {
     const box = row.querySelector('.job-editor');
 
     const fmt = box.querySelector('[data-f="format"]');
-    fmt.value = 'wav';
+    expect([...fmt.options].map(option=>option.value).slice(2,4)).toEqual(['wav','mp3']);
+    fmt.value = format;
     fmt.dispatchEvent(new document.defaultView.Event('change'));
 
     expect(box.querySelector('[data-only="video"]').hidden).toBe(true);
@@ -947,7 +948,7 @@ describe('匯出佇列監控緊湊工作區', () => {
     box.querySelector('[data-f="save"]').click();
     await new Promise(r => setTimeout(r, 0));
     // WAV 沒有視訊碼率，不可以送 kbps
-    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1', { format: 'wav', targetH: 0 });
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1', { format, targetH: 0 });
   });
 
   it('自訂高度等於 720p 預設時仍可重開寬高欄位，修改寬度後獨立送出', async () => {
@@ -1043,7 +1044,7 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(queueAPI.updateDelivery).toHaveBeenCalledWith('disc', { format, targetH: height, burnTimecode: false });
   });
 
-  it('九種格式工作均使用交付清單的完整名稱', async () => {
+  it('各格式工作均使用交付清單的完整名稱', async () => {
     const { document } = await openQueueWindow(deliveryFormats.DELIVERY_FORMAT_OPTIONS.map(option => ({
       id: option.format, status: 'queued', payload: { format: option.format, outPath: `C:/out/file${option.extension}` },
     })));

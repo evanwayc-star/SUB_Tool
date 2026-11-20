@@ -16,7 +16,7 @@ const {
 
 function deliverySpec(format) {
   return { format, width: 640, height: 360, fps: 29.97, duration: 1, videoKbps: 5000,
-    outPath: 'delivery.out', clips: format === 'wav' ? [] : [{ path: 'master.mov', type: 'video',
+    outPath: 'delivery.out', clips: ['wav', 'mp3'].includes(format) ? [] : [{ path: 'master.mov', type: 'video',
       in: 0, out: 1, offset: 0, natW: 640, natH: 360 }],
     audioPlan: { buses: ['left', 'right'].map(id => ({ id, inputs: [{ file: 'master.mov',
       trimStart: 0, trimEnd: 1, sourceStream: 0, sourceChannel: 0 }] })),
@@ -52,6 +52,7 @@ describe('交付 native 能力的公開 interface', () => {
     ['h264', ['v:libx264', 'a:aac'], []],
     ['prores', ['v:prores_ks', 'a:pcm_s24le'], []],
     ['wav', ['a:pcm_s24le'], []],
+    ['mp3', ['a:libmp3lame'], []],
     ['mod-fhd', ['v:libx264', 'a:aac'], []],
     ['airline-exw', ['v:libx264', 'a:aac'], []],
     ['airline-dmpes', ['v:libx264', 'a:aac_mf'], []],

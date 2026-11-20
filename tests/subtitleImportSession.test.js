@@ -51,20 +51,41 @@ describe('字幕匯入工作歸屬',()=>{
   it('拖入部分缺時間碼 TXT，確認前指出問題行，匯入後原文和未定時狀態均保留',async()=>{
     State.mediaName='video.mov';State.fps=24;
     const request=subio.importDropped({name:'部分少時間碼.txt'});
-    workflow.reads.get('部分少時間碼.txt')(bytes('開頭沒有時間碼\n00:00:01:00 00:00:02:00 正常\n00:00:03:24 00:00:04:00 無效影格'));
+    workflow.reads.get('部分少時間碼.txt')(bytes('開頭沒有時間碼\n00:00:01:00 00:00:02:00 正常\n00:00:03:25 00:00:04:00 無效影格\n00:00:55:24 00:00:57:00 進位句'));
     await request;
     const warnings=document.getElementById('subtitleImportIssues');
     expect(warnings?.textContent).toContain('第 1 行');
     expect(warnings?.textContent).toContain('第 3 行');
+    expect(warnings?.textContent).not.toContain('第 4 行');
     expect(warnings?.textContent).toContain('未定時');
     document.querySelector('#modalFoot button.primary').click();
     expect(State.cues.map(({text,timed})=>({text,timed}))).toEqual([
-      {text:'開頭沒有時間碼',timed:false},{text:'正常',timed:true},{text:'無效影格',timed:false},
+      {text:'開頭沒有時間碼',timed:false},{text:'正常',timed:true},{text:'無效影格',timed:false},{text:'進位句',timed:true},
     ]);
     expect(workflow.record).toHaveBeenCalledOnce();
     const text=Buffer.from(fileData('encore',State.cues).content,'base64').subarray(2).toString('utf16le');
     expect(text).toContain('--:--:--:-- --:--:--:-- 開頭沒有時間碼');
+    expect(text).toContain('00:00:56:00 00:00:57:00 進位句');
     expect(document.getElementById('toast').textContent).toContain('2 處需檢查');
+  });
+
+  it('拖入含 Tab 簡寫的 UTF-16LE TXT，保留三句順序並匯出空白起訖時間碼', async () => {
+    State.mediaName = 'video.mov';
+    State.fps = 24;
+    const first = '00:07:04:10 00:07:08:03 有時間碼的前句';
+    const last = '00:07:08:23 00:07:10:07 有時間碼的後句';
+    const fixture = Buffer.from('\uFEFF' + [first, '\t保留 句中空格 ', last].join('\r\n'), 'utf16le');
+    const request = subio.importDropped({name: 'tab-cues.txt'});
+    workflow.reads.get('tab-cues.txt')(Uint8Array.from(fixture).buffer);
+    await request;
+    expect(document.getElementById('modalTitle').textContent).toContain('3 條');
+    expect(document.getElementById('subtitleImportIssues')).toBeNull();
+    document.querySelector('#modalFoot button.primary').click();
+    expect(State.cues.map(({text, timed}) => [text, timed])).toEqual([
+      ['有時間碼的前句', true], ['保留 句中空格', false], ['有時間碼的後句', true],
+    ]);
+    const exported = Buffer.from(fileData('encore', State.cues).content, 'base64').subarray(2).toString('utf16le');
+    expect(exported.trimEnd().split('\r\n')).toEqual([first, '--:--:--:-- --:--:--:-- 保留 句中空格', last]);
   });
 
   it.each(['new','0'].flatMap(target=>

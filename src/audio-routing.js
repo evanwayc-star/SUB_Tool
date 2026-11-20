@@ -34,6 +34,7 @@ import { renderAudioTracks } from './mixer.js';
 import { escapeHTML } from './util.js';
 import { emit, on } from './events.js';
 import { History } from './history.js';
+import { deliveryPresetAudioProblem, normalizeDeliveryPresetAudio } from '../shared/delivery-formats.cjs';
 import { openModal, closeModal, showToast } from './ui.js';
 import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-engine.js';
 
@@ -251,13 +252,14 @@ function outputRowHtml(stream,index,buses=project().buses,delivery=false){
   const width=layoutWidth(layout);
   const firstId=stream.busIds?.[0]||'';
   const starts=buses.map((bus,busIndex)=>({bus,busIndex})).filter(({busIndex})=>busIndex+width<=buses.length);
-  const layoutOpts=Object.entries(LAYOUTS).map(([id,info])=>`<option value="${id}" ${id===layout?'selected':''}>${info.label}</option>`).join('');
+  const layoutOpts=Object.entries(LAYOUTS).filter(([id])=>id!=='stereoLtRt'||layout===id)
+    .map(([id,info])=>`<option value="${id}" ${id===layout?'selected':''}>${info.label}</option>`).join('');
   const busOpts=['<option value="">— 未指定 —</option>',...starts.map(({bus,busIndex})=>{
     const end=buses[busIndex+width-1];
     const label=width===1?busName(bus,busIndex):`${busName(bus,busIndex)} – ${busName(end,busIndex+width-1)}`;
     return `<option value="${escapeHTML(bus.id)}" ${String(bus.id)===String(firstId)?'selected':''}>${escapeHTML(label)}</option>`;
   })].join('');
-  const channelNames=layout==='stereo'?['左聲道 L','右聲道 R']:layout==='5.1'?['左 L','右 R','中央 C','低頻 LFE','左環繞 Ls','右環繞 Rs']:['單聲道'];
+  const channelNames=layout==='stereo'?['左聲道 L','右聲道 R']:layout==='stereoLtRt'?['左聲道 Lt','右聲道 Rt']:layout==='5.1'?['左 L','右 R','中央 C','低頻 LFE','左環繞 Ls','右環繞 Rs']:['單聲道'];
   const assignments=delivery?`<div class="audio-output-channels">${channelNames.map((name,channel)=>{
     const selected=String(stream.busIds?.[channel]||'');
     const options=['<option value="">— 未指定 —</option>',...buses.map((bus,busIndex)=>
@@ -296,6 +298,7 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
     :active?.closest('.audio-output-dialog')&&active.id?{id:active.id}:null);
   const p=editor.current();
   const wavDelivery=deliveryFormat==='wav';
+  const mp3Delivery=deliveryFormat==='mp3';
   const streams=p.exportLayout.streams;
   const rows=streams.map((stream,index)=>outputRowHtml(stream,index,p.buses,delivery)).join('')||'<tr><td colspan="4" class="audio-route-empty">尚無可輸出的專案音訊軌。</td></tr>';
   const presetButtons=DELIVERY_PRESETS.map(preset=>{
@@ -308,11 +311,14 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
     }
     return btn;
   }).join('');
-  const outputHelp=wavDelivery
+  const outputHelp=mp3Delivery ? '選擇一組音軌輸出 MP3。單聲道保留 Mono，Stereo 或 Lt/Rt 保留左右聲道，5.1 會混為 Stereo。' : wavDelivery
     ? '從主專案選擇這份 WAV 要輸出的音軌，依群組及聲道順序寫入同一個多聲道 WAV；只影響這份輸出。'
     : delivery?'從主專案選擇這份檔案要輸出的音軌。Stereo 的左、右聲道可各自指定任意 A 軌；只影響這份輸出。'
       :'設定主專案的 A 軌數量與預設輸出編組。每份輸出檔案可以另行選擇要使用的音軌。';
-  const modalSession=openRoutingModal(editor,delivery?(wavDelivery?'WAV 輸出音軌設定':'輸出檔案音軌設定'):'主專案音軌設定',
+  const chooseMp3Stream=mp3Delivery && streams.length>1 ? `<label class="audio-bus-count">選擇一組輸出音軌
+    <select id="audioMp3Stream"><option value="">選擇音軌組合…</option>${streams.map((stream,i)=>
+      `<option value="${escapeHTML(stream.id)}">${i+1} · ${escapeHTML(stream.name||LAYOUTS[stream.layout]?.label||stream.layout)}</option>`).join('')}</select></label>` : '';
+  const modalSession=openRoutingModal(editor,delivery?(mp3Delivery?'MP3 輸出音軌設定':wavDelivery?'WAV 輸出音軌設定':'輸出檔案音軌設定'):'主專案音軌設定',
     `<div class="audio-output-dialog">
       <div class="audio-route-help">${outputHelp}</div>
       ${delivery?`<div class="audio-bus-count">主專案可用音軌：<strong>${p.buses.length}</strong></div>`:`<div class="audio-bus-count"><label>專案音訊軌數
@@ -326,13 +332,16 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
         <button class="audio-output-count-preset" type="button" data-count="16">16</button>
         <button class="audio-output-count-preset" type="button" data-count="18">18</button>
       </div>`}
-      <div class="audio-delivery-presets"><span>${delivery?'輸出配置':'預設輸出配置'}</span><button id="audioOutputAllMono" type="button">全部專案音軌（Mono）</button>${presetButtons}</div>
+      ${mp3Delivery ? chooseMp3Stream : `<div class="audio-delivery-presets"><span>${delivery?'輸出配置':'預設輸出配置'}</span><button id="audioOutputAllMono" type="button">全部專案音軌（Mono）</button>${presetButtons}</div>`}
       <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>${wavDelivery?'WAV 聲道群組':'輸出音軌'}</th><th>聲道格式</th><th>${delivery?'輸出聲道 ← 專案音軌':'專案音軌'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="audio-output-actions"><button id="audioOutputAdd" type="button">新增${wavDelivery?' WAV 聲道群組':'輸出音軌'}</button></div>
+      ${mp3Delivery ? '' : `<div class="audio-output-actions"><button id="audioOutputAdd" type="button">新增${wavDelivery?' WAV 聲道群組':'輸出音軌'}</button></div>`}
     </div>`,
     [{label:'儲存輸出設定',primary:true,act:()=>{
       const current=editor.current();
-      editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
+      const streams=outputStreamsFromDialog(current.buses,current.exportLayout.streams);
+      const problem=mp3Delivery && deliveryPresetAudioProblem('mp3',{streams});
+      if(problem){ showToast(problem); return; }
+      editor.setStreams(streams);
       const result=editor.commit();
       if(!result.saved){ showToast(result.error); return; }
       closeModal({committed:true});
@@ -355,6 +364,14 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
       openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
     };
     const countInput=document.getElementById('audioOutputBusCount');
+    document.getElementById('audioMp3Stream')?.addEventListener('change',event=>{
+      if(event.target.value==='') return;
+      const current=editor.current();
+      const stream=outputStreamsFromDialog(current.buses,current.exportLayout.streams).find(item=>item.id===event.target.value);
+      if(!stream) return;
+      editor.setStreams([stream]);
+      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery,focusTarget:{streamId:stream.id,selector:'.audio-output-layout'}});
+    });
     document.getElementById('audioOutputBusApply')?.addEventListener('click',()=>{
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
@@ -396,6 +413,11 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
       row?.remove();
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
+      if(mp3Delivery){
+        openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery,
+          focusTarget:{streamId:(rows[index+1]||rows[index-1])?.dataset.streamId,selector:'.audio-output-layout'}});
+        return;
+      }
       document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]').forEach((streamRow,index)=>{
         const numberCell=streamRow.querySelector('.audio-output-index');
         if(numberCell) numberCell.textContent=String(index+1);
@@ -423,6 +445,7 @@ function openOutputSettings(){
 }
 function openDeliveryOutputSettings(spec,onBack=null,{deliveryFormat=null}={}){
   activeProjectEditor?.dismiss();
+  if(deliveryFormat==='mp3') spec=normalizeDeliveryPresetAudio('mp3',spec);
   openOutputSettingsEditor(AudioRoutingModel.editDelivery(spec,{wav:deliveryFormat==='wav'}),onBack,{deliveryFormat,delivery:true});
 }
 

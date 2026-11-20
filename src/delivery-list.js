@@ -27,7 +27,7 @@
      一份。MOD-FHD 的固定規格則由 shared/delivery-formats.cjs 提供。
 ============================================================================== */
 import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { getDeliveryFormatPreset, getDeliveryFormatOption, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
+import { getDeliveryFormatPreset, getDeliveryFormatOption, isAudioDeliveryFormat, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight, validCustomDeliverySize } from '../shared/delivery-resolution.cjs';
 import { supportsDeliveryChapters } from '../shared/delivery-chapters.cjs';
 
@@ -70,15 +70,20 @@ function audioTagFrom(audioPlan) {
 export function defaultDeliveryName({ projectTag, fps, format, targetW, targetH, audioPlan, burnTimecode }) {
   const ext = extensionFor(format);
   const preset = getDeliveryFormatPreset(format);
-  const tcTag = burnTimecode ? '_TC' : '';
+  const audioOnly = isAudioDeliveryFormat(format);
+  const tcTag = burnTimecode && !audioOnly ? '_TC' : '';
   if (preset) {
     const mode = format === 'bd-iso' ? bdVideoMode(fps) || preset : preset;
     return `ST_${projectTag}_${preset.fileLabel || preset.label}_${mode.height}${mode.scan === 'interlaced' ? 'i' : 'p'}_${mode.fps}fps${tcTag}${ext}`;
   }
-  const isWav = format === 'wav';
   let tag = '';
-  if (!isWav && targetH > 0) tag = targetW > 0 ? `_${targetW}x${targetH}` : `_${targetH}p`;
-  return `ST_${projectTag}_${normalizeDeliveryFrameRate(fps)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
+  if (!audioOnly && targetH > 0) tag = targetW > 0 ? `_${targetW}x${targetH}` : `_${targetH}p`;
+  let audioTag = audioTagFrom(audioPlan);
+  if (format === 'mp3') {
+    const plan = normalizeDeliveryPresetAudio(format, audioPlan);
+    audioTag = deliveryPresetAudioProblem(format, plan) ? '' : plan.streams[0].layout === 'mono' ? '_Mono' : '_Stereo';
+  }
+  return `ST_${projectTag}_${normalizeDeliveryFrameRate(fps)}fps${audioTag}${tag}${tcTag}${ext}`;
 }
 
 /* 交付規格派生、解析度與建議碼率的規則住在 `shared/delivery-resolution.cjs`——
@@ -118,7 +123,7 @@ function newRow({ audioOnly, defaultAudioLayout, outDir = '' }) {
 
 function applyFormatPreset(row, projectFps) {
   const preset = getDeliveryFormatPreset(row.format);
-  if (preset || row.format === 'wav') delete row.targetW;
+  if (preset) delete row.targetW;
   if (preset) {
     const mode = row.format === 'bd-iso'
       ? availableBdVideoModes(projectFps).find(item => item.fps === row.targetFps) || availableBdVideoModes(projectFps)[0]
@@ -132,7 +137,7 @@ function applyFormatPreset(row, projectFps) {
 }
 
 function invalidCustomSize(row) {
-  return row.targetW != null && !validCustomDeliverySize(row.targetW, row.targetH);
+  return !isAudioDeliveryFormat(row.format) && row.targetW != null && !validCustomDeliverySize(row.targetW, row.targetH);
 }
 
 const customSizeError = '自訂寬度與高度請輸入 16 至 8192 的偶數，總像素最多為 8192 × 4320。';
@@ -145,7 +150,7 @@ const customSizeError = '自訂寬度與高度請輸入 16 至 8192 的偶數，
  * @param {number} o.fps               專案 fps
  * @param {number} o.canvasW           專案畫布寬
  * @param {number} o.canvasH           專案畫布高
- * @param {boolean} o.audioOnly        序列內沒有影像 → 只能出 WAV
+ * @param {boolean} o.audioOnly        序列內沒有影像時預設使用 WAV
  * @param {object} o.defaultAudioLayout 新列的預設輸出編組
  * @param {boolean} o.desktop          桌面版才需要輸出目錄
  * @param {Array}  [o.initial]         既有的列（從音軌設定視窗折返時帶回來）
@@ -166,7 +171,7 @@ export function createDeliveryList({
     : [newRow({ audioOnly, defaultAudioLayout })];
 
   const nameFor = r => defaultDeliveryName({
-    projectTag, fps: r.format === 'wav' ? fps : normalizeDeliveryFrameRate(r.targetFps, fps || 25), format: r.format, targetW: r.targetW, targetH: r.targetH, audioPlan: r.audioPlan, burnTimecode: r.burnTimecode
+    projectTag, fps: isAudioDeliveryFormat(r.format) ? fps : normalizeDeliveryFrameRate(r.targetFps, fps || 25), format: r.format, targetW: r.targetW, targetH: r.targetH, audioPlan: r.audioPlan, burnTimecode: r.burnTimecode
   });
 
   /* 使用者沒有自己改過名字的列，要跟著格式／解析度／編組變動重新產生。
@@ -249,7 +254,7 @@ export function createDeliveryList({
 
     setCustomResolution(i, width, height) {
       const r = at(i);
-      if (!r || r.format === 'wav' || getDeliveryFormatPreset(r.format)) return;
+      if (!r || isAudioDeliveryFormat(r.format) || getDeliveryFormatPreset(r.format)) return;
       if (r.targetW === width && r.targetH === height) return;
       // 留下未輸入的欄位，讓送出驗證指出問題；清空不代表切回專案畫布。
       r.targetW = Number.isFinite(width) ? width : '';
@@ -373,14 +378,14 @@ export function createDeliveryList({
     toJobs({ clips, videoTracks, duration, assText, subtitleTracks, timelineStartTimecode, timecodeForFps, composeAudioPlan, compiledAudioPlan, chaptersForRow }) {
       return rows.map(r => {
         if (invalidCustomSize(r)) throw new Error(customSizeError);
-        const isWav = r.format === 'wav';
+        const audioDelivery = isAudioDeliveryFormat(r.format);
         const preset = getDeliveryFormatPreset(r.format);
         // FPS-SYNC：固定格式以規格的 FPS 換算 TC，專案時間軸的秒數不變。
         const outputFps = (preset && r.format !== 'bd-iso' ? preset.fps : null)
-          || normalizeDeliveryFrameRate(isWav ? fps : r.targetFps, normalizeDeliveryFrameRate(fps));
+          || normalizeDeliveryFrameRate(audioDelivery ? fps : r.targetFps, normalizeDeliveryFrameRate(fps));
         const startTimecode = timecodeForFps ? timecodeForFps(outputFps) : timelineStartTimecode;
         const spec = deriveDeliverySpec({
-          format: r.format, preset, canvasW, canvasH, targetW: r.targetW, targetH: r.targetH, projectFps: fps,
+          format: r.format, preset, canvasW, canvasH, targetW: audioDelivery ? undefined : r.targetW, targetH: audioDelivery ? 0 : r.targetH, projectFps: fps,
           bdMode: r.format === 'bd-iso' ? bdVideoMode(outputFps) : null,
           fps: outputFps, videoKbps: r.kbps,
           burnTimecode: r.burnTimecode, timecodeStart: startTimecode,

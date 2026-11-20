@@ -21,6 +21,7 @@ const { artifactProgress, isDiscOutput } = require('./export-artifact');
 const discTools = require('./disc-tools.json');
 const { nativeDiscPaths } = require('./disc-authoring');
 const { buildDeliveryArgv } = require('./export-plan');
+const { isAudioDeliveryFormat } = require('../shared/delivery-formats.cjs');
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
@@ -240,15 +241,17 @@ function createDeliveryCapabilities(options = {}) {
       if (type) required.set(`${type[1]}:${plan.args[index + 1]}`, { type: type[1], name: plan.args[index + 1] });
     }
     if (!Array.from(required.values()).some(codec => codec.type === 'a')
-      || (spec.format !== 'wav' && !Array.from(required.values()).some(codec => codec.type === 'v'))) {
+      || (!isAudioDeliveryFormat(spec.format) && !Array.from(required.values()).some(codec => codec.type === 'v'))) {
       throw fail('DELIVERY_ENCODER_UNAVAILABLE', '交付計畫缺少明確的影音編碼器');
     }
     for (const { type, name } of required.values()) {
       const video = type === 'v';
       const args = ['-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1', '-f', 'lavfi', '-i',
-        video ? 'color=black:s=320x240:r=30:d=0.1' : 'anullsrc=r=48000:cl=stereo',
+        video ? 'color=black:s=320x240:r=30:d=0.1'
+          : `anullsrc=r=48000:cl=${spec.format === 'mp3' && plan.audioChannels === 1 ? 'mono' : 'stereo'}`,
         '-t', '0.1', `-c:${type}`, name,
         ...(video ? ['-an', '-pix_fmt', /^prores/.test(name) ? 'yuv422p10le' : 'yuv420p'] : ['-vn']),
+        ...(spec.format === 'mp3' ? ['-b:a', plan.audioBitrates[0]] : []),
         '-f', 'null', '-'];
       await probe(ffmpeg, args, {
         signal, code: 'DELIVERY_ENCODER_UNAVAILABLE', label: `此交付的編碼器不可用（${name}）`,

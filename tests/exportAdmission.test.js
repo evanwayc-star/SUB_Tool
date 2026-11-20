@@ -21,7 +21,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { createExportAdmission } = require(path.join(ROOT, 'electron/export-queue.js'));
 const { expectedExportExtension } = require(path.join(ROOT, 'electron/ipc-guards.js'));
 
-const EXT = { h264: 'mp4', prores: 'mov', wav: 'wav', 'mod-fhd': 'ts', 'airline-exw': 'mpg', 'airline-dmpes': 'mpg' };
+const EXT = { h264: 'mp4', prores: 'mov', wav: 'wav', mp3: 'mp3', 'mod-fhd': 'ts', 'airline-exw': 'mpg', 'airline-dmpes': 'mpg' };
 
 /* 預設全部放行，測哪一條就只關哪一條——才不會因為別的規則先擋下來而假綠。 */
 function make(overrides = {}) {
@@ -51,6 +51,7 @@ describe('輸出副檔名必須與 format 一致', () => {
     ['h264', 'D:/out/a.mp4'],
     ['prores', 'D:/out/a.mov'],
     ['wav', 'D:/out/a.wav'],
+    ['mp3', 'D:/out/a.mp3'],
     ['mod-fhd', 'D:/out/a.ts'],
     ['airline-exw', 'D:/out/a.mpg'],
     ['airline-dmpes', 'D:/out/a.mpg'],

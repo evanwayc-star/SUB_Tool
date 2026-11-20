@@ -46,7 +46,7 @@ Windows 桌面版可先播放母素材，背景優先產生並逐步顯示波形
 
 ![背景匯出佇列，畫面為示範工作](docs/images/readme-export-queue.png)
 
-內建九種交付規格：ProRes422HQ-MOV、H264-MP4、WAV、DVD-ISO、BD-ISO、MOD-FHD，以及航空 DMPES 1.5M／4M 與 exW。字幕檔可另行匯出。
+交付格式包含 ProRes422HQ-MOV、H264-MP4、WAV、MP3、DVD-ISO、BD-ISO、MOD-FHD，以及航空 DMPES 1.5M／4M 與 exW。字幕檔可另行匯出。
 
 每份工作使用送出當下的快照，可查看進度、停止、重試與調整佇列順序。格式限制、聲道編組與燒入字幕設定見[影片與音訊交付](docs/使用說明.md#影片與音訊交付)。
 

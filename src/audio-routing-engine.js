@@ -208,6 +208,7 @@ export class MediaAudioRouter {
 export const LAYOUTS = {
   mono: { label: 'Mono', channels: 1 },
   stereo: { label: 'Stereo (L, R)', channels: 2 },
+  stereoLtRt: { label: 'Stereo (Lt, Rt)', channels: 2 },
   '5.1': { label: '5.1 (L, R, C, LFE, Ls, Rs)', channels: 6 }
 };
 export const MAX_AUDIO_BUSES = MAX_DELIVERY_AUDIO_BUSES;

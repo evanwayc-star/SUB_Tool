@@ -272,6 +272,25 @@ describe('delivery submission lifecycle through its production interface', () =>
     await expect(s.submission.submit()).resolves.toMatchObject({ status: 'submitted', accepted: 2, complete: true });
   });
 
+  it('同批 WAV 和 MP3 各自確認輸出路徑並保留同一組音軌', async () => {
+    const s = setup(['母帶', '試聽']);
+    const stereo = { layout: 'stereo', busIds: ['A1', 'A2'] };
+    s.project.audioPlan = { buses: [{ id: 'A1' }, { id: 'A2' }], streams: [stereo] };
+    for (const [index, format] of ['wav', 'mp3'].entries()) {
+      s.list.setFormat(index, format);
+      s.list.applyRow(index, { ...s.list.get(index), audioPlan: { streams: [stereo] } });
+    }
+    const paths = ['D:/交付/母帶.wav', 'D:/交付/試聽.mp3'];
+    s.desktop.prepareDeliveryTargets = vi.fn(async () => ({ id: 'audio-targets', existing: [paths[1]] }));
+
+    await expect(s.submission.submit()).resolves.toMatchObject({ status: 'submitted', accepted: 2, complete: true });
+    expect(s.desktop.prepareDeliveryTargets.mock.calls[0][0]).toEqual(paths);
+    expect(s.confirmOverwrite).toHaveBeenCalledWith([paths[1]]);
+    const jobs = s.desktop.exportVideo.mock.calls.map(([job]) => job);
+    expect(jobs.map(job => [job.format, job.outPath])).toEqual([['wav', paths[0]], ['mp3', paths[1]]]);
+    for (const job of jobs) expect(job.audioPlan.streams).toEqual([stereo]);
+  });
+
   it('失效的舊目錄檢查錯誤不得覆寫新預覽', async () => {
     const s = setup(['A.mp4']);
     let reject;

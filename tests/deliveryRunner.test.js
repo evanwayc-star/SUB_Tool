@@ -440,15 +440,15 @@ describe('delivery runner public interface', () => {
     expect(readdirSync(setup.tempDir)).toEqual([]);
     expect(setup.sent.at(-1)?.payload).toMatchObject(failure?{error:true}:{done:true});
   });
-  it.each(['wav', 'h264', 'prores', 'mod-fhd', 'airline-exw', 'airline-dmpes', 'airline-dmpes-4m', 'dvd-iso', 'bd-iso'])
+  it.each(['wav', 'mp3', 'h264', 'prores', 'mod-fhd', 'airline-exw', 'airline-dmpes', 'airline-dmpes-4m', 'dvd-iso', 'bd-iso'])
   ('%s 對 audioPlan 獨立母來源取得時鐘證據，交付不依賴來源出現在影片清單', async format => {
     const source = path.resolve('D:/external/delayed.mov');
     const hasAudio = vi.fn(async () => true), audioVideoStartOffsets = vi.fn(async file => file === source ? [1] : [0]);
     const f = make({ mediaProbe: () => ({ hasAudio, audioVideoStartOffsets, audioBitrates: vi.fn(async () => []) }) });
     const job = videoJob();
     job.payload = { ...job.payload, format, fps: 29.97, duration: 3,
-      clips: format === 'wav' ? [] : [{ ...job.payload.clips[0], out: 3 }],
-      outPath: 'D:/out/delivery.' + (format === 'wav' ? 'wav' : format === 'prores' ? 'mov' : /-iso$/.test(format) ? 'iso' : format === 'mod-fhd' ? 'ts' : format.startsWith('airline-') ? 'mpg' : 'mp4'),
+      clips: ['wav', 'mp3'].includes(format) ? [] : [{ ...job.payload.clips[0], out: 3 }],
+      outPath: 'D:/out/delivery.' + (['wav', 'mp3'].includes(format) ? format : format === 'prores' ? 'mov' : /-iso$/.test(format) ? 'iso' : format === 'mod-fhd' ? 'ts' : format.startsWith('airline-') ? 'mpg' : 'mp4'),
       audioPlan: { buses: ['left', 'right'].map(id => ({ id, inputs: [{ file: source, trimStart: 0, trimEnd: 3,
         sourceStream: 0, sourceChannel: 0 }] })), streams: [{ layout: 'stereo', busIds: ['left', 'right'] }] },
     };
@@ -458,6 +458,9 @@ describe('delivery runner public interface', () => {
     const args = f.runFfmpeg.mock.calls[0][0], graph = args[args.indexOf('-filter_complex') + 1];
     expect(graph).toContain('asetpts=PTS-STARTPTS+1.000000/TB,aresample=first_pts=0,atrim=');
     expect(f.queue.reportProgress).toHaveBeenLastCalledWith(job.id, expect.objectContaining({ done: true }));
+    if (format === 'mp3') expect(f.sent.at(-1).payload.result).toMatchObject({
+      encoder: 'libmp3lame', gpu: false, audioChannels: 2, audioBitrates: ['320k'], videoKbps: null,
+    });
   });
   it.skipIf(process.platform !== 'win32')('Windows 同母檔的大小寫別名只探測一次，音訊路由仍使用同一份開聲時間', async () => {
     const source = path.resolve('D:/source/Master.mov');

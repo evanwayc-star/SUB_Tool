@@ -42,7 +42,7 @@ import { autoBuildPreviewProxy, isLargeCanopusAvi } from './preview-proxy-policy
 
 const provisionalWaveform=createProvisionalSourceWaveform({
   jobs:MediaIntakeJobs,bridge:DESK,decode:(bytes,duration,options)=>Wave.calcSourceWaveformAsync(bytes,duration,options),
-  read:async url=>(await fetch(url)).arrayBuffer(),changed:()=>emit('media:timeline'),
+  read:async url=>(await fetch(url)).arrayBuffer(),changed:()=>emit('media:waveform'),
 });
 registerProvisionalSourceWaveform(provisionalWaveform);
 
@@ -177,7 +177,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
             // The waveform spans the mother source, not its trimmed placements.
             // Sequence, external audio and cues remain the timeline duration owner.
             ctx.recomputeTimelineDuration();
-            ctx._commitOriginalWave(primary,ab); emit('media:timeline');
+            ctx._commitOriginalWave(primary,ab); emit('media:waveform',{controls:true});
             setMediaProcessingStatus('波形已就緒','ok');
           }
           catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); setMediaProcessingStatus('播放時逐步產生波形','ok'); } }
@@ -280,7 +280,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       const ownsPrimary=()=>owns()&&primaryCurrent();
       if(provisional) void provisional.handoff(res.sourceKey,peaks=>{
         if(!ownsPrimary()||primary.peaks||Wave.getSourceMixPeaks(primary)) return false;
-        ctx._commitOriginalWave(primary,peaks,{mixPath:null});emit('media:timeline');
+        ctx._commitOriginalWave(primary,peaks,{mixPath:null});emit('media:waveform',{controls:true});
         return true;
       }).then(adopted=>{if(adopted&&ownsPrimary())void ctx._prepareSourceWaveform(primary,p,audio,dur,ownsPrimary);})
         .catch(error=>{if(ownsPrimary())console.warn('來源波形交接失敗:',error);});
@@ -337,7 +337,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
             if(ownsPrimary()){
               const pk=await Wave.calcFromWavAsync(buf,0,{owns:ownsPrimary});
               if(!ownsPrimary())return;
-              if(pk){ self._commitOriginalWave(primary,pk,{mixPath:r.wave,channels:chs}); emit('media:timeline'); }
+              if(pk){ self._commitOriginalWave(primary,pk,{mixPath:r.wave,channels:chs}); emit('media:waveform',{controls:true}); }
               else Wave.initLive();
             }
           }catch(e2){ console.warn('wave',e2); if(ownsPrimary()) Wave.initLive(); }
@@ -401,7 +401,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         adoptedWaveform=await provisional.handoff(sourceKey,peaks=>{
           if(!ownsPrimary()||primary.peaks||Wave.getSourceMixPeaks(primary))return false;
           ctx._commitOriginalWave(primary,peaks,{mixPath:res.wave||null,channels:res.channels||[]});
-          emit('media:timeline');return true;
+          emit('media:waveform',{controls:true});return true;
         });
       }
     if(!ownsPrimary())return;
@@ -453,7 +453,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
           if(!ownsPrimary())return;
           if(pk) ctx._commitOriginalWave(primary,pk,{mixPath:res.wave,channels:chs});
           else Wave.initLive();
-          emit('media:timeline');
+          emit('media:waveform',{controls:true});
         }
         catch(e){ if(ownsPrimary()){ console.warn('wave',e); Wave.initLive(); setMediaProcessingStatus('播放時逐步產生波形','ok'); } }
       } else if(ownsPrimary()&&!adoptedWaveform) Wave.initLive();

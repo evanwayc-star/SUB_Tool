@@ -95,6 +95,9 @@ function notify(kind, index, field, phase, selectionChanged = false){
     if (kind === 'subtitle') emit('mpv:refreshSubs');
   }
   if (kind === 'subtitle' && field === 'name') emit('render:listTrackSel');
+  if (kind === 'subtitle' && index === State.listTrack && (field === 'locked' || field === 'name')) {
+    emit('render:checkPanel');
+  }
   if (selectionChanged) emit('render:all');
 }
 

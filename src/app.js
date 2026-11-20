@@ -457,12 +457,12 @@ function initUI(){
     StylePanelController.bindStylePanelEvents({ renderAll, renderVideoSub, refreshMpvSubs, drawTimeline, refreshStyleSummaries, initPresetLibrary: () => { syncPresetDraft = initPresetLibrary({ styleChanged }); }, styleChanged });
   ;
   // 字幕檢查：字數上限輸入
-  $('cpLenInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
+  $('cpLenInput').addEventListener('input',renderCheckPanel);
   $('cpLenInput').addEventListener('keydown',e=>{if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation();});
   // 全域數值輸入框滾輪微調：每個欄位遵守自己的 step（行距＝0.1、字距＝0.5）。
   bindNumberInputWheel(document);
   // 字幕檢查：包含文字輸入
-  $('cpContainsInput').addEventListener('input',()=>{ renderCheckPanel(); renderSubList(); });
+  $('cpContainsInput').addEventListener('input',renderCheckPanel);
   $('cpContainsInput').addEventListener('keydown',e=>{if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation();});
   // 搜尋浮動視窗
   $('searchInput').addEventListener('input',()=>searchUpdate($('searchInput').value));
@@ -716,7 +716,7 @@ function rafLoop(renderVideoSubCallback) {
     if (window._ensurePlayheadVisible) window._ensurePlayheadVisible();
     updatePlayhead();
     renderVideoSubCallback(true);
-    if (Wave.live) { Wave.captureLive(); if ((_rafFrame++ % 6) === 0) drawWave(); }
+    if (Wave.live) { Wave.captureLive(); if ((_rafFrame++ % 6) === 0) emit('media:waveform'); }
     
     const active=subtitlePreviewIndex.activeAtTime(State.cues,getExactFps(State.fps||25),t+0.001,_rafLastIdx,State.listTrack);
     const act=active?.cue||null;
@@ -915,14 +915,16 @@ async function initDesktop(){
         if ($('stStopBtn')) $('stStopBtn').style.display = 'none';
         const r = d.result;
         if (!r) return;
-        const isWav = r.encoder === 'pcm_s24le';
-        const kindLabel = isWav ? '音訊' : '影片';
-        const acc = isWav ? `${r.audioChannels} 軌 ${r.encoder}` : (r.gpu ? `GPU ${r.encoder}` : `CPU ${r.encoder}`);
+        const isMp3 = r.encoder === 'libmp3lame';
+        const audioOnly = isMp3 || r.encoder === 'pcm_s24le';
+        const kindLabel = audioOnly ? '音訊' : '影片';
+        const acc = audioOnly ? `${r.audioChannels} 聲道 ${isMp3 ? 'MP3' : r.encoder}` : (r.gpu ? `GPU ${r.encoder}` : `CPU ${r.encoder}`);
         const br = r.videoKbps ? `，${(r.videoKbps / 1000).toFixed(1)}Mbps` : '';
         const actualAbr = Array.isArray(r.audioActualBitrates) && r.audioActualBitrates.length
           ? r.audioActualBitrates.map(stream => stream?.kbps > 0 ? `${stream.kbps}k` : '?').join('/') : '';
         const targetAbr = Array.isArray(r.audioBitrates) && r.audioBitrates.length ? r.audioBitrates.join('/') : '';
-        const abr = actualAbr ? `，音訊 AAC 實測 ${actualAbr}` : (targetAbr ? `，音訊 AAC 目標 ${targetAbr}` : '');
+        const codec = isMp3 ? 'MP3' : 'AAC';
+        const abr = actualAbr ? `，音訊 ${codec} 實測 ${actualAbr}` : (targetAbr ? `，音訊 ${codec} 目標 ${targetAbr}` : '');
         const secs = (r.elapsedMs / 1000).toFixed(1);
         setStatus(`已匯出${kindLabel}（${acc}${br}${abr}，耗時 ${secs}s）`, 'ok', 'unlock');
         showToast(`${kindLabel}已匯出（${acc}${br}${abr}）`);

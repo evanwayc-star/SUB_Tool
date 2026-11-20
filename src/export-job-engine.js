@@ -62,7 +62,7 @@ export function allocateExportFileNames(files) {
   });
 }
 
-export const WEB_VIDEO_EXPORT_MESSAGE = '網頁版不支援影片／多聲道 WAV 交付，請使用 Electron 桌面版';
+export const WEB_VIDEO_EXPORT_MESSAGE = '影片、WAV 與 MP3 交付請使用 Electron 桌面版';
 
 /**
  * 檢查當前平台是否具備視訊交付匯出能力。

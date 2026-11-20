@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const QueueStore = require('./queue-store');
-const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
+const { getDeliveryFormatPreset, isAudioDeliveryFormat } = require('../shared/delivery-formats.cjs');
 const { serializeDeliveryChapters } = require('../shared/delivery-chapters.cjs');
 const { buildDeliveryArgv } = require('./export-plan');
 const { assertOutputAuthority, assertDeliveryDestinationEvidence, assertDeliveryDestinationEvidenceAsync } = require('./export-lease');
@@ -66,7 +66,7 @@ function createDeliveryRunner(options = {}) {
     const jobId = job.id;
     const target = events.senderForId?.(job.senderId) || null;
     const sendProgress = data => dispatch(target, jobId, 'task-progress', data);
-    const isWav = format === 'wav';
+    const audioOnly = isAudioDeliveryFormat(format);
     const isPro = format === 'prores';
     const preset = getDeliveryFormatPreset(format);
     const isDisc = preset?.kind === 'disc';
@@ -78,7 +78,7 @@ function createDeliveryRunner(options = {}) {
     assertDeliveryDestinationEvidence(job.outputAuthority);
 
     let assText = null;
-    if (job.assRef) {
+    if (job.assRef && !audioOnly) {
       const assPath = QueueStore.safeAssPath(queueDir(), job.assRef);
       try {
         if (!assPath) throw new Error('字幕暫存路徑無效');
@@ -143,7 +143,7 @@ function createDeliveryRunner(options = {}) {
       if (assText && assText.trim()) {
         assName = temporaryInputs.create('ass', Buffer.from(assText, 'utf8'));
       }
-      if (!isWav && rawTimecodeWatermark) {
+      if (!audioOnly && rawTimecodeWatermark) {
         const fontFile = fonts.timecodeFile?.();
         if (fontFile) {
           // FreeType's fontfile opens via the Windows ANSI code page. Keep the
@@ -210,7 +210,7 @@ function createDeliveryRunner(options = {}) {
       const inputEvidence = temporaryInputs.evidence();
       assertDeliveryInputEvidence(inputEvidence);
 
-      if (isWav) {
+      if (audioOnly) {
         await runFfmpeg(args, {
           executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, outPath,
           outputAuthority: job.outputAuthority, sourcePaths, inputEvidence,
@@ -222,6 +222,7 @@ function createDeliveryRunner(options = {}) {
           result: {
             outPath, encoder: plan.plannedEncoder, gpu: false,
             elapsedMs: now() - startedAt, videoKbps: null, audioChannels: plan.audioChannels,
+            ...(audioBitrates ? { audioBitrates } : {}),
           },
         });
         return;

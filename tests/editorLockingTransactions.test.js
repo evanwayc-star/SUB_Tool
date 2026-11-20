@@ -22,6 +22,8 @@ beforeAll(async()=>{
   Timeline=await import('../src/timeline-renderer.js');Clips=await import('../src/clip-model.js');
   Menus=await import('../src/menus.js');UI=await import('../src/ui.js');Project=await import('../src/project.js');
   const {on}=await import('../src/events.js');on('history:record',label=>History.record(label));
+  const {renderCheckPanel}=await import('../src/subtitles.js');
+  on('render:checkPanel',renderCheckPanel);
   vi.spyOn(Media,'seek').mockResolvedValue(true);
   for(const element of [document.getElementById('tlLayer'),document.getElementById('tlScroll')]){
     element.getBoundingClientRect=()=>({left:0,top:0,right:640,bottom:500,width:640,height:500});
@@ -43,6 +45,58 @@ beforeEach(async()=>{
 });
 afterAll(()=>{window.dispatchEvent(new Event('blur'));UI.closeModal();Media.externalAudio.clear();vi.clearAllTimers();vi.useRealTimers();});
 
+it('來源波形在鎖按下後合併更新，保留字幕、素材按鈕和波形區塊的操作目標',async()=>{
+  const {Wave}=await import('../src/media.js');
+  const {initMediaView}=await import('../src/video-renderer.js');
+  initMediaView();
+  const c=clip('wave-event',{audioSourceId:'wave-event'});
+  State.clips=[c];Timeline.drawTimeline();
+  const lock=document.querySelector('#tlGutterTracks .glock');
+  const audioLock=document.querySelector('#tlGutterAtracks .alock');
+  const block=document.querySelector('.audio-clip-block');
+  const subtitle=document.querySelector('#tlTracks [data-id="keep"]');
+  expect(subtitle).not.toBeNull();
+  mouse(lock,'mousedown');
+  const contexts=vi.spyOn(HTMLCanvasElement.prototype,'getContext');
+  try{
+    for(const peak of [.25,.5,.75]){
+      Wave.setSourceMixPeaks(c,Float32Array.of(-peak,peak));
+      Wave.setSourceWaveSelection(c,'mix');
+    }
+    vi.advanceTimersByTime(35);
+    expect(document.querySelector('#tlGutterTracks .glock')).toBe(lock);
+    expect(document.querySelector('#tlGutterAtracks .alock')).toBe(audioLock);
+    expect(document.querySelector('#tlTracks [data-id="keep"]')).toBe(subtitle);
+    expect(document.querySelector('.audio-clip-block')).toBe(block);
+    expect(block.querySelector('canvas')).not.toBeNull();
+    expect(contexts.mock.contexts.filter(canvas=>canvas===block.querySelector('canvas'))).toHaveLength(1);
+    mouse(lock,'mouseup');lock.click();expect(State.tracks[0].locked).toBe(true);
+  }finally{contexts.mockRestore();}
+});
+
+it('暫存波形只在出現與移除時調整列高，排隊中的刷新讀取最新來源',async()=>{
+  const {registerProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
+  const {emit}=await import('../src/events.js');
+  let preview=null;
+  const release=registerProvisionalSourceWaveform({snapshot:()=>preview});
+  try{
+    State.clips=[clip('existing',{audioSourceId:'existing'})];Timeline.drawTimeline();
+    const lock=document.querySelector('#tlGutterAtracks .alock'),subtitle=document.getElementById('tlTracks');
+    const top=parseFloat(subtitle.style.top);
+    preview={name:'A',duration:2,peaks:Float32Array.of(-.1,.1)};
+    emit('media:waveform');vi.advanceTimersByTime(35);
+    const row=document.querySelector('.provisional-source-wave'),label=document.querySelector('.provisional-source-wave-label');
+    expect(row.querySelector('canvas')).not.toBeNull();expect(label.title).toContain('A');
+    expect(parseFloat(subtitle.style.top)).toBeGreaterThan(top);
+    preview={name:'B',duration:2,peaks:Float32Array.of(-.5,.5)};emit('media:waveform');
+    vi.advanceTimersByTime(35);
+    expect(document.querySelector('.provisional-source-wave')).toBe(row);expect(label.title).toContain('B');
+    emit('media:waveform');preview=null;vi.advanceTimersByTime(35);
+    expect(row.isConnected).toBe(false);expect(label.isConnected).toBe(false);
+    expect(parseFloat(subtitle.style.top)).toBe(top);expect(document.querySelector('#tlGutterAtracks .alock')).toBe(lock);
+  }finally{release();}
+});
+
 it('全部鎖定同時保存外音 runtime、專案純資料及一筆可 Undo/Redo 的 History',()=>{
   const audio=Media.createExternalAudioSource({audioSourceId:'lock-audio',duration:4,path:'C:/lock.wav',locked:false});
   History.reset();Timeline.toggleAllLock();
@@ -52,6 +106,28 @@ it('全部鎖定同時保存外音 runtime、專案純資料及一筆可 Undo/Re
   History.redo();expect(Media.getExternalAudioSource(audio.id).locked).toBe(true);
   Timeline.toggleAllLock();expect(Media.getExternalAudioSource(audio.id).locked).toBe(false);
   expect(State.externalAudioState[0].locked).toBe(false);expect(History.stack).toHaveLength(3);
+});
+
+it.each(['gutter','all'])('%s 鎖定與解鎖後，檢查修剪按鈕即時反映目前軌道且可繼續點選編號',async action=>{
+  const {createCommands}=await import('../src/commands.js');
+  const commands=createCommands();
+  State.listTrack=0;State.cues[0].text=' 有空白';
+  Timeline.drawTimeline();
+  commands.run('check-panel');
+  const panel=document.getElementById('checkPanel');
+  const trim=panel.querySelector('[data-act="trim-track"]'),number=panel.querySelector('#cpTrim .cp-num');
+  const toggle=()=>action==='all'?commands.run('toggle-all-lock'):document.querySelector('#tlGutterTracks .glock').click();
+  try{
+    expect(trim.disabled).toBe(false);
+    toggle();
+    expect(State.tracks[0].locked).toBe(true);
+    expect(trim.disabled).toBe(true);
+    number.click();expect(State.selectedId).toBe('keep');
+    toggle();
+    expect(State.tracks[0].locked).toBe(false);
+    expect(trim.disabled).toBe(false);
+    expect(panel.querySelector('#cpTrim .cp-num')).toBe(number);
+  }finally{commands.run('close-check');}
 });
 
 it.each(['material','track'])('公開影片選取尊重 %s 鎖，保留既有字幕與焦點',kind=>{
