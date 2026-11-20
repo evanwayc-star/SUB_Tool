@@ -28,44 +28,72 @@ export function renderCurrentTimecode(time) {
 // X6：狀態點除顏色外提供文字等價（aria-label），供報讀器與非顏色辨識
 const _DOT_LABEL = { ok: '就緒', err: '錯誤', busy: '處理中', '': '閒置' };
 let _statusLocked = false;
-let _status = null;
 let _mediaIntakeStatus = null;
+let _processingTimer = null;
+let _processingOwner = null;
 function setStatus(msg, kind, force = false, detail = null) {
   if(kind==='err')recordStatusError(msg,detail);
   if (_statusLocked && !force) return;
   if (force === 'lock') _statusLocked = true;
   else if (force === 'unlock') _statusLocked = false;
-  _status = {msg,kind,detail};
-  // 背景準備期間仍讓錯誤可見；後續進度恢復時 toast 保留閱讀時間。
   if (_mediaIntakeStatus && kind === 'err') showToast(msg);
-  renderStatus(_statusLocked || kind === 'err' || force === true ? _status : _mediaIntakeStatus || _status);
+  const msgEl=$('stMsg');
+  if(msgEl){
+    msgEl.textContent=msg;
+    msgEl.title=detail||msg;
+    msgEl.setAttribute('aria-label',detail||msg);
+  }
+  const dot=$('stDot');
+  if(dot){
+    dot.className='dot'+(kind?' '+kind:'');
+    dot.setAttribute('aria-label',_DOT_LABEL[kind||'']??'');
+  }
 }
 
-// 進度的生命週期由 MediaIntakeJobs 持有；UI 只負責顯示優先序，不鎖住匯出。
+// 工作進度與一般操作有各自的顯示區，匯出的 lock 只管左側。
 export function setMediaIntakeStatus(msg, kind = 'busy', detail = null, parts = null) {
   if(kind==='err'&&(_mediaIntakeStatus?.kind!==kind||_mediaIntakeStatus.msg!==msg||_mediaIntakeStatus.detail!==detail))
     recordStatusError(msg,detail);
-  if (!_status) _status = {msg:$('stMsg')?.textContent || '',kind:''};
+  if(msg==null&&!_mediaIntakeStatus)return;
   _mediaIntakeStatus = msg == null ? null : {msg,kind,detail,parts};
-  renderStatus(_statusLocked ? _status : _mediaIntakeStatus || _status);
+  clearTimeout(_processingTimer);
+  _processingOwner=null;
+  renderMediaProcessing(msg,kind,detail,parts);
 }
 
-function renderStatus({msg,kind,detail,parts}) {
-  const msgEl = $('stMsg');
+// Supplemental operations have no intake lease. A terminal notice expires back
+// to the current clip's live Proxy state. An active intake always owns this slot.
+export function setMediaProcessingStatus(msg,kind='busy',_force=false,detail=null){
+  if(kind==='err')recordStatusError(msg,detail);
+  if(_mediaIntakeStatus)return;
+  clearTimeout(_processingTimer);
+  _processingOwner=null;
+  renderMediaProcessing(msg,kind,detail);
+  if(msg==null)return;
+  const message=$('stIntakeMsg');
+  const clear=()=>{
+    if(_processingOwner===clear&&message===$('stIntakeMsg'))setMediaProcessingStatus(null);
+  };
+  _processingOwner=clear;
+  if(kind!=='busy')_processingTimer=setTimeout(clear,3500);
+  return clear;
+}
+
+function renderMediaProcessing(msg,kind,detail,parts) {
+  const proxy=$('stProxy');
+  if(proxy) proxy.hidden=msg!=null;
+  const msgEl = $('stIntakeMsg');
   if (msgEl) {
+    msgEl.hidden=msg==null;
+    msgEl.dataset.tone=kind||'';
     msgEl.classList.toggle('status-pair',Array.isArray(parts));
     if(Array.isArray(parts)){
       msgEl.replaceChildren(...parts.map((text,index)=>{
         const span=document.createElement('span');span.className=index===1?'status-pair-separator':'status-pair-item';span.textContent=text;return span;
       }));
-    }else msgEl.textContent = msg;
-    msgEl.title=detail||msg;
-    msgEl.setAttribute('aria-label',detail||msg);
-  }
-  const d = $('stDot');
-  if (d) {
-    d.className = 'dot' + (kind ? (' ' + kind) : '');
-    d.setAttribute('aria-label', _DOT_LABEL[kind || ''] ?? '');
+    }else msgEl.textContent=msg||'';
+    msgEl.title=detail||msg||'';
+    msgEl.setAttribute('aria-label',msgEl.title);
   }
 }
 

@@ -6,7 +6,7 @@ import { AudioPipeline } from './audio-routing-engine.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { $ } from './dom.js';
-import { setStatus } from './ui.js';
+import { setMediaProcessingStatus } from './ui.js';
 
 export const WAVE_DECODE_MAX = 5e8;    // 超過此大小不整檔解碼波形，改即時擷取
 
@@ -709,7 +709,7 @@ export const Wave = {
     else if(ab.duration>State.duration){State.duration=ab.duration;emit('duration:known');}
     if(!sourceIsCurrent()) return false;
     this.setSourceBuffer(currentSource(),ab); emit('media:timeline');
-    setStatus('波形已產生','ok');
+    setMediaProcessingStatus('波形已產生','ok');
     return true;
   },
   async fromVideoElement(){ /* fallback：無法解碼時略過 */ },

@@ -12,8 +12,7 @@
       Base64 字串並直接包裹進 JSON 中存檔。大型影音檔則僅儲存絕對路徑。
       
    2. 自動備份機制 (Auto Save)
-      為防止當機，本模組實作了定時自動備份。會定期比較 `_lastSavedDataStr` 
-      是否被修改，若有變更則將專案寫入備份目錄中，並加入時間戳記防撞。
+      每三分鐘比較已提交的專案內容與原檔及最近一次成功備份，只有新變更才寫入備份。
 
    【維護鐵律】
    - 當您在 `state.js` 新增了任何專案層級的欄位時，請務必回來這裡確認
@@ -163,6 +162,8 @@ let _editGuardDone = false;  // 本 session 是否已顯示過「請先儲存」
 let _savePath      = null;   // 上次儲存的完整路徑（desktop only）
 let _saveBaseName  = null;   // 基礎名稱（不含副檔名），自動備份用
 let _autoSaveTimer = null;
+let _lastBackupContent = null;
+let _backupInFlight = null;
 let _lastSavedDataStr = null; // 用於判斷專案是否被修改
 let _savedWriteRevision = 0; // 相同 bytes 的成功寫入，也是一份不能被載入 completion 取代的回覆。
 let _autoRelinkNeedsSave = false; // 載入時找到新素材路徑，但磁碟上的專案尚未寫入新路徑
@@ -369,6 +370,7 @@ function _onSaved(fullPath, webName, snapshot){
     setStatus('專案已儲存：'+webName,'ok');
   }
   _lastSavedDataStr = snapshot;
+  _lastBackupContent = null;
   _savedWriteRevision++;
   _autoRelinkNeedsSave = false;
   if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave, 3*60*1000);
@@ -416,34 +418,44 @@ function _saveProject(asNew){
 }
 
 async function _autoSave(){
-  if(!_saveBaseName) return;
+  if(!_saveBaseName || _backupInFlight?.()) return;
+  const data=_buildProjectData();
+  const content=_projectContentString(data);
+  if(content===_lastBackupContent || !_needsProjectSave(content)) return;
+
   const ownsWorkspace=Project.captureWorkspaceOwnership();
   const savePath=_savePath,saveBaseName=_saveBaseName;
-  const current=()=>ownsWorkspace()&&_savePath===savePath&&_saveBaseName===saveBaseName;
+  const ownsTarget=()=>ownsWorkspace()&&_savePath===savePath&&_saveBaseName===saveBaseName;
+  const revision=_savedWriteRevision;
   const name=`${saveBaseName}_${_timestamp()}.subtool`;
-  const bytes=_buildBytes();
-  if(IS_DESKTOP && DESK.writeProject && savePath){
-    const dir=savePath.replace(/[^\\/]+$/,'');
-    const autoSaveDir=dir+'.subtool_AutoSave/';
-    let res;
-    try{res=await DESK.writeProject(autoSaveDir+name, bytesToB64(bytes));}
-    catch{res=null;}
-    // 已送出的舊備份安全完成；換專案或另存新路徑後不再回報到目前工作區。
-    if(current()){
-      if(res?.code==='PROJECT_DESTINATION_CHANGED') showToast('自動備份失敗：專案檔在儲存期間已變更，請另存新檔','error');
-      else if(typeof res==='string'&&res) setStatus('自動備份：'+name,'ok');
-      else setStatus('自動備份失敗，請手動儲存專案','err');
+  const payload=bytesToB64(_buildBytes(data));
+  _backupInFlight=ownsTarget;
+  try{
+    if(IS_DESKTOP && DESK.writeProject && savePath){
+      const dir=savePath.replace(/[^\\/]+$/,'');
+      let res;
+      try{res=await DESK.writeProject(dir+'.subtool_AutoSave/'+name,payload);}
+      catch{res=null;}
+      if(!ownsTarget() || revision!==_savedWriteRevision) return;
+      if(typeof res!=='string' || !res){
+        if(res?.code==='PROJECT_DESTINATION_CHANGED') showToast('自動備份失敗：專案檔在儲存期間已變更，請另存新檔','error');
+        else setStatus('自動備份失敗，請手動儲存專案','err');
+        return;
+      }
+      setStatus('自動備份：'+name,'ok');
+    }else{
+      try{
+        localStorage.setItem('subtool_autosave_data',payload);
+        localStorage.setItem('subtool_autosave_name',name);
+      }catch(error){
+        console.warn('auto-save localStorage failed:',error);
+        return;
+      }
+      setStatus('自動備份已存（瀏覽器本地）','ok');
     }
-  } else {
-    // Fix #2：瀏覽器版改用 localStorage 避免每 3 分鐘觸發下載干擾工作流
-    try{
-      localStorage.setItem('subtool_autosave_data', bytesToB64(bytes));
-      localStorage.setItem('subtool_autosave_name', name);
-      if(current()) setStatus('自動備份已存（瀏覽器本地）','ok');
-    }catch(e){
-      // localStorage 額度已滿時靜默失敗，不干擾使用者
-      console.warn('auto-save localStorage failed:', e);
-    }
+    _lastBackupContent=content;
+  }finally{
+    if(_backupInFlight===ownsTarget) _backupInFlight=null;
   }
 }
 
@@ -516,6 +528,7 @@ function resetProject(){
   _saveBaseName=null;
   _publishProjectIdentity();
   _lastSavedDataStr=null;
+  _lastBackupContent=null;
   _autoRelinkNeedsSave=false;
   if(_autoSaveTimer){ clearInterval(_autoSaveTimer); _autoSaveTimer=null; }
   resetAudioProject();
@@ -556,18 +569,21 @@ async function _confirmProjectReplacement(consent,generation){
   return await confirmDiscardUnsaved()?()=>current()&&unchanged():null;
 }
 
-function isProjectDirty() {
+function _needsProjectSave(content) {
   if (_autoRelinkNeedsSave) return true;
-  const data=_buildProjectData();
   // 空軌道的名稱、樣式、格網與交付範圍也是持久內容，與有無字幕／片段無關。
   // 新工作區和磁碟存檔都以同一份 committed snapshot 作為乾淨基準。
   if (!_lastSavedDataStr) return true;
   
   try {
-    return _projectContentString(data) !== _projectContentString(JSON.parse(_lastSavedDataStr));
+    return content !== _projectContentString(JSON.parse(_lastSavedDataStr));
   } catch (e) {
     return true;
   }
+}
+
+function isProjectDirty() {
+  return _needsProjectSave(_projectContentString(_buildProjectData()));
 }
 
 function _beginProjectLoad(){
@@ -894,6 +910,7 @@ const Project = {
     State.presetEdit=null;
     _saveEpoch++;
     _notifyWorkspaceInvalidated();
+    _lastBackupContent=null;
     _autoRelinkNeedsSave = false;
     _editGuardDone = true; // 開啟舊檔後不需再次跳出存檔提示
     // Media.reset() 會釋放播放器資源，但不覆寫專案顯示名稱／路徑；讀取新專案時

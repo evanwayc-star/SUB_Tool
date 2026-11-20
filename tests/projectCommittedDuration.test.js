@@ -22,11 +22,14 @@ showClipSpeed(clip);
 document.getElementById('clipSpeedPercent').value='50';
 Array.from(document.querySelectorAll('#modalFoot button')).find(b=>b.textContent.trim()==='套用').click();
 expect(State.clips[0].speed).toBe(.5);expect(State.duration).toBe(20);
-vi.advanceTimersByTime(180000);for(let i=0;i<20;i++)await Promise.resolve();
-expect(window.subtool.writeProject).toHaveBeenCalled();
+await vi.advanceTimersByTimeAsync(180000);
+expect(window.subtool.writeProject).not.toHaveBeenCalled();
+State.cues[0].text='已編輯';
+await vi.advanceTimersByTimeAsync(180000);
+expect(window.subtool.writeProject).toHaveBeenCalledOnce();
 const b=Buffer.from(window.subtool.writeProject.mock.calls.at(-1)[1],'base64');const d=JSON.parse(b.subarray(2).toString('utf16le'));
 
-expect(d.clips[0].speed??1).toBe(1); expect(d.cues[0].end).toBe(10);
+expect(d.clips[0].speed??1).toBe(1); expect(d.cues[0]).toMatchObject({text:'已編輯',end:10});
 await Project.saveAs();
 expect(decode(window.subtool.saveProject.mock.calls.at(-1)[1]).cues[0].end).toBe(10);
 expect(State.cues[0]).toMatchObject({start:9,end:10,_tempEnd:true});

@@ -371,9 +371,14 @@
 
     <!-- ===== 狀態列 ===== -->
     <div class="statusbar">
-      <span class="status-primary"><span class="dot" id="stDot"></span><span id="stMsg" role="status" aria-live="polite">就緒</span><button id="stProxyCancelBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">取消 Proxy</button><button id="stStopBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">停止</button><button id="stResumeBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">▶ 繼續佇列</button></span>
+      <span class="status-primary"><span class="dot" id="stDot"></span><span id="stMsg" role="status" aria-live="polite">就緒</span><button id="stStopBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">停止</button><button id="stResumeBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">▶ 繼續佇列</button></span>
       <span id="stMedia"></span>
-      <span id="stProxy" class="status-proxy">Proxy：未載入</span>
+      <span id="stBackground" class="status-background" role="group" aria-label="背景處理">
+        <span id="stProxy" class="status-proxy">Proxy：未載入</span>
+        <span id="stIntakeMsg" hidden></span>
+        <button type="button" id="stProxyCancelBtn" style="display:none">停止背景處理</button>
+        <button type="button" id="stIntakeRetryBtn" style="display:none">繼續背景處理</button>
+      </span>
       <button type="button" class="status-errors" id="stErrorsBtn" data-act="status-errors" aria-haspopup="dialog" aria-label="查看錯誤回報" title="查看錯誤回報">錯誤<span id="stErrorCount" hidden></span></button>
       <div class="sep"></div>
       <span id="stEngine">音訊引擎：原生</span>

@@ -3,7 +3,7 @@
 import { $ } from './dom.js';
 import { on } from './events.js';
 import { MediaIntakeJobs } from './media-intake-jobs.js';
-import { setStatus, setMediaIntakeStatus, showToast } from './ui.js';
+import { setMediaProcessingStatus, setMediaIntakeStatus, showToast } from './ui.js';
 
 const starts=new Map();
 function verificationBytes({stage,processedBytes,totalBytes}){
@@ -14,7 +14,7 @@ function verificationBytes({stage,processedBytes,totalBytes}){
   return `（${format(processedBytes)} / ${format(totalBytes)} ${unit}）`;
 }
 
-function progressText(data,requestId){
+function progressText(data,requestId,shortLabel=null){
   const stage=data.stage||'transcoding',label=data.label||'處理中';
   const pct=typeof data.pct==='number'&&Number.isFinite(data.pct)?Math.max(0,Math.min(100,data.pct)):null;
   const identity=stage+'\0'+label;
@@ -30,21 +30,22 @@ function progressText(data,requestId){
     const fmt=seconds=>`${Math.floor(seconds/60).toString().padStart(2,'0')}:${(seconds%60).toString().padStart(2,'0')}`;
     time=` [已用 ${fmt(Math.floor(elapsed/1000))} / 預估剩餘 ${fmt(remaining)}]`;
   }
+  if(shortLabel) return (pct==null?'':`${Math.floor(pct)}% `)+shortLabel+time;
   return label+'…'+(pct==null?'':` ${Math.floor(pct)}%`)+verificationBytes(data)+time;
 }
 
 export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
-  let retryButton=$('stIntakeRetryBtn');
-  if(!retryButton&&$('stProxyCancelBtn')?.parentNode){
-    retryButton=document.createElement('button');retryButton.id='stIntakeRetryBtn';retryButton.type='button';
-    retryButton.className='intake-retry';retryButton.style.display='none';
-    $('stProxyCancelBtn').after(retryButton);
-  }
+  const retryButton=$('stIntakeRetryBtn');
+  let sessionId=MediaIntakeJobs.snapshot().sessionId;
   // Nested synchronous notifications can make the event's snapshot stale;
   // always render the intake owner's current state at delivery time.
   const render=()=>{
     updateProxyStatus();
     const state=MediaIntakeJobs.snapshot();
+    if(state.sessionId!==sessionId){
+      sessionId=state.sessionId;
+      setMediaProcessingStatus(null);
+    }
     const recovery=state.recoveries?.[0];
     if(retryButton){
       retryButton.style.display=recovery&&!state.count?'inline-block':'none';
@@ -59,13 +60,7 @@ export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
       button.title='停止目前專案的 Proxy 與音訊快取工作，保留母素材與已完成快取';
     }
     if($('stMedia')) $('stMedia').style.display=state.count?'none':'';
-    const jobs=(state.jobs||[]).flatMap(job=>{
-      const data=job.progress;
-      // The native plan identifies actual outputs. A needsProxy request may
-      // only repair audio; labels and overall waveform progress are not proof.
-      if(data?.stage!=='transcoding'||data.outputs?.proxy!==true)return [job];
-      return data.outputs.audio?[{...job,progress:{...data,label:'準備音軌快取'}}]:[];
-    });
+    const jobs=state.jobs||[];
     const ids=new Set(jobs.map(job=>job.requestId));
     for(const id of starts.keys()) if(!ids.has(id)) starts.delete(id);
     const active=job=>job.progress&&!job.progress.queued;
@@ -81,12 +76,11 @@ export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
       const extraCount=new Set(jobs.filter(job=>!shown.has(group(job))).map(group)).size;
       const extra=extraCount?`（另有 ${extraCount} 項背景工作）`:'';
       if(other){
-        const percent=pct=>typeof pct==='number'&&Number.isFinite(pct)?`${Math.floor(Math.max(0,Math.min(100,pct)))}% `:'';
         const stage=other.progress.stage;
         const label=stage==='source-verification'?'驗證母素材':stage==='cache-check'?'檢查快取':
-          stage==='transcoding'&&String(other.progress.label||'').includes('Proxy')?'Proxy 轉檔':
+          stage==='transcoding'&&(other.progress.outputs?.proxy??String(other.progress.label||'').includes('Proxy'))?'Proxy 轉檔':
             stage==='transcoding'?'音訊分析':other.progress.label||'處理中';
-        const parts=[percent(data.pct)+'波形','｜',percent(other.progress.pct)+label+extra];
+        const parts=[progressText(data,visible.requestId,'波形'),'｜',progressText(other.progress,other.requestId,label)+extra];
         const detail=progressText(data,visible.requestId)+'；'+progressText(other.progress,other.requestId)+extra;
         setMediaIntakeStatus(parts.join(''),'busy',detail,parts);
       }else setMediaIntakeStatus(progressText(data,visible.requestId)+extra);
@@ -102,8 +96,14 @@ export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
   render();
   const button=$('stProxyCancelBtn');
   if(button) button.onclick=()=>{
-    if(!MediaIntakeJobs.snapshot().count) return;
-    Promise.resolve().then(cancel).catch(error=>showToast('停止媒體處理失敗：'+(error?.message||error)));
+    const clicked=MediaIntakeJobs.snapshot();
+    if(!clicked.count)return;
+    Promise.resolve().then(()=>{
+      const current=MediaIntakeJobs.snapshot();
+      if(current.sessionId===clicked.sessionId&&current.count)return cancel();
+    }).catch(error=>{
+      if(MediaIntakeJobs.snapshot().sessionId===clicked.sessionId)showToast('停止媒體處理失敗：'+(error?.message||error),'error');
+    });
   };
 }
 
@@ -120,7 +120,7 @@ export function handleMediaIntakeProgress(data){
     const pureProxy=data.outputs?.proxy===true&&data.outputs.audio===false;
     if(!succeeded||!pureProxy){
       const label=data.outputs?.proxy&&data.outputs.audio?'音軌快取':data.label||'轉檔';
-      setStatus(label+(succeeded?'完成':'失敗')+(!succeeded&&data.errorMsg?'：'+data.errorMsg:''),succeeded?'ok':'err');
+      setMediaProcessingStatus(label+(succeeded?'完成':'失敗')+(!succeeded&&data.errorMsg?'：'+data.errorMsg:''),succeeded?'ok':'err');
     }
     if(!MediaIntakeJobs.snapshot().count&&$('stMedia')) $('stMedia').style.display='';
     if(succeeded) window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:data}));
@@ -129,7 +129,7 @@ export function handleMediaIntakeProgress(data){
   // 已持有的進度由 jobs snapshot 顯示，含本機波形整理；非 intake 的 extractAudio 保留舊入口。
   if(!owned){
     if($('stMedia')) $('stMedia').style.display='none';
-    setStatus(progressText(data,data.jobId),'busy');
+    setMediaProcessingStatus(progressText(data,data.jobId),'busy');
   }
   return true;
 }

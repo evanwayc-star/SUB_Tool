@@ -50,7 +50,7 @@ const deskMock = vi.hoisted(() => ({
 vi.mock('../src/dom.js', () => domMock);
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
-  setStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
+  setStatus: vi.fn(), setMediaProcessingStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
@@ -72,7 +72,7 @@ let Wave;
 let State;
 let resetAudioProject;
 let resetPlayerAdapter;
-let setStatus;
+let setStatus, setMediaProcessingStatus;
 let showToast;
 
 describe('HTML fallback mother audio follows the installed effect owner', () => {
@@ -100,7 +100,7 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     ({ Media, Wave } = await import('../src/media.js'));
     ({ State, resetAudioProject } = await import('../src/state.js'));
     ({ resetPlayerAdapter } = await import('../src/media-player-adapter.js'));
-    ({ setStatus, showToast } = await import('../src/ui.js'));
+    ({ setStatus, setMediaProcessingStatus, showToast } = await import('../src/ui.js'));
   });
 
   beforeEach(() => {
@@ -112,6 +112,7 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     deskMock.cleanupAudio.mockReset();
     deskMock.audioSourceFingerprint.mockClear();
     setStatus.mockClear();
+    setMediaProcessingStatus.mockClear();
     showToast.mockClear();
     deskMock.ingest.mockResolvedValue({ channels: [] });
     Media.reset();
@@ -315,7 +316,8 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     effected.volume=.4;effected.muted=false;effected.solo=true;
     if(kind==='stream')window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:{jobId:22}}));
     rawURL.resolve(kind==='native'?'C:/cache/raw-wave.wav':'file:///'+raw);await loading;
-    await vi.waitFor(()=>expect(setStatus).toHaveBeenLastCalledWith(kind==='stream'?'媒體已載入':kind==='native'?'媒體已載入（原生直讀，免轉 Proxy）':'媒體已載入（桌面模式）','ok'));
+    if(kind==='stream') await vi.waitFor(()=>expect(setMediaProcessingStatus).toHaveBeenCalledWith('影音預覽已就緒','ok'));
+    expect(setStatus).toHaveBeenLastCalledWith(kind==='stream'?'媒體已載入':kind==='native'?'媒體已載入（原生直讀）':'媒體已載入（桌面模式）','ok');
     expect(Media.tracks).toEqual([effected]);
     expect(source.peaks).toBe(effectPeaks);
     expect(Wave.getSourceWaveform(source).peaks).toBe(effectPeaks);

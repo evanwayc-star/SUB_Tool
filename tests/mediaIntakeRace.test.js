@@ -57,7 +57,7 @@ vi.mock('../src/dom.js', () => domMock);
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/ui.js', async original => ({
   renderCurrentTimecode: (await original()).renderCurrentTimecode,
-  setStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
+  setStatus: vi.fn(), setMediaProcessingStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
@@ -89,7 +89,7 @@ let Wave;
 let State;
 let resetAudioProject;
 let resetPlayerAdapter;
-let setStatus;
+let setStatus, setMediaProcessingStatus;
 let showToast;
 let pending;
 let shuttleRewind;
@@ -229,7 +229,7 @@ describe('desktop mother-source intake ownership', () => {
     ({ Media, Wave } = await import('../src/media.js'));
     ({ State, resetAudioProject } = await import('../src/state.js'));
     ({ resetPlayerAdapter } = await import('../src/media-player-adapter.js'));
-    ({ setStatus, showToast } = await import('../src/ui.js'));
+    ({ setStatus, setMediaProcessingStatus, showToast } = await import('../src/ui.js'));
     ({ shuttleRewind, shuttlePause, stepFrame, jklReset } = await import('../src/transport-controller.js'));
   });
 
@@ -244,6 +244,7 @@ describe('desktop mother-source intake ownership', () => {
     deskMock.cancelMediaIntake.mockClear();
     deskMock.releaseStream.mockClear();
     setStatus.mockClear();
+    setMediaProcessingStatus.mockClear();
     showToast.mockClear();
     deskMock.ingest.mockImplementation(({ path }) => {
       const work = deferred();
@@ -288,7 +289,8 @@ describe('desktop mother-source intake ownership', () => {
       if(outcome==='save-failure'){
         wave.reject(new Error('checkpoint save failed'));await loading;
         expect(deskMock.ingest).not.toHaveBeenCalled();expect(getProvisionalSourceWaveform()).toBeNull();
-        expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('波形尚未完成'),'err');
+        expect(setMediaProcessingStatus).toHaveBeenCalledWith(expect.stringContaining('波形尚未完成'),'err');
+        expect(setStatus).not.toHaveBeenCalledWith(expect.stringContaining('波形'),'err');
       }else{
         MediaIntakeJobs.progress({...request,stage:'source-waveform',waveform:{...data,startSample:4000,completedSamples:8000},pct:100});
         const savedPeaks=getProvisionalSourceWaveform().peaks;
@@ -882,7 +884,7 @@ describe('desktop mother-source intake ownership', () => {
         expect(setStatus).toHaveBeenLastCalledWith('新專案','ok');
       }else{
         expect(State.clips[0].peaks.some(value=>value!==0)).toBe(true);
-        expect(setStatus).toHaveBeenLastCalledWith('媒體已載入（原生直讀，免轉 Proxy）','ok');
+        expect(setStatus).toHaveBeenLastCalledWith('媒體已載入（原生直讀）','ok');
       }
     }finally{fetch.mockRestore();decode.mockRestore();}
   });
@@ -989,7 +991,8 @@ describe('desktop mother-source intake ownership', () => {
     expect(Media.tracks).toEqual([]);
     expect(deskMock.fileURL).not.toHaveBeenCalledWith('stale.mp4');
     expect(showToast).not.toHaveBeenCalled();
-    expect(setStatus).toHaveBeenLastCalledWith('已取消 Proxy 與音訊背景處理','ok');
+    expect(setMediaProcessingStatus).toHaveBeenLastCalledWith('已取消 Proxy 與音訊背景處理','ok');
+    expect(setStatus).not.toHaveBeenCalledWith('已取消 Proxy 與音訊背景處理','ok');
   });
 
   it('取消背景 Proxy 保留已提交 mpv 的時間回報，reset 後才撤銷該 transport',async()=>{

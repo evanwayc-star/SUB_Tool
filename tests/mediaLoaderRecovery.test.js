@@ -22,7 +22,7 @@ const desk = vi.hoisted(() => ({
 vi.mock('../src/dom.js', () => dom);
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/ui.js', async original => ({ renderCurrentTimecode: (await original()).renderCurrentTimecode,
-  setStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(), openModal: vi.fn(), closeModal: vi.fn() }));
+  setStatus: vi.fn(), setMediaProcessingStatus: vi.fn(), showToast: vi.fn(), showOsd: vi.fn(), openModal: vi.fn(), closeModal: vi.fn() }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
 vi.mock('../src/subtitles.js', () => ({ selectCueSingle: vi.fn(), commitCueTimeEdit: vi.fn() }));

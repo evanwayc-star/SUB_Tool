@@ -26,7 +26,7 @@ const domMock = vi.hoisted(() => {
 vi.mock('../src/dom.js', () => domMock);
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
-  setStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
+  setStatus: vi.fn(), setMediaProcessingStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));
@@ -68,6 +68,7 @@ describe('web mother-source intake ownership', () => {
     State.mediaPath = null;
     resetAudioProject();
     ui.setStatus.mockClear();
+    ui.setMediaProcessingStatus.mockClear();
     ui.showToast.mockClear();
     domMock.video.src = '';
     domMock.video.readyState = 1;
@@ -298,13 +299,13 @@ describe('web mother-source intake ownership', () => {
 
     try {
       const a = Media._loadFFmpegForIntake(() => ownsA);
-      expect(ui.setStatus).toHaveBeenCalledWith('載入 ffmpeg.wasm（首次需下載 ~25MB）…', 'busy');
+      expect(ui.setMediaProcessingStatus).toHaveBeenCalledWith('載入 ffmpeg.wasm（首次需下載 ~25MB）…', 'busy');
 
       ownsA = false;
       gate.resolve({});
       await expect(a).resolves.toBeNull();
 
-      expect(ui.setStatus).not.toHaveBeenCalledWith('ffmpeg 就緒', 'ok');
+      expect(ui.setMediaProcessingStatus).not.toHaveBeenCalledWith('ffmpeg 就緒', 'ok');
       expect(domMock.$('stEngine').textContent).toBe('');
     } finally {
       loader.mockRestore();
@@ -323,6 +324,7 @@ describe('web mother-source intake ownership', () => {
       await expect(a).rejects.toThrow('offline');
 
       expect(ui.setStatus.mock.calls.filter(([,kind])=>kind==='err')).toEqual([]);
+      expect(ui.setMediaProcessingStatus.mock.calls.filter(([,kind])=>kind==='err')).toEqual([]);
       expect(ui.showToast).not.toHaveBeenCalled();
     } finally {
       loader.mockRestore();
@@ -337,7 +339,8 @@ describe('web mother-source intake ownership', () => {
       const file=new File(['media'],'source.mov');
       const result=action==='transcode'?await Media.transcodeAndExtract(file):await Media.extractAllAudio(file,1);
       expect(result).toBe(false);
-      expect(ui.setStatus.mock.calls.filter(([,kind])=>kind==='err')).toEqual([
+      expect(ui.setStatus.mock.calls.filter(([,kind])=>kind==='err')).toEqual([]);
+      expect(ui.setMediaProcessingStatus.mock.calls.filter(([,kind])=>kind==='err')).toEqual([
         ['ffmpeg 載入失敗（需網路；或改用本機伺服器/Electron 版）','err',false,'engine download unavailable'],
       ]);
       expect(ui.showToast.mock.calls.filter(([,kind])=>kind==='error')).toEqual([]);

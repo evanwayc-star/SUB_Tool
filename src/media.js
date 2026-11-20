@@ -38,7 +38,7 @@ import { MediaIntakeJobs } from './media-intake-jobs.js';
 import { MediaAudioRouter, AudioPipeline } from './audio-routing-engine.js';
 import { destroyScrubber } from './audio-engine.js';
 import { State, DESK, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect, saveConfig } from './state.js';
-import { setStatus, showToast, openModal, closeModal, renderCurrentTimecode } from './ui.js';
+import { setStatus, setMediaProcessingStatus, showToast, openModal, closeModal, renderCurrentTimecode } from './ui.js';
 import { Seq } from './sequence.js';
 import { createAudioEffects } from './audio-effects.js';
 import { createMpvSourceTransition } from './mpv-source-transition.js';
@@ -687,7 +687,7 @@ const Media = {
           console.warn('優先波形準備失敗:',error);
           if(DESK.sourceWaveformContinuous===true){
             MediaIntakeJobs.failRecovery(path,error);
-            setStatus('波形尚未完成：'+(error?.message||String(error)),'err');
+            setMediaProcessingStatus('波形尚未完成：'+(error?.message||String(error)),'err');
           }
         }
         return false;
@@ -1232,7 +1232,7 @@ const Media = {
       if(this._bgVersion===myVer && sourceCurrent()){
         this.applyGains(); notifyAudioTracks(); emit('media:timeline');
         recovery.complete();
-        setStatus('音軌與波形已加入','ok');
+        setMediaProcessingStatus('音軌與波形已就緒','ok');
       }
       return res;
     }catch(e){
@@ -1240,7 +1240,7 @@ const Media = {
       if(this._bgVersion===myVer && sourceCurrent()){
         recovery.fail(e);
         console.warn('external audio cache:',e);
-        setStatus('音軌已加入（匯出聲道準備失敗）','');
+        setMediaProcessingStatus('匯出聲道準備失敗','err',false,e?.message||String(e));
       }
       return null;
     }
@@ -1651,23 +1651,23 @@ const Media = {
       notifyAudioTracks();
       if(this.playing) this.startElementSources(this.vTime());
       if(!(restoredSource?._restore)&&!(restoredSource?._internalSplit)) emit('history:record','加入音訊：'+asset.name);
+      setStatus('音軌已加入','ok');
       if(Array.isArray(info?.audio)&&info.audio.length){
-        setStatus('產生波形與匯出聲道…','busy');
         void this.cacheExternalRoutingAudio(asset,p,asset.duration,info.audio);
       }else{
         // probe 失敗時保留舊有的單獨波形退路；播放仍可正常使用，只是沒有可靠的逐聲道輸出快取。
         const version=this._bgVersion;
-        setStatus('產生波形…','busy');
+        const clearProgress=setMediaProcessingStatus('產生波形…','busy');
         void DESK.waveAudio(p,asset.duration).then(async wavPath=>{
           try{
             await this._setExternalWaveFromPath(asset,wavPath,version);
             try{ DESK.cleanupAudio(wavPath); }catch(e){}
-            if(this._bgVersion===version&&this.externalAudioSources.includes(asset)) setStatus('音軌與波形已加入','ok');
+            if(this._bgVersion===version&&this.externalAudioSources.includes(asset)) setMediaProcessingStatus('音軌與波形已就緒','ok');
           }catch(e){ console.warn('waveAudio error',e); }
         }).catch(e=>{
           console.warn('waveAudio error',e);
-          if(this._bgVersion===version&&this.externalAudioSources.includes(asset)) setStatus('音軌已加入','ok');
-        });
+          if(this._bgVersion===version&&this.externalAudioSources.includes(asset)) setMediaProcessingStatus('波形未能產生','err',false,e?.message||String(e));
+        }).finally(()=>clearProgress?.());
       }
       return asset;
     }catch(e){
@@ -1725,9 +1725,6 @@ const Media = {
     const sourceFingerprint=clipSourceFingerprint(primary),sourceCurrent=()=>clipSourceFingerprint(primary)===sourceFingerprint&&!!this._liveClipForSource(primary);
     const current=()=>this._bgVersion===myVer&&sourceCurrent();
     const recovery=this._registerIntakeRecovery(p,()=>this._bgAudioIngest(p,audio,dur,primary,{needsProxy,restorePreview}),sourceCurrent);
-    setStatus(needsProxy
-      ? '正在檢查 Proxy 與音訊快取（背景處理，不影響播放）…'
-      : '正在檢查音訊快取（背景處理，不影響播放）…','busy');
     let res;
     let stagedElements=[],stagedTracks=[];
     // 需要 Proxy 時同 pass 產 480p 短 GOP 預覽檔：多軌合成時交給 WebCodecs，
@@ -1816,7 +1813,7 @@ const Media = {
       // every original channel is committed; waveform display may finish later.
       if(current())this._publishPreviewAssets(primary,res,current);
       await waveReady;
-      if(current()){recovery.complete();setStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');}
+      if(current()){recovery.complete();setMediaProcessingStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');}
     }catch(error){
       for(const element of stagedElements) this._disposeMediaElement(element);
       for(const track of stagedTracks){try{track.gain?.disconnect();track.analyser?.disconnect?.();}catch(_){} }
@@ -1838,7 +1835,6 @@ const Media = {
     const version=this._bgVersion;
     const owns=()=>this._bgVersion===version&&!!this._liveClipForSource(spec.primary);
     const pending=(async()=>{
-      setStatus('正在為多影片疊層建立主影片 Proxy…','busy');
       // 初次匯入只抽音軌；此處在使用者加入第二支影片後才補做影像快取。
       // queue:true 避免與同一母素材的音訊快取同時寫入。
       const res=await MediaIntakeJobs.ingest({
@@ -1853,8 +1849,8 @@ const Media = {
       this._reverseProxySourcePath=spec.path;
       this._deferredPrimaryProxy=null;
       // WCPreview.tick 會自行讀取新 Proxy 並在畫格就緒後接管。
-      setStatus('主影片 Proxy 已就緒','ok');
-    })().catch(error=>{ if(owns()) setStatus('主影片 Proxy 建立失敗：'+(error?.message||error),'err'); });
+      setMediaProcessingStatus('主影片 Proxy 已就緒','ok');
+    })().catch(error=>{ if(owns()) setMediaProcessingStatus('主影片 Proxy 建立失敗：'+(error?.message||error),'err'); });
     this._deferredPrimaryProxyPromise=pending;
     void pending.finally(()=>{
       if(this._deferredPrimaryProxyPromise===pending) this._deferredPrimaryProxyPromise=null;
@@ -1894,20 +1890,20 @@ const Media = {
   async _loadFFmpegForIntake(owns=()=>true){
     const stillOwns=typeof owns==='function'?owns:()=>true;
     if(!stillOwns()) return null;
-    if(!this.ffmpeg) setStatus('載入 ffmpeg.wasm（首次需下載 ~25MB）…','busy');
+    const clearProgress=this.ffmpeg?null:setMediaProcessingStatus('載入 ffmpeg.wasm（首次需下載 ~25MB）…','busy');
     try{
       const ff=await this.loadFFmpeg();
       if(!stillOwns()) return null;
       $('stEngine').textContent='音訊引擎：ffmpeg.wasm';
-      setStatus('ffmpeg 就緒','ok');
+      setMediaProcessingStatus('ffmpeg 就緒','ok');
       return ff;
     }catch(e){
       if(stillOwns()){
-        setStatus('ffmpeg 載入失敗（需網路；或改用本機伺服器/Electron 版）','err',false,e?.message||String(e));
+        setMediaProcessingStatus('ffmpeg 載入失敗（需網路；或改用本機伺服器/Electron 版）','err',false,e?.message||String(e));
         showToast('ffmpeg.wasm 載入失敗：需網路連線，或以本機伺服器開啟本頁');
       }
       throw e;
-    }
+    }finally{clearProgress?.();}
   },
   runWebFfmpeg(work,{owns=()=>true}={}){
     if(typeof work!=='function') return Promise.reject(new TypeError('ffmpeg.wasm work must be a function'));
@@ -1973,7 +1969,7 @@ const Media = {
     }
   },
   async _extractAllAudio(file,count,{owns=()=>true}={}){
-    let ff;
+    let ff,clearProgress;
     const primary=Seq.primary();
     const decoded=[];
     try{
@@ -1988,7 +1984,7 @@ const Media = {
       ff.FS('writeFile','in.media',data);
       for(let i=0;i<count;i++){
         if(!owns()) return false;
-        setStatus(`抽取音軌 ${i+1}/${count}…`,'busy');
+        clearProgress=setMediaProcessingStatus(`抽取音軌 ${i+1}/${count}…`,'busy');
         await ff.run('-i','in.media','-map',`0:a:${i}`,'-ar','48000',`a${i}.wav`);
         if(!owns()) return false;
         const wav=ff.FS('readFile',`a${i}.wav`);
@@ -2000,16 +1996,17 @@ const Media = {
       if(!owns()||!sourceClip) return false;
       this._commitDecodedAudioBuffers(sourceClip,decoded,file,{owns});
       this.usingWebAudio=true; this.syncMuteState();
-      setStatus('多音軌抽取完成','ok'); notifyAudioTracks();
+      setMediaProcessingStatus('多音軌抽取完成','ok'); notifyAudioTracks();
       if(this.playing) this.startBufferSources(this.vTime());
       return true;
     }catch(e){
       if(!owns()) return false;
       // The loader already reported a rejected engine download.
-      if(ff)setStatus('音軌抽取失敗','err',false,e?.message||String(e));
+      if(ff)setMediaProcessingStatus('音軌抽取失敗','err',false,e?.message||String(e));
       console.error(e);
       return false;
     }finally{
+      clearProgress?.();
       // Fix #5：不論成功或失敗都清除 ffmpeg 虛擬 FS，防記憶體洩漏與後續「file already exists」
       if(ff){
         try{ ff.FS('unlink','in.media'); }catch(e){}
@@ -2039,7 +2036,7 @@ const Media = {
     return this.runWebFfmpeg(work,{owns});
   },
   async _transcodeAndExtract(file,projectRestore=null,{owns=()=>true}={}){
-    let ff=null;
+    let ff=null,clearProgress;
     let ownsWork=owns;
     const tempAudioFiles=[];
     const decoded=[];
@@ -2055,7 +2052,7 @@ const Media = {
       const probe=await (async()=>{ let log='';ff.setLogger(({message})=>log+=message+'\n');try{await ff.run('-i','in.media');}catch(e){}ff.setLogger(()=>{});return log;})();
       if(!owns()) return false;
       const aCount=(probe.match(/Stream #\d+:\d+.*: Audio:/g)||[]).length; // 0=無音軌：跳過抽取，不可 ||1 強抽（會整段誤報「轉檔失敗」）
-      setStatus('轉檔預覽影片中…','busy');
+      clearProgress=setMediaProcessingStatus('轉檔預覽影片中…','busy');
       await ff.run('-i','in.media','-c:v','libx264','-preset','ultrafast','-crf','26','-an','-movflags','+faststart','prev.mp4');
       if(!owns()) return false;
       const mp4=ff.FS('readFile','prev.mp4');
@@ -2078,7 +2075,7 @@ const Media = {
       // 抽音軌
       for(let i=0;i<aCount;i++){
         if(!ownsWork()) return false;
-        setStatus(`抽取音軌 ${i+1}/${aCount}…`,'busy');
+        clearProgress=setMediaProcessingStatus(`抽取音軌 ${i+1}/${aCount}…`,'busy');
         tempAudioFiles.push(`a${i}.wav`);
         await ff.run('-i','in.media','-map',`0:a:${i}`,'-ar','48000',`a${i}.wav`);
         if(!ownsWork()) return false;
@@ -2098,7 +2095,7 @@ const Media = {
       if(!ownsWork()) return false;
       this.usingWebAudio=true; this.syncMuteState();
       if(!ownsWork()) return false;
-      setStatus('轉檔完成','ok'); notifyAudioTracks();
+      setMediaProcessingStatus('轉檔完成','ok'); notifyAudioTracks();
       // Proxy 不含音訊；抽取完成時若使用者已在播放，按當前來源位置
       // 接上 buffer。若新定位尚未呈現，startBufferSources 會留給 session 起播。
       if(!ownsWork()) return false;
@@ -2110,10 +2107,11 @@ const Media = {
       // A cancellation can surface as a rejected ff.run.  It is not an error
       // for the now-current B intake and must not overwrite B's UI status.
       if(!ownsWork()) return false;
-      if(ff){setStatus('轉檔失敗','err',false,e?.message||String(e));showToast('ffmpeg 轉檔失敗');}
+      if(ff){setMediaProcessingStatus('轉檔失敗','err',false,e?.message||String(e));showToast('ffmpeg 轉檔失敗');}
       console.error(e);
       return false;
     }finally{
+      clearProgress?.();
       // The ffmpeg lane above prevents a stale A from deleting B's virtual
       // files while B runs.  Always release partial files on every exit path.
       if(ff){
@@ -3307,7 +3305,7 @@ const Media = {
     else { Seq.sort(); Seq.recomputeDuration(); }
     emit('media:timeline');
     emit('history:record', '加入影片：' + c.name);
-    setStatus(`已加入序列：${c.name}（背景轉檔 Proxy 與抽取音訊…）`, 'busy');
+    setStatus(`已加入序列：${c.name}`, 'ok');
     void this.ensureClipRuntime(c,info,assetOperation);
     void this.ensurePrimaryPreviewProxy();
     return c;
@@ -3387,7 +3385,7 @@ const Media = {
     }
     if(!owns()) return;
     let res; try{ res = await MediaIntakeJobs.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
-    catch(e){ if(owns()){recovery.fail(e);setStatus('影片音訊抽取失敗：' + (e?.message||e), 'err');} return; }
+    catch(e){ if(owns()){recovery.fail(e);setMediaProcessingStatus('影片音訊抽取失敗：' + (e?.message||e), 'err');} return; }
     if(!res || !owns()) return;
     if(res.proxy){
       try{ const u = await DESK.fileURL(res.proxy);
@@ -3434,7 +3432,7 @@ const Media = {
     if(owns())this._publishPreviewAssets(c,res,owns);
     await waveReady;
     if(!owns()) return;
-    notifyAudioTracks(); setStatus(`影片已加入序列：${this._liveClipForSource(c)?.name||c.name}`, 'ok');
+    notifyAudioTracks(); setMediaProcessingStatus(`影音預覽已就緒：${this._liveClipForSource(c)?.name||c.name}`, 'ok');
     recovery.complete();
     return true;
     }catch(error){if(owns())recovery.fail(error);throw error;}
@@ -4989,7 +4987,7 @@ const Media = {
     await cancellation;
     if(MediaIntakeJobs.snapshot().sessionId===sessionId)await MediaIntakeJobs.refreshRecoveryInfo();
     if(MediaIntakeJobs.snapshot().sessionId===sessionId&&!MediaIntakeJobs.snapshot().count)
-      setStatus('已取消 Proxy 與音訊背景處理','ok');
+      setMediaProcessingStatus('已取消 Proxy 與音訊背景處理','ok');
     return true;
   },
   reset(options={}){

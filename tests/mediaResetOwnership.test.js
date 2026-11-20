@@ -65,7 +65,7 @@ const eventMock = vi.hoisted(() => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/dom.js', () => domMock);
 vi.mock('../src/events.js', () => eventMock);
 vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
-  setStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
+  setStatus: vi.fn(), setMediaProcessingStatus: vi.fn(), showToast: vi.fn(), openModal: vi.fn(), closeModal: vi.fn(),
 }));
 vi.mock('../src/mixer.js', () => ({ renderAudioTracks: vi.fn(), clearMeterStrips: vi.fn() }));
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn(), updatePlayhead: vi.fn() }));

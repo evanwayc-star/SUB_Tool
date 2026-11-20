@@ -97,6 +97,39 @@ describe('project save ownership',()=>{
     }finally{browser.resetProject();downloaded.mockRestore();vi.unstubAllGlobals();}
   });
 
+  it('網頁備份也只寫變更的內容；配額不足後下一輪重試，成功即略過相同內容',async()=>{
+    vi.useFakeTimers();
+    vi.resetModules();
+    delete window.subtool;
+    const util=await import('../src/util.js');
+    const downloaded=vi.spyOn(util,'downloadBytes').mockImplementation(()=>{});
+    const {State:web}=await import('../src/state.js');
+    const browser=await import('../src/project.js');
+    const storage=vi.spyOn(Storage.prototype,'setItem');
+    const dataWrites=()=>storage.mock.calls.filter(([key])=>key==='subtool_autosave_data');
+    const tick=()=>vi.advanceTimersByTimeAsync(3*60*1000);
+    try{
+      await browser.Project.saveAs();
+      runtime.time=7;
+      await tick();
+      expect(dataWrites()).toHaveLength(0);
+      web.notes.push({id:'note',time:1,text:'備份備註'});
+      storage.mockImplementationOnce(()=>{throw new Error('storage quota exceeded');});
+      await tick();
+      await tick();
+      await tick();
+      expect(dataWrites()).toHaveLength(2);
+      expect(decode(dataWrites().at(-1)[1]).notes[0]).toMatchObject({time:1,text:'備份備註'});
+      expect(browser.isProjectDirty()).toBe(true);
+    }finally{
+      localStorage.removeItem('subtool_autosave_data');
+      localStorage.removeItem('subtool_autosave_name');
+      browser.resetProject();
+      storage.mockRestore();
+      downloaded.mockRestore();
+    }
+  });
+
   it.each([false,true])('變速片段固定=%s 保存時間軸長度與來源幀，不保存 PNG 預覽快取',async frozen=>{
     State.cues=[];
     const clip={id:'speed',path:'C:/movie.mp4',dur:6,in:0,out:6,offset:2,vtrack:0,speed:2,reverse:true};
@@ -132,10 +165,95 @@ describe('project save ownership',()=>{
     expect(getProjectDir()).toBeNull();expect(isProjectDirty()).toBe(true);
   });
 
+  it('開啟專案後只播放、跳轉或改變時間軸檢視，多次到期都不寫入',async()=>{
+    vi.useFakeTimers();
+    await Project.saveAs();
+    await Project.loadDesktop({path:'C:/project.subtool',b64:desk.saveProject.mock.calls[0][1]});
+    for(const time of [5,2,12]){
+      runtime.time=time;
+      State.pxPerSec+=10;
+      State.vtracksCollapsed=!State.vtracksCollapsed;
+      await vi.advanceTimersByTimeAsync(3*60*1000);
+    }
+    expect(desk.writeProject).not.toHaveBeenCalled();
+    State.cues[0].text='開檔後編輯';
+    await vi.advanceTimersByTimeAsync(3*60*1000);
+    expect(desk.writeProject).toHaveBeenCalledOnce();
+    expect(decode(desk.writeProject.mock.calls[0][1])).toMatchObject({
+      cues:[{text:'開檔後編輯'}],playhead:12,
+    });
+    expect(isProjectDirty()).toBe(true);
+  });
+
+  it('每次實際變更只備份一次，手動儲存後不再為同一內容備份',async()=>{
+    vi.useFakeTimers();
+    await Project.saveAs();
+    const tick=()=>vi.advanceTimersByTimeAsync(3*60*1000);
+    await tick();
+    expect(desk.writeProject).not.toHaveBeenCalled();
+    State.cues[0].text='第一次變更';
+    await tick();
+    runtime.time=8;
+    await tick();
+    expect(desk.writeProject).toHaveBeenCalledOnce();
+    expect(savedText(desk.writeProject.mock.calls[0])).toBe('第一次變更');
+    expect(isProjectDirty()).toBe(true);
+    State.cues[0].text='已手動儲存';
+    await Project.save();
+    await tick();
+    expect(desk.writeProject).toHaveBeenCalledTimes(2);
+    expect(desk.writeProject.mock.calls.at(-1)[0]).toBe('C:/project.subtool');
+    State.cues=[];
+    await tick();
+    expect(desk.writeProject).toHaveBeenCalledTimes(3);
+    expect(decode(desk.writeProject.mock.calls.at(-1)[1]).cues).toEqual([]);
+  });
+
+  it('備份讀寫中不重複送出，期間新增的編輯仍會寫入下一份備份',async()=>{
+    vi.useFakeTimers();
+    await Project.saveAs();
+    State.cues[0].text='第一份';
+    const pending=deferred();
+    desk.writeProject.mockReturnValueOnce(pending.promise);
+    const tick=()=>vi.advanceTimersByTimeAsync(3*60*1000);
+    await tick();
+    expect(desk.writeProject).toHaveBeenCalledOnce();
+    State.cues[0].text='第二份';
+    await tick();
+    expect(desk.writeProject).toHaveBeenCalledOnce();
+    pending.resolve(desk.writeProject.mock.calls[0][0]);
+    await tick();
+    await tick();
+    expect(desk.writeProject.mock.calls.map(savedText)).toEqual(['第一份','第二份']);
+    expect(isProjectDirty()).toBe(true);
+  });
+
+  it('同一路徑重開後，舊備份回覆不會略過新工作區的同名編輯',async()=>{
+    vi.useFakeTimers();
+    await Project.saveAs();
+    const original=desk.saveProject.mock.calls[0][1];
+    await Project.loadDesktop({path:'C:/project.subtool',b64:original});
+    const tick=()=>vi.advanceTimersByTimeAsync(3*60*1000);
+    const pending=deferred();
+    desk.writeProject.mockReturnValueOnce(pending.promise);
+    State.cues[0].text='同一項編輯';
+    await tick();
+    const path=desk.writeProject.mock.calls[0][0];
+    await Project.loadDesktop({path:'C:/project.subtool',b64:original});
+    pending.resolve(path);
+    await tick();
+    expect(desk.writeProject).toHaveBeenCalledOnce();
+    State.cues[0].text='同一項編輯';
+    await tick();
+    expect(desk.writeProject.mock.calls.map(savedText)).toEqual(['同一項編輯','同一項編輯']);
+    expect(decode(desk.writeProject.mock.calls[0][1])).toEqual(decode(desk.writeProject.mock.calls[1][1]));
+  });
+
   it.each(['reset', 'open', 'saveAs', 'current'])('自動備份完成回報保留原工作區及儲存目標資格：%s', async change => {
     const { setStatus } = await import('../src/ui.js');
     vi.useFakeTimers();
     await Project.saveAs();
+    State.cues[0].text='待備份';
     const pending = deferred();
     desk.writeProject.mockReturnValueOnce(pending.promise);
     await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
@@ -143,7 +261,7 @@ describe('project save ownership',()=>{
     const [backupPath, b64] = desk.writeProject.mock.calls[0];
     expect(backupPath).toContain('C:/.subtool_AutoSave/project_');
     expect([...Buffer.from(b64, 'base64').subarray(0, 2)]).toEqual([0xff, 0xfe]);
-    expect(decode(b64).cues[0].text).toBe('original');
+    expect(decode(b64).cues[0].text).toBe('待備份');
 
     if (change === 'reset') resetProject();
     else if (change === 'open') await Project.loadDesktop({ path: 'C:/opened/new.subtool',
@@ -266,11 +384,16 @@ describe('project save ownership',()=>{
     expect(isProjectDirty()).toBe(true);
     expect(savedText(desk.writeProject.mock.calls[0])).toBe('仍未儲存');
     expect(getProjectDir()).toBe('C:/');
+    await vi.advanceTimersByTimeAsync(3*60*1000);
+    await vi.advanceTimersByTimeAsync(3*60*1000);
+    expect(desk.writeProject.mock.calls.map(savedText)).toEqual(['仍未儲存','仍未儲存']);
+    expect(isProjectDirty()).toBe(true);
   });
 
   it.each(['reset','open','saveAs'])('自動備份的舊失敗在 %s 後抵達，不覆寫新工作區狀態',async change=>{
     const {setStatus}=await import('../src/ui.js');
     vi.useFakeTimers();await Project.saveAs();
+    State.cues[0].text='待備份';
     const pending=deferred();desk.writeProject.mockReturnValueOnce(pending.promise);
     await vi.advanceTimersByTimeAsync(3*60*1000);
     if(change==='reset')resetProject();
@@ -325,8 +448,12 @@ describe('Project 與 History 共用已提交快照',()=>{
     State.notes.push({id:'background',time:2,text:'背景完成'});
     History.record('背景工作');
     expect(isProjectDirty()).toBe(true);
+    await vi.advanceTimersByTimeAsync(3*60*1000);
+    expect(desk.writeProject.mock.calls.at(-1)[0]).toContain('.subtool_AutoSave');
+    const backup=decode(desk.writeProject.mock.calls.at(-1)[1]);
     await Project.save();
     const saved=decode(desk.writeProject.mock.calls.at(-1)[1]);
+    expect(backup).toEqual(saved);
     expect(saved.cues).toEqual([{start:1,end:2,text:'已提交',track:1,timed:true}]);
     expect(saved.clips[0]).toMatchObject({offset:0,posX:0.5});
     expect(saved.externalAudioSources[0]).toMatchObject({offset:3,height:64});
@@ -337,8 +464,7 @@ describe('Project 與 History 共用已提交快照',()=>{
     await Project.saveAs();
     expect(decode(desk.saveProject.mock.calls.at(-1)[1])).toEqual(saved);
     await vi.advanceTimersByTimeAsync(3*60*1000);
-    expect(desk.writeProject.mock.calls.at(-1)[0]).toContain('.subtool_AutoSave');
-    expect(decode(desk.writeProject.mock.calls.at(-1)[1])).toEqual(saved);
+    expect(desk.writeProject).toHaveBeenCalledTimes(2);
     cue.text='已提交';delete cue.style;clip.offset=0;delete clip.posX;
     audio.offset=3;audio.height=64;State.duration=10;State.audioProject.buses[0].muted=false;
     finish();finishAudio();
