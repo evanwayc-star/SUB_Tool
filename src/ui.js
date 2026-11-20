@@ -6,7 +6,7 @@
 import { $ } from './dom.js';
 import { State } from './state.js';
 import { Media } from './media.js';
-import { emit } from './events.js';
+import { emit, on } from './events.js';
 import { getNativePreviewRuntime } from './media-player-adapter.js';
 import { secToEncore } from './time.js';
 import { recordStatusError } from './status-error-report.js';
@@ -94,6 +94,38 @@ function renderMediaProcessing(msg,kind,detail,parts) {
     }else msgEl.textContent=msg||'';
     msgEl.title=detail||msg||'';
     msgEl.setAttribute('aria-label',msgEl.title);
+  }
+}
+
+// 音訊平衡可與匯出、波形及 Proxy 同時進行，各工作保留自己的狀態與按鈕。
+let effectNoticeTimer;
+export function bindAudioEffectStatusView(refreshClips,refreshDialog) {
+  on('media:audioEffectStatus', state => {
+    renderAudioEffectStatus(state);
+    refreshClips();
+    refreshDialog();
+  });
+}
+function renderAudioEffectStatus({active,result}) {
+  const el = $('stAudioEffect');
+  if (!el) return;
+  clearTimeout(effectNoticeTimer);
+  el.hidden = !active.length && !result;
+  if (active.length) {
+    const percent = job => Number.isFinite(job.pct) ? ' ' + Math.round(job.pct) + '%' : '';
+    const first = active[0];
+    el.textContent = '音訊平衡' + percent(first) + (active.length > 1 ? '（' + active.length + ' 項）' : '') + ' · ' + first.label;
+    el.title = active.map(job => job.name + ' · ' + job.label + percent(job)).join('\n');
+    el.dataset.tone = 'busy';
+  } else if (result) {
+    const text = {completed:'已套用', restored:'已還原原音', failed:'失敗'}[result.status];
+    el.textContent = '音訊平衡 · ' + text;
+    el.title = [result.name, text, result.detail].filter(Boolean).join(' · ');
+    el.dataset.tone = result.status === 'failed' ? 'err' : 'ok';
+    effectNoticeTimer = setTimeout(() => { el.hidden = true; }, 5000);
+  } else {
+    el.textContent = '';
+    el.title = '';
   }
 }
 

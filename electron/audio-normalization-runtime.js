@@ -55,17 +55,35 @@ function createAudioNormalizationRuntime({
     if (expected !== null && await captureSource(src) !== expected) throw sourceChanged();
   };
 
+  async function executeWithCancellation(args, options, signal) {
+    signal?.throwIfAborted();
+    let child;
+    const abort = () => child?.kill?.();
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      return await execute(args, { ...options,
+        isCancelled: () => !!signal?.aborted,
+        onProcess: process => { child = process; if (signal?.aborted) abort(); } });
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      signal?.throwIfAborted();
+    }
+  }
+
   return {
     /**
      * 快速分析來源音訊聲量 (ITU-R BS.1770 / RMS)
      */
-    async analyze(src, { duration = 0 } = {}) {
+    async analyze(src, { duration = 0, onProgress = null, signal = null } = {}) {
       if (typeof src !== 'string' || !src.trim()) {
         throw new TypeError('缺少有效的來源音訊路徑');
       }
 
+      signal?.throwIfAborted();
       const sourceEvidence = fingerprintSource ? await captureSource(src) : null;
-      const media = typeof probe === 'function' ? await probe(src) : null;
+      signal?.throwIfAborted();
+      const media = typeof probe === 'function' ? await probe(src, { signal }) : null;
+      signal?.throwIfAborted();
       // 面板顯示來源 MIX，沿波形的全部原始聲道等權／來源時鐘量測；
       // 這份混合報告不屬於 normalize() 的逐 stream 效果報告。
       const mix = media ? buildAudioIngestPlan(media.audio, { waveOnly: true }) : null;
@@ -74,21 +92,25 @@ function createAudioNormalizationRuntime({
         ? ['-filter_complex', [...mix.filters, `${mix.waveLabel}volumedetect,loudnorm=print_format=json[measurement]`].join(';'), '-map', '[measurement]', '-vn']
         : ['-af', 'volumedetect,loudnorm=print_format=json'];
       let stderr = '';
-      await execute([
+      await executeWithCancellation([
           '-hide_banner',
           '-i', src,
           ...analysisArgs,
           '-f', 'null',
           '-',
         ], {
-          duration,
+          duration: media?.duration || duration,
           jobId: 'audio-volume-analyze',
           label: '量測音訊聲量 (ITU 1770 / RMS)',
           onStderr: chunk => {
             stderr += chunk;
           },
-      });
+          onProgress: progress => {
+            if (!signal?.aborted) onProgress?.({ ...progress, stage: 'measure' });
+          },
+      }, signal);
       if (sourceEvidence !== null) await verifySource(src, sourceEvidence);
+      signal?.throwIfAborted();
       const report = parseVolumeAnalysis(stderr);
       if (!report) throw new Error('音訊量測未產生有效的聲量資料');
       return report;
@@ -119,20 +141,15 @@ function createAudioNormalizationRuntime({
         check();
         if (sourceEvidence !== null) { await verifySource(src, sourceEvidence); check(); }
         verifyOutput();
-        let child;
-        const abort = () => child?.kill?.();
-        signal?.addEventListener('abort', abort, { once: true });
-        try {
-          const writesOutput = ownedOutput && args.at(-1) === outWav;
-          const actualArgs = writesOutput ? [...args.slice(0, -1), '-f', 'wav', 'fd:'] : args;
-          const result = await execute(actualArgs, { ...executionOptions,
-            ...(writesOutput ? { outputDescriptor: ownedOutput.fd } : {}),
-            onProcess: process => { child = process; if (signal?.aborted) abort(); } });
-          check();
-          if (sourceEvidence !== null) { await verifySource(src, sourceEvidence); check(); }
-          verifyOutput();
-          return result;
-        } finally { signal?.removeEventListener('abort', abort); }
+        // 16 聲道長片的預聽 PCM 可超過 RIFF 的 32 位元大小欄位。
+        const writesOutput = args.at(-1) === outWav;
+        const actualArgs = writesOutput ? [...args.slice(0, -1), '-rf64', 'auto', '-f', 'wav',
+          ownedOutput ? 'fd:' : outWav] : args;
+        const result = await executeWithCancellation(actualArgs, { ...executionOptions,
+          ...(writesOutput && ownedOutput ? { outputDescriptor: ownedOutput.fd } : {}) }, signal);
+        if (sourceEvidence !== null) { await verifySource(src, sourceEvidence); check(); }
+        verifyOutput();
+        return result;
       };
       const perform = async () => { try {
         check();
@@ -145,6 +162,7 @@ function createAudioNormalizationRuntime({
         // 已對齊的 processed WAV 探測值為零，不會重複移動原點。
         const clock = media?.video || media?.audio?.[sourceStream];
         const sourceDuration = Number(media?.duration);
+        if (sourceDuration > 0 && Number.isFinite(sourceDuration)) duration = sourceDuration;
         const outputClock = sourceAudioClockFilter(clock)
           + (sourceDuration > 0 && Number.isFinite(sourceDuration)
             ? `,apad=whole_dur=${sourceDuration.toFixed(6)},atrim=end=${sourceDuration.toFixed(6)}` : '');

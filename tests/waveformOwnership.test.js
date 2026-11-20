@@ -29,6 +29,42 @@ function sourcePcm(seconds=600){
   new Int16Array(buffer,44).fill(8192);return buffer;
 }
 
+// FFmpeg writes WAVE_FORMAT_EXTENSIBLE for multichannel PCM. The last channel
+// has a signal across the whole file, including the last peak bucket.
+function multichannelPcm(seconds){
+  const channels=16, frames=seconds*4000, start=68;
+  const buffer=new ArrayBuffer(start+frames*channels*2), view=new DataView(buffer);
+  for(const [offset,text] of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[60,'data']])
+    for(let i=0;i<text.length;i++)view.setUint8(offset+i,text.charCodeAt(i));
+  view.setUint32(4,buffer.byteLength-8,true);view.setUint32(16,40,true);view.setUint16(20,0xfffe,true);
+  view.setUint16(22,channels,true);view.setUint32(24,4000,true);view.setUint32(28,4000*channels*2,true);
+  view.setUint16(32,channels*2,true);view.setUint16(34,16,true);view.setUint16(36,22,true);view.setUint16(38,16,true);
+  new Uint8Array(buffer,44,16).set([1,0,0,0,0,0,16,0,128,0,0,170,0,56,155,113]);
+  view.setUint32(64,frames*channels*2,true);
+  const pcm=new Int16Array(buffer,start);
+  for(let i=0;i<frames;i++)pcm[(i+1)*channels-1]=i%2 ? 16384 : -8192;
+  return buffer;
+}
+
+it('分段讀取多聲道平衡後的實際 PCM 格式，混音與個別聲道的首尾峰值正確',async()=>{
+  const buffer=multichannelPcm(40), sizes=[];
+  desktop.fileURL.mockResolvedValue('http://fixture/normalized.wave.wav');
+  vi.stubGlobal('fetch',vi.fn(async(_url,options)=>{
+    const range=/^bytes=(\d+)-(\d+)$/.exec(options?.headers?.Range||'');
+    if(!range)throw new Error('平衡後的長波形不可整檔讀入');
+    const first=Number(range[1]),end=Math.min(Number(range[2])+1,buffer.byteLength);
+    sizes.push(end-first);
+    return {status:206,arrayBuffer:async()=>buffer.slice(first,end)};
+  }));
+  const {peaks}=await Wave.preparePcmMix(['fixture'],{duration:40});
+  expect(peaks).toHaveLength(8000);
+  expect([...peaks.slice(0,2),...peaks.slice(-2)]).toEqual([-.25/16,.5/16,-.25/16,.5/16]);
+  Wave.registerSourceWaveforms('effect',{channels:[{sourceChannel:15,file:'fixture',pcmChannel:15}]});
+  const selected=await Wave.loadSourceWaveform('effect','0:15');
+  expect([...selected.slice(0,2),...selected.slice(-2)]).toEqual([-.25,.5,-.25,.5]);
+  expect(Math.max(...sizes)).toBeLessThan(buffer.byteLength/2);
+});
+
 beforeEach(() => {
   Wave.clearSources();
   Wave.peaks = null;

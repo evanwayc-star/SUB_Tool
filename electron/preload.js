@@ -107,7 +107,7 @@ contextBridge.exposeInMainWorld('subtool', {
   },
   normalizeAudio: (p, options, duration, requestId) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:normalize', { path: p, options, duration, requestId }); },
   cancelAudioNormalization: requestId => ipcRenderer.invoke('audio:normalize-cancel', { requestId }),
-  analyzeAudioLoudness: (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:analyzeLoudness', { path: p, duration }); },
+  analyzeAudioLoudness: (p, duration, requestId) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('audio:analyzeLoudness', { path: p, duration, requestId }); },
   onAudioNormalizeProgress: (callback) => {
     if (typeof callback !== 'function') return () => {};
     const handler = (_event, data) => callback(data);

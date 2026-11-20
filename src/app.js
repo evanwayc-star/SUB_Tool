@@ -40,14 +40,15 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.j
 import { createCommands } from './commands.js';
 import { renderPointerSeekControl, requestPointerSeek, timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction-engine.js';
 import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
-import { togglePanel, bindOverlayDrag, keepPanelInViewport, renderQueueMonitorIndicator, renderAsrIndicator, renderProjectIdentity, renderCurrentTimecode } from './ui.js';
+import { togglePanel, bindOverlayDrag, keepPanelInViewport, renderQueueMonitorIndicator, renderAsrIndicator, renderProjectIdentity, renderCurrentTimecode, bindAudioEffectStatusView } from './ui.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { bindMediaIntakeView, handleMediaIntakeProgress } from './media-intake-view.js';
+import { refreshAudioNormalizerDialog } from './audio-normalizer-dialog.js';
 import { bindPreviewStatusView, bindProxyStatusView } from './preview-status-view.js';
 import { renderProjectCanvasButton } from './project-canvas-preview.js';
 import { AudioRouting } from './audio-routing.js';
-import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline-renderer.js';
+import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, refreshClipEffectBadges } from './timeline-renderer.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, applyCueStylePatch } from './subtitles.js';
 import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames, hasActiveCueEdit } from './subtitle-model.js';
 import { searchUpdate, searchNav, searchReplace, searchSelectAll, replaceOne, setSelectCueHandler } from './subtitle-search.js';
@@ -83,6 +84,7 @@ const previewStatusView=bindPreviewStatusView({
   root:$('previewStatus'),readState:()=>Media.previewState(),setMode:mode=>Media.setPreviewMode(mode),
 });
 const proxyStatusView=bindProxyStatusView({root:$('stProxy'),readState:()=>Media.proxyStatus()});
+bindAudioEffectStatusView(refreshClipEffectBadges,refreshAudioNormalizerDialog);
 renderProjectCanvasButton();
 function updatePreviewViews(){previewStatusView.update();proxyStatusView.update();}
 on('media:preview-state',updatePreviewViews);

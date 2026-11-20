@@ -37,6 +37,41 @@ describe('audio-normalization-runtime.js', () => {
   });
 
   describe('createAudioNormalizationRuntime 執行管線', () => {
+    it('來源量測回報 FFmpeg 進度，關閉面板即停止該次讀取並等待程序結束', async () => {
+      const controller = new AbortController(), kill = vi.fn(), progress = vi.fn();
+      let finish, started;
+      const scanning = new Promise(resolve => { started = resolve; });
+      const execute = vi.fn((_args, options) => {
+        options.onProcess?.({ kill });
+        options.onProgress?.({ pct: 37 });
+        started();
+        return new Promise(resolve => { finish = resolve; });
+      });
+      const runtime = createAudioNormalizationRuntime({ createTempPath: vi.fn(), execute,
+        probe: async () => ({ duration: 90, audio: [{ channels: 1 }] }) });
+      const work = runtime.analyze('母素材.mov', { signal: controller.signal, onProgress: progress });
+      await scanning;
+      expect(execute.mock.calls[0][1].duration).toBe(90);
+      expect(progress).toHaveBeenCalledWith(expect.objectContaining({ stage: 'measure', pct: 37 }));
+      controller.abort();
+      expect(kill).toHaveBeenCalledOnce();
+      finish();
+      await expect(work).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    it('等待 probe 時取消來源量測，不啟動 FFmpeg', async () => {
+      const controller = new AbortController(), execute = vi.fn();
+      let finish;
+      const probe = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+      const runtime = createAudioNormalizationRuntime({ createTempPath: vi.fn(), execute, probe });
+      const work = runtime.analyze('母素材.mxf', { signal: controller.signal });
+      expect(probe).toHaveBeenCalledWith('母素材.mxf', { signal: controller.signal });
+      controller.abort();
+      finish({ duration: 3, audio: [{ channels: 1 }] });
+      await expect(work).rejects.toMatchObject({ name: 'AbortError' });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
     it.each([false, true])('probe 的來源原點只套於 %s 模式輸出，母素材量測保持完整', async isTruePeak => {
       const report = { input_i: '-22', input_tp: '-2', input_lra: '0', input_thresh: '-32', target_offset: '0' };
       const probe = vi.fn(async () => ({ duration: 3, video: { timestampOffset: -.5 } }));

@@ -114,6 +114,7 @@ describe('音訊平衡化私有輸出的實際檔案歸屬',()=>{
     const f=fixture();const result=await f.runtime.normalize('mother.wav',{isTruePeak:false});
     expect(f.write.mock.calls[0][1].outputDescriptor).toBeUndefined();
     const [args,options]=f.write.mock.calls.at(-1);
+    expect(args.slice(args.indexOf('-rf64'),args.indexOf('-rf64')+2)).toEqual(['-rf64','auto']);
     expect(args.at(-1)).toBe('fd:');expect(args.slice(-3,-1)).toEqual(['-f','wav']);
     expect(Number.isInteger(options.outputDescriptor)).toBe(true);
     expect(result.outputPath).toBe(f.output);expect(fs.readFileSync(f.output,'utf8')).toBe('owned wav');

@@ -14,6 +14,11 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
   const intents = new Map();
   let epoch = 0;
 
+  function publish(change = {}) {
+    const active = [...jobs.values()].filter(job => job.progress).map(job => ({ ...job.progress }));
+    changed({ active, ...change });
+  }
+
   function targets(input) {
     const all = sources();
     const raw = input?.target || input?.asset || input?.source || input;
@@ -23,6 +28,11 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
       || ((input?.isPrimary || id === 'video') ? all.find(s => s.primary) : null)
       || (!id ? all.find(s => audioMotherPath(s) === audioMotherPath(raw)) : null);
     return source ? all.filter(s => keyOf(s) === keyOf(source)) : [];
+  }
+
+  function pendingSettings(input) {
+    const job = jobs.get(keyOf(targets(input)[0]));
+    return job?.owns() ? structuredClone(job.settings) : undefined;
   }
 
   function cancel(key, expected = null) {
@@ -38,12 +48,28 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
     job.controller.abort();
   }
 
-  async function apply(input, options, { remember = true } = {}) {
+  function apply(input, options, flags) {
+    // 第一次進度通知會同步呼叫訂閱者；先建立可共用的 Promise 再啟動工作。
+    const completion = Promise.withResolvers();
+    completion.resolve(startOrJoin(input, options, flags, completion.promise));
+    return completion.promise;
+  }
+
+  async function startOrJoin(input, options, { remember = true } = {}, completion) {
     const initial = targets(input);
     const source = initial[0];
     if (!source || !audioMotherPath(source)) return { status: 'replaced' };
     const key = keyOf(source);
     const motherPath = audioMotherPath(source);
+    const name = source.name || motherPath.split(/[\\/]/).pop() || '音訊素材';
+    const spec = normalizeAudioLimiterSpec(options);
+    const layout = sourceLayout(source);
+    const stamp = fingerprint(source, spec, layout);
+    const previous = jobs.get(key);
+    if (previous?.stamp === stamp && previous.owns()) {
+      previous.remember ||= remember;
+      return previous.completion;
+    }
     const intent = ++nextWorkId, startEpoch = epoch;
     intents.set(key, intent);
     cancel(key);
@@ -52,10 +78,8 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
       return { status: 'replaced' };
     }
     failures.delete(key);
-    const spec = normalizeAudioLimiterSpec(options);
-    const layout = sourceLayout(source);
-    const stamp = fingerprint(source, spec, layout);
-    const job = { id: `audiofx-${Date.now()}-${intent}`, controller: new AbortController(), progressTargets: new Set(initial), epoch, intent, source, spec, remember, layout };
+    const job = { id: `audiofx-${Date.now()}-${intent}`, controller: new AbortController(), progressTargets: new Set(initial),
+      epoch, intent, source, spec, remember, layout, stamp, completion, settings: structuredClone(options ?? null) };
     jobs.set(key, job);
     const ownsSource = () => jobs.get(key) === job && job.epoch === epoch && !job.controller.signal.aborted
       && sources().some(s => initial.includes(s) && keyOf(s) === key && audioMotherPath(s) === motherPath);
@@ -64,16 +88,25 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
     job.ownsSource = ownsSource;
     const progress = data => {
       if (!owns()) return;
+      const pct = Math.max(0, Math.min(99, Math.round(Number(data.pct) || 0)));
+      const label = String(data.label || '音訊平衡');
+      let needsUpdate = job.progress?.pct !== pct || job.progress?.label !== label;
+      job.progress = { sourceId: key, name, pct, label };
       for (const target of targets(source)) {
+        if (!target.audioNormalizing) needsUpdate = true;
         job.progressTargets.add(target);
         target.audioNormalizing = true;
-        target.audioNormalizeProgress = Math.max(0, Math.min(100, Number(data.pct) || 0));
-        target.audioNormalizeLabel = String(data.label || '音訊平衡');
+        target.audioNormalizeProgress = pct;
+        target.audioNormalizeLabel = label;
       }
-      changed();
+      if (needsUpdate) publish();
     };
     progress({ pct: 0, label: spec ? '準備運算…' : '還原原音…' });
-    let prepared, result, discardable = false;
+    let prepared, result, outcome, discardable = false;
+    const preparePlayback = () => {
+      progress({ pct: spec ? 90 : 0, label: spec ? '準備預聽與波形' : '還原原音' });
+      return owns() ? prepare(source, result, owns, progress) : null;
+    };
     try {
       if (!owns()) return { status: 'replaced' };
       const work = { id: job.id, signal: job.controller.signal, progress, owns };
@@ -88,7 +121,7 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
       else if (spec) { result = await process(source, spec, work); discardable = !!result; }
       else result = null;
       if (!owns()) return { status: 'replaced' };
-      try { prepared = await prepare(source, result, owns); }
+      try { prepared = await preparePlayback(); }
       catch (error) {
         if (!cached || !owns()) throw error;
         // 快取可被清理；Redo 仍以母素材重建，不能把失效路徑當成專案內容。
@@ -97,7 +130,7 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
         result = await process(source, spec, work);
         discardable = !!result;
         if (!owns()) return { status: 'replaced' };
-        prepared = await prepare(source, result, owns);
+        prepared = await preparePlayback();
       }
       const finalSpec = result?.spec || spec;
       if (!owns()) { prepared?.dispose?.(); return { status: 'replaced' }; }
@@ -125,17 +158,19 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
         cache.set(fingerprint(source, finalSpec, layout), entry);
       }
       installed.set(key, fingerprint(source, finalSpec, layout));
-      changed({ committed: true });
-      if (remember && owns()) record(spec ? `音訊平衡：${finalSpec.max} dB` : '還原原始音訊');
+      publish({ committed: true });
+      if (job.remember && owns()) record(spec ? `音訊平衡：${finalSpec.max} dB` : '還原原始音訊');
+      outcome = { status: spec ? 'completed' : 'restored', name };
       return { status: 'completed' };
     } catch (error) {
       prepared?.dispose?.();
       if (!owns()) return { status: 'replaced' };
       failures.set(key, stamp);
+      outcome = { status: 'failed', name, detail: error?.message || String(error) };
       failed(error);
       return { status: 'failed', error };
     } finally {
-      if (jobs.get(key) === job) { cancel(key); changed(); }
+      if (jobs.get(key) === job) { cancel(key); publish(outcome ? { result: outcome } : {}); }
       if (intents.get(key) === intent) intents.delete(key);
       if (discardable) { try { await discardResult(result); } catch (_) {} }
     }
@@ -149,7 +184,7 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
       cancel(key,job);
       if(restart && !jobs.has(key) && intents.get(key)===job.intent && sources().includes(job.source)) {
         void apply(job.source,job.spec,{remember:job.remember});
-      }
+      } else publish();
     }
     for (const [key, source] of live) {
       const current = () => sources().includes(source) && keyOf(source) === key;
@@ -168,7 +203,9 @@ export function createAudioEffects({ sources, process, prepare, install, fingerp
     epoch++;
     failures.clear();
     if (clear) { installed.clear(); cache.clear(); }
-    for (const [key, job] of [...jobs]) cancel(key, job);
+    const previousJobs = [...jobs];
+    for (const [key, job] of previousJobs) cancel(key, job);
+    if (previousJobs.length) publish();
   }
-  return { targets, apply, sync, invalidate };
+  return { targets, pendingSettings, apply, sync, invalidate };
 }

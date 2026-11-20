@@ -122,6 +122,28 @@ function fixture(){
   return {live,pending,effects,install,record,failed,complete};
 }
 describe('來源效果工作 interface',()=>{
+  it('送出後立即通知狀態列，直到預聽準備完成才顯示已套用，並保留其他工作的進度',async()=>{
+    const a=clip('A'), b=clip('B'), encoded=deferred(), playable=deferred(), other=deferred();
+    const changed=vi.fn();
+    const effects=createAudioEffects({sources:()=>[a,b], changed,
+      process:(source,spec,work)=>{
+        work.progress({label:'分析音訊',pct:21});
+        return (source===a?encoded:other).promise;
+      },
+      prepare:()=>playable.promise,install:vi.fn()});
+    const first=effects.apply(a,spec), second=effects.apply(b,spec);
+    expect(changed.mock.lastCall[0].active.map(job=>[job.sourceId,job.pct])).toEqual([['A',21],['B',21]]);
+    encoded.resolve({outputPath:'a.wav',spec});
+    await vi.waitFor(()=>expect(changed.mock.lastCall[0].active[0].label).toContain('預聽'));
+    expect(changed.mock.lastCall[0].result).toBeUndefined();
+    playable.resolve({}); await first;
+    expect(changed.mock.lastCall[0]).toMatchObject({active:[{sourceId:'B'}],result:{status:'completed',name:'A.mp4'}});
+    other.reject(new Error('測試讀取失敗')); await second;
+    expect(changed.mock.lastCall[0]).toMatchObject({active:[],result:{status:'failed',name:'B.mp4',detail:'測試讀取失敗'}});
+    await effects.apply(a,null);
+    expect(changed.mock.lastCall[0]).toMatchObject({active:[],result:{status:'restored'}});
+  });
+
   it('佈局變更撤銷舊工作時，abort 同步啟動的較新設定不可被自動重啟覆蓋',async()=>{
     const source=clip('layout'),pending=[];let layout='first',effects,latest;
     const process=vi.fn((s,options,work)=>{
@@ -197,6 +219,22 @@ describe('來源效果工作 interface',()=>{
     expect(f.live[0].audioLimiterSpec.max).toBe(-12);
     expect(f.install).toHaveBeenCalledTimes(1);expect(f.record).toHaveBeenCalledTimes(1);
     expect(f.live[0].path).toBe('C:/a.mp4');
+  });
+  it('同一來源重複套用相同設定時沿用當前進度和最後結果',async()=>{
+    const f=fixture(), original=f.effects.apply(f.live[0],spec);
+    f.pending[0].work.progress({label:'分析響度',pct:42});
+    const editing= f.effects.pendingSettings(f.live[0]);
+    expect(editing).toEqual(spec);
+    editing.max=-24;
+    expect(f.effects.pendingSettings(f.live[0]).max).toBe(spec.max);
+    const repeated=f.effects.apply(f.live[0],{...spec});
+    expect(f.pending).toHaveLength(1);
+    expect(f.pending[0].work.signal.aborted).toBe(false);
+    expect(f.live[0].audioNormalizeProgress).toBe(42);
+    f.complete(0);
+    expect(await Promise.all([original,repeated])).toEqual([{status:'completed'},{status:'completed'}]);
+    expect(f.record).toHaveBeenCalledOnce();
+    expect(f.effects.pendingSettings(f.live[0])).toBeUndefined();
   });
   it('不同來源的進度不互相覆寫',async()=>{
     const f=fixture();const a=f.effects.apply(f.live[0],spec);const b=f.effects.apply(f.live[1],spec);

@@ -296,19 +296,20 @@ const Media = {
           if(result?.outputPath) paths.add(result.outputPath);
           await Promise.allSettled([...paths].map(path=>Promise.resolve().then(()=>DESK?.cleanupAudio?.(path))));
         },
-        prepare:(source,result,owns)=>this._prepareAudioEffect(source,result,owns),
+        prepare:(source,result,owns,progress)=>this._prepareAudioEffect(source,result,owns,progress),
         install:(source,prepared,spec)=>this._installAudioEffect(source,prepared,spec),
         isInstalled:source=>{
           const tracks=this.tracks.filter(t=>t.audioSourceId===source.audioSourceId);
           return tracks.length>0&&tracks.every(t=>t._audioEffect===true);
         },
-        changed:({committed=false}={})=>{
+        changed:({committed=false,...status})=>{
           if(committed){
             const live=this.externalAudio.serialize().filter(Boolean);
             const ids=new Set(live.map(s=>s.audioSourceId));
             State.externalAudioState=[...live,...(State.externalAudioState||[]).filter(s=>!ids.has(s.audioSourceId))];
+            emit('media:timeline');
           }
-          emit('media:timeline');
+          emit('media:audioEffectStatus',status);
         },
         record:label=>emit('history:record',label),
         failed:error=>showToast('音訊平衡失敗：'+(error.message||String(error)),'error'),
@@ -352,7 +353,10 @@ const Media = {
       if(streams.length>1 && !fingerprint) throw sourceChanged();
       unsubscribe=DESK.onAudioNormalizeProgress?.(data=>{
         if(data.requestId!==activeRequest||signal.aborted) return;
-        progress({...data,pct:(outputs.length*100+Number(data.pct||0))/streams.length});
+        const phase = data.stage==='pass1' ? '分析響度'
+          : data.stage==='silence' ? '保留無聲段落' : '處理音訊';
+        progress({label:`${phase}（串流 ${outputs.length+1}/${streams.length}）`,
+          pct:90*(outputs.length+Math.min(100,Math.max(0,Number(data.pct)||0))/100)/streams.length});
       });
       const reports={};
       for(const sourceStream of streams){
@@ -360,6 +364,7 @@ const Media = {
         await verify();
         check();
         activeRequest=`${id}-${sourceStream}`;
+        progress({label:`分析響度（串流 ${outputs.length+1}/${streams.length}）`,pct:90*outputs.length/streams.length});
         const result=await DESK.normalizeAudio(path,{
           maximumAmplitude:spec.max,targetLoudness:spec.min,inputBoost:spec.inputBoost,
           lookAheadTime:spec.lookAhead,releaseTime:spec.release,isTruePeak:spec.isTruePeak,
@@ -379,7 +384,7 @@ const Media = {
       throw error;
     }finally{ unsubscribe?.(); signal.removeEventListener('abort',cancel); }
   },
-  async _prepareAudioEffect(source,result,owns){
+  async _prepareAudioEffect(source,result,owns,progress=()=>{}){
     if(!result) return null;
     this.ensureCtx();
     const prepared={streams:[],peaks:null,outputPath:result.outputPath};
@@ -392,6 +397,7 @@ const Media = {
     };
     try{
       for(const stream of result.streams){
+        progress({pct:90+3*prepared.streams.length/result.streams.length,label:'載入平衡後的預聽音訊'});
         const url=await DESK.fileURL(stream.outputPath);
         if(!owns()){ prepared.dispose(); return null; }
         const el=new Audio(); setMediaElementSource(el,url); el.preload='auto';
@@ -404,12 +410,16 @@ const Media = {
       // 波形只需低取樣率預覽，不能把數小時的高取樣率 PCM 整份載入 renderer。
       const duration=source.dur||source.duration||0,wavePaths=[];
       for(const stream of prepared.streams){
+        progress({pct:93+4*wavePaths.length/prepared.streams.length,label:'產生平衡後的波形'});
         stream.wavePath=DESK.waveAudio?await DESK.waveAudio(stream.outputPath,duration):stream.outputPath;
         if(stream.wavePath && stream.wavePath!==stream.outputPath) generatedWaves.add(stream.wavePath);
         wavePaths.push(stream.wavePath);
         if(!owns()){ prepared.dispose(); return null; }
       }
-      const waveform=await Wave.preparePcmMix(wavePaths,{duration,owns});
+      progress({pct:97,label:'載入平衡後的波形'});
+      const waveform=await Wave.preparePcmMix(wavePaths,{duration,owns,
+        onProgress:fraction=>progress({pct:97+2*fraction,label:'載入平衡後的波形'}),
+      });
       if(!owns()){ prepared.dispose(); return null; }
       prepared.waveformPath=waveform?.path?Object.freeze({...waveform.path,
         sourceStreams:Object.freeze(prepared.streams.map(stream=>stream.sourceStream)),

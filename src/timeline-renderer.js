@@ -265,6 +265,10 @@ function drawWave(){
 // time so a reset, split or replacement cannot paint the previous workspace.
 let waveFramePending=false, waveControlsDirty=false, ownsWaveRows=null;
 const clipWavePainters=[], waveGutterPainters=[];
+const clipEffectPainters=[];
+export function refreshClipEffectBadges(){
+  if(ownsWaveRows?.())for(const paint of clipEffectPainters)paint();
+}
 _onEvent('media:waveform',({controls=false}={})=>{
   if(!tlAtracks)return;
   waveControlsDirty||=controls;
@@ -824,10 +828,44 @@ function syncProvisionalWave(){
   if(content)content.style.height=audioRowsHeight()+'px';
   layoutAudioLanes(vtracksHeight());
 }
+function paintClipEffect(block,source){
+  const running=source.audioNormalizing?source:source.asset?.audioNormalizing?source.asset:null;
+  const applied=source.hasAudioLimiter?source:source.asset?.hasAudioLimiter?source.asset:null;
+  block.classList.toggle('is-normalizing',!!running);
+  block.classList.toggle('has-limiter',!!applied&&!running);
+  let badge=block.querySelector('.audio-clip-fx-badge');
+  let bar=block.querySelector('.audio-clip-progress-bar');
+  if(!running){bar?.remove();bar=null;}
+  if(!running&&!applied){badge?.remove();return;}
+  if(!badge){
+    badge=document.createElement('span');badge.className='audio-clip-fx-badge';
+    block.querySelector('.audio-clip-label').after(badge);
+  }
+  badge.classList.toggle('processing',!!running);
+  if(running){
+    const pct=Number.isFinite(running.audioNormalizeProgress)?Math.round(running.audioNormalizeProgress):null;
+    const text=(running.audioNormalizeLabel||'運算中')+(pct==null?'':' '+pct+'%');
+    if(badge.textContent!==text)badge.textContent=text;
+    badge.title='音訊平衡 · '+text;
+    if(!bar){bar=document.createElement('div');bar.className='audio-clip-progress-bar';block.appendChild(bar);}
+    bar.style.width=(pct??0)+'%';
+  }else{
+    const label=applied.audioLimiterLabel||'平衡化';
+    badge.textContent='🎚 濾鏡 '+label;
+    const spec=applied.audioLimiterSpec;
+    badge.title=spec
+      ? (spec.isTruePeak!==false
+        ? `已套用音訊平衡 · 峰值上限 ${spec.max??-6} dBTP · 目標響度 ${spec.min??-12} LUFS`
+        : `已套用音訊平衡 · 峰值上限 ${spec.max??-6} dBFS · 增益計算基準 ${spec.min??-12} dB`)
+      : '已套用音訊平衡 · '+label;
+  }
+}
+
 function renderAudioTrackRows(){
   if(!tlAtracks) return;
   ownsWaveRows=Project.captureWorkspaceOwnership();
   clipWavePainters.length=0;
+  clipEffectPainters.length=0;
   const rows=audioRowLayout();
   const oldScroll=tlAtracks.scrollTop;
   tlAtracks.innerHTML='';
@@ -865,17 +903,7 @@ function renderAudioTrackRows(){
       const externalSelected=external&&State.selectedAudioClipId===c.id;
       const block=document.createElement('div');
       const isLocked=!!c.locked;
-      const isNormalizing = !!(c.audioNormalizing || c.asset?.audioNormalizing);
-      const normalizeProgress = Math.max(0, Math.min(100, Math.round(Number(c.audioNormalizeProgress ?? c.asset?.audioNormalizeProgress ?? 0))));
-      const limiterRef = [c,c.asset,external ? Media.externalAudio?.find?.(c.id) : null]
-        .find(source=>source?.hasAudioLimiter);
-      const hasLimiter = !isNormalizing && !!limiterRef;
-      const limiterLabel = limiterRef?.audioLimiterLabel || c.audioLimiterLabel || c.asset?.audioLimiterLabel || '平衡化';
-      const limiterSpec = limiterRef?.audioLimiterSpec || c.audioLimiterSpec || c.asset?.audioLimiterSpec;
-      const limiterTooltip = limiterSpec
-        ? `已套用音訊平衡化濾鏡 (最大: ${limiterSpec.max ?? -6} dB, 目標: ${limiterSpec.min ?? -12} dB)`
-        : `已套用音訊平衡化濾鏡 (${limiterLabel})`;
-      block.className='audio-clip-block'+(external?' external-audio-block':'')+(!external&&c.id===State.selectedClipId?' selected':'')+(external&&(externalSelected||Media.activeSource===c.audioSrc)?' selected':'')+(muted?' muted':'')+(isLocked?' locked':'')+(hasLimiter?' has-limiter':'')+(isNormalizing?' is-normalizing':'');
+      block.className='audio-clip-block'+(external?' external-audio-block':'')+(!external&&c.id===State.selectedClipId?' selected':'')+(external&&(externalSelected||Media.activeSource===c.audioSrc)?' selected':'')+(muted?' muted':'')+(isLocked?' locked':'');
       block.style.left=x1+'px'; block.style.width=Math.max(6,x2-x1)+'px';
       block.dataset.clipId=c.id||'';
       block.dataset.audioAssetId=external?(c.id||c.audioSourceId||c.audioSrc||''):'';
@@ -886,16 +914,10 @@ function renderAudioTrackRows(){
       block.dataset.audioEnd=String(e);
       block.dataset.audioEnabled=String(!muted);
       block.dataset.audioSourceName=c.name||row.label||'';
-      let fxBadge = '';
-      if (isNormalizing) {
-        fxBadge = `<span class="audio-clip-fx-badge processing" title="正在進行音訊平衡化處理 (${normalizeProgress}%)"><span class="fx-spin">⏳</span> 運算中 ${normalizeProgress}%</span>`;
-      } else if (hasLimiter) {
-        fxBadge = `<span class="audio-clip-fx-badge" title="${escapeHTML(limiterTooltip)}">🎚 濾鏡 ${escapeHTML(limiterLabel)}</span>`;
-      }
-      const progressBar = isNormalizing
-        ? `<div class="audio-clip-progress-bar" style="width:${normalizeProgress}%;"></div>`
-        : '';
-      block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span>${fxBadge}${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}${progressBar}`;
+      block.innerHTML=`${external?'<div class="edge l" title="修剪音訊開頭"></div>':''}<span class="audio-clip-label">${escapeHTML(c.name||'')}</span>${external?'<div class="edge r" title="修剪音訊結尾"></div>':''}`;
+      const effectSource=external?Media.externalAudio?.find?.(c.id)||c:c;
+      const paintEffect=()=>paintClipEffect(block,effectSource);
+      clipEffectPainters.push(paintEffect);paintEffect();
       const vx0=Math.max(0,x1),cvw=Math.round(Math.min(vw,x2)-vx0),Hpx=Math.max(10,h-6);
       let previousPeaks=null,cv=null;
       const paintWave=()=>{

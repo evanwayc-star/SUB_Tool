@@ -19,6 +19,22 @@ import {
 } from '../shared/audio-loudness.cjs';
 
 const DESK = typeof window !== 'undefined' ? window.subtool : null;
+let refreshOpenPanel;
+export function refreshAudioNormalizerDialog(){refreshOpenPanel?.();}
+
+function optionsForSpec(s) {
+  if(!s)return normalizeLimiterOptions({preset:'custom',inputBoost:6});
+  if(s.maximumAmplitude!=null)return normalizeLimiterOptions(s);
+  return normalizeLimiterOptions({
+    maximumAmplitude:s.max,targetLoudness:s.min,inputBoost:s.inputBoost??Math.abs(s.max-s.min),
+    lookAheadTime:s.lookAhead,releaseTime:s.release,isTruePeak:s.isTruePeak,linkChannels:s.linkChannels,
+  });
+}
+
+function sameLimiterOptions(a,b){
+  return ['maximumAmplitude','targetLoudness','inputBoost','isTruePeak','lookAheadTime','releaseTime',
+    'linkChannels','silenceProtection'].every(key=>a[key]===b[key]);
+}
 
 /**
  * 解析與當前音訊來源關聯的所有目標物件（包括外部音訊資產、Seq 片段與主影片）
@@ -39,48 +55,28 @@ export function openHardLimiterDialog(audioSource) {
     return;
   }
 
-  const filePath = audioSource?.path || audioSource?.asset?.path;
+  const targets = resolveAudioTargets(audioSource);
+  const filePath = audioMotherPath(targets[0]) || audioSource?.path || audioSource?.asset?.path;
   if (!filePath) {
     showToast('找不到音訊來源檔案路徑，無法套用效果');
     return;
   }
 
-  const targets = resolveAudioTargets(audioSource);
   const sourcePaths = new Map(targets.map(target => [target, audioMotherPath(target)]));
-  const appliedTarget = targets.find(t => t.hasAudioLimiter || t._originalPath);
-  const hasApplied = Boolean(appliedTarget);
+  const currentTarget=()=>Media.audioEffects.targets(audioSource).find(candidate =>
+    sourcePaths.has(candidate) && sourcePaths.get(candidate) === audioMotherPath(candidate));
+  let appliedTarget = targets.find(t => t.hasAudioLimiter || t._originalPath);
+  let hasApplied = Boolean(appliedTarget);
   const sourceName = audioSource?.name || targets[0]?.name || '音訊素材';
 
   // 取得既有波形進行 0ms 快速聲量估算
   const currentPeaks = targets.find(t => t.peaks)?.peaks || (audioSource.isPrimary ? Wave.peaks : null);
   const initialAnalysis = currentPeaks ? analyzePeaksLoudness(currentPeaks) : null;
 
-  let isFilterEnabled = hasApplied ? Boolean(appliedTarget.hasAudioLimiter) : true;
-  let currentOptions;
-  if (appliedTarget?.audioLimiterSpec) {
-    const s = appliedTarget.audioLimiterSpec;
-    currentOptions = normalizeLimiterOptions({
-      maximumAmplitude: s.max,
-      targetLoudness: s.min,
-      inputBoost: s.inputBoost ?? +(Math.abs(s.max - s.min)).toFixed(1),
-      lookAheadTime: s.lookAhead ?? 7,
-      releaseTime: s.release ?? 100,
-      isTruePeak: s.isTruePeak ?? true,
-      linkChannels: s.linkChannels ?? true,
-    });
-  } else {
-    currentOptions = normalizeLimiterOptions({
-      preset: 'custom',
-      maximumAmplitude: -6.0,
-      inputBoost: 6.0,
-      targetLoudness: -12.0,
-      isTruePeak: true,
-      lookAheadTime: 7,
-      releaseTime: 100,
-      linkChannels: true,
-    });
-  }
-  const appliedOptions=hasApplied?{...currentOptions}:null;
+  const pending=Media.audioEffects.pendingSettings?.(audioSource);
+  let isFilterEnabled = pending!==undefined ? pending!==null : !hasApplied || Boolean(appliedTarget.hasAudioLimiter);
+  let currentOptions=optionsForSpec(pending??appliedTarget?.audioLimiterSpec);
+  let appliedOptions=hasApplied?optionsForSpec(appliedTarget.audioLimiterSpec):null;
 
   const presetOptionsHtml = HARD_LIMITER_PRESETS.map(p => `
     <option value="${escapeHTML(p.id)}" ${p.id === currentOptions.preset ? 'selected' : ''}>
@@ -121,7 +117,7 @@ export function openHardLimiterDialog(audioSource) {
             <span id="hlStatusIcon" style="font-size:16px;">${hasApplied ? '🟢' : '⚪'}</span>
             <div>
               <div id="hlStatusTitle" style="font-size:13px;font-weight:700;color:${hasApplied ? '#4ade80' : '#e4e4e7'};">
-                ${hasApplied ? `濾鏡目前狀態：已開啟 (${appliedTarget.audioLimiterLabel || currentOptions.maximumAmplitude + ' dB'})` : '濾鏡目前狀態：未開啟（原音）'}
+                ${hasApplied ? '濾鏡目前狀態：已開啟' : '濾鏡目前狀態：未開啟（原音）'}
               </div>
               <div id="hlStatusDesc" style="font-size:11px;color:#a1a1aa;margin-top:2px;">
                 ${hasApplied ? '當前音訊正在使用強限制器平衡化處理。' : '目前音訊使用原始無失真波形與音質。'}
@@ -235,13 +231,34 @@ export function openHardLimiterDialog(audioSource) {
     </div>
   `;
 
+  let measureRequest=null, unsubscribeMeasure=null;
+  const releaseMeasurement=()=>{
+    unsubscribeMeasure?.();
+    unsubscribeMeasure=null;
+    const id=measureRequest;
+    measureRequest=null;
+    return id;
+  };
+  function cancelMeasurement(){
+    const id=releaseMeasurement();
+    if(id)Promise.resolve(DESK.cancelAudioNormalization?.(id)).catch(()=>{});
+  }
+  function leavePanel(){
+    refreshOpenPanel=null;
+    cancelMeasurement();
+  }
   const applyEffect = async options => {
     if (!session.isCurrent()) return;
     // ID 可由另一個專案重新載入；提交只能沿用開窗時仍存活的母素材。
-    const target = Media.audioEffects.targets(audioSource).find(candidate =>
-      sourcePaths.has(candidate) && sourcePaths.get(candidate) === audioMotherPath(candidate));
+    const target = currentTarget();
+    leavePanel();
     session.close({ committed: true });
     if (!target) { showToast('音訊來源已變更，請重新開啟效果面板'); return; }
+    const running=Media.audioEffects.pendingSettings?.(target);
+    if(running!==undefined && ((!options&&!running) || (options&&running&&sameLimiterOptions(options,optionsForSpec(running))))) {
+      showToast('音訊平衡仍在處理，進度顯示於狀態列');
+      return;
+    }
     const result = await Media.audioEffects.apply(target, options);
     if (result.status === 'completed') showToast(options ? '已套用音訊平衡' : '已還原原始音訊');
   };
@@ -253,12 +270,9 @@ export function openHardLimiterDialog(audioSource) {
     },
   ];
 
-  if (hasApplied) {
-    buttons.push({
-      label: '還原原音',
-      act: () => applyEffect(null),
-    });
-  }
+  if (hasApplied || targets.some(t=>t.audioNormalizing)) buttons.push({
+    id:'hlRestore', label:'還原原音', hidden:!hasApplied, act:()=>applyEffect(null),
+  });
 
   buttons.push({
     label: '套用',
@@ -275,8 +289,8 @@ export function openHardLimiterDialog(audioSource) {
     },
   });
 
-  const session = openModal(`音訊效果 — 強限制器／平衡化 (ITU 1770) — ${escapeHTML(sourceName)}`, html, buttons, {
-    width: '560px',
+  const session = openModal(`音訊效果 — 強限制器／平衡化 (ITU 1770) — ${sourceName}`, html, buttons, {
+    width: '560px', onDismiss:leavePanel, onReplaced:leavePanel,
   });
   const analysisPanel = document.getElementById('hlAnalysisStatus')?.closest('.hard-limiter-panel');
 
@@ -299,6 +313,20 @@ export function openHardLimiterDialog(audioSource) {
 
   function updateStatusBanner() {
     if (!statusBanner) return;
+    const working=targets.find(t=>t.audioNormalizing);
+    if(working){
+      statusBanner.style.background='rgba(56,189,248,.08)';
+      statusBanner.style.borderColor='rgba(56,189,248,.4)';
+      statusIcon.textContent='⏳';
+      statusTitle.style.color='#93c5fd';
+      statusTitle.textContent='音訊平衡處理中';
+      statusDesc.textContent=working.audioNormalizeLabel||'準備音訊';
+      statusBadge.style.color='#bae6fd';
+      statusBadge.style.background='#16425a';
+      statusBadge.style.borderColor='#32668a';
+      statusBadge.textContent=Number.isFinite(working.audioNormalizeProgress)?Math.round(working.audioNormalizeProgress)+'%':'處理中';
+      return;
+    }
     if (!isFilterEnabled) {
       statusBanner.style.background = 'rgba(234, 179, 8, 0.08)';
       statusBanner.style.borderColor = 'rgba(234, 179, 8, 0.35)';
@@ -317,10 +345,7 @@ export function openHardLimiterDialog(audioSource) {
         statusBadge.style.borderColor = 'rgba(234, 179, 8, 0.3)';
       }
     } else {
-      const changed=appliedOptions&&[
-        'maximumAmplitude','targetLoudness','inputBoost','isTruePeak',
-        'lookAheadTime','releaseTime','linkChannels','silenceProtection',
-      ].some(key=>currentOptions[key]!==appliedOptions[key]);
+      const changed=appliedOptions&&!sameLimiterOptions(currentOptions,appliedOptions);
       statusBanner.style.background = 'rgba(34, 197, 94, 0.08)';
       statusBanner.style.borderColor = 'rgba(34, 197, 94, 0.35)';
       if (statusIcon) statusIcon.textContent = '🟢';
@@ -389,24 +414,26 @@ export function openHardLimiterDialog(audioSource) {
   presetSel.onchange = () => {
     const found = HARD_LIMITER_PRESETS.find(p => p.id === presetSel.value);
     if (found) {
-      currentOptions = normalizeLimiterOptions(found);
+      currentOptions = normalizeLimiterOptions({...found,preset:found.id});
       updateUi();
-    }
+    }else currentOptions.preset='custom';
   };
 
   // 滑桿與數字輸入使用同一條更新路徑，避免超界、空值或小數讓位置與數值分離。
   for (const control of levelControls) {
     syncLevelControl(control);
     const changeLevel = value => {
+      const previous=currentOptions[control.key];
       syncLevelControl(control, value);
+      if(currentOptions[control.key]===previous)return;
       currentOptions.inputBoost = +(Math.abs(currentOptions.maximumAmplitude - currentOptions.targetLoudness)).toFixed(1);
-      presetSel.value = 'custom';
+      currentOptions.preset = presetSel.value = 'custom';
       updateStatusBanner();
     };
     control.slider.oninput = () => changeLevel(control.slider.valueAsNumber);
     control.number.onchange = () => changeLevel(control.number.valueAsNumber);
   }
-  if (appliedTarget?.audioLimiterSpec && (appliedTarget.audioLimiterSpec.inputBoost == null
+  if (pending===undefined && appliedTarget?.audioLimiterSpec && (appliedTarget.audioLimiterSpec.inputBoost == null
       || appliedTarget.audioLimiterSpec.max !== currentOptions.maximumAmplitude
       || appliedTarget.audioLimiterSpec.min !== currentOptions.targetLoudness)) {
     // 舊專案超界值收斂後，以畫面實際顯示的數值重算增益。
@@ -415,27 +442,35 @@ export function openHardLimiterDialog(audioSource) {
 
   peakRadio.onchange = () => {
     currentOptions.isTruePeak = false;
-    presetSel.value = 'custom';
+    currentOptions.preset = presetSel.value = 'custom';
     updateUi();
   };
 
   truePeakRadio.onchange = () => {
     currentOptions.isTruePeak = true;
-    presetSel.value = 'custom';
+    currentOptions.preset = presetSel.value = 'custom';
     updateUi();
   };
   updateUi();
 
   // 非同步呼叫後台 FFmpeg 進行精準聲量量測 (ITU-R BS.1770)
   const duration = audioSource?.duration || audioSource?.asset?.duration || 0;
-  if (DESK?.analyzeAudioLoudness && filePath) {
+  function startMeasurement() {
+    const tag=analysisPanel?.querySelector('#hlAnalysisStatus');
+    if(!tag)return;
+    if(!currentTarget()){tag.textContent='來源已變更，請重新開啟';return;}
+    if (!DESK?.analyzeAudioLoudness || !filePath) {
+      tag.textContent=initialAnalysis?'快速預覽':'未提供量測';
+      return;
+    }
+    tag.textContent=initialAnalysis?'快速預覽 · 量測中…':'量測中…';
+    const requestId='audio-measure-'+crypto.randomUUID();
+    measureRequest=requestId;
     const ownsAnalysis = () => {
       // A closed modal keeps its old DOM connected; neither that DOM nor a
       // replacement source with the same ID owns this measurement anymore.
-      if (!session.isCurrent() || !analysisPanel?.isConnected) return false;
-      const sourceStillCurrent = Media.audioEffects.targets(audioSource).some(candidate =>
-        sourcePaths.has(candidate) && sourcePaths.get(candidate) === audioMotherPath(candidate));
-      if (sourceStillCurrent) return true;
+      if (measureRequest!==requestId || !session.isCurrent() || !analysisPanel?.isConnected) return false;
+      if (currentTarget()) return true;
       const tagEl = analysisPanel.querySelector('#hlAnalysisStatus');
       if (tagEl) {
         tagEl.textContent = '來源已變更，請重新開啟';
@@ -445,7 +480,11 @@ export function openHardLimiterDialog(audioSource) {
       }
       return false;
     };
-    DESK.analyzeAudioLoudness(filePath, duration).then(res => {
+    unsubscribeMeasure=DESK.onAudioNormalizeProgress?.(data=>{
+      if(data?.requestId!==requestId || data.stage!=='measure' || !ownsAnalysis())return;
+      tag.textContent='量測中'+(Number.isFinite(data.pct)?' '+Math.round(data.pct)+'%':'…');
+    });
+    DESK.analyzeAudioLoudness(filePath, duration, requestId).then(res => {
       if (!res || !ownsAnalysis()) return;
       const maxEl = analysisPanel.querySelector('#hlAnalyzedMax');
       const meanEl = analysisPanel.querySelector('#hlAnalyzedMean');
@@ -473,6 +512,33 @@ export function openHardLimiterDialog(audioSource) {
         tagEl.title=err?.message||String(err);
       }
       console.warn('[HardLimiter] 背景量測失敗：', err);
-    });
+    }).finally(()=>{if(measureRequest===requestId)releaseMeasurement();});
   }
+  let wasWorking=targets.some(t=>t.audioNormalizing);
+  refreshOpenPanel=()=>{
+    if(!session.isCurrent()){leavePanel();return;}
+    if(!currentTarget()){
+      cancelMeasurement();
+      if(analysisPanel)analysisPanel.querySelector('#hlAnalysisStatus').textContent='來源已變更，請重新開啟';
+      return;
+    }
+    const working=targets.some(t=>t.audioNormalizing);
+    if(!wasWorking&&working){
+      cancelMeasurement();
+      if(analysisPanel)analysisPanel.querySelector('#hlAnalysisStatus').textContent='等待平衡作業完成';
+    }
+    if(wasWorking&&!working){
+      appliedTarget=targets.find(t=>t.hasAudioLimiter);
+      hasApplied=Boolean(appliedTarget);
+      appliedOptions=hasApplied?optionsForSpec(appliedTarget.audioLimiterSpec):null;
+      const restore=document.getElementById('hlRestore');
+      if(restore)restore.style.display=hasApplied?'':'none';
+      if(!measureRequest)startMeasurement();
+    }
+    wasWorking=working;
+    updateStatusBanner();
+  };
+  if(wasWorking){
+    analysisPanel.querySelector('#hlAnalysisStatus').textContent='等待平衡作業完成';
+  }else startMeasurement();
 }

@@ -1621,21 +1621,19 @@ ipcMain.handle('audio:normalize-cancel', (e, { requestId }) => {
   controller?.abort();
   return !!controller;
 });
-ipcMain.handle('audio:normalize', async (e, { path: src, options, duration, requestId }) => {
-  if (!FFMPEG) throw new Error('找不到 ffmpeg，無法執行音訊平衡化');
-  requireReadablePath('audio:normalize', src);
+async function runAudioNormalizationJob(e, src, duration, requestId, work) {
   const key = requestId == null ? Symbol('legacy-audio-normalization') : audioNormalizationKey(e.sender, requestId);
   if (audioNormalizationJobs.has(key)) throw new Error('音訊工作識別重複');
   const controller = new AbortController();
   audioNormalizationJobs.set(key, controller);
   const cancel = () => controller.abort();
   e.sender.once('destroyed', cancel);
-  try { return await audioNormalizationRuntime.normalize(src, options, {
+  try { return await work({
     signal: controller.signal,
     duration,
     onProgress: p => {
       try {
-        if (e.sender && !e.sender.isDestroyed()) {
+        if (!controller.signal.aborted && !e.sender.isDestroyed()) {
           e.sender.send('audio:normalize-progress', { ...p, src, requestId });
         }
       } catch (_) {}
@@ -1644,12 +1642,20 @@ ipcMain.handle('audio:normalize', async (e, { path: src, options, duration, requ
     audioNormalizationJobs.delete(key);
     e.sender.removeListener('destroyed', cancel);
   }
+}
+
+ipcMain.handle('audio:normalize', async (e, { path: src, options, duration, requestId }) => {
+  if (!FFMPEG) throw new Error('找不到 ffmpeg，無法執行音訊平衡化');
+  requireReadablePath('audio:normalize', src);
+  return runAudioNormalizationJob(e, src, duration, requestId,
+    lifecycle => audioNormalizationRuntime.normalize(src, options, lifecycle));
 });
 
-ipcMain.handle('audio:analyzeLoudness', async (e, { path: src, duration }) => {
+ipcMain.handle('audio:analyzeLoudness', async (e, { path: src, duration, requestId }) => {
   if (!FFMPEG) throw new Error('找不到 ffmpeg，無法執行音訊聲量分析');
   requireReadablePath('audio:analyzeLoudness', src);
-  return audioNormalizationRuntime.analyze(src, { duration });
+  return runAudioNormalizationJob(e, src, duration, requestId,
+    lifecycle => audioNormalizationRuntime.analyze(src, lifecycle));
 });
 
 /* 辨識只讀已授權來源的有界 PCM，不建立新檔或接受 renderer 自訂 filter。 */

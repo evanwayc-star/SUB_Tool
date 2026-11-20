@@ -6,7 +6,9 @@ const requests = vi.hoisted(() => {
   const pending = [];
   window.subtool = {
     normalizeAudio: () => {},
-    analyzeAudioLoudness: (path) => new Promise((resolve,reject) => pending.push({ path, resolve,reject })),
+    analyzeAudioLoudness: (path,duration,requestId) => new Promise((resolve,reject) => pending.push({ path, requestId, resolve,reject })),
+    onAudioNormalizeProgress: vi.fn(),
+    cancelAudioNormalization: vi.fn(async()=>{}),
   };
   return pending;
 });
@@ -18,10 +20,13 @@ vi.mock('../src/media.js', () => ({
 }));
 vi.mock('../src/state.js', () => ({ IS_DESKTOP: true }));
 vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
-  openModal: (title, html) => {
+  openModal: (title, html, buttons, opts) => {
+    if(modal.session?.isCurrent())modal.session.replace();
     document.getElementById('modalBody').innerHTML = html;
     const owner=++modal.generation;
-    return modal.session={isCurrent:()=>modal.generation===owner,close:()=>{if(modal.generation===owner)modal.generation++;}};
+    return modal.session={isCurrent:()=>modal.generation===owner,replace:()=>opts.onReplaced?.(),close:()=>{
+      if(modal.generation===owner){modal.generation++;opts.onDismiss?.();}
+    }};
   },
   closeModal: () => {},
   showToast: () => {},
@@ -33,6 +38,26 @@ beforeEach(() => {
   requests.length = 0;
   modal.generation++;
   document.getElementById('modalBody').innerHTML = '';
+});
+
+it('每個來源只顯示其量測進度，關閉或換視窗會取消自己的讀取',()=>{
+  const callbacks=new Set();
+  window.subtool.onAudioNormalizeProgress.mockImplementation(fn=>{callbacks.add(fn);return ()=>callbacks.delete(fn);});
+  window.subtool.cancelAudioNormalization.mockClear();
+  openHardLimiterDialog({id:'a',path:'C:/a.wav'});
+  const first=requests[0].requestId;
+  expect(typeof first).toBe('string');
+  openHardLimiterDialog({id:'b',path:'C:/b.wav'});
+  const second=requests[1].requestId;
+  expect(second).not.toBe(first);
+  expect(window.subtool.cancelAudioNormalization).toHaveBeenCalledWith(first);
+  for(const fn of callbacks)fn({requestId:first,stage:'measure',pct:82});
+  expect(document.getElementById('hlAnalysisStatus').textContent).not.toContain('82%');
+  for(const fn of callbacks)fn({requestId:second,stage:'measure',pct:37});
+  expect(document.getElementById('hlAnalysisStatus').textContent).toContain('37%');
+  modal.session.close();
+  expect(window.subtool.cancelAudioNormalization).toHaveBeenCalledWith(second);
+  expect(callbacks.size).toBe(0);
 });
 
 it('真峰值與一般峰值切換時，單位與目前增益說明跟隨真正處理模式', () => {

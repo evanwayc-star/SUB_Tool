@@ -81,6 +81,23 @@ describe('FFmpeg execution', () => {
     expect(removeFile).toHaveBeenCalledWith(path.join(root, 'normalized.wav'));
   });
 
+  it('關閉音訊平衡面板取消量測，等待 writer 結束並清除這次取消的記錄', async () => {
+    const root = makeTempRoot(), child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn();
+    const execution = createFFmpegExecution({ getFFmpegPath: () => 'ffmpeg', getUserDataDir: () => root,
+      spawnDirect: () => child });
+    const controller = new AbortController();
+    const runtime = createAudioNormalizationRuntime({ createTempPath: vi.fn(),
+      execute: (args, options) => execution.execute(args, { ...options, executionKind: 'direct' }) });
+    const work = runtime.analyze('source.mov', { signal: controller.signal }).catch(error => error);
+    controller.abort();
+    expect(child.kill).toHaveBeenCalledOnce();
+    child.emit('close', 1);
+    await expect(work).resolves.toMatchObject({ name: 'AbortError' });
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
   it('shutdown 統一終止 direct child，close 前不結束且拒絕新工作', async () => {
     const root = makeTempRoot();
     const child = new EventEmitter();

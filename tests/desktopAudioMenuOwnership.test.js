@@ -17,6 +17,8 @@ beforeAll(async()=>{
     {get:(target,key)=>target[key]||(()=>{}),set:(target,key,value)=>(target[key]=value,true)});
   ({State}=await import('../src/state.js'));({Media}=await import('../src/media.js'));
   Timeline=await import('../src/timeline-renderer.js');Menus=await import('../src/menus.js');UI=await import('../src/ui.js');
+  const {refreshAudioNormalizerDialog}=await import('../src/audio-normalizer-dialog.js');
+  UI.bindAudioEffectStatusView(Timeline.refreshClipEffectBadges,refreshAudioNormalizerDialog);
   vi.spyOn(Media,'seek').mockResolvedValue(true);
   for(const element of [document.getElementById('tlLayer'),document.getElementById('tlScroll')]){
     element.getBoundingClientRect=()=>({left:0,top:0,right:640,bottom:500,width:640,height:500});
@@ -59,6 +61,86 @@ it('右鍵面板改一般峰值後，套用保留畫面參數並提交 Peak 無�
   document.querySelector('#modalFoot button.primary').click();
   await vi.waitFor(()=>expect(normalizeAudio).toHaveBeenCalledOnce());
   expect(normalizeAudio.mock.calls[0][1]).toMatchObject({isTruePeak:false,maximumAmplitude:-6,targetLoudness:-12,inputBoost:6,sourceStream:0});
+});
+
+it('片段的平衡進度直接更新原來的區塊，切換到其他素材或完成後維持正確標示',async()=>{
+  const {emit}=await import('../src/events.js');
+  const clip=State.clips[0];
+  Timeline.drawTimeline();
+  const block=document.querySelector('.audio-clip-block[data-clip-id="primary"]');
+  const other=document.querySelector('.audio-clip-block[data-clip-id="secondary"]');
+  Object.assign(clip,{audioNormalizing:true,audioNormalizeLabel:'分析響度',audioNormalizeProgress:36});
+  emit('media:audioEffectStatus',{active:[{sourceId:'primary-id',name:'primary',label:'分析響度',pct:36}]});
+  const badge=block.querySelector('.audio-clip-fx-badge');
+  expect(badge?.textContent).toBe('分析響度 36%');
+  expect(other.querySelector('.audio-clip-fx-badge')).toBeNull();
+  clip.audioNormalizeProgress=65;
+  emit('media:audioEffectStatus',{active:[{sourceId:'primary-id',name:'primary',label:'分析響度',pct:65}]});
+  expect(badge.textContent).toBe('分析響度 65%');
+  expect(block.querySelector('.audio-clip-progress-bar').style.width).toBe('65%');
+  Object.assign(clip,{audioNormalizing:false,hasAudioLimiter:true,audioLimiterLabel:'−6 dB'});
+  emit('media:audioEffectStatus',{active:[],result:{status:'completed',name:'primary'}});
+  expect(badge.textContent).toContain('−6 dB');
+  expect(block.querySelector('.audio-clip-progress-bar')).toBeNull();
+  expect(block).toBe(document.querySelector('.audio-clip-block[data-clip-id="primary"]'));
+});
+
+it('從片段送出並收起表單後仍顯示進度，重新開啟面板可讀到同一個工作的狀態',async()=>{
+  let fail;
+  normalizeAudio.mockImplementationOnce(()=>new Promise((_resolve,reject)=>{fail=reject;}));
+  Timeline.drawTimeline();
+  const block=document.querySelector('.audio-clip-block[data-clip-id="primary"]');
+  context(block);
+  document.querySelector('[data-menu-id="hard_limiter"]').click();
+  document.querySelector('#modalFoot button.primary').click();
+  const status=document.getElementById('stAudioEffect');
+  expect(status.hidden).toBe(false);
+  expect(status.textContent).toContain('音訊平衡');
+  expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+  await vi.waitFor(()=>expect(normalizeAudio).toHaveBeenCalledOnce());
+  expect(status.title).toContain('primary');
+  context(block);
+  document.querySelector('[data-menu-id="hard_limiter"]').click();
+  expect(document.getElementById('hlStatusTitle').textContent).toBe('音訊平衡處理中');
+  expect(document.getElementById('hlStatusBadge').textContent).toContain('%');
+  fail(new Error('測試音訊讀取失敗'));
+  await vi.waitFor(()=>expect(status.textContent).toContain('失敗'));
+  expect(status.title).toContain('測試音訊讀取失敗');
+  expect(block.classList.contains('is-normalizing')).toBe(false);
+  expect(document.getElementById('hlStatusTitle').textContent).not.toBe('音訊平衡處理中');
+});
+
+it.each([false,true])('運算中重新開啟保留目前設定，再按套用不會重開工作（自訂=%s）',async(custom)=>{
+  let fail;
+  normalizeAudio.mockImplementationOnce(()=>new Promise((_resolve,reject)=>{fail=reject;}));
+  Timeline.drawTimeline();
+  const open=()=>{
+    context(document.querySelector('.audio-clip-block[data-clip-id="primary"]'));
+    document.querySelector('[data-menu-id="hard_limiter"]').click();
+  };
+  const set=(id,value)=>{
+    const el=document.getElementById(id);el.value=value;el.dispatchEvent(new Event('change',{bubbles:true}));
+  };
+  open();
+  set('hlPresetSelect','limit_minus_1db');
+  if(custom)set('hlMinAmpNum','-20');
+  document.querySelector('#modalFoot button.primary').click();
+  try{
+    await vi.waitFor(()=>expect(normalizeAudio).toHaveBeenCalledOnce());
+    open();
+    expect(document.getElementById('hlMaxAmpNum').value).toBe('-1');
+    expect(document.getElementById('hlMinAmpNum').value).toBe(custom?'-20':'-14');
+    expect(document.getElementById('hlPresetSelect').value).toBe(custom?'custom':'limit_minus_1db');
+    document.getElementById('hlMaxAmpNum').focus();
+    document.querySelector('#modalFoot button.primary').click();
+    await Promise.resolve();await Promise.resolve();
+    expect(normalizeAudio).toHaveBeenCalledOnce();
+    expect(State.clips[0].audioNormalizing).toBe(true);
+    expect(document.getElementById('stAudioEffect').hidden).toBe(false);
+  }finally{
+    fail?.(new Error('測試結束'));
+    await vi.waitFor(()=>expect(State.clips[0].audioNormalizing).not.toBe(true));
+  }
 });
 
 it.each(['primary','secondary'])('只有 %s 套用效果時，各來源音訊區塊與右鍵對話框僅顯示自己的狀態',sourceId=>{

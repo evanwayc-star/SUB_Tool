@@ -592,7 +592,7 @@ function createFFmpegExecution(options = {}) {
     if (entry) directExecutions.add(entry);
     const work = isDirect && shuttingDown ? Promise.reject(shutdownError()) : executeProcess(args, {
       ...executionOptions,
-      isCancelled: () => Boolean(entry?.cancelled),
+      isCancelled: () => Boolean(entry?.cancelled || (isDirect && executionOptions.isCancelled?.())),
       onProgress: progress => {
         lastPct = progress.pct;
         return executionOptions.onProgress?.(progress);

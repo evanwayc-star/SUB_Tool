@@ -54,6 +54,38 @@ it('直接波形進度只清理自己的訊息，受管進度接管後不會復�
   expect(proxy.hidden).toBe(false);
 });
 
+it('音訊平衡進度與匯出、Proxy 可同時讀取，新工作不會被上一筆完成提示清除',async()=>{
+  vi.useFakeTimers();
+  try {
+    const {emit}=await import('../src/events.js');
+    const {bindAudioEffectStatusView}=await import('../src/ui.js');
+    bindAudioEffectStatusView(vi.fn(),vi.fn());
+    setStatus('正在匯出影片','busy','lock');
+    const work=jobs.ingest({path:'demo.mxf',needsProxy:true});
+    progress({...requests[0],stage:'transcoding',label:'轉檔 Proxy',pct:42,outputs:{proxy:true}});
+    const status=document.getElementById('stAudioEffect');
+    const busy={sourceId:'first',name:'電影',label:'分析響度',pct:28};
+    emit('media:audioEffectStatus',{active:[busy]});
+    expect(status?.hidden).toBe(false);
+    expect(status.textContent).toMatch(/音訊平衡 28%.*分析響度/);
+    expect(status.title).toContain('電影');
+    expect(document.getElementById('stIntakeMsg').textContent).toContain('42%');
+    expect(document.getElementById('stMsg').textContent).toBe('正在匯出影片');
+    emit('media:audioEffectStatus',{active:[],result:{status:'completed',name:'電影'}});
+    expect(status.textContent).toContain('已套用');
+    emit('media:audioEffectStatus',{active:[{...busy,name:'配樂',pct:0}]});
+    vi.advanceTimersByTime(6000);
+    expect(status.hidden).toBe(false);
+    expect(status.title).toContain('配樂');
+    emit('media:audioEffectStatus',{active:[],result:{status:'failed',name:'配樂',detail:'解碼失敗'}});
+    expect(status.textContent).toContain('失敗');
+    expect(status.title).toContain('解碼失敗');
+    emit('media:audioEffectStatus',{active:[]});
+    expect(status.hidden).toBe(true);
+    resolve({});await work;
+  } finally {vi.useRealTimers();}
+});
+
 it('背景結果保留錯誤紀錄、屆時回到目前 Proxy 狀態，另開專案立即清理',async()=>{
   const {setMediaProcessingStatus,openModal}=await import('../src/ui.js');
   const {openStatusErrorReport}=await import('../src/status-error-report.js');

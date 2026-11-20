@@ -10,22 +10,36 @@ import { setMediaProcessingStatus } from './ui.js';
 
 export const WAVE_DECODE_MAX = 5e8;    // 超過此大小不整檔解碼波形，改即時擷取
 
-function wavePcm(arrayBuffer){
+function pcmWaveHeader(arrayBuffer){
   const view=new DataView(arrayBuffer);
   if(view.byteLength<44||view.getUint32(0,false)!==0x52494646||view.getUint32(8,false)!==0x57415645)return null;
-  let channels=0,sampleRate=0,data=null;
+  let channels=0,sampleRate=0;
   for(let offset=12;offset+8<=view.byteLength;){
     const id=view.getUint32(offset,false),size=view.getUint32(offset+4,true),start=offset+8;
+    if(id===0x64617461 && channels && sampleRate && start%2===0 && size%(channels*2)===0){
+      return {start,length:size/(channels*2),channels,sampleRate};
+    }
     if(start+size>view.byteLength)return null;
     if(id===0x666d7420){
-      if(size<16||view.getUint16(start,true)!==1||view.getUint16(start+14,true)!==16)return null;
+      if(size<16||view.getUint16(start+14,true)!==16)return null;
+      const format=view.getUint16(start,true);
+      if(format===0xfffe){
+        // KSDATAFORMAT_SUBTYPE_PCM, with all 16 valid bits in each sample.
+        if(size<40 || view.getUint16(start+16,true)<22 || view.getUint16(start+18,true)!==16 ||
+          view.getUint32(start+24,true)!==1 || view.getUint32(start+28,false)!==0x00001000 ||
+          view.getUint32(start+32,false)!==0x800000aa || view.getUint32(start+36,false)!==0x00389b71)return null;
+      } else if(format!==1)return null;
       channels=view.getUint16(start+2,true);sampleRate=view.getUint32(start+4,true);
-    }else if(id===0x64617461)data={start,size};
+    }
     offset=start+size+(size%2);
   }
-  if(!channels||!sampleRate||!data||data.start%2||data.size%(channels*2))return null;
-  const samples=new Int16Array(arrayBuffer,data.start,data.size/2);
-  return {samples,channels,sampleRate,length:samples.length/channels};
+  return null;
+}
+
+function wavePcm(arrayBuffer){
+  const info=pcmWaveHeader(arrayBuffer);
+  if(!info || info.start+info.length*info.channels*2>arrayBuffer.byteLength)return null;
+  return {...info,samples:new Int16Array(arrayBuffer,info.start,info.length*info.channels),firstFrame:0};
 }
 
 function sourceWavePcm(arrayBuffer,duration){
@@ -53,8 +67,9 @@ function pcmPeakCalculation(streams,duration,res,channel){
         for(const stream of streams){
           const frame=Math.floor(j*stream.sampleRate/sampleRate);
           if(frame>=stream.length)continue;
-          if(channel!=null)v+=stream.samples[frame*stream.channels+channel];
-          else for(let c=0;c<stream.channels;c++)v+=stream.samples[frame*stream.channels+c];
+          const base=(frame-stream.firstFrame)*stream.channels;
+          if(channel!=null)v+=stream.samples[base+channel];
+          else for(let c=0;c<stream.channels;c++)v+=stream.samples[base+c];
         }
         v=(v/numChannels)/32768.0;
         if(v<mn)mn=v;if(v>mx)mx=v;
@@ -62,7 +77,7 @@ function pcmPeakCalculation(streams,duration,res,channel){
       peaks[i*2]=mn;peaks[i*2+1]=mx;
     }
   };
-  return {peaks,len,fill,batchBuckets:Math.max(1,Math.floor(16384/(spb*numChannels)))};
+  return {peaks,len,fill,sampleRate,batchBuckets:Math.max(1,Math.floor(16384/(spb*numChannels)))};
 }
 
 async function finishPcmPeaks(calculation,owns){
@@ -404,8 +419,9 @@ export const Wave = {
       (key==='mix'?state.mix===entry:state.channels.get(key)===entry);
     const promise=(async()=>{
       try{
-        if(Array.isArray(entry.path.paths)){
-          const peaks=await this._loadPcmMix(entry.path,owns);
+        if(Array.isArray(entry.path.paths)||entry.pcmChannel!=null){
+          const descriptor=Array.isArray(entry.path.paths)?entry.path:{paths:[entry.path]};
+          const peaks=await this._loadPcmMix(descriptor,owns,entry.pcmChannel);
           if(!owns())return null;
           entry.peaks=peaks;
           emit('media:waveform',{controls:true});
@@ -798,26 +814,65 @@ export const Wave = {
     calculation.fill(0,calculation.len);
     return calculation.peaks;
   },
-  async preparePcmMix(paths,{duration=0,owns=()=>true}={}){
+  async preparePcmMix(paths,{duration=0,owns=()=>true,onProgress}={}){
     // A reload descriptor represents original PCM members, never already
     // reduced extrema. Copy/freeze it so callers cannot change an active mix.
     const path=Object.freeze({paths:Object.freeze([...paths]),duration:Math.max(0,Number(duration)||0)});
-    const peaks=await this._loadPcmMix(path,owns);
+    const peaks=await this._loadPcmMix(path,owns,null,onProgress);
     return owns()?{path,peaks}:null;
   },
-  async _loadPcmMix(descriptor,owns){
-    const buffers=[];
+  async _loadPcmMix(descriptor,owns,channel=null,onProgress){
+    // 平衡後的多聲道波形可達數 GB。先讀 FFmpeg 產生的 WAV header，
+    // 只為當前這一批時間桶讀取各串流對應的樣本。
+    const inputs=[];
     for(const path of descriptor.paths){
       if(!owns())return null;
       const url=await DESK.fileURL(path);
       if(!owns())return null;
-      const response=await fetch(url);
+      const response=await fetch(url,{headers:{Range:'bytes=0-65535'}});
       if(!owns())return null;
+      if(response.ok===false)throw new Error('無法讀取平衡後的波形');
       const buffer=await response.arrayBuffer();
       if(!owns())return null;
-      buffers.push(buffer);
+      const info=pcmWaveHeader(buffer);
+      if(!info)return null;
+      const complete=info.start+info.length*info.channels*2<=buffer.byteLength;
+      if(!complete && response.status!==206)throw new Error('平衡後的波形檔案不完整');
+      inputs.push({...info,url,firstFrame:0,buffer:complete?buffer:null});
     }
-    return this.calcFromWavAsync(buffers,descriptor.duration,{owns});
+    if(inputs.every(input=>input.buffer))
+      return this.calcFromWavAsync(inputs.map(input=>input.buffer),descriptor.duration,{channel,owns});
+    const res=this.resolution, calc=pcmPeakCalculation(inputs,descriptor.duration,res,channel);
+    if(!calc)return null;
+    const bytesPerBucket=inputs.reduce((sum,s)=>sum+2*s.channels*Math.ceil(s.sampleRate/res),0);
+    const step=Math.max(1,Math.floor(1024*1024/bytesPerBucket));
+    for(let first=0; first<calc.len; first+=step){
+      if(!owns())return null;
+      const last=Math.min(calc.len,first+step);
+      for(const input of inputs){
+        if(input.buffer){
+          input.samples ||= new Int16Array(input.buffer,input.start,input.length*input.channels);
+          continue;
+        }
+        const startSample=Math.floor(first*(calc.sampleRate/res));
+        const stopSample=Math.floor(last*(calc.sampleRate/res));
+        const begin=Math.min(input.length,Math.floor(startSample*input.sampleRate/calc.sampleRate));
+        const end=Math.min(input.length,Math.ceil(stopSample*input.sampleRate/calc.sampleRate));
+        if(end<=begin)continue;
+        const startByte=input.start+begin*input.channels*2, byteCount=(end-begin)*input.channels*2;
+        const response=await fetch(input.url,{headers:{Range:`bytes=${startByte}-${startByte+byteCount-1}`}});
+        if(!owns())return null;
+        if(response.status!==206)throw new Error('無法分段讀取平衡後的波形');
+        const bytes=await response.arrayBuffer();
+        if(!owns())return null;
+        if(bytes.byteLength!==byteCount)throw new Error('平衡後的波形檔案不完整');
+        input.firstFrame=begin;
+        input.samples=new Int16Array(bytes);
+      }
+      calc.fill(first,last);
+      onProgress?.(last/calc.len);
+    }
+    return owns()?calc.peaks:null;
   }
 };
 

@@ -125,7 +125,7 @@ describe('音訊聲量分析 (analyzePeaksLoudness & parseVolumeAnalysis)', () =
       const execute=vi.fn(async(args,options)=>options.onStderr('mean_volume: -18 dB\nmax_volume: -3 dB'));
       const runtime=createAudioNormalizationRuntime({createTempPath:()=> 'unused.wav',probe,execute});
       expect(await runtime.analyze('multiple.mkv')).toMatchObject({maxDb:-3,meanDb:-18});
-      expect(probe).toHaveBeenCalledWith('multiple.mkv');
+      expect(probe).toHaveBeenCalledWith('multiple.mkv', { signal: null });
       const args=execute.mock.calls[0][0],filter=args[args.indexOf('-filter_complex')+1];
       expect(filter).toContain('[0:a:0]asetpts=PTS-0.500000/TB,aresample=48000:async=1:first_pts=0');
       expect(filter).toContain('pan=mono|c0=0.333333333333*c0+0.333333333333*c1');
