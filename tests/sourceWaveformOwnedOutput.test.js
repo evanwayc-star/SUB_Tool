@@ -294,6 +294,11 @@ it('素材旁波形快取不可寫時明確失敗，清掉自己的暫存且不�
       .rejects.toMatchObject({ code: 'SIDECAR_CACHE_UNAVAILABLE' });
     expect(execute).toHaveBeenCalledOnce();
     expect(progress.at(-1)).toMatchObject({ done: true, outcome: 'failed', errorCode: 'SIDECAR_CACHE_UNAVAILABLE' });
+    await expect(runtime.waveform({ src: source, duration: 1, audio: [{ channels: 1 }], continuous: true,
+      channel: { sourceStream: 0, sourceChannel: 0 } })).rejects.toMatchObject({
+      code: 'SIDECAR_CACHE_UNAVAILABLE', message: expect.stringMatching(/同資料夾.*權限/),
+    });
+    expect(execute).toHaveBeenCalledOnce();
     expect(fs.readdirSync(tempRoot)).toEqual([]);
     expect(fs.existsSync(cacheRoot)).toBe(false);
     expect(fs.readFileSync(source, 'utf8')).toBe('mother source');

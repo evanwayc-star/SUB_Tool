@@ -1,6 +1,6 @@
 'use strict';
 
-const { sourceClockSeek, timestampOffset } = require('./media-source-clock');
+const { sourceClockSeek, sourceAudioClockFilter, timestampOffset } = require('./media-source-clock');
 
 const SAMPLE_RATE = 4000, RESOLUTION = 100, BUCKET_SAMPLES = SAMPLE_RATE / RESOLUTION;
 const CHECKPOINT_SAMPLES = SAMPLE_RATE * 5;
@@ -17,12 +17,19 @@ function peaksForPCM(bytes) {
 
 // The store and all PCM work live in the background worker. The parent retains
 // the native process owner; a checkpoint is published only after durable write.
-async function runContinuousSourceWaveform({ src, duration, audio, sourceKey, store, verify,
+async function runContinuousSourceWaveform({ src, duration, audio, channel, sourceKey, store, verify,
   execute, buildPlan, ownProcess, progress }) {
   const totalSamples = Math.round(duration * SAMPLE_RATE);
   const initiallyComplete = store.isComplete, resumedSamples = store.completedSamples;
   let publishedSamples = 0;
   const publish = completedSamples => {
+    if (channel) {
+      // Channel display reads the verified WAV once ready. Only the MIX uses
+      // progressive PCM peaks; avoid reading the NAS file back at every step.
+      if (completedSamples > publishedSamples) progress({ pct: completedSamples / totalSamples * 100 });
+      publishedSamples = completedSamples;
+      return;
+    }
     while (publishedSamples < completedSamples) {
       verify();
       const count = Math.min(CHECKPOINT_SAMPLES, completedSamples - publishedSamples);
@@ -40,9 +47,13 @@ async function runContinuousSourceWaveform({ src, duration, audio, sourceKey, st
     publish(resumedSamples);
 
     const decode = async (startSample, compareFrom) => {
-      const sourceStart = startSample / SAMPLE_RATE, seek = sourceClockSeek(sourceStart, audio[0]);
+      const sourceStart = startSample / SAMPLE_RATE, seek = sourceClockSeek(sourceStart, audio[channel?.sourceStream ?? 0]);
       const clocks = audio.map(stream => ({ ...stream, timestampOffset: timestampOffset(stream) + seek.seek - sourceStart }));
-      const plan = buildPlan(clocks, { waveOnly: true }), remainingSamples = totalSamples - startSample;
+      const plan = channel ? {
+        filters: [`[0:a:${channel.sourceStream}]${sourceAudioClockFilter(clocks[channel.sourceStream])},pan=mono|c0=c${channel.sourceChannel}[selected]`],
+        waveLabel: '[selected]',
+      } : buildPlan(clocks, { waveOnly: true });
+      const remainingSamples = totalSamples - startSample;
       const filters = [...plan.filters,
         `${plan.waveLabel}aresample=${SAMPLE_RATE},apad=whole_len=${remainingSamples},atrim=end_sample=${remainingSamples},asetpts=N/SR/TB[sourcewave]`];
       const args = ['-y', '-threads', '1', '-filter_complex_threads', '1', '-ss', String(seek.seek), '-i', src,
@@ -88,7 +99,8 @@ async function runContinuousSourceWaveform({ src, duration, audio, sourceKey, st
       };
       try {
         await execute(args, { executionKind: 'direct', deferTerminal: true, streamPcm: true,
-          duration: remainingSamples / SAMPLE_RATE, jobId: 'source-wave', label: '優先產生波形', onPcm: receive,
+          duration: remainingSamples / SAMPLE_RATE, jobId: channel ? 'source-channel-wave' : 'source-wave',
+          label: channel ? '產生原音聲道波形' : '優先產生波形', onPcm: receive,
           onProcess: process => {
             child = process; ownProcess?.(process);
             process.stdout?.on('data', bytes => { try { receive(bytes); } catch (_) {} });

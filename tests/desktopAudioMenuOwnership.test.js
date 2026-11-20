@@ -34,6 +34,74 @@ beforeEach(()=>{
 });
 afterAll(()=>{UI.closeModal();Media.audioEffects.invalidate({clear:true});Media.externalAudio.clear();vi.clearAllTimers();vi.useRealTimers();});
 
+it('八條單聲道原音在右鍵點選 S6，保留選單焦點並同步顯示運算、失敗和重試完成',async()=>{
+  const {Wave}=await import('../src/media.js');
+  const {MediaIntakeJobs}=await import('../src/media-intake-jobs.js');
+  const {emit}=await import('../src/events.js');
+  const channels=Array.from({length:8},(_,sourceStream)=>({sourceStream,sourceChannel:0}));
+  const source=State.clips[0],clipId=source.id;
+  const desk=window.subtool;
+  const requests=[];
+  desk.prepareSourceWaveform=vi.fn(()=>new Promise((resolve,reject)=>requests.push({resolve,reject})));
+  desk.fileURL=vi.fn().mockResolvedValue('https://wave.test/s6.wav');
+  // Only the desktop adapter and the file transport stand in for disk I/O.
+  const frames=4000*source.dur;
+  const wav=Buffer.alloc(44+frames*2);
+  wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);
+  wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);
+  wav.writeUInt32LE(4000,24);wav.writeUInt32LE(8000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);
+  wav.write('data',36);wav.writeUInt32LE(frames*2,40);wav.fill(Buffer.from([0,64]),44);
+  vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>wav.buffer.slice(wav.byteOffset,wav.byteOffset+wav.length)})));
+  try{
+    Wave.registerSourceWaveforms(source,{channels:[],mixPeaks:Float32Array.of(-.1,.1)});
+    Timeline.drawTimeline();
+    const open=()=>context(document.querySelector(`.audio-clip-block[data-clip-id="${clipId}"]`));
+    const item=()=>document.querySelector('[data-menu-id="wave:5:0"]');
+    open();
+    expect(item()).toBeNull();
+    Wave.registerSourceWaveforms(source,{channels});
+    emit('media:waveform',{controls:true});
+    await vi.advanceTimersByTimeAsync(32);
+    expect([...document.querySelectorAll('[data-menu-id$=":0"] .c-text')].map(el=>el.textContent))
+      .toEqual(channels.map(ch=>'S'+(ch.sourceStream+1)+' Ch 1'));
+    expect(desk.prepareSourceWaveform).not.toHaveBeenCalled();
+    item().click();
+    await vi.waitFor(()=>expect(desk.prepareSourceWaveform).toHaveBeenCalledOnce());
+    const first=desk.prepareSourceWaveform.mock.calls[0][0];
+    expect(first).toMatchObject({path:source.path,channel:{sourceStream:5,sourceChannel:0}});
+    open();
+    const active=item();
+    active.focus();
+    expect(active.textContent).toContain('產生中');
+    expect(active.querySelector('.chk')).not.toBeNull();
+    MediaIntakeJobs.progress({sessionId:first.sessionId,requestId:first.requestId,pct:40});
+    await vi.advanceTimersByTimeAsync(32);
+    expect(active.textContent).toMatch(/產生中 \d+%/);
+    requests[0].reject(new Error('無法讀取母素材'));
+    await vi.waitFor(()=>expect(active.textContent).toContain('重試'));
+    expect(document.activeElement).toBe(active);
+    expect(active.title).toContain('無法讀取母素材');
+    expect(document.querySelector('.agtrack[data-audio-source-id="primary-id"] .audio-clip-route').textContent).toContain('失敗');
+    active.click();await vi.waitFor(()=>expect(desk.prepareSourceWaveform).toHaveBeenCalledTimes(2));
+    open();
+    await MediaIntakeJobs.reset({retainRecovery:true});
+    await vi.waitFor(()=>expect(item().textContent).toContain('已停止，點選重試'));
+    expect(document.querySelector('.agtrack[data-audio-source-id="primary-id"] .audio-clip-route').textContent).toContain('已停止');
+    expect(document.querySelector('[data-menu-id="wave:4:0"]').textContent).toBe('S5 Ch 1');
+    requests[1].resolve({complete:true,wave:'過期.wav'});
+    item().click();await vi.waitFor(()=>expect(desk.prepareSourceWaveform).toHaveBeenCalledTimes(3));
+    open();
+    requests[2].resolve({complete:true,wave:'s6.wav'});
+    await vi.waitFor(()=>expect(item().querySelector('.c-text').textContent).toBe('S6 Ch 1'));
+    expect(item().querySelector('.chk')).not.toBeNull();
+    expect([...Wave.getSourceWaveform(source).peaks.slice(-2)]).toEqual([0,.5]);
+  }finally{
+    Wave.forgetSourceWaveforms(source);
+    delete desk.prepareSourceWaveform;delete desk.fileURL;
+    vi.unstubAllGlobals();
+  }
+});
+
 it.each([
   ['primary','gutter'],['secondary','gutter'],['secondary','block'],['external','gutter'],['external','block'],
 ])('%s 母素材的 %s 右鍵音訊平衡提交使用該來源，視窗標題與 native 路徑一致',async(sourceId,entry)=>{

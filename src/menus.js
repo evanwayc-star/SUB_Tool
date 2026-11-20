@@ -37,7 +37,8 @@ import {
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
-let ctxReturnFocus=null,ctxSelection=null,ctxPreservesFocus=false,ctxActiveIndex=-1,ctxReturnAria=null,ctxGeneration=0;
+let ctxReturnFocus=null,ctxSelection=null,ctxPreservesFocus=false,ctxActiveIndex=-1,ctxReturnAria=null,ctxItemSerial=0;
+let updateWaveMenu=null;
 function selectCtxItem(items,index){
   ctxActiveIndex=index;
   items.forEach((item,i)=>{item.tabIndex=i===index?0:-1;item.classList.toggle('keyboard-active',ctxPreservesFocus&&i===index);});
@@ -45,6 +46,7 @@ function selectCtxItem(items,index){
   else items[index].focus({preventScroll:true});
 }
 function hideCtx({restoreFocus=true}={}){
+  updateWaveMenu=null;
   const was=ctx.classList.contains('show');
   const previous=ctxReturnFocus,selection=ctxSelection,aria=ctxReturnAria;
   ctxReturnFocus=null;ctxSelection=null;ctxPreservesFocus=false;ctxActiveIndex=-1;ctxReturnAria=null;
@@ -59,6 +61,33 @@ function hideCtx({restoreFocus=true}={}){
   }
   if(was) { window._ctxOpen=false; emit('mpv:sync'); emit('render:videoSub'); } // 選單若曾讓 mpv 讓位，關閉時恢復（僅在真的有開過才發，避免每次 mousedown 都打 IPC）
 }
+function createCtxItem(it){
+  const node=document.createElement('div');
+  if(it.id) node.dataset.menuId=it.id;
+  if(it.title) node.title=it.title;
+  if(it.sep){node.className='msep';return node;}
+  if(it.heading){node.className='lbl';node.textContent=it.label;return node;}
+  const {icon,text}=splitMenuLabel(it.label);
+  node.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`+(it.checked?'<span class="chk">✓</span>':'');
+  if(it.note){
+    node.className='ctx-note'+(it.tone?' '+it.tone:'');
+    node.setAttribute('role','status');
+    return node;
+  }
+  node.className='ci';
+  node.setAttribute('role','menuitem');
+  node.tabIndex=-1;
+  node.id=`ctx-item-${++ctxItemSerial}`;
+  // 輸入框的複製／貼上選單需保留游標及 inline editor。
+  if(ctxPreservesFocus) node.addEventListener('mousedown',e=>{if(e.button===0)e.preventDefault();});
+  if(typeof it.act==='function') node.onclick=()=>{hideCtx();it.act();};
+  else{node.classList.add('disabled');node.setAttribute('aria-disabled','true');}
+  return node;
+}
+function positionCtx(x,y){
+  ctx.style.left=Math.max(6,Math.min(x,window.innerWidth-ctx.offsetWidth-6))+'px';
+  ctx.style.top=Math.max(6,Math.min(y,window.innerHeight-ctx.offsetHeight-6))+'px';
+}
 function showCtx(x,y,items,{preserveFocus=false}={}){
   if(ctx.classList.contains('show')) hideCtx();
   ctxReturnFocus=document.activeElement;
@@ -70,33 +99,10 @@ function showCtx(x,y,items,{preserveFocus=false}={}){
     if(typeof active?.selectionStart==='number') ctxSelection={input:[active.selectionStart,active.selectionEnd,active.selectionDirection]};
     else if(selection?.rangeCount) ctxSelection={range:selection.getRangeAt(0).cloneRange()};
   }
-  ctx.innerHTML='';
-  const generation=++ctxGeneration;
-  for(const it of items){
-    let d;
-    if(it.sep){ d=document.createElement('div'); d.className='msep'; }
-    else if(it.heading){ d=document.createElement('div'); d.className='lbl'; d.textContent=it.label; }
-    else if(it.note){
-      d=document.createElement('div'); d.className='ctx-note'+(it.tone?' '+it.tone:''); d.setAttribute('role','status');
-      const { icon, text } = splitMenuLabel(it.label);
-      d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`;
-    }
-    else { d=document.createElement('div'); d.className='ci'; d.setAttribute('role','menuitem');d.tabIndex=-1;d.id=`ctx-item-${generation}-${ctx.children.length}`;
-      const { icon, text } = splitMenuLabel(it.label);
-      d.innerHTML=`<span class="c-icon">${icon}</span><span class="c-text">${escapeHTML(text)}</span>`+(it.checked?'<span class="chk">✓</span>':'');
-      // 輸入框的複製／貼上選單需保留游標及 inline editor；其他選單維持原焦點行為。
-      if(preserveFocus) d.addEventListener('mousedown',e=>{if(e.button===0)e.preventDefault();});
-      if(typeof it.act==='function') d.onclick=()=>{ hideCtx(); it.act(); };
-      else { d.classList.add('disabled'); d.setAttribute('aria-disabled','true'); }
-    }
-    if(it.id) d.dataset.menuId=it.id;
-    ctx.appendChild(d);
-  }
+  ctx.replaceChildren(...items.map(createCtxItem));
   ctx.setAttribute('role','menu');
   ctx.classList.add('show');
-  const w=ctx.offsetWidth,h=ctx.offsetHeight;
-  ctx.style.left=Math.max(6,Math.min(x,window.innerWidth-w-6))+'px';
-  ctx.style.top=Math.max(6,Math.min(y,window.innerHeight-h-6))+'px';
+  positionCtx(x,y);
   ctx.tabIndex=-1;
   const enabled=[...ctx.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')];
   if(enabled.length) selectCtxItem(enabled,0);
@@ -389,7 +395,7 @@ function audioMenuContext(audioEl){
 
 /* 延遲選單只能操作開啟時的來源；Undo／重載可用相同 ID 建立不同物件。
    將資格留在選單 module，Media 仍負責實際編輯與提交時的鎖定檢查。 */
-function ownedAudioMenuItems(context,items,sourceIds=[]){
+function captureAudioMenuOwnership(context,sourceIds){
   const ownsWorkspace=Project.captureWorkspaceOwnership();
   const resolve=id=>context.external
     ? Media.getExternalAudioSource?.(id)||State.externalAudioState?.find(source=>sourceIdMatches(source,id))||null
@@ -402,14 +408,10 @@ function ownedAudioMenuItems(context,items,sourceIds=[]){
   const targets=[...new Set([context.assetId,context.sourceId,...sourceIds].filter(Boolean))]
     .map(id=>{const source=resolve(id);return {id,source,identity:identity(source),file:source?._file||source?.blob};});
   const fallback=[State.mediaPath,State.mediaName,State.mediaFile,State.mediaBlob];
-  const owns=()=>ownsWorkspace()
+  return ()=>ownsWorkspace()
     &&(!context.external||!!context.source)
     &&targets.every(target=>{const source=resolve(target.id);return source===target.source&&identity(source)===target.identity&&(source?._file||source?.blob)===target.file;})
     &&(!!context.source||fallback.every((value,i)=>value===[State.mediaPath,State.mediaName,State.mediaFile,State.mediaBlob][i]));
-  return items.map(item=>typeof item.act==='function'?{...item,act:()=>{
-    if(!owns()){showToast('音訊來源或專案已變更，請重新開啟右鍵選單');return;}
-    return item.act();
-  }}:item);
 }
 
 function sourceWaveLaneIds(row,sourceId){
@@ -433,15 +435,62 @@ function sourceWaveMenuState(sourceId,sourceIds){
   return {options:normalizeWaveOptions(rawOptions),selected};
 }
 
-function selectSourceWave(sourceId,selection,sourceIds){
-  const changed=sourceIds?.length>1&&typeof Wave.setSourceWaveLaneSelection==='function'
-    ? Wave.setSourceWaveLaneSelection(sourceIds,selection) : Wave.setSourceWaveSelection?.(sourceId,selection);
-  Promise.resolve(changed).then(()=>drawTimeline()).catch(err=>{
+async function selectSourceWave(sourceId,selection,sourceIds,owns){
+  try{
+    if(sourceIds.length>1) await Wave.setSourceWaveLaneSelection(sourceIds,selection);
+    else await Wave.setSourceWaveSelection(sourceId,selection);
+  }catch(err){
+    if(!owns())return;
     console.warn('source wave selection:',err);
     showToast(selection==='vocals'
       ? `人聲分離未完成：${err?.message||'請重試'}`
-      : '無法載入此聲道的波形');
-  });
+      : `無法載入此聲道的波形：${err?.message||'請重試'}`);
+  }
+}
+
+export function refreshOpenWaveMenu(){ updateWaveMenu?.(); }
+
+function showAudioCtx(e,context,sourceIds,buildMenu){
+  const {clientX:x,clientY:y}=e;
+  const owns=captureAudioMenuOwnership(context,sourceIds);
+  const selectWave=selection=>selectSourceWave(context.sourceId,selection,sourceIds,owns);
+  const readItems=()=>buildMenu(sourceWaveMenuState(context.sourceId,sourceIds),selectWave);
+  const guard=item=>typeof item.act==='function'?{...item,act:()=>{
+    if(!owns()){showToast('音訊來源或專案已變更，請重新開啟右鍵選單');return;}
+    return item.act();
+  }}:item;
+  showCtx(x,y,readItems().map(guard));
+  updateWaveMenu=()=>{
+    if(!owns()){hideCtx();return;}
+    const isWave=id=>id?.startsWith('wave:')||id?.startsWith('wave_');
+    const old=[...ctx.children].filter(node=>isWave(node.dataset.menuId));
+    const items=readItems().filter(item=>isWave(item.id));
+    if(items.length!==old.length||items.some((item,i)=>item.id!==old[i].dataset.menuId)){
+      // 探測結果可能在開啟選單後才列出完整串流。
+      const activeId=old.includes(document.activeElement)?document.activeElement.dataset.menuId:null;
+      old[0].before(...items.map(item=>createCtxItem(guard(item))));
+      old.forEach(node=>node.remove());
+      if(activeId){
+        const enabled=[...ctx.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')];
+        selectCtxItem(enabled,Math.max(0,enabled.findIndex(node=>node.dataset.menuId===activeId)));
+      }
+      positionCtx(x,y);
+      return;
+    }
+    let resized=false;
+    items.forEach((item,i)=>{
+      const node=old[i],label=node.querySelector('.c-text')||node;
+      if(label.textContent!==item.label){label.textContent=item.label;resized=true;}
+      if(node.title!==(item.title||'')) node.title=item.title||'';
+      const check=node.querySelector('.chk');
+      if(!!check!==!!item.checked){
+        if(check) check.remove();
+        else{const mark=document.createElement('span');mark.className='chk';mark.textContent='✓';node.append(mark);}
+        resized=true;
+      }
+    });
+    if(resized)positionCtx(x,y);
+  };
 }
 /* 時間軸區塊右鍵 / 空白軌道區右鍵 */
 tlScroll?.addEventListener?.('contextmenu', tlContextMenuHandler);
@@ -462,7 +511,6 @@ function tlContextMenuHandler(e){
     const end=Math.max(start,Number(audioEl.dataset.audioEnd)||start);
     const playhead=Media.displayTime();
     const enabled=source?.enabled!==false&&audioEl.dataset.audioEnabled!=='false';
-    const wave=sourceWaveMenuState(sourceId);
     const recognitionSource=source || {
       id:external?assetId:'primary-audio',
       name:sourceName||State.mediaName||'主要音訊',
@@ -479,7 +527,7 @@ function tlContextMenuHandler(e){
       : (source || State.clips?.find(c => c.id === assetId || c.primary || c.audioSrc === 'video') || State.clips?.[0]);
     const hasLimiter = Boolean(resolvedTarget?.hasAudioLimiter || audioEl.classList.contains('has-limiter'));
     const limiterLabel = resolvedTarget?.audioLimiterLabel || '';
-    const items=buildAudioClipMenu({
+    showAudioCtx(e,context,[],(wave,selectWave)=>buildAudioClipMenu({
       name:sourceName,
       external,
       locked,
@@ -506,10 +554,9 @@ function tlContextMenuHandler(e){
       splitAtPlayhead:()=>runExternalAudioMenuAction('splitExternalAudio',[assetId,playhead]),
       toggleAudio:()=>runExternalAudioMenuAction('toggleExternalAudioEnabled',[assetId]),
       openAudioRouting:()=>AudioRouting.openForSource(sourceId),
-      selectWave:selection=>selectSourceWave(sourceId,selection),
+      selectWave,
       removeAudio:()=>runExternalAudioMenuAction('removeExternalAudio',[assetId],{clearSelection:true}),
-    });
-    showCtx(e.clientX,e.clientY,ownedAudioMenuItems(context,items));
+    }));
     return;
   }
   
@@ -520,11 +567,10 @@ function tlContextMenuHandler(e){
     const context=audioMenuContext(audioRow);
     const {source,sourceId,sourceName,filePath,external,locked}=context;
     const waveSourceIds=sourceWaveLaneIds(audioRow,sourceId);
-    const wave=sourceWaveMenuState(sourceId,waveSourceIds);
     const resolvedTrackTarget=source;
     const hasLimiter = Boolean(resolvedTrackTarget?.hasAudioLimiter);
     const limiterLabel = resolvedTrackTarget?.audioLimiterLabel || '';
-    const items=buildAudioTrackMenu({
+    showAudioCtx(e,context,waveSourceIds,(wave,selectWave)=>buildAudioTrackMenu({
       name:sourceName,
       external,
       locked,
@@ -545,9 +591,8 @@ function tlContextMenuHandler(e){
         isPrimary:!external,
       }),
       openAudioRouting:()=>AudioRouting.openForSource(sourceId),
-      selectWave:selection=>selectSourceWave(sourceId,selection,waveSourceIds),
-    });
-    showCtx(e.clientX,e.clientY,ownedAudioMenuItems(context,items,waveSourceIds));
+      selectWave,
+    }));
     return;
   }
   /* 影片序列區塊右鍵 */

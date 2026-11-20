@@ -15,6 +15,25 @@ function setup(){
 }
 
 describe('renderer media intake ownership',()=>{
+  it('改選聲道只取消原本的聲道要求，同一素材的 MIX 繼續處理', async()=>{
+    const {jobs,bridge,pending}=setup(),controller=new AbortController(),onProgress=vi.fn();
+    const mix=jobs.prepareSourceWaveform({path:'eight.mov',duration:12,continuous:true});
+    const channel=jobs.prepareSourceWaveform({path:'eight.mov',duration:12,continuous:true,
+      channel:{sourceStream:5,sourceChannel:0}},null,{signal:controller.signal,onProgress});
+    const [mixRequest,channelRequest]=bridge.prepareSourceWaveform.mock.calls.map(([request])=>request);
+    jobs.progress({...mixRequest,stage:'source-waveform',pct:15});
+    expect(onProgress).not.toHaveBeenCalled();
+    jobs.progress({...channelRequest,stage:'source-channel-waveform',pct:34});
+    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({pct:34}));
+    controller.abort();
+    await expect(channel).rejects.toMatchObject({name:'AbortError'});
+    expect(bridge.cancelMediaIntake).toHaveBeenCalledExactlyOnceWith({sessionId:channelRequest.sessionId,requestId:channelRequest.requestId});
+    expect(jobs.snapshot().jobs.map(job=>job.requestId)).toEqual([mixRequest.requestId]);
+    expect(jobs.progress({...channelRequest,done:true,outcome:'failed'})).toBe(false);
+    pending[1].resolve({wave:'late-s6.wav'});
+    pending[0].resolve({wave:'mix.wav'});
+    expect(await mix).toEqual({wave:'mix.wav'});
+  });
   it('Proxy 狀態只採 encoder 的實際輸出，驗證、波形及補音軌不能冒充 Proxy 百分比', async()=>{
     const f=setup(),work=f.jobs.ingest({path:'A.mov',needsProxy:true}),request=f.bridge.ingest.mock.calls[0][0];
     expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'preparing',pct:null});

@@ -50,7 +50,8 @@ import {
   planClipGesturePreview,
   planAudioGesturePreview,
 } from './timeline-gesture-transaction.js';
-import { hideCtx, showCueMenu } from './menus.js';
+import { hideCtx, showCueMenu, refreshOpenWaveMenu } from './menus.js';
+import { waveOptionLabel } from './timeline-context-menu-model.js';
 import { Seq } from './sequence.js';
 import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds, requestPointerSeek } from './timeline-interaction-engine.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
@@ -281,6 +282,7 @@ _onEvent('media:waveform',({controls=false}={})=>{
       for(const paint of clipWavePainters)paint();
       if(refreshControls)for(const paint of waveGutterPainters)paint();
     }
+    if(refreshControls) refreshOpenWaveMenu();
     syncProvisionalWave();
   });
 });
@@ -701,11 +703,6 @@ function sourceWaveDetail(source,external){
   const fallback=sourceWaveFallback(source,external);
   if(typeof Wave.getSourceWaveform==='function') return Wave.getSourceWaveform(source,fallback);
   return {peaks:fallback,selection:'mix',fallback:false};
-}
-function sourceWaveLabel(source,selection){
-  if(typeof Wave.getSourceWaveOptions!=='function') return selection==='mix'?'MIX':'Ch';
-  const option=Wave.getSourceWaveOptions(source).find(item=>item.id===selection);
-  return option?.label||'MIX（所有聲道）';
 }
 /* 外部音檔是可獨立剪輯的素材。selectedAudioClipId 只保存 runtime 選取狀態，
    不與影片 clip / 字幕選取混用，讓 Delete 與右鍵操作可明確知道目標。 */
@@ -1156,8 +1153,12 @@ function renderAtrackGutter(){
     const updateWaveControls=()=>{
       const laneWave=Wave.getSourceWaveLaneState?.(laneSources);
       const waveSelection=laneWave?.selection||(Wave.getSourceWaveSelection?.(source)||'mix');
-      const waveLabel=laneWave?.label||sourceWaveLabel(source,waveSelection);
-      const vocalOption=Wave.getSourceWaveOptions?.(source)?.find(item=>item.id==='vocals');
+      const waveOptions=laneWave?.options||Wave.getSourceWaveOptions?.(source)||[];
+      const selectedOption=waveOptions.find(item=>item.id===waveSelection);
+      const waveLabel=selectedOption?waveOptionLabel(selectedOption):laneWave?.label||'MIX（所有聲道）';
+      const waveError=selectedOption?.error;
+      const waveTitle=waveError?`${waveLabel}\n${waveError.message||waveError}`:waveLabel;
+      const vocalOption=waveOptions.find(item=>item.id==='vocals');
       vocalPending=laneWave?.pending??!!vocalOption?.preparing;
       vocalSelected=laneWave?.vocalsSelected??waveSelection==='vocals';
       const vocalButtonLabel=vocalPending?`取消 ${laneWave?.progress??vocalOption.progress}%`:vocalSelected?'原音':'人聲';
@@ -1166,7 +1167,8 @@ function renderAtrackGutter(){
         : vocalSelected?'顯示整列原音波形':'分離配樂，顯示整列人聲波形（首次需要下載模型）';
       const title=`${row.label}\n聲音：${muted?'已關閉':'已開啟'}（點喇叭按鈕切換）\n波形：${waveLabel}\n點人聲按鈕分離配樂；按右鍵可切換 MIX／來源聲道／人聲`;
       if(g.title!==title)g.title=title;
-      if(routeLabel.title!==waveLabel){routeLabel.title=waveLabel;routeLabel.textContent=waveLabel;}
+      if(routeLabel.title!==waveTitle)routeLabel.title=waveTitle;
+      if(routeLabel.textContent!==waveLabel)routeLabel.textContent=waveLabel;
       vocalBtn.classList.toggle('on',vocalSelected);
       vocalBtn.setAttribute('aria-pressed',laneWave?.mixed?'mixed':String(vocalSelected));
       if(vocalBtn.title!==vocalButtonTitle)vocalBtn.title=vocalButtonTitle;

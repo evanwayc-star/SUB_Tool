@@ -38,7 +38,7 @@ const { createScreenshotOutput } = require('./screenshot-output');
 const { createIpcGuards, expectedExportExtension, mergeRendererConfig } = require('./ipc-guards');
 const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput, isRetryable } = require('./export-queue');
 const { createMpvHost } = require('./mpv-host');
-const { createMediaIntakeRuntime, createMediaIngestCoordinator, sourceAudioClockFilter } = require('./media-intake-runtime');
+const { createMediaIntakeRuntime, createMediaIngestCoordinator, createSourceWaveformCoordinator, sourceAudioClockFilter } = require('./media-intake-runtime');
 const { createCompareWindow } = require('./compare-window');
 const { createMediaProbe } = require('./media-probe');
 const { createClipFrameCache, validateClipFrameRequest } = require('./clip-frame-cache');
@@ -105,8 +105,7 @@ let tmpSeq = 0;
 /* proxy、聲道與波形都共用 per-source cache；streamIngest 回傳「可播放」後仍持有
    writer lease，直到 ffmpeg 完整結束才讓下一個 queued ingest 寫入。 */
 const mediaIngestCoordinator = createMediaIngestCoordinator();
-// 波形直接讀母素材並寫私有暫存，不與 Proxy 共寫快取，因此有獨立的取消／close 屏障。
-const mediaWaveformCoordinator = createMediaIngestCoordinator();
+const mediaWaveformCoordinator = createSourceWaveformCoordinator();
 
 /* S1：唯一的 IPC 檔案能力權威。
    renderer 路徑不會因 fs:fileURL／stat 等查詢被靜默升格；只接受原生對話框、OS 開檔、
@@ -1953,7 +1952,7 @@ ipcMain.handle('ffmpeg:sourceKey', async (_e, source) => {
 ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
   const owner = mediaIntakeOwner(e, request);
   if (owner.sessionId === undefined) throw new TypeError('波形工作缺少 sessionId/requestId');
-  const { path: src, duration, audio, start, length, ignoreCached, continuous } = request;
+  const { path: src, duration, audio, start, length, ignoreCached, continuous, channel } = request;
   requireReadablePath('ffmpeg:prepareSourceWaveform', src);
   let prepared;
   const cancel = () => { void mediaWaveformCoordinator.cancel(owner); };
@@ -1961,9 +1960,9 @@ ipcMain.handle('ffmpeg:prepareSourceWaveform', async (e, request) => {
   if (e.sender.isDestroyed?.()) cancel();
   try {
     return await mediaWaveformCoordinator.enqueue(async lease => {
-      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length, ignoreCached, continuous }, mediaIntakeSession(e, lease, owner));
+      prepared = await mediaIntakeRuntime.waveform({ src, duration, audio, start, length, ignoreCached, continuous, channel }, mediaIntakeSession(e, lease, owner));
       return prepared;
-    }, owner);
+    }, owner, channel);
   } catch (error) {
     // native 已交回但 coordinator 尚未發布時若失權，renderer 不會取得路徑，仍由 main 回收。
     if (prepared?.temporary) mediaIntakeRuntime.cleanupGeneratedFile(prepared.wave);

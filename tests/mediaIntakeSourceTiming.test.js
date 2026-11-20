@@ -1,5 +1,5 @@
 // @subtool-ci windows
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -117,6 +117,66 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
       expect(waveform.length / 4 / 4000).toBeCloseTo(1.2, 2);
       for (const frequency of frequencies) expect(energy(waveform, .2, 1, frequency), `${frequency} Hz in ${mode} MIX`).toBeCloseTo(.125 / 8, 3);
       expect(energy(waveform, .2, 1)).toBeCloseTo(.03125, 3);
+      if (mode === 'ingest') {
+        const selected = await runtime.waveform({ ...request, continuous: true, channel: { sourceStream: 5, sourceChannel: 0 } });
+        expect(selected.wave).not.toBe(result.wave);
+        const samples = pcm(selected.wave);
+        for (const [i, frequency] of frequencies.entries())
+          expect(energy(samples, .2, 1, frequency)).toBeCloseTo(i === 5 ? .125 : 0, 3);
+      }
+    } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
+  }, 30000);
+
+  it('從原檔產生所選 S6 聲道的波形，跨工作重用素材旁快取且不混入 MIX', async () => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-'));
+    roots.push(directory);
+    const source = path.join(directory, 'six streams.mov'), cache = path.join(directory, 'cache'), temp = path.join(directory, 'temp');
+    fs.mkdirSync(cache); fs.mkdirSync(temp);
+    run(['-y', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono:d=1',
+      '-f', 'lavfi', '-i', 'aevalsrc=0.25*sin(2*PI*440*t)|0.5*sin(2*PI*880*t):s=48000:d=1',
+      '-map', '0:a', '-map', '0:a', '-map', '0:a', '-map', '0:a', '-map', '0:a', '-map', '1:a', '-c:a', 'pcm_s16le', source]);
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => temp });
+    const authority = new FileAuthority({ internalDirectories: [temp, cache] });
+    authority.grantTrustedFile(source);
+    const calls = [], events = [];
+    const runtime = createMediaIntakeRuntime({ fileAuthority: authority, ffmpegExecution: {
+      execute(args, options) { calls.push(args); return execution.execute(args, options); },
+    }, tempRoot: temp, cacheRoot: cache, allowSidecarCache: true, backgroundWaveforms: true,
+    describeAudio: async file => (await probe.describe(file)).audio, sendProgress: (_, data) => events.push(data) });
+    const request = { src: source, duration: 1, continuous: true };
+    const channel = sourceChannel => ({ sourceStream: 5, sourceChannel });
+    try {
+      const right = await runtime.waveform({ ...request, channel: channel(1) }, { owner: { sessionId: 'test', requestId: 'S6R' } });
+      expect(right).toMatchObject({ complete: true, cached: false, temporary: false, channel: channel(1) });
+      expect(right.wave).toContain('.subtool_Cache'); expect(authority.canRead(right.wave)).toBe(true);
+      expect(events.filter(event => event.requestId === 'S6R').every(event => event.jobId === 'source-channel-wave')).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({ jobId: 'source-channel-wave', pct: 100, done: true, channel: channel(1) }));
+      const rightSamples = pcm(right.wave);
+      expect(energy(rightSamples, .2, .8, 880)).toBeCloseTo(.5, 3);
+      expect(energy(rightSamples, .2, .8, 440)).toBeLessThan(.001);
+      expect(calls).toHaveLength(1);
+      expect(calls[0][calls[0].indexOf('-filter_complex') + 1].match(/\[0:a:\d+\]/g)).toEqual(['[0:a:5]']);
+      const info = await runtime.cacheInfo(source, { sourceOnly: true });
+      expect(info.source.locations).toMatchObject([{ kind: 'sidecar', waveform: { state: 'missing', hasSourceChannels: true } }]);
+      const [mix, left] = await Promise.all([runtime.waveform(request), runtime.waveform({ ...request, channel: channel(0) })]);
+      expect(new Set([mix.wave, left.wave, right.wave]).size).toBe(3);
+      expect(energy(pcm(mix.wave), .2, .8, 880)).toBeCloseTo(.5 / 7, 3);
+      expect(energy(pcm(left.wave), .2, .8, 440)).toBeCloseTo(.25, 3);
+      expect(energy(pcm(left.wave), .2, .8, 880)).toBeLessThan(.001);
+      await expect(runtime.waveform({ ...request, channel: channel(1) })).resolves.toMatchObject({ wave: right.wave, cached: true });
+      await expect(runtime.waveform({ ...request, channel: channel(2) })).rejects.toThrow(/S6.*Ch3/);
+      expect(calls).toHaveLength(3);
+      // Inspect actual PCM opens inside the same runtime that executes in each
+      // desktop worker. Directory enumeration must not read the other WAVs.
+      const reader = createMediaIntakeRuntime({ fileAuthority: authority, tempRoot: temp, cacheRoot: cache,
+        allowSidecarCache: true, describeAudio: async file => (await probe.describe(file)).audio });
+      const opened = vi.spyOn(fs, 'openSync');
+      try {
+        await expect(reader.waveform({ ...request, channel: channel(1) })).resolves.toMatchObject({ wave: right.wave, cached: true });
+        const waveReads = opened.mock.calls.map(([file]) => file).filter(file => typeof file === 'string' && file.endsWith('.wav'));
+        expect([...new Set(waveReads)]).toEqual([right.wave]);
+      } finally { opened.mockRestore(); await reader.close(); }
     } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
   }, 30000);
 

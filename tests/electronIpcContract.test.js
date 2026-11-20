@@ -14,9 +14,9 @@ const require = createRequire(import.meta.url);
 const { FileAuthority } = require('../electron/file-authority.js');
 const { createIpcGuards } = require('../electron/ipc-guards.js');
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
-const { createMediaIntakeRuntime, createMediaIngestCoordinator } = require('../electron/media-intake-runtime.js');
+const { createMediaIntakeRuntime, createMediaIngestCoordinator, createSourceWaveformCoordinator } = require('../electron/media-intake-runtime.js');
 
-function intakeBridge(runtime, coordinator, sender, waveformCoordinator = createMediaIngestCoordinator(), readable = () => {}) {
+function intakeBridge(runtime, coordinator, sender, waveformCoordinator = createSourceWaveformCoordinator(), readable = () => {}) {
   const source = fs.readFileSync(path.join(ROOT, 'electron/main.js'), 'utf8');
   const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
   const channels = ['ffmpeg:ingest', 'ffmpeg:streamIngest', 'ffmpeg:prepareSourceWaveform', 'ffmpeg:cancelIntake', 'ffmpeg:releaseStream', 'ffmpeg:sourceKey'];
@@ -203,6 +203,40 @@ describe('Electron invoke interface', () => {
     const work=api.mediaSourceKey('C:/source.mov');await entered;allowed=false;release();
     await expect(work).rejects.toMatchObject({code:'UNAUTHORIZED_PATH'});
   });
+  it('選擇原音聲道經 preload/main 檢查母素材權限，可在 MIX 尚未結束時獨立運作及取消', async () => {
+    let finishMix, finishChannel;
+    const waveforms = createSourceWaveformCoordinator(), sender = new EventEmitter();
+    const channel = { sourceStream: 5, sourceChannel: 0 }, work = [];
+    const runtime = { cancel: vi.fn(), waveform(request, session) {
+      work.push(request);
+      return new Promise(resolve => {
+        if (!request.channel) { finishMix = resolve; return; }
+        finishChannel = resolve;
+        session.ownProcess({ kill: resolve });
+      });
+    } };
+    const readable = vi.fn((_, file) => { if (!['mother.mov', 'next.mov'].includes(file)) throw new Error('unauthorized'); });
+    const api = intakeBridge(runtime, createMediaIngestCoordinator(), sender, waveforms, readable);
+    const request = { path: 'mother.mov', duration: 1000, continuous: true, sessionId: 'wave' };
+    const mix = api.prepareSourceWaveform({ ...request, requestId: 'mix' });
+    const selected = api.prepareSourceWaveform({ ...request, requestId: 'channel', channel });
+    selected.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(work).toHaveLength(2));
+      expect(work[1]).toMatchObject({ src: 'mother.mov', channel, continuous: true });
+      await expect(api.prepareSourceWaveform({ ...request, path: 'unselected.mov', requestId: 'foreign', channel })).rejects.toThrow('unauthorized');
+      const next = api.prepareSourceWaveform({ ...request, path: 'next.mov', requestId: 'switch', channel: { sourceStream: 3, sourceChannel: 1 } });
+      expect(work).toHaveLength(2);
+      await expect(api.cancelMediaIntake({ sessionId: 'wave', requestId: 'channel' })).resolves.toBe(1);
+      await expect(selected).rejects.toMatchObject({ code: 'INGEST_SUPERSEDED' });
+      await vi.waitFor(() => expect(work).toHaveLength(3));
+      expect(work[2]).toMatchObject({ src: 'next.mov', channel: { sourceStream: 3, sourceChannel: 1 } });
+      finishChannel('next channel ready'); await expect(next).resolves.toBe('next channel ready');
+      finishMix('mixed');
+      await expect(mix).resolves.toBe('mixed');
+    } finally { finishChannel?.(); finishMix?.(); await waveforms.cancelAllAndWait(); }
+  });
+
   it('來源波形經真 preload/main/runtime 不排在 Proxy 後；取消只停止自己並等待 writer close 清理', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-wave-ipc-'));
     const source = path.join(root, 'mother.mov'); fs.writeFileSync(source, 'mother');

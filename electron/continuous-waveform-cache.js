@@ -29,7 +29,14 @@ function recipe(spec) {
       || (stream.timestampOffset !== undefined && !Number.isFinite(stream.timestampOffset))) throw new TypeError('連續波形音訊配置無效');
     return { channels: stream.channels, timestampOffset: stream.timestampOffset || 0 };
   });
-  return { version: 1, sharedSourceKey: spec.sharedSourceKey, audio, totalSamples: spec.totalSamples };
+  const result = { version: 1, sharedSourceKey: spec.sharedSourceKey, audio, totalSamples: spec.totalSamples };
+  if (spec.channel !== undefined) {
+    const { sourceStream, sourceChannel } = spec.channel || {};
+    if (!Number.isInteger(sourceStream) || !Number.isInteger(sourceChannel) || sourceChannel < 0
+      || !audio[sourceStream] || sourceChannel >= audio[sourceStream].channels) throw new RangeError('來源音訊沒有指定聲道');
+    result.channel = { sourceStream, sourceChannel };
+  }
+  return result;
 }
 
 function wavHeader(samples) {
@@ -172,10 +179,13 @@ function scan(directory, expected, verify = () => {}, metadataOnly = false) {
 function describeContinuousWaveformCache(directory, { sourceKey, verify = () => {} } = {}) {
   try {
     const result = scan(directory, null, verify, true);
-    const best = result.candidates.find(candidate => candidate.spec.sharedSourceKey === sourceKey);
-    return best ? { state: best.complete ? 'complete' : 'partial', completedSamples: best.samples,
+    const matches = result.candidates.filter(candidate => candidate.spec.sharedSourceKey === sourceKey);
+    const best = matches.find(candidate => !candidate.spec.channel);
+    const summary = best ? { state: best.complete ? 'complete' : 'partial', completedSamples: best.samples,
       totalSamples: best.spec.totalSamples, bytes: Number(best.stat.size), verified: false }
       : { state: result.uncertain ? 'unknown' : 'missing', verified: false };
+    if (matches.some(candidate => candidate.spec.channel)) summary.hasSourceChannels = true;
+    return summary;
   } catch (_) { return { state: 'unknown', verified: false }; }
 }
 

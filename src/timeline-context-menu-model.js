@@ -46,8 +46,23 @@ export function normalizeWaveOptions(rawOptions) {
       label: item?.label || (selection === 'mix' ? 'MIX（所有聲道）' : String(selection)),
       ready: item?.ready !== false,
       ...(item?.statusLabel ? { statusLabel: true } : {}),
+      ...(item?.kind === 'channel' ? {
+        kind: 'channel', preparing: !!item.preparing, progress: item.progress,
+        error: item.error?.message || item.error, stopped: item.error?.name === 'AbortError', detail: item.detail,
+      } : {}),
     };
   }).filter(item => item.selection);
+}
+
+export function waveOptionLabel(option, { menu = false } = {}) {
+  if (option.kind !== 'channel' || option.ready) return option.label;
+  if (option.stopped || option.error?.name === 'AbortError') return option.label + (menu ? '（已停止，點選重試）' : '（已停止）');
+  if (option.error) return option.label + (menu ? '（產生失敗，點選重試）' : '（產生失敗）');
+  if (option.preparing) {
+    const percent = Number.isFinite(option.progress) ? ' ' + Math.round(option.progress) + '%' : '';
+    return option.label + '（產生中' + percent + '）';
+  }
+  return option.label;
 }
 
 function waveformItems(options, selected, actions, scope='此素材') {
@@ -59,9 +74,12 @@ function waveformItems(options, selected, actions, scope='此素材') {
     ...(selected==='mixed'?[note('wave_mixed','混合（依各片段）；選取後套用整列')]:[]),
     ...options.map(option => action(
       `wave:${option.selection}`,
-      option.ready || option.statusLabel ? option.label : `${option.label}（準備中）`,
+      waveOptionLabel(option, { menu: true }),
       () => actions.selectWave?.(option.selection),
-      { checked: String(selected || 'mix') === option.selection }
+      {
+        checked: String(selected || 'mix') === option.selection,
+        title: option.error || option.detail || (option.kind === 'channel' && !option.ready && !option.preparing ? '點選產生此聲道波形' : ''),
+      }
     )),
   ];
 }

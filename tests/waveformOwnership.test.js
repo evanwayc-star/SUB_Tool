@@ -11,6 +11,7 @@ vi.mock('../src/dom.js', () => ({ $: vi.fn(), video: {} }));
 vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), setStatus: vi.fn() }));
 
 import { Wave } from '../src/waveform-decoder.js';
+import { State } from '../src/state.js';
 import { Media } from '../src/media.js';
 
 const deferred = () => {
@@ -143,6 +144,38 @@ it('完整聲道清單取代預覽占位，刪除目前選取的聲道後回到 
   Media.tracks = [{ audioSourceId: 'source-1', sourceChannel: 0 }, { audioSourceId: 'source-1', sourceChannel: 1 }];
   Wave.registerSourceWaveforms('source-1', { channels: [] });
   expect(Wave.getSourceWaveOptions('source-1').filter(option => option.kind === 'channel')).toEqual([]);
+});
+
+it('只有路由與 MIX 時，S6 可單獨產生，失敗只在手動重試後重跑', async () => {
+  const source={audioSourceId:'eight-mono',path:'mother.mov',dur:1};
+  const channels=Array.from({length:8},(_,sourceStream)=>({sourceStream,sourceChannel:0}));
+  const mix=Float32Array.from([-.1,.1]);
+  const work=deferred();
+  desktop.prepareSourceWaveform=vi.fn().mockRejectedValueOnce(new Error('素材暫時離線')).mockReturnValue(work.promise);
+  State.clips=[source];
+  try{
+    Wave.registerSourceWaveforms(source,{channels,mixPeaks:mix});
+    const option=()=>Wave.getSourceWaveOptions(source).find(item=>item.id==='5:0');
+    expect(option()).toMatchObject({ready:false,preparing:false});
+    expect(desktop.prepareSourceWaveform).not.toHaveBeenCalled();
+    Wave.setSourceWaveSelection(source.audioSourceId,'5:0');
+    await vi.waitFor(()=>expect(option().error?.message).toContain('離線'));
+    expect(Wave.getSourceWaveform(source).peaks).toBeNull();
+    expect(option().preparing).toBe(false);
+    expect(desktop.prepareSourceWaveform).toHaveBeenCalledTimes(1);
+    desktop.fileURL.mockResolvedValue('file:///s6.wav');
+    vi.stubGlobal('fetch',vi.fn(async()=>({arrayBuffer:async()=>sourcePcm(1)})));
+    Wave.setSourceWaveSelection(source.audioSourceId,'5:0');
+    expect(option().preparing).toBe(true);
+    expect(Wave.getSourceWaveform(source).peaks).toBeNull();
+    work.resolve({complete:true,wave:'s6.wav'});
+    await vi.waitFor(()=>expect(option().ready).toBe(true));
+    expect(option()).toMatchObject({preparing:false,error:null});
+    expect(desktop.prepareSourceWaveform).toHaveBeenCalledTimes(2);
+    expect(desktop.prepareSourceWaveform.mock.lastCall[0]).toMatchObject({path:'mother.mov',duration:1,continuous:true,channel:channels[5]});
+    expect([...Wave.getSourceWaveform(source).peaks.slice(-2)]).toEqual([0,.25]);
+    expect(Wave.getSourceWaveOptions(source).filter(o=>o.kind==='channel'&&o.ready).map(o=>o.id)).toEqual(['5:0']);
+  }finally{delete desktop.prepareSourceWaveform;delete State.clips;}
 });
 
 it.each([false, true])('已移除聲道的舊解碼晚到，不會重建或覆蓋同座標（重新加入=%s）', async readded => {

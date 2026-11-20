@@ -7,6 +7,8 @@ import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { $ } from './dom.js';
 import { setMediaProcessingStatus } from './ui.js';
+import { MediaIntakeJobs } from './media-intake-jobs.js';
+import { audioMotherPath } from '../shared/audio-loudness.cjs';
 
 export const WAVE_DECODE_MAX = 5e8;    // 超過此大小不整檔解碼波形，改即時擷取
 
@@ -145,6 +147,11 @@ export const Wave = {
     }
     return '';
   },
+  _registeredSource(source,state){
+    if(source&&typeof source==='object') return source;
+    return [...(State.clips||[]),...(Media.externalAudioSources||[])].find(item=>
+      this._sourceKey(item)===state.key||this._runtimeSourceKey(item)===state.runtimeSourceId);
+  },
   _channelKey(stream,channel){ return `${stream}:${channel}`; },
   _channelDescriptor(channel,index=0){
     const sourceStream=Math.max(0,Math.floor(Number(channel?.sourceStream??0)||0));
@@ -242,19 +249,23 @@ export const Wave = {
         const nextPeaks=raw.peaks||null;
         const pcmChannel=raw.pcmChannel??old?.pcmChannel??null;
         if(!old||nextPath!==old.path||pcmChannel!==old.pcmChannel||(nextPeaks&&nextPeaks!==old.peaks)){
+          old?.controller?.abort();
           state.channels.set(desc.key,{
             ...desc,
             label:raw.label||old?.label||`Ch ${desc.sourceChannel+1}`,
             path:nextPath,
             pcmChannel,
-            peaks:nextPeaks||(nextPath===old?.path?old?.peaks:null)||null,
+            peaks:nextPeaks||(old&&nextPath===old.path&&pcmChannel===old.pcmChannel?old.peaks:null)||null,
             loading:null
           });
         }else old.label=raw.label||old.label||`Ch ${desc.sourceChannel+1}`;
       }
       // An explicit list describes the complete source, including zero audio.
       // Removing the entry also revokes any decode still waiting for its file.
-      for(const key of state.channels.keys()) if(!retained.has(key)) state.channels.delete(key);
+      for(const [key,entry] of state.channels) if(!retained.has(key)){
+        entry.controller?.abort();
+        state.channels.delete(key);
+      }
       state.channelsRegistered=true;
       for(const field of ['selection','originalSelection']){
         if(state[field]!=='mix'&&state[field]!=='vocals'&&!state.channels.has(state[field])) state[field]='mix';
@@ -328,7 +339,7 @@ export const Wave = {
         label:multiStream?`S${item.sourceStream+1} Ch ${item.sourceChannel+1}`:`Ch ${item.sourceChannel+1}`,
         sourceLabel:item.label,
         selected:selected===item.key,
-        ready:!!item.peaks
+        ready:!!item.peaks,preparing:!!item.loading,error:item.error||null,progress:item.progress??null,statusLabel:true
       })),
       {
         id:'vocals',kind:'vocals',
@@ -369,6 +380,13 @@ export const Wave = {
       return {
         ...option,selected:selection===option.id,
         ready:corresponding.every(item=>item.ready!==false),
+        ...(option.kind==='channel'?{
+          preparing:corresponding.some(item=>item.preparing),
+          error:corresponding.find(item=>item.error&&item.error.name!=='AbortError')?.error
+            ||corresponding.find(item=>item.error)?.error||null,
+          progress:corresponding.every(item=>item.ready||item.progress!=null)
+            ?Math.round(corresponding.reduce((sum,item)=>sum+(item.ready?100:item.progress),0)/corresponding.length):null,
+        }:{}),
         ...(option.id==='vocals'?{
           ready:vocalOptions.every(item=>item?.ready),preparing:pending,progress,detail,
           label:pending?`人聲（分離配樂 ${progress}%）`:'人聲（分離配樂）',
@@ -412,25 +430,67 @@ export const Wave = {
     if(!entry) return null;
     if(entry.peaks) return entry.peaks;
     if(entry.loading) return entry.loading;
-    if(!entry.path||!DESK?.fileURL) return null;
+    if(key==='mix'&&(!entry.path||!DESK?.fileURL))return null;
+    const controller=new AbortController();
+    entry.controller=controller;
+    entry.error=null;
+    entry.progress=null;
     const generation=this._generation;
-    const owns=()=>this._generation===generation&&
+    const owns=()=>!controller.signal.aborted&&this._generation===generation&&
       [...this.sourceWaveforms.values()].some(value=>value===state)&&
       (key==='mix'?state.mix===entry:state.channels.get(key)===entry);
+    const updateProgress=value=>{
+      const percent=Math.max(0,Math.min(99,Math.round(value)));
+      if(owns()&&Number.isFinite(percent)&&percent!==entry.progress){
+        entry.progress=percent;
+        emit('media:waveform',{controls:true});
+      }
+    };
     const promise=(async()=>{
       try{
+        const mother=key!=='mix'&&entry.pcmChannel==null&&DESK?.prepareSourceWaveform
+          ?this._registeredSource(source,state):null;
+        const path=audioMotherPath(mother),duration=Number(mother?.dur??mother?.duration);
+        if(path&&duration>0&&Number.isFinite(duration)){
+          // Publish the loading promise before native intake notifies synchronous UI observers.
+          await Promise.resolve();
+          if(!owns())return null;
+          const channel={sourceStream:entry.sourceStream,sourceChannel:entry.sourceChannel};
+          const result=await MediaIntakeJobs.prepareSourceWaveform({path,duration,continuous:true,
+            channel},null,{
+            signal:controller.signal,onProgress:data=>{if(Number.isFinite(data.pct))updateProgress(data.pct*.95);},
+          });
+          if(!owns())return null;
+          if(!result?.complete||!result.wave)throw new Error('聲道波形未完成，請重試');
+          const peaks=await MediaIntakeJobs.prepareWaveform(({owns:ownsRead,report})=>{
+            report({label:'讀取聲道波形',pct:0});
+            return this._loadPcmMix({paths:[result.wave]},()=>owns()&&ownsRead(),0,value=>{
+              report({label:'讀取聲道波形',pct:Math.round(value*100)});
+              updateProgress(95+value*5);
+            });
+          },{path,channel},{signal:controller.signal});
+          if(!owns())return null;
+          if(!peaks?.length)throw new Error('聲道波形檔案無法讀取，請重試');
+          entry.peaks=peaks;
+          return peaks;
+        }
+        if(!entry.path||!DESK?.fileURL){
+          await Promise.resolve();
+          throw new Error('尚未取得此聲道的音訊，請確認素材可讀後重試');
+        }
         if(Array.isArray(entry.path.paths)||entry.pcmChannel!=null){
           const descriptor=Array.isArray(entry.path.paths)?entry.path:{paths:[entry.path]};
           const peaks=await this._loadPcmMix(descriptor,owns,entry.pcmChannel);
           if(!owns())return null;
+          if(!peaks?.length)throw new Error('聲道波形檔案無法讀取，請重試');
           entry.peaks=peaks;
-          emit('media:waveform',{controls:true});
           return peaks;
         }
         const url=await DESK.fileURL(entry.path);
         if(!owns()) return null;
         const response=await fetch(url);
         if(!owns()) return null;
+        if(response.ok===false)throw new Error('無法讀取波形檔案');
         const buffer=await response.arrayBuffer();
         if(!owns()) return null;
         let peaks=await this.calcFromWavAsync(buffer,0,{channel:entry.pcmChannel,owns});
@@ -444,13 +504,17 @@ export const Wave = {
         if(!owns()) return null;
         entry.peaks=peaks;
         if(key==='mix'&&peaks) this.setSourceMixPeaks(source,peaks,{mixPath:entry.path});
-        emit('media:waveform',{controls:true});
         return peaks;
       }catch(error){
+        await Promise.resolve();
         if(!owns()) return null;
+        entry.error=error;
         console.warn('source waveform load',error);
         return null;
-      }finally{ if(entry.loading===promise) entry.loading=null; }
+      }finally{
+        if(entry.controller===controller){entry.loading=null;entry.controller=null;}
+        if(owns())emit('media:waveform',{controls:true});
+      }
     })();
     entry.loading=promise;
     return promise;
@@ -477,9 +541,7 @@ export const Wave = {
   },
   _restoreSourceVocals(source,state){
     if(!state||state.vocalChoiceMade||state.vocalIntent||state.vocals.loading) return;
-    const registered=source&&typeof source==='object'?source:
-      [...(State.clips||[]),...(Media.externalAudioSources||[])].find(item=>
-        this._sourceKey(item)===state.key||this._runtimeSourceKey(item)===state.runtimeSourceId);
+    const registered=this._registeredSource(source,state);
     // Intake can first register a runtime alias, then add the mother path,
     // duration and stream descriptors. Only a changed lookup retries a cache miss.
     const restoreKey=JSON.stringify([
@@ -613,10 +675,9 @@ export const Wave = {
     }
     const wanted=selection==='mix'?state.mix:state.channels.get(selection);
     if(wanted?.peaks) return {peaks:wanted.peaks,selection,fallback:false,pending:!!state.vocalIntent};
-    // 選擇的 cache 尚未讀取時仍先畫 MIX，避免時間軸空白；非同步完成後自行重繪。
-    if(wanted?.path) void this.loadSourceWaveform(source,selection);
-    const mix=state.mix.peaks||fallbackPeaks||null;
-    return {peaks:mix,selection,fallback:selection!=='mix'&&!!mix,pending:!!state.vocalIntent||!!wanted?.path};
+    if(wanted&&!wanted.error&&!wanted.controller&&(wanted.path||selection!=='mix'))void this.loadSourceWaveform(source,selection);
+    // Until the selected channel is ready, never draw another channel's peaks under its label.
+    return {peaks:selection==='mix'?fallbackPeaks:null,selection,fallback:false,pending:!!state.vocalIntent||!!wanted?.loading};
   },
   setSourceWaveSelection(source,selection){
     const state=this._ensureSourceWaveforms(source);
@@ -640,17 +701,30 @@ export const Wave = {
     this._cancelSourceVocals(state);
     state.vocalRestoreComplete=true;
     state.vocalChoiceMade=true;
-    if(next!=='cancel-vocals') state.selection=next==='mix'||state.channels.has(next)?next:'mix';
+    if(next!=='cancel-vocals'){
+      if(state.selection!==next)this._stopChannelLoad(state.channels.get(state.selection));
+      state.selection=next==='mix'||state.channels.has(next)?next:'mix';
+      const entry=state.selection==='mix'?state.mix:state.channels.get(state.selection);
+      if(entry)entry.error=null;
+    }
     void this._rememberVocalSelection(source,state,state.selection==='vocals');
     // 立即重繪 MIX／已快取聲道；尚未解碼的單聲道會在背景載入後再重繪。
     this.getSourceWaveform(source);
     emit('media:waveform',{controls:true});
     return state.selection;
   },
+  _stopChannelLoad(entry){
+    if(!entry?.controller)return;
+    entry.controller.abort();
+    entry.controller=null;
+    entry.loading=null;
+    entry.progress=null;
+  },
   forgetSourceWaveforms(source){
     const state=this._sourceState(source,false);
     if(!state) return;
     this._cancelSourceVocals(state,{clear:true});
+    for(const entry of state.channels.values())this._stopChannelLoad(entry);
     for(const [key,value] of this.sourceWaveforms){ if(value===state) this.sourceWaveforms.delete(key); }
   },
 
@@ -699,7 +773,10 @@ export const Wave = {
   clearSources({keep=[]}={}){
     const retained=new Set(keep.map(source=>this._sourceState(source)).filter(Boolean));
     if(!retained.size) this._generation+=1;
-    for(const state of new Set(this.sourceWaveforms.values())) if(!retained.has(state)) this._cancelSourceVocals(state,{clear:true});
+    for(const state of new Set(this.sourceWaveforms.values())) if(!retained.has(state)){
+      this._cancelSourceVocals(state,{clear:true});
+      for(const entry of state.channels.values())this._stopChannelLoad(entry);
+    }
     for(const [key,state] of this.sourceWaveforms) if(!retained.has(state)) this.sourceWaveforms.delete(key);
     this.sources=[]; this.srcIdx=-1; emit('media:srcSel');
   },
@@ -831,13 +908,13 @@ export const Wave = {
       if(!owns())return null;
       const response=await fetch(url,{headers:{Range:'bytes=0-65535'}});
       if(!owns())return null;
-      if(response.ok===false)throw new Error('無法讀取平衡後的波形');
+      if(response.ok===false)throw new Error('無法讀取波形檔案');
       const buffer=await response.arrayBuffer();
       if(!owns())return null;
       const info=pcmWaveHeader(buffer);
       if(!info)return null;
       const complete=info.start+info.length*info.channels*2<=buffer.byteLength;
-      if(!complete && response.status!==206)throw new Error('平衡後的波形檔案不完整');
+      if(!complete && response.status!==206)throw new Error('波形檔案不完整');
       inputs.push({...info,url,firstFrame:0,buffer:complete?buffer:null});
     }
     if(inputs.every(input=>input.buffer))
@@ -862,10 +939,10 @@ export const Wave = {
         const startByte=input.start+begin*input.channels*2, byteCount=(end-begin)*input.channels*2;
         const response=await fetch(input.url,{headers:{Range:`bytes=${startByte}-${startByte+byteCount-1}`}});
         if(!owns())return null;
-        if(response.status!==206)throw new Error('無法分段讀取平衡後的波形');
+        if(response.status!==206)throw new Error('無法分段讀取波形檔案');
         const bytes=await response.arrayBuffer();
         if(!owns())return null;
-        if(bytes.byteLength!==byteCount)throw new Error('平衡後的波形檔案不完整');
+        if(bytes.byteLength!==byteCount)throw new Error('波形檔案不完整');
         input.firstFrame=begin;
         input.samples=new Int16Array(bytes);
       }

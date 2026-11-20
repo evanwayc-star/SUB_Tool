@@ -28,25 +28,33 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     }))});
   const publish=()=>changed(snapshot());
   const finish=job=>{if(pending.get(job.requestId)===job){pending.delete(job.requestId);publish();}};
-  function run(method,options,owner=session,action=null,onWaveform=null){
-    if(owner!==session) return Promise.reject(cancelled());
+  function run(method,options,owner=session,action=null,onWaveform=null,{signal,onProgress}={}){
+    if(owner!==session||signal?.aborted) return Promise.reject(cancelled());
     const requestId=id();
     let abort;
     const aborted=new Promise((_,reject)=>{abort=()=>reject(cancelled());});
     const local=method==='prepareWaveform',sourceWave=method==='prepareSourceWaveform';
-    const job={owner,requestId,path:options.path||null,recoveryId:recoveries.get(options.path)?.id,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,onWaveform,
-      progress:local?{stage:'waveform',label:'準備波形',pct:null}:sourceWave?{stage:'source-waveform',label:'等候優先產生波形',pct:null,queued:true}:null};
+    const channel=options.channel;
+    const waveStage=channel?'source-channel-waveform':local?'waveform':'source-waveform';
+    const job={owner,requestId,path:options.path||null,recoveryId:channel?null:recoveries.get(options.path)?.id,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,onWaveform,onProgress,
+      progress:local?{stage:waveStage,label:channel?'讀取聲道波形':'準備波形',pct:null}:sourceWave?{stage:waveStage,label:channel?'等候產生聲道波形':'等候優先產生波形',pct:null,queued:true}:null};
     if(job.proxy&&job.path)proxyStates.set(job.path,{requestId,state:'preparing',pct:null});
     if(!local) owner.used=true;
     pending.set(requestId,job);awaitingReply.add(job);publish();
     // A synchronous observer may already have replaced the session in publish().
     if(owner!==session){awaitingReply.delete(job);return aborted;}
+    if(signal?.aborted){awaitingReply.delete(job);finish(job);return Promise.reject(cancelled());}
+    const cancelRequest=()=>{
+      abort();
+      if(!local)Promise.resolve().then(()=>bridge.cancelMediaIntake?.({sessionId:owner.id,requestId})).catch(()=>{});
+    };
+    signal?.addEventListener('abort',cancelRequest,{once:true});
     let native;
     try{native=local?action({
       owns:()=>owner===session&&pending.get(requestId)===job,
       report(data){
         if(owner!==session||pending.get(requestId)!==job) return false;
-        job.progress={stage:'waveform',label:data?.label||'準備波形',pct:data?.pct,
+        job.progress={stage:waveStage,label:data?.label||'準備波形',pct:data?.pct,
           overall:!!data?.overall,queued:!!data?.queued};publish();
         return owner===session&&pending.get(requestId)===job;
       },
@@ -63,6 +71,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       delivered=result;if(owner!==session) discard(result);return result;
     });
     return Promise.race([resultPromise,aborted]).then(result=>{
+      signal?.removeEventListener('abort',cancelRequest);
       awaitingReply.delete(job);
       if(owner!==session){discard(result);throw cancelled();}
       if(result?.proxy&&(!job.terminal||job.outcome==='success')
@@ -73,13 +82,16 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       if(owner!==session){discard(result);throw cancelled();}
       if(job.progressError){discard(result);throw job.progressError;}
       return result;
-    },error=>{awaitingReply.delete(job);if(owner!==session) discard(delivered);updateProxy(job,'failed');finish(job);throw error;});
+    },error=>{
+      signal?.removeEventListener('abort',cancelRequest);
+      awaitingReply.delete(job);if(owner!==session) discard(delivered);updateProxy(job,'failed');finish(job);throw error;
+    });
   }
   return {
     ingest:options=>run('ingest',options),
     streamIngest:options=>run('streamIngest',options),
-    prepareSourceWaveform:(options,onWaveform)=>run('prepareSourceWaveform',options,session,null,onWaveform),
-    prepareWaveform:(action,options={})=>run('prepareWaveform',options,session,action),
+    prepareSourceWaveform:(options,onWaveform,controls)=>run('prepareSourceWaveform',options,session,null,onWaveform,controls),
+    prepareWaveform:(action,options={},controls)=>run('prepareWaveform',options,session,action,null,controls),
     registerRecovery({path,owns,retry}){
       const entry={id:id(),path,owns,retry,status:'working',message:''};
       recoveries.set(path,entry);
@@ -127,6 +139,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       if(!job||job.owner!==session) return false;
       // Peak batches belong to this request; do not retain them in status snapshots.
       const {waveform,...status}=payload;
+      if(!payload.done) job.onProgress?.(status);
       if(waveform&&!job.progressError&&typeof job.onWaveform==='function'){
         try{job.onWaveform(waveform);}catch(error){job.progressError=error;}
       }

@@ -64,12 +64,13 @@ export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
     const ids=new Set(jobs.map(job=>job.requestId));
     for(const id of starts.keys()) if(!ids.has(id)) starts.delete(id);
     const active=job=>job.progress&&!job.progress.queued;
-    const visible=jobs.findLast(job=>active(job)&&job.progress.overall)
+    const visible=jobs.findLast(job=>active(job)&&job.progress.stage==='source-channel-waveform')
+      ||jobs.findLast(job=>active(job)&&job.progress.overall)
       ||jobs.findLast(job=>active(job)&&['waveform','source-waveform'].includes(job.progress.stage))
       ||jobs.findLast(active)||jobs.findLast(job=>job.progress)||jobs[0];
     if(visible){
       const data=visible.progress||{stage:'cache-check',label:visible.proxy?'檢查媒體快取':'檢查音訊快取',pct:null};
-      const other=(['waveform','source-waveform'].includes(data.stage)&&!visible.proxy)
+      const other=(['waveform','source-waveform','source-channel-waveform'].includes(data.stage)&&!visible.proxy)
         ? jobs.findLast(job=>job!==visible&&job.proxy&&active(job)) : null;
       const group=job=>job.path||job.requestId;
       const shown=new Set([visible,...(other?[other]:[])].map(group));
@@ -80,7 +81,7 @@ export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
         const label=stage==='source-verification'?'驗證母素材':stage==='cache-check'?'檢查快取':
           stage==='transcoding'&&(other.progress.outputs?.proxy??String(other.progress.label||'').includes('Proxy'))?'Proxy 轉檔':
             stage==='transcoding'?'音訊分析':other.progress.label||'處理中';
-        const parts=[progressText(data,visible.requestId,'波形'),'｜',progressText(other.progress,other.requestId,label)+extra];
+        const parts=[progressText(data,visible.requestId,data.stage==='source-channel-waveform'?data.label:'波形'),'｜',progressText(other.progress,other.requestId,label)+extra];
         const detail=progressText(data,visible.requestId)+'；'+progressText(other.progress,other.requestId)+extra;
         setMediaIntakeStatus(parts.join(''),'busy',detail,parts);
       }else setMediaIntakeStatus(progressText(data,visible.requestId)+extra);
@@ -116,7 +117,7 @@ export function handleMediaIntakeProgress(data){
     starts.delete(owned?data.requestId:data.jobId);
     const succeeded=data.outcome==='success';
     // 這只是來源的一段波形完成；整體進度由外層工作持有，也不是 Proxy ingest 完成事件。
-    if(succeeded&&data.stage==='source-waveform') return true;
+    if(data.stage==='source-channel-waveform'||(succeeded&&data.stage==='source-waveform')) return true;
     const pureProxy=data.outputs?.proxy===true&&data.outputs.audio===false;
     if(!succeeded||!pureProxy){
       const label=data.outputs?.proxy&&data.outputs.audio?'音軌快取':data.label||'轉檔';

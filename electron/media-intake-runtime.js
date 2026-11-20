@@ -994,7 +994,8 @@ function createMediaIntakeRuntime(options = {}) {
       if (isSidecarCandidate(src, dir)) {
         sidecar = sidecarAuthority(src, { allowMissing: true });
         if (sidecar?.missing) {
-          try { fs.mkdirSync(sidecarRoot(src)); sidecar = sidecarAuthority(src); } catch (_) { sidecar = null; }
+          try { fs.mkdirSync(sidecarRoot(src)); } catch (error) { if (error.code !== 'EEXIST') continue; }
+          sidecar = sidecarAuthority(src);
         }
         if (!sidecar) continue;
       }
@@ -1085,7 +1086,7 @@ function createMediaIntakeRuntime(options = {}) {
         || path.basename(directory) === key && (!hit.sourceContent || hit.sourceKeys.includes(key))
           && (!hit.sharedSourceKeys.length || hit.sharedSourceKeys.includes(shared)));
       const waveform = describeContinuousWaveformCache(directory, { sourceKey: shared || local, verify });
-      if (matching || ['partial', 'complete'].includes(waveform.state)) {
+      if (matching || waveform.hasSourceChannels || ['partial', 'complete'].includes(waveform.state)) {
         locations.push({ directory, kind: isSidecar ? 'sidecar' : 'central',
           waveform: waveform.state === 'missing' && matching && hit.meta.wave ? { state: 'complete', verified: false } : waveform,
           proxy: !!(matching && hit.meta.proxy), channels: matching ? hit.meta.channels.length : 0 });
@@ -1732,8 +1733,11 @@ function createMediaIntakeRuntime(options = {}) {
           // witness matches; directory spelling alone never expands deletion.
           if (!raw.error && shared && raw.sharedSourceKeys.includes(shared))
             return inspectSourceCache(dir, [], key, { dir, sourceContent: raw.sourceContent, sharedSourceKey: shared }, true, currentSrc);
-          if (raw.metadataMissing && ['partial', 'complete'].includes(describeContinuousWaveformCache(dir,
-            { sourceKey: shared, verify: () => { if (!current()) throw cacheDirectoryChanged(); assertSidecar(); } }).state)) return raw;
+          if (raw.metadataMissing) {
+            const wave = describeContinuousWaveformCache(dir,
+              { sourceKey: shared, verify: () => { if (!current()) throw cacheDirectoryChanged(); assertSidecar(); } });
+            if (wave.hasSourceChannels || ['partial', 'complete'].includes(wave.state)) return raw;
+          }
           return hit;
         };
         const removeSidecar = async dir => {
@@ -2465,10 +2469,10 @@ function createMediaIntakeRuntime(options = {}) {
     if (!observed.isFile() || observed.isSymbolicLink()
       || ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].some(field => observed[field] !== result.waveEvidence?.[field]))
       throw new Error('已保存的連續波形在交接期間變更');
-    completedContinuousWaves.set(result.sourceKey, { ...result, src });
+    if (!result.channel) completedContinuousWaves.set(result.sourceKey, { ...result, src });
   }
 
-  async function continuousWaveform({ src, duration, audio, sourceKey, ignoreCached }, session, progress) {
+  async function continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached }, session, progress) {
     const ensureCurrent = () => { if (closed || cancelled(session)) throw new IngestSupersededError(); };
     const totalSamples = Math.round(duration * 4000);
     const localKey = crypto.createHash('sha256').update('strict-source-wave-v1\0' + sourceKey).digest('hex');
@@ -2487,7 +2491,7 @@ function createMediaIntakeRuntime(options = {}) {
     checkSource(true);
     const recipeAudio = audio.map(stream => ({ channels: stream.channels, timestampOffset: timestampOffset(stream) }));
     const specFor = () => ({ version: 1, sharedSourceKey: sharedKey || localKey,
-      audio: recipeAudio, totalSamples });
+      audio: recipeAudio, totalSamples, ...(channel ? { channel } : {}) });
     if (!audio.length) {
       progress({ pct: 100, done: true, outcome: 'success', label: '來源沒有音訊' });
       return { wave: null, channels: [], cached: false, temporary: false, start: 0, duration, complete: true, sourceKey };
@@ -2533,12 +2537,12 @@ function createMediaIntakeRuntime(options = {}) {
     const opened = openAt(preferred);
     const { dir, verify, unprotect, store } = opened;
     try {
-      const result = await runContinuousSourceWaveform({ src, duration, audio, sourceKey, store, verify,
+      const result = await runContinuousSourceWaveform({ src, duration, audio, channel, sourceKey, store, verify,
         buildPlan: buildAudioIngestPlan, execute: (args, opts) => ffmpegExecution.execute(args, opts), progress,
         ownProcess: child => ownWaveformProcess(child, session.ownProcess) });
       verify();
       const observed = fs.lstatSync(result.wave, { bigint: true });
-      const completed = { ...result, channels: [], continuous: true, cacheDir: dir, recipeAudio, totalSamples, sharedSourceKey: sharedKey,
+      const completed = { ...result, ...(channel ? { channel } : {}), channels: [], continuous: true, cacheDir: dir, recipeAudio, totalSamples, sharedSourceKey: sharedKey,
         waveEvidence: Object.fromEntries(['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].map(field => [field, observed[field]])) };
       rememberContinuousWaveform(src, completed);
       progress({ pct: 100, done: true, outcome: 'success', label: '波形已就緒' });
@@ -2556,6 +2560,11 @@ function createMediaIntakeRuntime(options = {}) {
     waveformTasks.add(task);
     task.then(() => waveformTasks.delete(task), () => waveformTasks.delete(task));
     return task;
+  }
+
+  function waveformProgressIdentity(channel) {
+    return channel ? { jobId: 'source-channel-wave', stage: 'source-channel-waveform', channel }
+      : { jobId: 'source-wave', stage: 'source-waveform' };
   }
 
   async function prepareBackgroundWaveform(request, session) {
@@ -2595,7 +2604,7 @@ function createMediaIntakeRuntime(options = {}) {
           rememberContinuousWaveform(request.src, metadata);
         }
         current(); assertPublished();
-        reportProgress(session, { jobId: 'source-wave', stage: 'source-waveform', pct: (metadata.start + metadata.duration) / request.duration * 100,
+        reportProgress(session, { ...waveformProgressIdentity(request.channel), pct: (metadata.start + metadata.duration) / request.duration * 100,
           done: true, outcome: 'success', label: metadata.complete ? '波形已就緒' : '波形片段已備妥' });
         await Promise.resolve();
         current(); assertPublished();
@@ -2608,23 +2617,29 @@ function createMediaIntakeRuntime(options = {}) {
         try { assertPublished(); cleanupGeneratedFile(published.wave); }
         catch (_) { publishedRecord.retired = true; options.forgetTemporaryFile?.(published.wave); }
       }
-      reportProgress(session, { jobId: 'source-wave', stage: 'source-waveform', done: true, outcome: 'failed',
+      reportProgress(session, { ...waveformProgressIdentity(request.channel), done: true, outcome: 'failed',
         errorCode: error.code || 'SOURCE_WAVE_FAILED', errorMsg: error.message });
       throw error;
     }
   }
 
-  async function waveform({ src, duration, audio = [], start = 0, length, ignoreCached = false, continuous = false }, session = {}) {
+  async function waveform({ src, duration, audio = [], start = 0, length, ignoreCached = false, continuous = false, channel }, session = {}) {
     if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(start) || start < 0 || start >= duration
       || (length !== undefined && (!Number.isFinite(length) || length <= 0 || length > 60))
       || (length === undefined && start !== 0)) throw new RangeError('波形範圍必須在來源內，片段不可超過 60 秒');
     if (typeof ignoreCached !== 'boolean') throw new TypeError('波形快取選項無效');
     if (typeof continuous !== 'boolean' || (continuous && (start !== 0 || length !== undefined))) throw new TypeError('連續波形必須使用整份來源範圍');
+    if (channel !== undefined) {
+      const { sourceStream, sourceChannel } = channel || {};
+      if (!continuous || !Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream >= 256
+        || !Number.isInteger(sourceChannel) || sourceChannel < 0 || sourceChannel >= 64) throw new RangeError('原音波形聲道無效');
+      channel = { sourceStream, sourceChannel };
+    }
     const validAudio = list => Array.isArray(list) && list.length <= 256 && !list.some(stream => !stream || typeof stream !== 'object'
       || !Number.isInteger(stream.channels) || stream.channels < 1 || stream.channels > 64
       || (stream.timestampOffset !== undefined && !Number.isFinite(stream.timestampOffset)));
     if (!validAudio(audio)) throw new TypeError('波形來源音訊描述無效');
-    if (options.backgroundWaveforms) return backgroundWaveform({ src, duration, audio, start, length, ignoreCached, continuous }, session);
+    if (options.backgroundWaveforms) return backgroundWaveform({ src, duration, audio, start, length, ignoreCached, continuous, channel }, session);
     const ensureCurrent = () => { if (closed || cancelled(session)) throw new IngestSupersededError(); };
     ensureCurrent();
     while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
@@ -2636,11 +2651,11 @@ function createMediaIntakeRuntime(options = {}) {
       ensureCurrent();
       if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在波形讀取期間變更，請重新載入');
     };
-    const progress = payload => reportProgress(session, { jobId: 'source-wave', stage: 'source-waveform',
-      label: '優先產生波形', queued: false, start, length: segmentDuration, totalDuration: duration, ...payload });
+    const progress = payload => reportProgress(session, { ...waveformProgressIdentity(channel),
+      label: channel ? '產生原音聲道波形' : '優先產生波形', queued: false, start, length: segmentDuration, totalDuration: duration, ...payload });
     progress({ pct: start / duration * 100 });
-    let hit = ignoreCached ? null : readCache(src, audio, false);
-    if (continuous && !ignoreCached && !(hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio)))) {
+    let hit = ignoreCached || channel ? null : readCache(src, audio, false);
+    if (!channel && continuous && !ignoreCached && !(hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio)))) {
       await preparePortableCache({ src, audio, needsProxy: false }, session, false, { knownOnly: true });
       check(); hit = readCache(src, audio, false);
     }
@@ -2656,7 +2671,9 @@ function createMediaIntakeRuntime(options = {}) {
       check();
       if (!validAudio(audio)) throw new TypeError('無法確認波形來源音訊描述');
     }
-    if (continuous) return continuousWaveform({ src, duration, audio, sourceKey, ignoreCached }, session, progress);
+    if (channel && (!audio[channel.sourceStream] || channel.sourceChannel >= audio[channel.sourceStream].channels))
+      throw new RangeError(`來源音訊沒有 S${channel.sourceStream + 1} · Ch${channel.sourceChannel + 1}`);
+    if (continuous) return continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached }, session, progress);
     const localWaveKey = crypto.createHash('sha256').update('strict-source-wave-v1\0' + sourceKey).digest('hex');
     // 共享證據仍含 NAS 檔案身分與完整時間戳；不把同樣取樣內容的另一份檔案當成同一來源。
     const sharedWaveKey = allowSidecarCache ? sharedSourceFingerprintSync(src) : null;
@@ -3391,10 +3408,29 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
   });
 }
 
+// An explicitly selected channel writes its own recipe. It can run while the
+// priority MIX is still growing, but only one channel reads the source at once.
+function createSourceWaveformCoordinator() {
+  const mix = createMediaIngestCoordinator(), channels = createMediaIngestCoordinator();
+  return {
+    enqueue: (work, owner, channel) => (channel ? channels : mix).enqueue(work, owner),
+    async cancel(scope) {
+      const [mixCount, channelCount] = await Promise.all([mix.cancel(scope), channels.cancel(scope)]);
+      return mixCount + channelCount;
+    },
+    cancelAllAndWait: () => Promise.all([mix.cancelAllAndWait(), channels.cancelAllAndWait()]),
+    resume() {
+      const mixReady = mix.resume(), channelsReady = channels.resume();
+      return mixReady && channelsReady;
+    },
+  };
+}
+
 module.exports = {
   cacheKeyFor,
   createMediaIntakeRuntime,
   createMediaIngestCoordinator,
+  createSourceWaveformCoordinator,
   IngestSupersededError,
   buildAudioIngestPlan,
   sourceAudioClockFilter,
