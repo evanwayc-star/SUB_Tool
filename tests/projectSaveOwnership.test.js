@@ -202,7 +202,7 @@ describe('project save ownership',()=>{
     showToast.mockClear();
     desk.writeProject.mockRejectedValueOnce(new Error('C:/private/secret: disk unavailable'));
     await expect(Project.save()).resolves.toBeNull();expect(isProjectDirty()).toBe(true);
-    expect(showToast).toHaveBeenCalledWith('儲存專案失敗，請嘗試「另存新檔」');
+    expect(showToast).toHaveBeenCalledExactlyOnceWith('儲存專案失敗，請嘗試「另存新檔」','error');
     expect(showToast.mock.calls.flat().join(' ')).not.toContain('C:/private/secret');
     await expect(Project.save()).resolves.toBe('C:/project.subtool');expect(isProjectDirty()).toBe(false);
   });
@@ -215,7 +215,7 @@ describe('project save ownership',()=>{
     showToast.mockClear();
     (kind==='save'?desk.writeProject:desk.saveProject).mockResolvedValueOnce({code:'PROJECT_DESTINATION_CHANGED'});
     await expect(kind==='save'?Project.save():Project.saveAs()).resolves.toBeNull();
-    expect(showToast).toHaveBeenCalledWith('專案檔在儲存期間已變更，請另存新檔');
+    expect(showToast).toHaveBeenCalledExactlyOnceWith('專案檔在儲存期間已變更，請另存新檔','error');
     expect(isProjectDirty()).toBe(true);
     expect(getProjectDir()).toBe(directory);
   });
@@ -247,7 +247,7 @@ describe('project save ownership',()=>{
     showToast.mockClear();setStatus.mockClear();
     desk.writeProject.mockResolvedValueOnce({code:'PROJECT_DESTINATION_CHANGED'});
     await vi.advanceTimersByTimeAsync(3*60*1000);
-    expect(showToast).toHaveBeenCalledWith('自動備份失敗：專案檔在儲存期間已變更，請另存新檔');
+    expect(showToast).toHaveBeenCalledWith('自動備份失敗：專案檔在儲存期間已變更，請另存新檔','error');
     expect(setStatus).not.toHaveBeenCalledWith(expect.stringContaining('自動備份：'), 'ok');
     expect(isProjectDirty()).toBe(true);
   });

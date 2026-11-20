@@ -16,7 +16,7 @@ import { snapTimeToFrame, secToEncore } from './time.js';
 import { sortCues, hasActiveCueEdit, extendDurationForCues } from './subtitle-model.js';
 import { recordHistory } from './history.js';
 import { Project } from './project.js';
-import { openModal, closeModal, showToast } from './ui.js';
+import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { emit } from './events.js';
 import { decodeText, downloadBytes, escapeHTML, readFile, encodeUTF16LE } from './util.js';
 import { alignTranscriptToEvidence, parseTranscriptLines, resolveRecognitionAlignment, buildTranscriptAlignmentDiagnostic } from './transcript-alignment.js';
@@ -1687,7 +1687,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           }
         } catch (err) {
           console.error('ASR error:', err);
-          if(!ownsDialog()){ showToast('❌ 語音辨識失敗：'+(err.message||String(err)),4000); return; }
+          if(!ownsDialog()){ showToast('❌ 語音辨識失敗：'+(err.message||String(err)),'error'); return; }
           if (statusEl) {
             statusEl.style.display = 'block';
             statusEl.className = 'asr-status is-error';
@@ -1703,9 +1703,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           }
           setFormProcessing(false);
           progressBar?.classList.remove('indeterminate');
+          // Cancellation/replacement resolves in the session, without entering
+          // this catch. Record a real failure once, preserving the dialog alert.
           if (!getAsrSession()?.dialogOpen) {
-            showToast('❌ 語音辨識失敗：' + (err.message || String(err)), 4000);
-          }
+            showToast('❌ 語音辨識失敗：'+(err.message||String(err)),'error');
+          } else setStatus('語音辨識失敗','err',false,err.message||String(err));
         } finally {
           unsubscribe();
         }

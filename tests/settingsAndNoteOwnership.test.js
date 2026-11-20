@@ -69,6 +69,13 @@ it('a normal inline note time edit records once and Undo restores the time',()=>
  Notes.renderNotes();document.querySelector('.nt-time').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));const input=document.querySelector('.nt-te');input.value='00:00:02:12';key(input,'Enter');
  expect(State.notes[0].time).toBe(2.48);expect(History.stack).toHaveLength(2);History.undo();expect(State.notes[0].time).toBe(1);
 });
+it('備註時間的數字輸入保留全形與正常時碼貼上，文字欄不受限制',()=>{
+ Notes.renderNotes();document.querySelector('.nt-time').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));const input=document.querySelector('.nt-te');
+ expect(key(input,'a')).toBe(false);expect(key(input,'１')).toBe(true);expect(key(input,'-')).toBe(false);
+ const paste=new Event('paste',{bubbles:true,cancelable:true});Object.defineProperty(paste,'clipboardData',{value:{getData:()=> '００：００：０２：１２'}});input.dispatchEvent(paste);
+ expect(input.value).toBe('00:00:02:12');key(input,'Enter');expect(State.notes[0].time).toBe(2.48);expect(History.stack).toHaveLength(2);
+ const text=document.querySelector('.nt-text');text.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));expect(key(text,'a')).toBe(true);text.innerText='字母 ABC 123';text.dispatchEvent(new FocusEvent('blur'));expect(State.notes[0].text).toBe('字母 ABC 123');
+});
 it('note Escape and untouched blur record no Undo step',()=>{
  Notes.renderNotes();let el=document.querySelector('.nt-text');el.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));el.innerText='discard';key(el,'Escape');
  el=document.querySelector('.nt-text');el.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));el.dispatchEvent(new FocusEvent('blur'));

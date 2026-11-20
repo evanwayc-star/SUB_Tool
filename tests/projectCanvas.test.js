@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 vi.mock('../src/media.js', () => ({ Media: {
   externalAudio: { list: () => [] }, reset: vi.fn(), displayTime: () => 0, mpvMode: false,
@@ -7,7 +8,9 @@ vi.mock('../src/media.js', () => ({ Media: {
 vi.mock('../src/timeline-renderer.js', () => ({ drawTimeline: vi.fn() }));
 vi.mock('../src/notes.js', () => ({ renderNotes: vi.fn() }));
 
-let State, Project, resetProject, isProjectDirty, History, showProjectSettings, canvas, events, save, nativeCanvas;
+let State, Project, resetProject, isProjectDirty, History, showProjectSettings, canvas, events, save, nativeCanvas, initialButtonLabel;
+const canvasButton = () => document.querySelector('[data-act="project-settings"]');
+const buttonSize = () => canvasButton().querySelector('.lbl').textContent;
 const select = (id, value) => {
   const el = document.getElementById(id); el.value = value; el.dispatchEvent(new Event('change', { bubbles: true }));
 };
@@ -23,6 +26,8 @@ const savedDocument = () => JSON.parse(Buffer.from(save.mock.calls.at(-1)[1], 'b
 beforeEach(async () => {
   vi.resetModules();
   document.body.innerHTML = '<div id="modalBg"><div class="modal"><h2 id="modalTitle"></h2><div id="modalBody"></div><div id="modalFoot"></div></div></div><div id="historyList"></div><div id="toast"></div><span id="stMsg"></span>';
+  const entry = new DOMParser().parseFromString(readFileSync('index.html','utf8'),'text/html');
+  document.body.prepend(entry.querySelector('[data-act="project-settings"]'));
   save = vi.fn().mockResolvedValue('C:/test/project.subtool');
   nativeCanvas = vi.fn().mockResolvedValue({ok:true});
   window.subtool = { isDesktop: true, saveProject: save, mpv: {setProjectCanvas:nativeCanvas} };
@@ -30,14 +35,33 @@ beforeEach(async () => {
   ({ Project, resetProject, isProjectDirty } = await import('../src/project.js'));
   ({ History } = await import('../src/history.js'));
   ({ showProjectSettings } = await import('../src/project-settings.js'));
+  initialButtonLabel = buttonSize();
   canvas = await import('../src/project-canvas.js');
   events = await import('../src/events.js');
+  const {renderProjectCanvasButton}=await import('../src/project-canvas-preview.js');
+  events.on('duration:known',renderProjectCanvasButton);
   Object.assign(State, { projectCanvas: null, videoWidth: 3840, videoHeight: 2160, clips: [], cues: [], notes: [], duration: 0 });
+  events.emit('duration:known');
   History.reset(); Project.establishCleanBaseline();
 });
 afterEach(() => { resetProject?.(); delete window.subtool; });
 
 describe('project canvas settings and persistence', () => {
+  it('shows the effective canvas initially and after source loading or project reset, retaining the settings action', () => {
+    expect(initialButtonLabel).toBe('1920 x 1080');
+    expect(buttonSize()).toBe('3840 x 2160');
+    expect(canvasButton().getAttribute('aria-label')).toContain('3840 x 2160');
+    expect(canvasButton().getAttribute('aria-label')).toContain('專案畫布');
+    expect(canvasButton().getAttribute('aria-haspopup')).toBe('dialog');
+    expect(canvasButton().title).toContain('開啟');
+    canvasButton().addEventListener('click',showProjectSettings);
+    canvasButton().click();
+    expect(document.getElementById('modalTitle').textContent).toBe('專案畫布設定');
+    resetProject();
+    expect(buttonSize()).toBe('1920 x 1080');
+    State.videoWidth=2048;State.videoHeight=858;events.emit('duration:known');
+    expect(buttonSize()).toBe('2048 x 858');
+  });
   it('invalid dimensions identify and focus the field; editing clears the error and updates the size summary', async () => {
     showProjectSettings(); select('projectCanvasMode','custom');
     const width=document.getElementById('projectCanvasWidth');width.value='0';
@@ -87,6 +111,7 @@ describe('project canvas settings and persistence', () => {
     await applySize('1440', '2560');
     expect(State.projectCanvas).toEqual({ width: 1440, height: 2560 });
     expect(canvas.projectCanvasSize()).toEqual({ width: 1440, height: 2560 });
+    expect(buttonSize()).toBe('1440 x 2560');
     expect(State.videoWidth).toBe(3840);
     expect(State.audioProject).toEqual(routes);
     expect(History.stack).toHaveLength(2);
@@ -94,9 +119,11 @@ describe('project canvas settings and persistence', () => {
     History.undo();
     expect(State.projectCanvas).toBeNull();
     expect(canvas.projectCanvasSize()).toEqual({ width: 3840, height: 2160 });
+    expect(buttonSize()).toBe('3840 x 2160');
     expect(isProjectDirty()).toBe(false);
     History.redo();
     expect(canvas.projectCanvasSize()).toEqual({ width: 1440, height: 2560 });
+    expect(buttonSize()).toBe('1440 x 2560');
     expect(changed).toHaveBeenCalledTimes(3);
   });
 
@@ -108,12 +135,15 @@ describe('project canvas settings and persistence', () => {
     State.projectCanvas = { width: 1080, height: 1920 };
     expect(Project.apply(data)).toBe(true);
     expect(canvas.projectCanvasSize()).toEqual({ width: 1920, height: 1080 });
+    expect(buttonSize()).toBe('1920 x 1080');
     await Project.saveAs(); expect(savedDocument().projectCanvas).toEqual(data.projectCanvas);
     delete data.projectCanvas; Project.apply(data);
     expect(State.projectCanvas).toBeNull();
     expect(canvas.projectCanvasSize()).toEqual({ width: 1920, height: 1080 });
     State.videoWidth = 2048; State.videoHeight = 858;
+    events.emit('duration:known');
     expect(canvas.projectCanvasSize()).toEqual({ width: 2048, height: 858 });
+    expect(buttonSize()).toBe('2048 x 858');
   });
 
   it('discards a draft on Cancel, changed workspace, or Undo without overwriting newer work', async () => {
@@ -146,6 +176,8 @@ describe('project canvas settings and persistence', () => {
   it('keeps source metadata, fixed subtitle coordinates, and viewport geometry independent', async () => {
     await applySize('1080', '1920');
     State.videoWidth = 2048; State.videoHeight = 858;
+    events.emit('duration:known');
+    expect(buttonSize()).toBe('1080 x 1920');
     expect(canvas.projectCanvasRect(960, 540)).toEqual({ x: 328, y: 0, w: 304, h: 540 });
     const { ASS_PLAY_RES, posToPx } = await import('../src/substyle.js');
     expect(ASS_PLAY_RES).toEqual({ x: 1920, y: 1080 });

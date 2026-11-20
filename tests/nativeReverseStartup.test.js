@@ -99,7 +99,7 @@ describe('已呈現 Proxy 的反向首播進展與一次復原',()=>{
     Media.play();await flush();await vi.advanceTimersByTimeAsync(3000);
     expect(bridge.loadfile).toHaveBeenCalledTimes(1);expect(bridge.play).toHaveBeenCalledTimes(2);
     expect(Media.playing).toBe(false);expect(carrier().paused).toBe(true);
-    const {setStatus}=await import('../src/ui.js');expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('反向播放'), 'err');
+    const {setStatus}=await import('../src/ui.js');expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('反向播放'), 'err', false, expect.stringContaining('重新載入素材'));
     await vi.advanceTimersByTimeAsync(30000);expect(bridge.loadfile).toHaveBeenCalledTimes(1);
   });
   it('重載後定位由格間 4.98 落到實際 PTS 4.96，不把定位下降當成播放恢復',async()=>{

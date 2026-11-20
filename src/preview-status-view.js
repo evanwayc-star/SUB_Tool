@@ -1,5 +1,31 @@
 const WAIT_TEXT={seeking:'定位中…',video:'等待影片…',audio:'等待聲道…'};
 
+const PROXY_STATUS={
+  idle:['未載入','目前沒有載入影片'],
+  unsupported:['網頁版不支援','Proxy 背景轉檔需使用桌面版'],
+  original:['使用原片','目前沒有已就緒的 Proxy，使用原始影片'],
+  preparing:['準備中','正在檢查或準備 Proxy；尚無轉檔進度'],
+  encoding:['轉檔中','正在產生同資料夾的 Proxy；進度不包含波形或音軌工作'],
+  ready:['已就緒','Proxy 已完成，可供預覽使用'],
+  failed:['失敗','Proxy 未能完成或無法讀取；可使用原片，或重試背景處理／Proxy 預覽'],
+  stopped:['已停止','Proxy 背景處理已停止；可使用原片或繼續背景處理'],
+};
+
+export function bindProxyStatusView({root,readState}){
+  let disposed=false;
+  const update=()=>{
+    if(disposed||!root)return;
+    const current=readState(),state=Object.hasOwn(PROXY_STATUS,current?.state)?current.state:'idle';
+    const [label,title]=PROXY_STATUS[state];
+    const pct=typeof current.pct==='number'&&Number.isFinite(current.pct)?Math.floor(Math.max(0,Math.min(100,current.pct))):null;
+    const text='Proxy：'+(state==='encoding'&&pct!==null?`轉檔 ${pct}%`:label);
+    if(root.textContent!==text)root.textContent=text;
+    root.title=title;root.dataset.state=state;
+    root.dataset.tone=state==='failed'?'error':['preparing','encoding'].includes(state)?'busy':'normal';
+  };
+  update();return {update,dispose(){disposed=true;}};
+}
+
 export function bindPreviewStatusView({root,readState,setMode,now=Date.now}){
   const modeButtons=[...(root?.querySelectorAll('[data-preview-mode]')||[])];
   const modeGroup=root?.querySelector('[data-preview-modes]');

@@ -11,6 +11,7 @@ import { runVideoExportCommand } from './export-job-engine.js';
 import { showToast, openModal, closeModal, togglePanel, closePanel, openCacheDialog, keepPanelInViewport } from './ui.js';
 import { showSettingsModal } from './settings.js';
 import { showProjectSettings } from './project-settings.js';
+import { openStatusErrorReport } from './status-error-report.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
 import { importSub, showExportDialog, showExportVideoDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
 import { renderCheckPanel, deleteSelected } from './subtitles.js';
@@ -85,6 +86,7 @@ function createCommands() {
     'new': startNewProject,
     'cache-manage': openCacheDialog,
     'project-settings': showProjectSettings,
+    'status-errors': () => openStatusErrorReport(openModal),
 
     // Subtitle I/O
     'imp-auto': importSub,
@@ -93,7 +95,7 @@ function createCommands() {
       isDesktop: IS_DESKTOP,
       openExport: () => showExportVideoDialog(),
       notify: showToast,
-      reportError: err => { console.error('匯出影片錯誤', err); showToast('匯出影片錯誤：' + err.message); },
+      reportError: err => { console.error('匯出影片錯誤', err); showToast('匯出影片錯誤：' + err.message,'error'); },
     }),
     'export-notes': exportNotes,
     'queue-monitor': () => {

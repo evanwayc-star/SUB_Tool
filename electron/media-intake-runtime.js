@@ -2315,6 +2315,7 @@ function createMediaIntakeRuntime(options = {}) {
     let streamGuard = null;
     return {
       cached: false, dir, args, meta, buildProxy, assertSource,
+      outputs: { proxy: buildProxy, audio: buildChannels.length > 0 || !!(!reuseWave && audioPlan.waveLabel) },
       readDirs: [...(copyCompleted ? [hit.dir] : []), ...(waveCopy ? [continuousWave.cacheDir] : [])],
       assertRetryOwner() {
         verifyPublication();
@@ -2430,13 +2431,15 @@ function createMediaIntakeRuntime(options = {}) {
     return () => { for (const release of releases) release(); };
   }
 
-  function reportCacheHit(session) {
-    reportProgress(session, { jobId: 'ingest', stage: 'cache-ready', label: '使用既有快取', done: true, outcome: 'success', pct: 100 });
+  function reportCacheHit(session, meta) {
+    reportProgress(session, { jobId: 'ingest', stage: 'cache-ready', label: '使用既有快取', done: true, outcome: 'success', pct: 100,
+      proxyReady: !!meta?.proxy });
   }
 
-  function reportCompletion(session, jobId, label, error) {
+  function reportCompletion(session, jobId, label, error, plan) {
     reportProgress(session, {
       jobId, label, done: true, outcome: error ? 'failed' : 'success',
+      ...(plan ? { outputs: plan.outputs, proxyReady: !error && !!plan.meta.proxy } : {}),
       ...(error ? { errorCode: error.code || 'MEDIA_CACHE_FAILED', errorMsg: error.message || String(error) } : { pct: 100 }),
     });
   }
@@ -2846,7 +2849,7 @@ function createMediaIntakeRuntime(options = {}) {
     }
     if (plan.cached) {
       plan.assertSource();
-      reportCacheHit(session);
+      reportCacheHit(session, plan.meta);
       if (closed || cancelled(session)) throw new IngestSupersededError();
       plan.assertSource();
       return Object.assign({ cached: true }, plan.meta);
@@ -2863,7 +2866,7 @@ function createMediaIntakeRuntime(options = {}) {
         try {
           await ffmpegExecution.execute(plan.args, {
             executionKind: 'direct', deferTerminal: true,
-            onProgress: payload => reportProgress(session, { ...payload, stage: 'transcoding' }),
+            onProgress: payload => reportProgress(session, { ...payload, stage: 'transcoding', outputs: plan.outputs }),
             onStderr: text => { stderr = (stderr + text).slice(-16000); },
             duration: request.duration, jobId: 'ingest', label: plan.label,
             onProcess: process => session.ownProcess?.(process),
@@ -2886,12 +2889,12 @@ function createMediaIntakeRuntime(options = {}) {
       }
       if (closed || cancelled(session)) throw new IngestSupersededError();
       plan.commit();
-      reportCompletion(session, 'ingest', plan.label);
+      reportCompletion(session, 'ingest', plan.label, null, plan);
       if (closed || cancelled(session)) throw new IngestSupersededError();
       plan.assertSource();
       return Object.assign({ cached: false }, plan.meta);
     } catch (error) {
-      reportCompletion(session, 'ingest', plan.label, error);
+      reportCompletion(session, 'ingest', plan.label, error, plan);
       throw error;
     } finally {
       try { plan.dispose(); } finally { unprotect(); }
@@ -2946,7 +2949,7 @@ function createMediaIntakeRuntime(options = {}) {
       if (closed || cancelled(session)) return { response: null, completion: null };
       const verifySourceOwner = plan.streamGuard();
       verifySource();
-      reportCacheHit(session);
+      reportCacheHit(session, plan.meta);
       if (closed || cancelled(session)) return { response: null, completion: null };
       verifySource();
       const id = createStreamId('c-');
@@ -2999,7 +3002,7 @@ function createMediaIntakeRuntime(options = {}) {
         try {
           await ffmpegExecution.execute(plan.args, {
             executionKind: 'direct', deferTerminal: true,
-            onProgress: payload => reportProgress(session, { ...payload, stage: 'transcoding' }),
+            onProgress: payload => reportProgress(session, { ...payload, stage: 'transcoding', outputs: plan.outputs }),
             onStderr: text => { stderr = (stderr + text).slice(-16000); },
             duration, jobId: id, label: plan.label,
             onProcess: process => { writer = process; session.ownProcess?.(process); if (readinessError) stopUnreadyWriter(); },
@@ -3032,16 +3035,16 @@ function createMediaIntakeRuntime(options = {}) {
     const completion = runAttempts().then(() => {
       job.done = true;
       if (readinessError) {
-        reportCompletion(session, id, plan.label, readinessError);
+        reportCompletion(session, id, plan.label, readinessError, plan);
       } else if (!cancelled(session)) {
         plan.commit();
-        reportCompletion(session, id, plan.label);
+        reportCompletion(session, id, plan.label, null, plan);
       }
     }).catch(error => {
       job.done = true;
       const failure = readinessError && error?.code === 'ABORT_ERR' ? readinessError : error;
       job.error = failure.message;
-      reportCompletion(session, id, plan.label, failure);
+      reportCompletion(session, id, plan.label, failure, plan);
     }).finally(() => { try { plan.dispose(); } finally { unprotect(); } });
 
     const startedAt = now();

@@ -19,6 +19,16 @@ function openEditor(value = '00:00:10:00') {
 function renderFrame() {
   for (const [id, callback] of [...frames]) { frames.delete(id); callback(performance.now()); }
 }
+function typeDigits(input,text){
+  for(const digit of text){
+    const key=new KeyboardEvent('keydown',{key:digit,bubbles:true,cancelable:true});
+    if(!input.dispatchEvent(key))continue;
+    const before=new InputEvent('beforeinput',{inputType:'insertText',data:digit,bubbles:true,cancelable:true});
+    if(!input.dispatchEvent(before))continue;
+    input.setRangeText(digit,input.selectionStart,input.selectionEnd,'end');
+    input.dispatchEvent(new InputEvent('input',{inputType:'insertText',data:digit,bubbles:true}));
+  }
+}
 
 beforeAll(async () => {
   vi.useFakeTimers(); localStorage.clear();
@@ -96,4 +106,19 @@ it('Escape 取消後顯示最新位置，後續正常播放仍更新時碼及 se
   expect(tc().textContent).toBe('00:00:04:01');
   expect(document.getElementById('seekBar').value).toBe('4040');
   expect(History.stack).toHaveLength(1);
+});
+
+it.each([['tcShiftInput','shift-fwd',1.48,2.48],['durAdjTcInput','dur-adj-add',1,2.48]])('調整欄 %s 只收數字、顯示時碼並以真命令修改字幕', (id,action,start,end)=>{
+  State.tracks=[{visible:true,locked:false}];State.cues=[{id:'numeric-cue',start:1,end:2,text:'保留字幕文字',track:0}];History.reset();
+  const input=document.getElementById(id);input.focus();input.select();typeDigits(input,'００００００１２abc');
+  expect(input.value).toBe('00:00:00:12');expect(input.inputMode).toBe('numeric');press(input,'Enter');
+  document.querySelector(`[data-act="${action}"]`).click();
+  expect(State.cues[0]).toMatchObject({start,end,text:'保留字幕文字'});expect(History.stack).toHaveLength(2);
+  History.undo();expect(State.cues[0]).toMatchObject({start:1,end:2});
+});
+
+it('播放點的數字輸入仍支援相對負號，Enter 只提交一次',async()=>{
+  time=10;const input=openEditor('');typeDigits(input,'-０００００１１２');
+  expect(input.value).toBe('-00:00:01:12');press(input,'Enter');await Promise.resolve();
+  expect(Media.seek).toHaveBeenCalledExactlyOnceWith(8.52);
 });

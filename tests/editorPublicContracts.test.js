@@ -303,16 +303,17 @@ it('真多句刪除確認前保留軌道，取消後保留全部狀態，確認�
   } finally { deletionRenderBridge = false; }
 });
 
-it('真字幕文字視窗以 literal text 顯示 sibling 軌名，並維持複製入口', async () => {
+it('真字幕文字視窗以 literal text 顯示目前軌名，不再混入其他軌的文字', async () => {
   const name = '英文 <b>主要</b> & "參考" O\'Brien';
-  State.tracks.push({ name, visible: true, locked: false });
+  State.tracks[0].name=name;
+  State.tracks.push({ name:'其他軌', visible: true, locked: false });
   State.cues.push({ id: 'sibling', start: 10, end: 20, text: 'sibling <text>', track: 1 });
   await StylePanelController.openCueEditModal(State.cues[0]);
   await vi.advanceTimersByTimeAsync(30);
-  const copy = document.getElementById('cueEditCopySib1');
-  expect(copy.previousElementSibling.textContent).toBe('軌道：' + name);
-  expect(copy.previousElementSibling.querySelector('b')).toBe(null);
-  expect(document.getElementById('modalBody').textContent).toContain('sibling <text>');
+  expect(document.querySelector('.cue-edit-track').textContent).toBe(name);
+  expect(document.querySelector('.cue-edit-track b')).toBe(null);
+  expect(document.getElementById('cueEditCopy')).not.toBeNull();
+  expect(document.getElementById('modalBody').textContent).not.toContain('sibling <text>');
 });
 
 it.each([false, true])('ASR commit 使用真 selection 介面並可 Undo/Redo（untimed=%s）', untimed => {
@@ -351,14 +352,15 @@ it.each([[40, 4], [100, 100]])('真 side panel 樣式 %s/%s 經自身 ASS 與 im
   expect(plan.cues[0]).toMatchObject({ text: cue.text, start: 10, end: 20, style: { letterSpacing, lineSpacing } });
 });
 
-it('真 cue modal 提交最大字距/行距改變原 cue.style，ASS import 保留逐句與軌道樣式', async () => {
+it('真 cue modal 只改文字，ASS import 保留原有最大字距/行距及軌道樣式', async () => {
   State.tracks[0].letterSpacing = 40; State.tracks[0].lineSpacing = 4;
-  const cue = State.cues[0]; cue.style = { color: '#123456', angle: 12 };
+  const cue = State.cues[0]; cue.style = { color: '#123456', angle: 12, letterSpacing:100, lineSpacing:100 };
   await StylePanelController.openCueEditModal(cue); await vi.advanceTimersByTimeAsync(30);
-  document.getElementById('cueStyle_letterSpacing').value = 100;
-  document.getElementById('cueStyle_lineSpacing').value = 100;
+  expect(document.getElementById('cueStyleEditor')).toBeNull();
+  document.getElementById('cueEditTa').innerText='新的字幕';
   document.querySelector('#modalFoot button.primary').click();
   expect(cue.style).toEqual({ color: '#123456', angle: 12, letterSpacing: 100, lineSpacing: 100 });
+  expect(cue.text).toBe('新的字幕');
   expect(State.tracks[0]).toMatchObject({ letterSpacing: 40, lineSpacing: 4 });
   const plan = buildSubtitleImportPlan(SubFormats.parseASS(SubFormats.toASS(
     [cue], 25, State.tracks, 1920, 1080, { includeMetadata: true },
@@ -366,19 +368,6 @@ it('真 cue modal 提交最大字距/行距改變原 cue.style，ASS import 保�
   expect(plan.usedMetadata).toBe(true); expect(plan.cues[0].style).toEqual(cue.style);
   expect(plan.trackPatch).toMatchObject({ letterSpacing: 40, lineSpacing: 4 });
 });
-
-it.each([['fontSize', 600], ['letterSpacing', 101], ['lineSpacing', 101]])(
-  '真 cue modal 新修改 %s=%s 超界時不提交文字、樣式或 History', async (key, value) => {
-    const cue = State.cues[0], before = structuredClone(cue);
-    await StylePanelController.openCueEditModal(cue); await vi.advanceTimersByTimeAsync(30);
-    document.getElementById('cueEditTa').innerText = 'must not commit';
-    document.getElementById('cueStyle_' + key).value = value;
-    document.querySelector('#modalFoot button.primary').click();
-    expect(cue).toEqual(before); expect(History.stack).toHaveLength(1);
-    expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
-    expect(document.getElementById('toast').textContent).toContain('樣式值無效');
-  },
-);
 
 it('真 cue modal 未修改原有 legacy 數值時可只改文字，保留其樣式且可 Undo', async () => {
   const cue = State.cues[0];

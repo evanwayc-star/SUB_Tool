@@ -16,6 +16,19 @@ beforeEach(async()=>{
   cancel=vi.fn(()=>jobs.reset());bindView(cancel);
 });
 
+it.each([false,true])('真實 Proxy 轉檔在右欄顯示；左欄只保留同筆音軌工作=%s',async audio=>{
+  setStatus('專案已儲存','ok');
+  const work=jobs.ingest({path:'demo.mxf',needsProxy:true});
+  progress({...requests[0],stage:'transcoding',label:'正在轉檔 Proxy 與分析音訊',pct:42,outputs:{proxy:true,audio}});
+  const text=document.getElementById('stMsg').textContent;
+  expect(text).not.toContain('Proxy');
+  expect(text).toBe(audio?'準備音軌快取… 42%':'專案已儲存');
+  expect(getComputedStyle(document.getElementById('stProxyCancelBtn')).display).not.toBe('none');
+  progress({...requests[0],done:true,outcome:'success',label:'正在轉檔 Proxy',proxyReady:true,outputs:{proxy:true,audio}});
+  resolve({proxy:'proxy.mp4'});await work;
+  if(!audio)expect(document.getElementById('stMsg').textContent).toBe('專案已儲存');
+});
+
 it('原生終態通知同步換專案時不發布舊工作完成事件或覆蓋新狀態',async()=>{
   const {on}=await import('../src/events.js');
   const events=vi.spyOn(window,'dispatchEvent');

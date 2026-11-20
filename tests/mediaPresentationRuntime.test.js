@@ -381,7 +381,7 @@ describe('Media presentation runtime', () => {
         expect(elements).toHaveBeenCalledExactlyOnceWith(0,110);expect(Media.playing).toBe(true);
       }else{
         expect(elements).not.toHaveBeenCalled();expect(Media.playing).toBe(false);
-        if(action==='reject')expect(setStatus).toHaveBeenCalledWith('無法播放影片段「next」','err');
+        if(action==='reject')expect(setStatus).toHaveBeenCalledExactlyOnceWith('無法播放影片段「next」','err',false,'native play rejected');
         else expect(setStatus).not.toHaveBeenCalled();
       }
       expect(bridge.play).toHaveBeenCalledOnce();
@@ -552,7 +552,7 @@ describe('Media presentation runtime', () => {
       reject(new DOMException('source cannot start','NotSupportedError'));
       await vi.waitFor(()=>expect(Media.playing).toBe(false));
       expect(domMock.$('playBtn').textContent).toBe('▶');
-      expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('播放'), 'err');
+      expect(setStatus).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('播放'), 'err',false,'source cannot start');
       await Promise.resolve();
       await vi.waitFor(()=>expect(domMock.video.play).toHaveBeenCalledOnce());
       Media.play();
@@ -624,7 +624,7 @@ describe('Media presentation runtime', () => {
       }else if(action==='reject'){
         expect(Media.playing).toBe(false);expect(elements).not.toHaveBeenCalled();
         expect(domMock.$('playBtn').textContent).toBe('▶');
-        expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('播放'),'err');
+        expect(setStatus).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('播放'),'err',false,'play rejected');
         expect(play).toHaveBeenCalledOnce();
       }else{
         expect(elements).not.toHaveBeenCalled();

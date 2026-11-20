@@ -1,4 +1,5 @@
 import { State } from './state.js';
+import { projectCanvasSize } from './project-canvas.js';
 import { on } from './events.js';
 import { getNativePreviewRuntime } from './media-player-adapter.js';
 import { setStatus } from './ui.js';
@@ -61,4 +62,15 @@ export function cancelProjectCanvasPreview() {
   if (previewPending) void syncProjectCanvasPreview();
 }
 
-on('project:canvasChanged', () => { void syncProjectCanvasPreview(); });
+export function renderProjectCanvasButton(){
+  if(typeof document==='undefined')return;
+  const {width,height}=projectCanvasSize(),size=`${width} x ${height}`;
+  for(const button of document.querySelectorAll('[data-act="project-settings"]')){
+    const label=button.querySelector('.lbl');
+    if(label)label.textContent=size;
+    button.setAttribute('aria-label',`專案畫布 ${size} px，開啟畫布設定`);
+    button.title=`專案畫布 ${size} px，開啟畫布設定`;
+  }
+}
+
+on('project:canvasChanged', () => { renderProjectCanvasButton(); void syncProjectCanvasPreview(); });

@@ -220,7 +220,11 @@ function showExportDialog() {
       }
       session.close();
       const result=await submission.write();
-      if(result.message){setStatus(result.message,result.kind);showToast(result.toast);}
+      if(result.message){
+        if(result.kind==='err')setStatus(result.message,result.kind,false,result.toast);
+        else setStatus(result.message,result.kind);
+        showToast(result.toast);
+      }
     }
   }, { label: '取消', act: () => session.close() }], { width: 'min(680px,94vw)' });
   document.querySelectorAll('.subtitle-export-dialog input').forEach(input => input.addEventListener('change', updateSummary));
@@ -317,7 +321,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     }
   }
 
-  if (!DESK.exportVideo) { showToast('桌面版匯出元件未就緒'); return; }
+  if (!DESK.exportVideo) { showToast('桌面版匯出元件未就緒','error'); return; }
   const data = initialDraft?.draft || _captureExportDraft();
   if (!data) { showToast('沒有可匯出的影片或外部音訊'); return; }
   const sourceError = exportSourceError(data);
@@ -559,7 +563,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       if (session.isCurrent() && ownsWorkspace()) {
         if (result.status === 'invalid') showToast(result.reason);
         if (result.status === 'failed') {
-          showToast('送出失敗: ' + (result.error.message || result.error));
+          showToast('送出失敗: ' + (result.error.message || result.error),'error');
           console.error(result.error);
         }
         if (result.complete) session.close({ committed: true });
@@ -696,8 +700,8 @@ export async function _prepareSubtitleImport(text, kind, owns=beginSubtitleImpor
   }
   let parsed;
   try { parsed = _parseSubtitleText(text, kind,grid); }
-  catch (e) { showToast('解析失敗：' + e.message); return null; }
-  if (_parsedSubtitleCount(parsed) === 0) { showToast('未解析到字幕（檢查格式/編碼）'); return null; }
+  catch (e) { showToast('解析失敗：' + e.message,'error'); return null; }
+  if (_parsedSubtitleCount(parsed) === 0) { showToast('未解析到字幕（檢查格式/編碼）','error'); return null; }
   if (!State.mediaName && kind !== 'encore') {
     const sourceFps = _subtoolFpsValue(parsed);
     const fpsVal = await _askFpsModal(sourceFps || '29.97', !!sourceFps,owns);
@@ -981,7 +985,7 @@ if (typeof document !== 'undefined') {
         // same load generation; a save epoch change alone must not revoke it.
         await Project.open(()=>IS_DESKTOP&&typeof DESK.openDroppedProject==='function'
           ? DESK.openDroppedProject(f) : f);
-      }catch(error){ showToast('開啟專案失敗：'+error.message); }
+      }catch(error){ showToast('開啟專案失敗：'+error.message,'error'); }
     }
     // Subtitle intake captures its own request/workspace owner before reading.
     else if (['srt', 'ass', 'ssa', 'txt'].includes(ext)) { importDropped(f); }

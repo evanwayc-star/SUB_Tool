@@ -9,6 +9,7 @@ import { Media } from './media.js';
 import { emit } from './events.js';
 import { getNativePreviewRuntime } from './media-player-adapter.js';
 import { secToEncore } from './time.js';
+import { recordStatusError } from './status-error-report.js';
 
 /* 狀態列 / toast / modal */
 export function renderProjectIdentity({name}={}) {
@@ -29,11 +30,12 @@ const _DOT_LABEL = { ok: '就緒', err: '錯誤', busy: '處理中', '': '閒置
 let _statusLocked = false;
 let _status = null;
 let _mediaIntakeStatus = null;
-function setStatus(msg, kind, force = false) {
+function setStatus(msg, kind, force = false, detail = null) {
+  if(kind==='err')recordStatusError(msg,detail);
   if (_statusLocked && !force) return;
   if (force === 'lock') _statusLocked = true;
   else if (force === 'unlock') _statusLocked = false;
-  _status = {msg,kind};
+  _status = {msg,kind,detail};
   // 背景準備期間仍讓錯誤可見；後續進度恢復時 toast 保留閱讀時間。
   if (_mediaIntakeStatus && kind === 'err') showToast(msg);
   renderStatus(_statusLocked || kind === 'err' || force === true ? _status : _mediaIntakeStatus || _status);
@@ -41,6 +43,8 @@ function setStatus(msg, kind, force = false) {
 
 // 進度的生命週期由 MediaIntakeJobs 持有；UI 只負責顯示優先序，不鎖住匯出。
 export function setMediaIntakeStatus(msg, kind = 'busy', detail = null, parts = null) {
+  if(kind==='err'&&(_mediaIntakeStatus?.kind!==kind||_mediaIntakeStatus.msg!==msg||_mediaIntakeStatus.detail!==detail))
+    recordStatusError(msg,detail);
   if (!_status) _status = {msg:$('stMsg')?.textContent || '',kind:''};
   _mediaIntakeStatus = msg == null ? null : {msg,kind,detail,parts};
   renderStatus(_statusLocked ? _status : _mediaIntakeStatus || _status);
@@ -66,7 +70,8 @@ function renderStatus({msg,kind,detail,parts}) {
 }
 
 let toastT;
-function showToast(msg) {
+function showToast(msg, kind) {
+  if(kind==='error')recordStatusError(msg);
   const t = $('toast');
   if (!t) return;
   t.textContent = msg;

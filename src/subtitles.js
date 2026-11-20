@@ -8,7 +8,7 @@
    ============================================================================== */
 import { $, sublist } from './dom.js';
 import { State, isSel, trackVisible, cueSuffix, setSelection, deselect, pruneSelection } from './state.js';
-import { escapeHTML, tcKeyAllowed, escapeHTMLWithSpaces } from './util.js';
+import { escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { inspectSubtitleCharacters } from './subtitle-text-check.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
@@ -211,7 +211,7 @@ function openInlineTimeEdit(el, curSec, onCommit, {isCurrent=()=>true,onStale=()
   const origText = el.textContent;
   const inp = document.createElement('input');
   inp.className = 'tc-edit'; inp.style.width = '80px'; inp.value = origText;
-  setupTimecodeInput(inp);
+  setupTimecodeInput(inp,{allowSign:true});
   el.textContent = ''; el.appendChild(inp); inp.focus(); inp.select();
   let done = false;
   if(cue) inlineTimeEditors.set(inp,{cue,row:el.closest('.sub-row'),isCurrent,discard:()=>{
@@ -249,7 +249,6 @@ function openInlineTimeEdit(el, curSec, onCommit, {isCurrent=()=>true,onStale=()
   inp.addEventListener('keydown', e=>{ e.stopPropagation();
     if(e.key==='Enter'){ e.preventDefault(); fin(true); }
     else if(e.key==='Escape'){ e.preventDefault(); fin(false); }
-    else if(!tcKeyAllowed(e)) e.preventDefault();
   });
   inp.addEventListener('blur', ()=>fin(true));
   inp.addEventListener('mousedown', e=>e.stopPropagation());

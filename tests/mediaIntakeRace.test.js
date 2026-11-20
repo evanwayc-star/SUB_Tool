@@ -396,7 +396,8 @@ describe('desktop mother-source intake ownership', () => {
         await load;
         expect(State.clips).toEqual([]);expect(State.duration).toBe(0);
         expect(setStatus).toHaveBeenLastCalledWith('讀取失敗','');
-        expect(showToast).toHaveBeenLastCalledWith(expect.stringContaining('無法定位影片'));
+        expect(showToast).toHaveBeenLastCalledWith(expect.stringContaining('無法定位影片'),'error');
+        expect(showToast.mock.calls.at(-1)[0]).toContain('source seek failed');
         return;
       }
       await vi.waitFor(()=>expect(rawTime).toBe(3.5));
@@ -801,7 +802,8 @@ describe('desktop mother-source intake ownership', () => {
       await Media.loadDesktopMedia('C:/media/audio-error.webm');
       expect(State.clips[0].path).toBe('C:/media/audio-error.webm');
       expect(showToast).toHaveBeenCalledWith(expect.stringContaining('metadata 讀取失敗'));
-      expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗', 'err');
+      expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗', 'err',false,'metadata 讀取失敗');
+      expect(showToast.mock.calls.filter(([,kind])=>kind==='error')).toHaveLength(0);
     } finally {
       audio.mockRestore();
     }
@@ -919,7 +921,8 @@ describe('desktop mother-source intake ownership', () => {
         expect(setStatus).toHaveBeenLastCalledWith('new project ready','ok');
         expect(showToast).not.toHaveBeenCalled();
       }else{
-        await vi.waitFor(()=>expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗','err'));
+        await vi.waitFor(()=>expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗','err',false,
+          failure==='URL'?'cache URL unavailable':'metadata unavailable'));
         expect(Media.pendingChannels).toEqual([]);expect(State.clips).toHaveLength(1);
         expect(showToast).toHaveBeenCalledWith(expect.stringContaining(failure==='URL'?'cache URL unavailable':'metadata unavailable'));
       }
@@ -945,7 +948,7 @@ describe('desktop mother-source intake ownership', () => {
     try {
       await Media.loadDesktopMedia('C:/media/audio-error.mov');
       await vi.waitFor(() => expect(setStatus).toHaveBeenLastCalledWith(
-        '影片已載入，但音訊預覽載入失敗', 'err'));
+        '影片已載入，但音訊預覽載入失敗', 'err',false,'metadata 讀取失敗'));
       expect(showToast).toHaveBeenCalledWith(expect.stringContaining('metadata 讀取失敗'));
     } finally {
       audio.mockRestore();

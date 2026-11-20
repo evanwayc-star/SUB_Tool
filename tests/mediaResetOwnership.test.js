@@ -1609,7 +1609,7 @@ describe('reset-scoped media ownership', () => {
       await vi.waitFor(()=>expect(Media.playing).toBe(false));
       expect(start).not.toHaveBeenCalled();
       expect(domMock.$('playBtn').textContent).toBe('▶');
-      expect(setStatus).toHaveBeenCalledWith('無法播放影片段「next」','err');
+      expect(setStatus).toHaveBeenCalledExactlyOnceWith('無法播放影片段「next」','err',false,'source cannot start');
       domMock.video.play.mockResolvedValue(undefined);
       Media.activeClipId=first.id;Media.playing=true;
       expect(Media.seqContinueAtEnd()).toBe(true);

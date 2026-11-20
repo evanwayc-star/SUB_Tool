@@ -80,6 +80,62 @@ async function fixture({path='C:/mother.mov',mode='original',prepareLocalPreview
     holdPresent:()=>{holdPresent=true;},emit:(name,data)=>nativeEvent({event:'property-change',name,data,sourceSessionId:`source-${session}`}),dispose};
 }
 
+it('底部 Proxy 資料只屬目前來源，波形進度、取消及舊專案晚到事件不會誤報',async()=>{
+  const f=await fixture(),native=deferred();let request;
+  const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
+  f.desktop.ingest=vi.fn(options=>{request=options;return native.promise;});
+  try{
+    expect(f.Media.proxyStatus()).toMatchObject({state:'original',pct:null});
+    const work=jobs.ingest({path:f.clip.path,needsProxy:true});
+    const cancelled=expect(work).rejects.toMatchObject({name:'AbortError'});
+    expect(f.Media.proxyStatus()).toMatchObject({state:'preparing',pct:null});
+    jobs.progress({...request,stage:'source-verification',pct:90});
+    expect(f.Media.proxyStatus()).toMatchObject({state:'preparing',pct:null});
+    jobs.progress({...request,stage:'transcoding',pct:35,outputs:{proxy:true,audio:false}});
+    let report;
+    const waveform=jobs.prepareWaveform(control=>{report=control.report;return new Promise(()=>{});},{path:f.clip.path});
+    const waveCancelled=expect(waveform).rejects.toMatchObject({name:'AbortError'});
+    report({pct:87,overall:true});expect(f.Media.proxyStatus()).toMatchObject({state:'encoding',pct:35});
+    const other={...f.clip,id:'other',path:'C:/other.mov'};f.State.clips.push(other);f.Media.activeClipId=other.id;
+    expect(f.Media.proxyStatus()).toMatchObject({state:'original',pct:null});
+    f.Media.activeClipId=f.clip.id;
+    await jobs.reset({retainRecovery:true});await cancelled;await waveCancelled;
+    expect(f.Media.proxyStatus()).toMatchObject({state:'stopped',pct:null});
+    f.Media.reset();expect(f.Media.proxyStatus()).toMatchObject({state:'idle',pct:null});
+    expect(jobs.progress({...request,done:true,outcome:'success',proxyReady:true})).toBe(false);
+    native.resolve({proxy:f.assets.proxy});await flush();
+    expect(f.Media.proxyStatus()).toMatchObject({state:'idle',pct:null});
+  }finally{native.resolve({});f.dispose();}
+});
+
+it('底部 Proxy 就緒依已登記產物，讀取失敗和明確重試後跟著目前來源更新',async()=>{
+  const f=await fixture();
+  try{
+    f.register();expect(f.Media.proxyStatus()).toMatchObject({state:'ready',pct:null});
+    const {clipSourceFingerprint}=await import('../src/media-intake-engine.js');
+    const catalog=f.Media._previewCatalog(),record=catalog.get(clipSourceFingerprint(f.clip));
+    catalog.setFailed(record,true);expect(f.Media.proxyStatus()).toMatchObject({state:'failed',pct:null});
+    await f.Media.setPreviewMode('smooth');expect(f.Media.proxyStatus()).toMatchObject({state:'ready',pct:null});
+    expect(f.adapter.ownsNativeSourcePath(f.assets.proxy)).toBe(true);
+  }finally{f.dispose();}
+});
+
+it('目前母片載入失敗只記錄一個含原因的錯誤，普通 toast 不再重複記錄',async()=>{
+  const f=await fixture();
+  const {setStatus,showToast}=await import('../src/ui.js');
+  try{
+    await f.Media.seek(4);f.disconnect();await flush();
+    setStatus.mockClear();showToast.mockClear();
+    f.mpv.loadfile.mockResolvedValueOnce({ok:false,error:{code:'MPV_LOAD_FAILED',message:'network read failed'}});
+    await f.Media.seek(6);
+    expect(setStatus.mock.calls.filter(([,kind])=>kind==='err')).toEqual([
+      ['mpv 無法載入「mother.mov」','err',false,'network read failed'],
+    ]);
+    expect(showToast).toHaveBeenCalledWith('mpv 無法載入影片段「mother.mov」：network read failed');
+    expect(showToast.mock.calls.filter(([,kind])=>kind==='error')).toEqual([]);
+  }finally{f.dispose();}
+});
+
 it('剛完成的 Proxy 無法載入時在原位置呈現母片，後續播放與定位不會重試壞檔，至手動重試為止',async()=>{
   const f=await fixture({mode:'smooth'});
   try{

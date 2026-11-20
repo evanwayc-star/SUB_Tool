@@ -423,14 +423,15 @@ describe('native media intake runtime', () => {
       const work = await runtime[mode](request, { owner, progressTarget: owner.sender });
       await work.completion;
       expect(progress.some(payload => !payload.done)).toBe(true);
-      expect(progress.at(-1)).toMatchObject({ done: true, outcome: 'success' });
+      expect(progress.find(payload=>payload.stage==='transcoding')).toMatchObject({outputs:{proxy:true,audio:false}});
+      expect(progress.at(-1)).toMatchObject({ done: true, outcome: 'success',proxyReady:true,outputs:{proxy:true,audio:false} });
       expect(progress.every(payload => payload.sessionId === 'project' && payload.requestId === 'first')).toBe(true);
       progress.length = 0;
       const cached = await runtime[mode](request, { owner: { ...owner, requestId: 'cached' }, progressTarget: owner.sender });
       expect(cached.cached).toBe(true);
       expect(progress).toEqual([
         expect.objectContaining({ sessionId: 'project', requestId: 'cached', stage: 'cache-check', pct: null }),
-        expect.objectContaining({ sessionId: 'project', requestId: 'cached', stage: 'cache-ready', pct: 100, done: true, outcome: 'success' }),
+        expect.objectContaining({ sessionId: 'project', requestId: 'cached', stage: 'cache-ready', pct: 100, done: true, outcome: 'success',proxyReady:true }),
       ]);
     } finally { await runtime.close(); }
   });
@@ -642,12 +643,16 @@ describe('native media intake runtime', () => {
   });
 
   it.each(['ingest', 'stream'])('%s proxy-only cache 必須補齊新請求的全部聲道，保留既有proxy並可跨runtime讀回', async mode => {
-    const fixture = repairFixture(async args => writeIntakeOutputs(args));
+    const progress=[];
+    const fixture = repairFixture(async (args,_count,executionOptions) => {
+      executionOptions.onProgress?.({pct:42});writeIntakeOutputs(args);
+    },{sendProgress:(_target,payload)=>progress.push(payload)});
     const { runtime, source, calls } = fixture;
     try {
       const first = await runtime.ingest({ src: source, duration: 1, needsProxy: true, audio: [] });
       const proxyBytes = fs.readFileSync(first.proxy);
       const request = { src: source, duration: 1, needsProxy: true, audio: [{ channels: 2 }] };
+      progress.length=0;
       const work = await runtime[mode](request);
       const second = mode === 'stream' ? work.response : work;
       await work.completion;
@@ -658,6 +663,8 @@ describe('native media intake runtime', () => {
       expect(fs.readFileSync(first.proxy)).toEqual(proxyBytes);
       expect(calls).toHaveLength(2);
       expect(calls[1]).not.toContain(first.proxy);
+      expect(progress.find(payload=>payload.stage==='transcoding')).toMatchObject({outputs:{proxy:false,audio:true}});
+      expect(progress.at(-1)).toMatchObject({proxyReady:true,outputs:{proxy:false,audio:true}});
       const persisted = await fixture.createRuntime().ingest(request);
       expect(persisted).toEqual({ cached: true, proxy: second.proxy, channels: second.channels, wave: second.wave });
       expect(calls).toHaveLength(2);
@@ -738,7 +745,7 @@ describe('native media intake runtime', () => {
         jobId: 'ingest', stage: 'cache-check', label: '檢查 Proxy 與音訊快取', pct: null,
       });
       expect(sendProgress).toHaveBeenNthCalledWith(2, progressTarget, {
-        jobId: 'ingest', stage: 'cache-ready', label: '使用既有快取', pct: 100, done: true, outcome: 'success',
+        jobId: 'ingest', stage: 'cache-ready', label: '使用既有快取', pct: 100, done: true, outcome: 'success', proxyReady: true,
       });
     } finally { await runtime.close(); }
   });

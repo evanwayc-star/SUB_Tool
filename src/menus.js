@@ -763,8 +763,8 @@ export function showClipFade(c){
   setTimeout(()=>{
     if(!current()) return;
     const a=$('cfIn'), b=$('cfOut'), aV=$('cfInV'), bV=$('cfOutV');
-    if(aV) setupTimecodeInput(aV);
-    if(bV) setupTimecodeInput(bV);
+    if(aV) setupTimecodeInput(aV,{allowSeconds:true});
+    if(bV) setupTimecodeInput(bV,{allowSeconds:true});
     if(a) a.oninput=()=>{ if(aV) aV.value=secToEncore(+a.value, State.fps, State.dropFrame); };
     if(b) b.oninput=()=>{ if(bV) bV.value=secToEncore(+b.value, State.fps, State.dropFrame); };
     if(aV) aV.onchange=()=>{
@@ -810,6 +810,7 @@ export function showClipSpeed(c){
        }finally{preparing=false;}
      }}],{onDismiss:()=>controller.abort(),onReplaced:()=>controller.abort()});
   const speed=$('clipSpeedPercent'),duration=$('clipSpeedDuration');
+  setupTimecodeInput(duration,{allowSeconds:true});
   speed?.addEventListener('input',()=>{
     const rate=Number(speed.value)/100;
     if(Number.isFinite(rate)&&rate>0) duration.value=secToEncore(sourceLength/rate,State.fps,State.dropFrame);
@@ -886,7 +887,7 @@ export function showClipDuration(c){
         session.close({committed:true});
         if(clamped < v - 1e-6) showToast(`已設為可用的最長 ${secToEncore(clamped, State.fps, State.dropFrame)}`);
      }}]);
-  setTimeout(()=>{ if(!current()) return; const el=$('cdVal'); if(el){ setupTimecodeInput(el); el.focus(); el.select(); } },0);
+  setTimeout(()=>{ if(!current()) return; const el=$('cdVal'); if(el){ setupTimecodeInput(el,{allowSeconds:true}); el.focus(); el.select(); } },0);
 }
 
 export function showCrossfade(c){
@@ -915,7 +916,7 @@ export function showCrossfade(c){
   setTimeout(()=>{
     if(!current()) return;
     const s=$('xfT'), sV=$('xfTV');
-    if(sV) setupTimecodeInput(sV);
+    if(sV) setupTimecodeInput(sV,{allowSeconds:true});
     if(s) s.oninput=()=>{ if(sV) sV.value=secToEncore(+s.value, State.fps, State.dropFrame); };
     if(sV) sV.onchange=()=>{
         const v = parseDurationInput(sV.value);

@@ -7,14 +7,14 @@ const engineMocks = vi.hoisted(() => ({
 
 vi.mock('../src/events.js', () => ({ emit: vi.fn(), on: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
-vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn() }));
+vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), openModal: vi.fn(), closeModal: vi.fn(), showToast: vi.fn(), setStatus:vi.fn() }));
 vi.mock('../src/speech-recognition-engine.js', async importOriginal => ({
   ...(await importOriginal()),
   transcribeAudioStream: engineMocks.transcribeAudioStream
 }));
 
 import { State } from '../src/state.js';
-import { closeModal, openModal, showToast } from '../src/ui.js';
+import { closeModal, openModal, showToast, setStatus } from '../src/ui.js';
 import {
   getClipAudioBuffer,
   getAsrConfig,
@@ -174,6 +174,7 @@ describe('本機語音辨識進行中的回饋與取消', () => {
 
     expect(State.cues).toHaveLength(0);
     expect(showToast).not.toHaveBeenCalled();
+    expect(setStatus).not.toHaveBeenCalled();
     expect(closeModal).toHaveBeenCalledTimes(closeCountAfterCancel);
   });
 
@@ -197,6 +198,7 @@ describe('本機語音辨識進行中的回饋與取消', () => {
     expect(startButton.disabled).toBe(false);
     expect(cancelButton.disabled).toBe(false);
     expect(showToast).not.toHaveBeenCalled();
+    expect(setStatus).toHaveBeenCalledExactlyOnceWith('語音辨識失敗','err',false,'模型損毀');
     consoleError.mockRestore();
   });
 

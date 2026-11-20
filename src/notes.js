@@ -13,7 +13,7 @@
 import { $ } from './dom.js';
 import { State, newId, getFpsRevision } from './state.js';
 import { secToEncore } from './time.js';
-import { escapeHTML, tcKeyAllowed } from './util.js';
+import { escapeHTML } from './util.js';
 import { Media } from './media.js';
 import { requestPointerSeek } from './timeline-interaction-engine.js';
 import { updatePlayhead, drawRuler } from './timeline-renderer.js';
@@ -243,7 +243,7 @@ function renderNotes(){
         timeEl.setAttribute('aria-label',`備註時間 ${timeEl.textContent}，Enter 或 F2 編輯`);
         if(returnToField&&timeEl.isConnected)timeEl.focus();
       };
-      inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();fin(true,true);} else if(e.key==='Escape'){e.preventDefault();fin(false,true);} else if(!tcKeyAllowed(e))e.preventDefault(); });
+      inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();fin(true,true);} else if(e.key==='Escape'){e.preventDefault();fin(false,true);} });
       inp.addEventListener('blur',()=>fin(true));
       inp.addEventListener('mousedown',e=>e.stopPropagation());
     };

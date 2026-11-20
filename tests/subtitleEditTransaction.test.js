@@ -661,14 +661,14 @@ describe('拆分字幕 UI adapters', () => {
     expect(State.cues.map(cue => cue.text)).toEqual(['前半後半']);
   });
 
-  it('修改字幕 modal 的 Ctrl+Enter 一次提交樣式草稿與拆分，保留背景樣式且可一次 Undo', async () => {
+  it('修改字幕 modal 的 Ctrl+Enter 保留全部既有與背景樣式，拆分可一次 Undo', async () => {
     State.tracks[0].locked = false;
     const cue = State.cues[0];
     cue.style = { fontSize: 40, posX: 12 };
     History.reset();
     await StylePanelController.openCueEditModal(cue);
     await vi.advanceTimersByTimeAsync(30);
-    document.getElementById('cueStyle_fontSize').value = '72';
+    expect(document.querySelector('[id^="cueStyle_"]')).toBeNull();
     cue.style.posY = 33;
     History.record('背景樣式');
     const editor = document.getElementById('cueEditTa');
@@ -679,8 +679,8 @@ describe('拆分字幕 UI adapters', () => {
     }));
 
     expect(State.cues.map(cue => ({ text: cue.text, style: cue.style }))).toEqual([
-      { text: '前半', style: { fontSize: 72, posX: 12, posY: 33 } },
-      { text: '後半', style: { fontSize: 72, posX: 12, posY: 33 } },
+      { text: '前半', style: { fontSize: 40, posX: 12, posY: 33 } },
+      { text: '後半', style: { fontSize: 40, posX: 12, posY: 33 } },
     ]);
     expect(History.stack.map(entry => entry.label)).toEqual(['初始', '背景樣式', '拆分字幕']);
     History.undo();
@@ -689,41 +689,36 @@ describe('拆分字幕 UI adapters', () => {
     ]);
   });
 
-  it.each(['invalid', 'conflict'])('修改字幕 modal 的 Ctrl+Enter 拒絕 %s 樣式且不先切分文字', async failure => {
+  it.each([600, 90])('修改字幕 modal 的 Ctrl+Enter 不重寫或拒絕既有字級 %s', async fontSize => {
     State.tracks[0].locked = false;
     const cue = State.cues[0];
-    cue.style = { fontSize: 40 };
+    cue.style = { fontSize };
     History.reset();
     await StylePanelController.openCueEditModal(cue);
     await vi.advanceTimersByTimeAsync(30);
-    document.getElementById('cueStyle_fontSize').value = failure === 'invalid' ? '' : '72';
-    if (failure === 'conflict') {
-      cue.style.fontSize = 90;
-      History.record('背景樣式');
-    }
     const editor = document.getElementById('cueEditTa');
     placeCursor(editor, 2);
-    const before = structuredClone(State.cues), history = History.stack.length;
+    const before = structuredClone(State.cues);
 
     editor.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
     }));
 
-    expect(State.cues).toEqual(before);
-    expect(History.stack).toHaveLength(history);
-    expect(document.getElementById('modalBg').classList.contains('show')).toBe(true);
-    expect(document.getElementById('toast').textContent).toContain(failure === 'invalid' ? '字級的樣式值無效' : '字幕樣式已被其他編輯更新');
-    (await import('../src/ui.js')).closeModal();
+    expect(State.cues.map(cue=>({text:cue.text,style:cue.style}))).toEqual([
+      {text:'前半',style:{fontSize}},{text:'後半',style:{fontSize}},
+    ]);
+    expect(History.stack).toHaveLength(2);
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+    History.undo();expect(State.cues).toEqual(before);
   });
 
-  it.each(['blank', 'time'])('修改字幕 modal 的 Ctrl+Enter 在 %s 切分被拒絕時也不先提交樣式', async failure => {
+  it.each(['blank', 'time'])('修改字幕 modal 的 Ctrl+Enter 在 %s 切分被拒絕時不改文字或原有樣式', async failure => {
     State.tracks[0].locked = false;
     const cue = State.cues[0];
     Object.assign(cue, { start: 10, end: 20, timed: true, style: { fontSize: 40 } });
     History.reset();
     await StylePanelController.openCueEditModal(cue);
     await vi.advanceTimersByTimeAsync(30);
-    document.getElementById('cueStyle_fontSize').value = '72';
     const editor = document.getElementById('cueEditTa');
     placeCursor(editor, failure === 'blank' ? 0 : 2);
     const clock = vi.spyOn(Media, 'displayTime').mockReturnValue(failure === 'blank' ? 15 : 10);
@@ -949,7 +944,7 @@ describe('字幕一般編輯 UI adapters', () => {
     });
   });
 
-  it('修改字幕 modal 的文字與樣式在同一筆交易中被鎖軌擋下', async () => {
+  it('修改字幕 modal 的文字交易被鎖軌擋下', async () => {
     State.tracks[0].locked = false;
     const cue = State.cues.find(item => item.id === 'target');
 
@@ -957,7 +952,6 @@ describe('字幕一般編輯 UI adapters', () => {
     await vi.advanceTimersByTimeAsync(30);
     State.tracks[0].locked = true;
     document.getElementById('cueEditTa').innerText = '對話框不應寫入';
-    document.getElementById('cueStyle_bold').value = '0';
     document.querySelector('#modalFoot button.primary').click();
 
     expect({

@@ -322,10 +322,25 @@ describe('web mother-source intake ownership', () => {
       gate.reject(new Error('offline'));
       await expect(a).rejects.toThrow('offline');
 
-      expect(ui.setStatus).not.toHaveBeenCalledWith('ffmpeg 載入失敗（需網路；或改用本機伺服器/Electron 版）', '');
+      expect(ui.setStatus.mock.calls.filter(([,kind])=>kind==='err')).toEqual([]);
       expect(ui.showToast).not.toHaveBeenCalled();
     } finally {
       loader.mockRestore();
     }
+  });
+
+  it.each(['transcode','extract'])('current %s engine download failure records its reason once through the outer operation',async action=>{
+    const loader=vi.spyOn(Media,'loadFFmpeg').mockRejectedValue(new Error('engine download unavailable'));
+    const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+    State.clips=[{id:'primary',primary:true,in:0,out:12,offset:0,dur:12}];
+    try{
+      const file=new File(['media'],'source.mov');
+      const result=action==='transcode'?await Media.transcodeAndExtract(file):await Media.extractAllAudio(file,1);
+      expect(result).toBe(false);
+      expect(ui.setStatus.mock.calls.filter(([,kind])=>kind==='err')).toEqual([
+        ['ffmpeg 載入失敗（需網路；或改用本機伺服器/Electron 版）','err',false,'engine download unavailable'],
+      ]);
+      expect(ui.showToast.mock.calls.filter(([,kind])=>kind==='error')).toEqual([]);
+    }finally{loader.mockRestore();log.mockRestore();}
   });
 });

@@ -15,6 +15,44 @@ function setup(){
 }
 
 describe('renderer media intake ownership',()=>{
+  it('Proxy 狀態只採 encoder 的實際輸出，驗證、波形及補音軌不能冒充 Proxy 百分比', async()=>{
+    const f=setup(),work=f.jobs.ingest({path:'A.mov',needsProxy:true}),request=f.bridge.ingest.mock.calls[0][0];
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'preparing',pct:null});
+    f.jobs.progress({...request,stage:'source-verification',pct:77});
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'preparing',pct:null});
+    f.jobs.progress({...request,stage:'transcoding',pct:55,outputs:{proxy:false,audio:true}});
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'preparing',pct:null});
+    f.jobs.progress({...request,stage:'transcoding',pct:42.8,outputs:{proxy:true,audio:true}});
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'encoding',pct:42.8});
+    f.jobs.progress({...request,done:true,outcome:'success',proxyReady:true,outputs:{proxy:true,audio:true}});
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'ready',pct:null});
+    expect(f.jobs.proxyState('B.mov')).toBeNull();
+    f.pending[0].resolve({proxy:'A-proxy.mp4'});await work;
+  });
+  it('Proxy 取消、失敗、重試與換專案都有來源歸屬；舊回覆不得污染新一輪', async()=>{
+    const f=setup(),old=f.jobs.ingest({path:'A.mov',needsProxy:true}),first=f.bridge.ingest.mock.calls[0][0];
+    const rejected=expect(old).rejects.toMatchObject({name:'AbortError'});
+    f.jobs.progress({...first,stage:'transcoding',pct:25,outputs:{proxy:true,audio:false}});
+    await f.jobs.reset({retainRecovery:true});await rejected;
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'stopped',pct:null});
+    const retry=f.jobs.ingest({path:'A.mov',needsProxy:true}),second=f.bridge.ingest.mock.calls[1][0];
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'preparing',pct:null});
+    expect(f.jobs.progress({...first,done:true,outcome:'success',proxyReady:true})).toBe(false);
+    f.pending[0].resolve({proxy:'old.mp4'});await Promise.resolve();
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'preparing'});
+    f.jobs.progress({...second,done:true,outcome:'failed',outputs:{proxy:true,audio:false},errorMsg:'disk full'});
+    const failure=expect(retry).rejects.toThrow('disk full');f.pending[1].reject(new Error('disk full'));await failure;
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'failed',pct:null});
+    await f.jobs.reset();expect(f.jobs.proxyState('A.mov')).toBeNull();
+  });
+  it('串流先送達失敗終態後才回早期 URL，不能把未完成 Proxy 誤標為就緒', async()=>{
+    const f=setup(),work=f.jobs.streamIngest({path:'A.mov'}),request=f.bridge.streamIngest.mock.calls[0][0];
+    f.jobs.progress({...request,stage:'transcoding',pct:20,outputs:{proxy:true,audio:false}});
+    f.jobs.progress({...request,done:true,outcome:'failed',proxyReady:false,outputs:{proxy:true,audio:false}});
+    f.pending[0].resolve({proxy:'partial-proxy.mp4',cached:false});await work;
+    expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'failed',pct:null});
+  });
+
   it('停止後只採原來源的保存紀錄，晚到查詢不能覆蓋重試或新工作區',async()=>{
     const f=setup(),gate=deferred(),retry=vi.fn();
     f.bridge.cacheInfo=vi.fn(()=>gate.promise);

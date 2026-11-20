@@ -12,6 +12,12 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
   let session={id:id(),used:false};
   const pending=new Map();
   const recoveries=new Map();
+  const proxyStates=new Map();
+  const updateProxy=(job,state,pct=null)=>{
+    const entry=proxyStates.get(job.path);
+    if(job.owner!==session||entry?.requestId!==job.requestId)return;
+    entry.state=state;entry.pct=typeof pct==='number'&&Number.isFinite(pct)?Math.max(0,Math.min(100,pct)):null;
+  };
   // 終態事件可能早於 IPC 回覆：畫面可移除已完成工作，交接仍由 session 持有。
   const awaitingReply=new Set();
   const snapshot=()=>({sessionId:session.id,count:pending.size,hasProxy:[...pending.values()].some(job=>job.proxy),
@@ -30,6 +36,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     const local=method==='prepareWaveform',sourceWave=method==='prepareSourceWaveform';
     const job={owner,requestId,path:options.path||null,recoveryId:recoveries.get(options.path)?.id,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,onWaveform,
       progress:local?{stage:'waveform',label:'準備波形',pct:null}:sourceWave?{stage:'source-waveform',label:'等候優先產生波形',pct:null,queued:true}:null};
+    if(job.proxy&&job.path)proxyStates.set(job.path,{requestId,state:'preparing',pct:null});
     if(!local) owner.used=true;
     pending.set(requestId,job);awaitingReply.add(job);publish();
     // A synchronous observer may already have replaced the session in publish().
@@ -58,13 +65,15 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     return Promise.race([resultPromise,aborted]).then(result=>{
       awaitingReply.delete(job);
       if(owner!==session){discard(result);throw cancelled();}
+      if(result?.proxy&&(!job.terminal||job.outcome==='success')
+        &&(method!=='streamIngest'||result.cached||job.terminal))updateProxy(job,'ready');
       if(method!=='streamIngest'||result?.cached||job.terminal) finish(job);
       // finish() synchronously notifies observers; they can replace the
       // workspace before this result is handed over to its original caller.
       if(owner!==session){discard(result);throw cancelled();}
       if(job.progressError){discard(result);throw job.progressError;}
       return result;
-    },error=>{awaitingReply.delete(job);if(owner!==session) discard(delivered);finish(job);throw error;});
+    },error=>{awaitingReply.delete(job);if(owner!==session) discard(delivered);updateProxy(job,'failed');finish(job);throw error;});
   }
   return {
     ingest:options=>run('ingest',options),
@@ -111,6 +120,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       return {ingest:options=>run('ingest',options,owner)};
     },
     snapshot,
+    proxyState(path){const entry=proxyStates.get(path);return entry?{state:entry.state,pct:entry.pct}:null;},
     progress(payload){
       if(!payload||payload.sessionId!==session.id) return false;
       const job=pending.get(payload.requestId);
@@ -121,18 +131,27 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
         try{job.onWaveform(waveform);}catch(error){job.progressError=error;}
       }
       if(job.owner!==session||pending.get(payload.requestId)!==job) return false;
+      if(payload.proxyReady===true)updateProxy(job,'ready');
+      else if(payload.done&&payload.outcome==='failed')updateProxy(job,'failed');
+      else if(!payload.done&&payload.stage==='transcoding'&&payload.outputs?.proxy===true)
+        updateProxy(job,'encoding',payload.pct);
       if(payload.done){
         const recovery=recoveries.get(job.path);
         if(payload.outcome==='failed'&&recovery&&recovery.id===job.recoveryId&&recovery.owns()){
           recovery.status='failed';recovery.message=payload.errorMsg||`${payload.label||'背景處理'}失敗`;
         }
-        job.terminal=true;finish(job);
+        job.terminal=true;job.outcome=payload.outcome;finish(job);
       }
       else {job.progress=status;publish();}
       return job.owner===session;
     },
     reset({retainRecovery=false}={}){
       const previous=session;session={id:id(),used:false};
+      if(retainRecovery){
+        for(const entry of proxyStates.values())if(entry.state==='preparing'||entry.state==='encoding'){
+          entry.state='stopped';entry.pct=null;
+        }
+      }else proxyStates.clear();
       if(retainRecovery){for(const entry of recoveries.values())if(entry.owns()){
         entry.status='stopped';entry.message='背景處理已停止；已保存的快取會在繼續時重新驗證。';
       }}else recoveries.clear();

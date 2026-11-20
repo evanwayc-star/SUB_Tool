@@ -1,12 +1,31 @@
 // @vitest-environment jsdom
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { bindPreviewStatusView } from '../src/preview-status-view.js';
+import { bindPreviewStatusView, bindProxyStatusView } from '../src/preview-status-view.js';
 
 let state,view,root,setMode;
 const flush=async()=>{for(let n=0;n<8;n++)await Promise.resolve();};
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 const modeButton=mode=>root.querySelector(`[data-preview-mode="${mode}"]`);
+
+it.each([
+  [{state:'idle'},'Proxy：未載入'],
+  [{state:'unsupported'},'Proxy：網頁版不支援'],
+  [{state:'original'},'Proxy：使用原片'],
+  [{state:'preparing'},'Proxy：準備中'],
+  [{state:'encoding',pct:42.8},'Proxy：轉檔 42%'],
+  [{state:'encoding',pct:null},'Proxy：轉檔中'],
+  [{state:'ready'},'Proxy：已就緒'],
+  [{state:'failed'},'Proxy：失敗'],
+  [{state:'stopped'},'Proxy：已停止'],
+])('底部 Proxy 狀態獨立顯示 %j，不使用一般工作進度', (current,label)=>{
+  const element=document.createElement('span');let snapshot=current;
+  const proxyView=bindProxyStatusView({root:element,readState:()=>snapshot});
+  expect(element.textContent).toBe(label);expect(element.title).not.toBe('');
+  snapshot={state:'idle'};proxyView.update();expect(element.textContent).toBe('Proxy：未載入');
+  proxyView.dispose();snapshot={state:'encoding',pct:80};proxyView.update();
+  expect(element.textContent).toBe('Proxy：未載入');
+});
 beforeEach(()=>{
   vi.useFakeTimers();
   document.head.innerHTML=`<style>${readFileSync('src/styles.css','utf8')}</style>`;

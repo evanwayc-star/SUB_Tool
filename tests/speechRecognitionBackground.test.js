@@ -15,6 +15,7 @@ const engineMocks = vi.hoisted(() => ({
 const uiMocks = vi.hoisted(() => ({
   openModal: vi.fn(),
   closeModal: vi.fn(),
+  setStatus: vi.fn(),
   showToast: vi.fn()
 }));
 
@@ -38,6 +39,7 @@ vi.mock('../src/audio.js', () => ({
 vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(),
   openModal: uiMocks.openModal,
   closeModal: uiMocks.closeModal,
+  setStatus: uiMocks.setStatus,
   showToast: uiMocks.showToast
 }));
 
@@ -98,6 +100,10 @@ describe('語音辨識背景執行與進度視窗切換', () => {
       expect(document.getElementById('asrMonitorOutcomeTitle').textContent).toBe('工作未完成');
       expect(document.getElementById('asrMonitorOutcomeHelp').textContent).toContain('重新開啟辨識設定');
       expect(State.cues).toEqual([]);
+      expect(uiMocks.showToast.mock.calls.filter(([,kind])=>kind==='error')).toEqual([
+        ['❌ 語音辨識失敗：受控辨識失敗','error'],
+      ]);
+      expect(uiMocks.setStatus).not.toHaveBeenCalled();
     } finally { errorLog.mockRestore(); }
   });
 

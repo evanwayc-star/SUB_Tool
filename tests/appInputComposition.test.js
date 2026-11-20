@@ -89,7 +89,7 @@ it.each(['player','subtitle'].flatMap(kind=>['貼上','取消'].map(action=>[kin
   input.dispatchEvent(new KeyboardEvent('keydown',{key:action==='貼上'?'Enter':'Escape',bubbles:true,cancelable:true}));
   await Promise.resolve();await Promise.resolve();
   expect(input.isConnected).toBe(true);expect(document.activeElement).toBe(input);
-  expect(input.value).toBe(action==='貼上'?'1124':'1234');expect(seek).not.toHaveBeenCalled();
+  expect(input.value).toBe(action==='貼上'?'11:24':'1234');expect(seek).not.toHaveBeenCalled();
   expect(State.cues).toEqual(cues);
   expect(document.getElementById('ctxmenu').classList.contains('show')).toBe(false);
   input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
@@ -144,6 +144,19 @@ it.each(['searchInput', 'replaceInput'])('%s 舊式組字 Enter 不導覽或取�
   else {
     expect(State.cues.find(cue => cue.id === initialSelection).text).toBe('新文二');
     expect(State.cues[0].text).toBe('原文一'); expect(History.stack).toHaveLength(2);
+  }
+});
+
+it('字幕位移與時長欄只接受數字，方向由按鈕決定', async () => {
+  await finishStatus(); startup.resolve(null); await vi.advanceTimersByTimeAsync(100);
+  for (const id of ['tcShiftInput', 'durAdjTcInput']) {
+    const input = document.getElementById(id);
+    for (const key of ['d', '-', '+', ':']) {
+      const event = new KeyboardEvent('keydown', {key, bubbles: true, cancelable: true});
+      input.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(input.inputMode).toBe('numeric');
   }
 });
 

@@ -276,7 +276,7 @@ function _normalisedProjectData(rawData){
     return data;
   }
   console.warn('invalid project document:',integrity.errors);
-  showToast(integrity.errors.find(error=>error.includes('補建'))||'專案檔格式不完整，無法開啟');
+  showToast(integrity.errors.find(error=>error.includes('補建'))||'專案檔格式不完整，無法開啟','error');
   return null;
 }
 
@@ -393,11 +393,11 @@ function _saveProject(asNew){
         const response=await (saveAs?DESK.saveProject(name,bytesToB64(bytes)):DESK.writeProject(_savePath,bytesToB64(bytes)));
         if(!owns()) return null;
         if(response?.code==='PROJECT_DESTINATION_CHANGED'){
-          showToast('專案檔在儲存期間已變更，請另存新檔');
+          showToast('專案檔在儲存期間已變更，請另存新檔','error');
           return null;
         }
         if(typeof response!=='string'||!response){
-          if(!saveAs||response) showToast('儲存專案失敗，請嘗試「另存新檔」');
+          if(!saveAs||response) showToast('儲存專案失敗，請嘗試「另存新檔」','error');
           return null;
         }
         pth=response;
@@ -406,7 +406,7 @@ function _saveProject(asNew){
       showToast(saveAs?'已另存新檔':'已儲存專案');
       return pth||name;
     }catch{
-      if(owns()) showToast('儲存專案失敗，請嘗試「另存新檔」');
+      if(owns()) showToast('儲存專案失敗，請嘗試「另存新檔」','error');
       return null;
     }
   });
@@ -430,7 +430,7 @@ async function _autoSave(){
     catch{res=null;}
     // 已送出的舊備份安全完成；換專案或另存新路徑後不再回報到目前工作區。
     if(current()){
-      if(res?.code==='PROJECT_DESTINATION_CHANGED') showToast('自動備份失敗：專案檔在儲存期間已變更，請另存新檔');
+      if(res?.code==='PROJECT_DESTINATION_CHANGED') showToast('自動備份失敗：專案檔在儲存期間已變更，請另存新檔','error');
       else if(typeof res==='string'&&res) setStatus('自動備份：'+name,'ok');
       else setStatus('自動備份失敗，請手動儲存專案','err');
     }
@@ -667,7 +667,7 @@ async function _confirmProjectFonts(data,generation){
               if(!done&&_isCurrentProjectLoad(generation)) finish('recheck');
             }
           }catch(error){
-            if(!done&&_isCurrentProjectLoad(generation)) showToast('匯入字體失敗：'+error.message);
+            if(!done&&_isCurrentProjectLoad(generation)) showToast('匯入字體失敗：'+error.message,'error');
           }
         }});
       }
@@ -984,7 +984,7 @@ const Project = {
     const request=++_openRequestGeneration,generation=_projectLoadSession.generation;
     const buf=await readFile(file);
     if(request!==_openRequestGeneration || !_isCurrentProjectLoad(generation)) return false;
-    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(buf))); }catch(e){ showToast('無法解析專案檔'); return false; }
+    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(buf))); }catch(e){ showToast('無法解析專案檔：'+e.message,'error'); return false; }
     if(!data) return false;
     return _queueProjectLoad(next=>this._load(data,next,file.name,consent));
   },
@@ -1016,7 +1016,7 @@ const Project = {
     await _projectLoadSession.restoreMedia(generation,{kind:'deferred'});
   },
   loadDesktop(r,consent=null){
-    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(b64ToBytes(r.b64).buffer))); }catch(e){ showToast('無法解析專案檔'); return Promise.resolve(false); }
+    let data; try{ data=_normalisedProjectData(JSON.parse(decodeText(b64ToBytes(r.b64).buffer))); }catch(e){ showToast('無法解析專案檔：'+e.message,'error'); return Promise.resolve(false); }
     if(!data) return Promise.resolve(false);
     return _queueProjectLoad(generation=>this._loadDesktop(r,data,generation,consent));
   },

@@ -77,7 +77,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     setStatus('讀取媒體資訊…','busy');
     let info=null;
     try{ info=await DESK.probe(p); }
-    catch(e){ if(!owns()) return; showToast('ffprobe 失敗：'+e.message); }
+    catch(e){ if(!owns()) return; showToast('ffprobe 失敗：'+e.message,'error'); }
     if(!owns()) return;
     const dur=info?info.duration:0;
     if(!projectRestore&&gridRevision===getFpsRevision()&&info?.video?.fps){ setFps(info.video.fps); }
@@ -139,11 +139,11 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       setMediaElementSource(video,mediaUrl); await activateHtml5Transport(video);
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(!owns()||metadata==='cancelled') return;
-      if(metadata!=='ready'){ showToast('無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return; }
+      if(metadata!=='ready'){ showToast('無法讀取影片 metadata，未載入','error'); setStatus('讀取失敗',''); return; }
       try{await getPlayerAdapter().seekElement(video,0,{owns});}
       catch(error){
         if(!owns()||error?.name==='AbortError')return;
-        showToast('無法定位影片，未載入');setStatus('讀取失敗','');return;
+        showToast('無法定位影片，未載入：'+(error?.message||error),'error');setStatus('讀取失敗','');return;
       }
       if(!owns()) return;
       State.duration=maxKnownSourceDuration(dur,getPlayerAdapter().sourceDuration(video.duration,mediaUrl));
@@ -236,7 +236,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       ctx._ingestDoneHandler=handler;
       window.addEventListener('desk:ingest-done',handler);
       try{ res=await MediaIntakeJobs.streamIngest({ path:p, duration:dur, audio }); }
-      catch(e){ provisional?.cancel(); stopListening(); if(!owns()) return; recovery.fail(e);console.error(e); showToast('讀取失敗：'+e.message); setStatus('讀取失敗',''); return; }
+      catch(e){ provisional?.cancel(); stopListening(); if(!owns()) return; recovery.fail(e);console.error(e); showToast('讀取失敗：'+e.message,'error'); setStatus('讀取失敗',''); return; }
       if(!owns()){
         provisional?.cancel();
         stopListening();
@@ -271,7 +271,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         stopListening();
         discardUnpublishedStream();
         recovery.fail(new Error('轉檔串流無法讀取影片 metadata，未載入'));
-        showToast('轉檔串流無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return;
+        showToast('轉檔串流無法讀取影片 metadata，未載入','error'); setStatus('讀取失敗',''); return;
       }
       State.duration=maxKnownSourceDuration(dur,video.duration);
       video.muted=true;
@@ -349,7 +349,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         recovery.fail(error);
         console.warn('stream ingest tracks:',error);
         showToast('音訊預覽載入失敗：'+(error?.message||String(error)));
-        setStatus('影片已載入，但音訊預覽載入失敗','err');
+        setStatus('影片已載入，但音訊預覽載入失敗','err',false,error?.message||String(error));
       };
 
       let tracksStarted=false;
@@ -370,7 +370,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     setStatus(canNative?'正在分析音訊與抽取多聲道…':'正在轉檔 Proxy 與分析音訊（大檔需數分鐘）…','busy');
     let res;
     try{ res=await MediaIntakeJobs.ingest({ path:p, duration:dur, needsProxy:!canNative, audio }); }
-    catch(e){ if(!owns()) return; recovery.fail(e);console.error(e); showToast('讀取/轉檔失敗：'+e.message); setStatus('讀取/轉檔失敗',''); return; }
+    catch(e){ if(!owns()) return; recovery.fail(e);console.error(e); showToast('讀取/轉檔失敗：'+e.message,'error'); setStatus('讀取/轉檔失敗',''); return; }
     if(!owns()) return;
     if(res.cached) setStatus('使用既有快取，秒開…','ok');
 
@@ -382,13 +382,13 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     if(!owns()||metadata==='cancelled') return;
     if(metadata!=='ready'){
       recovery.fail(new Error('轉檔結果無法讀取影片 metadata，未載入'));
-      showToast('轉檔結果無法讀取影片 metadata，未載入'); setStatus('讀取失敗',''); return;
+      showToast('轉檔結果無法讀取影片 metadata，未載入','error'); setStatus('讀取失敗',''); return;
     }
     try{await getPlayerAdapter().seekElement(video,0,{owns});}
     catch(error){
       if(!owns()||error?.name==='AbortError')return;
       recovery.fail(error);
-      showToast('轉檔結果無法定位影片，未載入');setStatus('讀取失敗','');return;
+      showToast('轉檔結果無法定位影片，未載入：'+(error?.message||error),'error');setStatus('讀取失敗','');return;
     }
     if(!owns()) return;
     State.duration=maxKnownSourceDuration(dur,getPlayerAdapter().sourceDuration(video.duration,mediaUrl));
@@ -463,7 +463,9 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
 
       if(!ownsPrimary()) return;
       if(audioLoadError)recovery.fail(audioLoadError);else recovery.complete();
-      setStatus(audioLoadError?'影片已載入，但音訊預覽載入失敗':'媒體已載入（桌面模式）',audioLoadError?'err':'ok'); emit('duration:known');
+      if(audioLoadError)setStatus('影片已載入，但音訊預覽載入失敗','err',false,audioLoadError.message||String(audioLoadError));
+      else setStatus('媒體已載入（桌面模式）','ok');
+      emit('duration:known');
     }catch(error){
       if(owns()) recovery.fail(error);
       throw error;
@@ -529,7 +531,7 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
       await adapter.enterHtml5(video);
       $('videoSub').style.display=''; video.style.display='';
       if(!fallbackToHtml5){
-        showToast('mpv 啟動失敗：'+e.message); setStatus('mpv 啟動失敗','');
+        showToast('mpv 啟動失敗：'+e.message,'error'); setStatus('mpv 啟動失敗','');
       }
       return false;
     }
@@ -617,7 +619,7 @@ export async function loadVideoFile(ctx, file, projectRestore=null){
     if(native){
       const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
       if(!owns()||metadata==='cancelled') return;
-      if(metadata!=='ready'){ showToast('無法讀取此影片，未載入'); setStatus('讀取失敗',''); return; }
+      if(metadata!=='ready'){ showToast('無法讀取此影片，未載入','error'); setStatus('讀取失敗',''); return; }
       const sourceInfo=await sourcePresentationMetadata(url,{owns});
       if(!owns()) return;
       const adapter=getPlayerAdapter();
@@ -625,7 +627,7 @@ export async function loadVideoFile(ctx, file, projectRestore=null){
       try{ await adapter.seekElement(video,0,{owns}); }
       catch(error){
         if(!owns()) return;
-        showToast('無法定位影片來源起點，未載入');setStatus('讀取失敗','');return;
+        showToast('無法定位影片來源起點，未載入：'+(error?.message||error),'error');setStatus('讀取失敗','');return;
       }
       if(!owns()) return;
       State.duration=maxKnownSourceDuration(sourceInfo?.duration,adapter.sourceDuration(video.duration,url));

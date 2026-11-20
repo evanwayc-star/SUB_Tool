@@ -44,7 +44,8 @@ import { togglePanel, bindOverlayDrag, keepPanelInViewport, renderQueueMonitorIn
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { bindMediaIntakeView, handleMediaIntakeProgress } from './media-intake-view.js';
-import { bindPreviewStatusView } from './preview-status-view.js';
+import { bindPreviewStatusView, bindProxyStatusView } from './preview-status-view.js';
+import { renderProjectCanvasButton } from './project-canvas-preview.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive } from './timeline-renderer.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, applyCueStylePatch } from './subtitles.js';
@@ -81,7 +82,10 @@ if (typeof __APP_VERSION__ !== 'undefined') {
 const previewStatusView=bindPreviewStatusView({
   root:$('previewStatus'),readState:()=>Media.previewState(),setMode:mode=>Media.setPreviewMode(mode),
 });
-on('media:preview-state',()=>previewStatusView.update());
+const proxyStatusView=bindProxyStatusView({root:$('stProxy'),readState:()=>Media.proxyStatus()});
+renderProjectCanvasButton();
+function updatePreviewViews(){previewStatusView.update();proxyStatusView.update();}
+on('media:preview-state',updatePreviewViews);
 
 /* app.js 為協調層：訂閱各模組發送的事件並呼叫對應的渲染/指令函式。
    各模組只 emit、不再反向 import app.js，藉此切斷雙向相依。
@@ -120,7 +124,7 @@ on('note:openInPanel', openNoteInPanel);
 on('cue:openEdit', StylePanelController.openCueEditModal);
 on('action', doAction);
 // 原生視窗讓位／回歸時，來源提示也須改讀目前可見的 presenter。
-on('mpv:sync', ()=>{_syncMpvPanel();previewStatusView.update();});
+on('mpv:sync', ()=>{_syncMpvPanel();updatePreviewViews();});
 on('history:record', recordHistory); // 供 media.js 等低階模組記錄歷史（避免 media→history 循環相依）
 on('project:relinkBrowserMedia', (generation, projectRestore)=>{
   void Commands.run('open-media', { relink: { generation, plan: projectRestore } })
@@ -242,6 +246,7 @@ _videoWrap?.addEventListener('pointermove', e => { if(!previewDrag.subtitleDrag(
 _videoWrap?.addEventListener('pointerleave', () => { if(!previewDrag.subtitleDrag()) _setSubtitleHover(null); });
 
 function onDurationKnown(){
+  renderProjectCanvasButton();
   renderDurationReadout();
   $('seekBar').max=Math.max(1,Math.round(State.duration*1000));
   renderSeekBar($('seekBar'), Media.displayTime());
@@ -564,7 +569,7 @@ function startTimeEdit(){
   const old=span.textContent;
   const inp=document.createElement('input'); inp.className='tc-edit'; inp.value=''; inp.placeholder=old;
   span.textContent=''; span.appendChild(inp); inp.focus();
-  setupTimecodeInput(inp);
+  setupTimecodeInput(inp,{allowSign:true});
   let done=false;
   const fin=(commit)=>{ if(done)return; done=true; inp.remove(); renderCurrentTimecode(Media.displayTime());
     if(commit){
@@ -604,10 +609,8 @@ function initExtras(){
   // 新輸入框鍵盤事件
   const formatTcInput = (el) => {
     if(!el) return;
-    const raw = el.value.trim().replace(/^[+-]/, '');
-    const sign = el.value.trim().startsWith('-') ? '-' : (el.value.trim().startsWith('+') ? '+' : '');
-    const t = parseTimecodeInput(raw);
-    if (t !== null) el.value = sign + secToEncore(t, State.fps, State.dropFrame);
+    const t = parseTimecodeInput(el.value.trim());
+    if (t !== null) el.value = secToEncore(t, State.fps, State.dropFrame);
   };
   ['tcShiftInput', 'durAdjTcInput'].forEach(id => {
     const el = $(id);
@@ -751,6 +754,7 @@ function startAppTicker(renderVideoSubCallback) {
 async function init(){
   await loadConfig();
   previewStatusView.update();
+  proxyStatusView.update();
   await loadKeys();
   $('safeFrameBtn')?.classList.toggle('active', !!State.safeFrame); // 安全框開關狀態還原（v4.33）
   $('timecodeWatermarkBtn')?.classList.toggle('active', !!State.timecodeWatermark);
@@ -861,7 +865,7 @@ async function initDesktop(){
   function _updateQueueStatusUI() {
     renderQueueMonitorIndicator($('stMonitorBtn'), _queueStatus);
     if (_queueStatus.missingCount > 0) {
-      showToast(`佇列中有 ${_queueStatus.missingCount} 份工作來源遺失，已被中止`);
+      showToast(`佇列中有 ${_queueStatus.missingCount} 份工作來源遺失，已被中止`,'error');
       _queueStatus.missingCount = 0; // only show once per update
     }
     
@@ -874,7 +878,7 @@ async function initDesktop(){
     }
   }
 
-  bindMediaIntakeView(()=>Media.cancelProxyJobs());
+  bindMediaIntakeView(()=>Media.cancelProxyJobs(),proxyStatusView.update);
   DESK.onProgress(d=>{
     if (d.jobId && String(d.jobId).startsWith('export-')) {
       if (!d.error && !d.stopped && !d.done) _visibleExportJobId = d.jobId;
@@ -888,7 +892,7 @@ async function initDesktop(){
           logPath = m[1];
           msg = msg.replace(/\[LOG_PATH\].*?\[\/LOG_PATH\]/, '').trim();
         }
-        setStatus(`匯出失敗`, '', 'unlock');
+        setStatus('匯出失敗','err','unlock',logPath?[msg,logPath].filter(Boolean).join('\n'):msg);
         const modalBody = `<div style="font-size:13px;line-height:1.6;white-space:pre-wrap;">${msg.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`;
         const session = openModal(`匯出失敗`, modalBody, [{ label: '關閉', primary: true, act: closeModal }]);
         if (logPath) {

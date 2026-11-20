@@ -311,7 +311,7 @@ const Media = {
           emit('media:timeline');
         },
         record:label=>emit('history:record',label),
-        failed:error=>showToast('音訊平衡失敗：'+(error.message||String(error))),
+        failed:error=>showToast('音訊平衡失敗：'+(error.message||String(error)),'error'),
       });
     }
     return this._audioEffects;
@@ -749,6 +749,17 @@ const Media = {
     // A failed native load hides the previous frame. Keep the clip at the
     // playhead available to the two source buttons while it is being retried.
     return this._activeClip()||(this.inGap()&&this.seqOn()?Seq.clipAt(this.displayTime()):null);
+  },
+  proxyStatus(){
+    const clip=this._previewClip();
+    if(!clip||Seq.isStill(clip))return {state:'idle',pct:null};
+    if(!DESK)return {state:'unsupported',pct:null};
+    const preparation=MediaIntakeJobs.proxyState(clip.path);
+    const record=this._previewSources?.get(clipSourceFingerprint(clip));
+    if(preparation?.state==='encoding')return preparation;
+    if(record?.failed)return {state:'failed',pct:null};
+    if(record?.assets.proxy||preparation?.state==='ready')return {state:'ready',pct:null};
+    return preparation||{state:'original',pct:null};
   },
   previewState(){
     const clip=this._previewClip(),record=clip?this._previewSources?.get(clipSourceFingerprint(clip)):null;
@@ -1551,7 +1562,7 @@ const Media = {
     }catch(e){
       if(!owns()){ this._disposeMediaElement(el); this._releaseObjectURL(url); return null; }
       this._disposeMediaElement(el); this._releaseObjectURL(url);
-      setStatus('音訊載入失敗：'+e.message,''); showToast('音訊載入失敗：'+e.message);
+      setStatus('音訊載入失敗：'+e.message,''); showToast('音訊載入失敗：'+e.message,'error');
       return null;
     }
   },
@@ -1571,7 +1582,7 @@ const Media = {
         if(!owns()) return null;
         console.warn('cached desktop audio load:',e);
         setStatus('音訊載入失敗：'+(e?.message||e),'');
-        showToast('無法載入音訊檔：'+(e?.message||e));
+        showToast('無法載入音訊檔：'+(e?.message||e),'error');
         return null;
       }
     }
@@ -1674,7 +1685,7 @@ const Media = {
         console.warn('desktop audio cache fallback:',cacheError);
       }
       setStatus('音軌載入失敗：'+(e?.message||e),'');
-      showToast('無法載入音訊檔：'+(e?.message||e));
+      showToast('無法載入音訊檔：'+(e?.message||e),'error');
       return null;
     }
   },
@@ -1815,7 +1826,7 @@ const Media = {
       this.pendingChannels=[];
       notifyAudioTracks();
       showToast('音訊預覽載入失敗：'+(error?.message||String(error)));
-      setStatus('影片已載入，但音訊預覽載入失敗','err');
+      setStatus('影片已載入，但音訊預覽載入失敗','err',false,error?.message||String(error));
     }
   },
 
@@ -1892,7 +1903,7 @@ const Media = {
       return ff;
     }catch(e){
       if(stillOwns()){
-        setStatus('ffmpeg 載入失敗（需網路；或改用本機伺服器/Electron 版）','');
+        setStatus('ffmpeg 載入失敗（需網路；或改用本機伺服器/Electron 版）','err',false,e?.message||String(e));
         showToast('ffmpeg.wasm 載入失敗：需網路連線，或以本機伺服器開啟本頁');
       }
       throw e;
@@ -1994,7 +2005,9 @@ const Media = {
       return true;
     }catch(e){
       if(!owns()) return false;
-      setStatus('音軌抽取失敗','');console.error(e);
+      // The loader already reported a rejected engine download.
+      if(ff)setStatus('音軌抽取失敗','err',false,e?.message||String(e));
+      console.error(e);
       return false;
     }finally{
       // Fix #5：不論成功或失敗都清除 ffmpeg 虛擬 FS，防記憶體洩漏與後續「file already exists」
@@ -2097,7 +2110,8 @@ const Media = {
       // A cancellation can surface as a rejected ff.run.  It is not an error
       // for the now-current B intake and must not overwrite B's UI status.
       if(!ownsWork()) return false;
-      setStatus('轉檔失敗','');console.error(e);showToast('ffmpeg 轉檔失敗');
+      if(ff){setStatus('轉檔失敗','err',false,e?.message||String(e));showToast('ffmpeg 轉檔失敗');}
+      console.error(e);
       return false;
     }finally{
       // The ffmpeg lane above prevents a stale A from deleting B's virtual
@@ -2452,7 +2466,7 @@ const Media = {
         session.observePlaybackState(false,{source:'mpv',reason:'error',owns});
         if(!owns()) return;
       }
-      setStatus('mpv 連線中斷，按播放可重新連線','err');
+      setStatus('mpv 連線中斷，按播放可重新連線','err',false,'按播放或點選字幕可重新連線');
       if(!owns()) return;
       showToast('mpv 連線中斷，按播放或點選字幕可重新連線');
       return;
@@ -2552,7 +2566,7 @@ const Media = {
         this._mpvPath=null; // A subsequent Play must reload this failed entry.
         this.observePlayerPlaybackState(false,{source:'mpv',reason:'error'});
         if(!ownsTarget())return;
-        setStatus('mpv 播放失敗，按播放可重試','err'); showToast('mpv 播放此影片段失敗，按播放可重試');
+        setStatus('mpv 播放失敗，按播放可重試','err',false,e.file_error||'目前影片段讀取或解碼失敗'); showToast('mpv 播放此影片段失敗，按播放可重試');
         return;
       }
       if(this._seqSwitching||this.mpvSourceTransitionPending())return;
@@ -2824,7 +2838,7 @@ const Media = {
           const adapter=getPlayerAdapter();
           if(!adapter.isAvailable){
             retryIfSuperseded=false;
-            setStatus(`mpv 無法載入「${c.name}」`, 'err');
+            setStatus(`mpv 無法載入「${c.name}」`, 'err',false,'播放器未連線');
             showToast(`mpv 無法載入影片段「${c.name}」（播放器未連線）`);
             this._enterGap(_tl);
             return;
@@ -2852,10 +2866,9 @@ const Media = {
             if(!r || r.ok === false){
               retryIfSuperseded=false;
               this._mpvPath=null;
-              this._failPlaybackPresentation({status:'failed'});
-              if(!owns())return;
               const reason=r?.error?.message||'請確認檔案可讀取，再按播放重試';
-              setStatus(`mpv 無法載入「${c.name}」`, 'err');
+              this._failPlaybackPresentation({status:'failed',message:`mpv 無法載入「${c.name}」`,detail:reason});
+              if(!owns())return;
               showToast(`mpv 無法載入影片段「${c.name}」：${reason}`);
               if(owns())this._enterGap(_tl);
               return;
@@ -2895,7 +2908,7 @@ const Media = {
           if(!owns()) return;
           if(metadata!=='ready'){
             retryIfSuperseded=false;
-            setStatus(`無法載入影片段「${c.name}」`,'err');
+            setStatus(`無法載入影片段「${c.name}」`,'err',false,`metadata ${metadata}`);
             showToast(`無法載入影片段「${c.name}」（metadata ${metadata}）`);
             try{ video.pause(); video.removeAttribute?.('src'); video.src=''; video.load?.(); }catch(error){}
             this._enterGap(_tl);
@@ -2912,7 +2925,7 @@ const Media = {
         catch(error){
           if(error.name!=='AbortError'&&owns()){
             retryIfSuperseded=false;
-            setStatus(`無法定位影片段「${c.name}」`,'err');
+            setStatus(`無法定位影片段「${c.name}」`,'err',false,error?.message||String(error));
             showToast(`無法定位影片段「${c.name}」`);
             this.pause({seekOnPause:false});
           }
@@ -3248,16 +3261,16 @@ const Media = {
     const owns=()=>this._ownsAssetOperation(assetOperation);
     if(!owns()) return null;
     setStatus('讀取影片資訊…', 'busy');
-    let info = null; try{ info = await DESK.probe(p); }catch(e){ if(owns()){ showToast('ffprobe 失敗：' + e.message); setStatus('', ''); } return null; }
+    let info = null; try{ info = await DESK.probe(p); }catch(e){ if(owns()){ showToast('ffprobe 失敗：' + e.message,'error'); setStatus('', ''); } return null; }
     if(!owns()) return null;
     const dur = info?.duration || 0;
-    if(!dur){ showToast('無法取得影片長度，未加入'); setStatus('', ''); return; }
+    if(!dur){ showToast('無法取得影片長度，未加入','error'); setStatus('', ''); return; }
     if(!this.mpvMode){
       // 無 mpv：只有原生可播格式能跨段切換（單一 <video> 換 src）
       const nativeCodecs = ['h264','hevc','vp8','vp9','av1','mpeg4'];
       const ext = (baseName(p).split('.').pop() || '').toLowerCase();
       const ok = info?.video && nativeCodecs.includes(info.video.codec) && ['mp4','mov','m4v','webm','mkv'].includes(ext);
-      if(!ok){ showToast('未偵測到 mpv：序列僅支援加入原生格式（MP4/MOV/WebM/MKV）'); setStatus('', ''); return; }
+      if(!ok){ showToast('未偵測到 mpv：序列僅支援加入原生格式（MP4/MOV/WebM/MKV）','error'); setStatus('', ''); return; }
     }
     const fps = info?.video?.fps || 0;
     if(fps && Math.abs(snapFps(fps) - State.fps) > 0.002)
@@ -3374,7 +3387,7 @@ const Media = {
     }
     if(!owns()) return;
     let res; try{ res = await MediaIntakeJobs.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
-    catch(e){ if(owns()){recovery.fail(e);setStatus('影片音訊抽取失敗：' + (e?.message||e), '');} return; }
+    catch(e){ if(owns()){recovery.fail(e);setStatus('影片音訊抽取失敗：' + (e?.message||e), 'err');} return; }
     if(!res || !owns()) return;
     if(res.proxy){
       try{ const u = await DESK.fileURL(res.proxy);
@@ -3590,7 +3603,7 @@ const Media = {
     const dur=metadata==='ready'?maxKnownSourceDuration(sourceInfo?.duration,adapter.sourceDuration(test.duration,url)):0;
     this._disposeMediaElement(test);
     if(metadata==='cancelled'||!owns()){ this._releaseObjectURL(url); return null; }
-    if(!dur){ showToast('無法讀取此影片，未加入'); setStatus('', ''); this._releaseObjectURL(url); return null; }
+    if(!dur){ showToast('無法讀取此影片，未加入','error'); setStatus('', ''); this._releaseObjectURL(url); return null; }
     let overrides = {};
     if (State.clips.length > 0) {
       overrides.vtrack = State.videoTracks.length;
@@ -3730,8 +3743,8 @@ const Media = {
       for(const asset of made){ if(this.externalAudioSources.includes(asset)) this.removeExternalAudio(asset.id,{record:false}); }
       if(!owns()) return null;
       console.warn('detach clip audio:',error);
-      setStatus('解除影音連結失敗','');
       const reason=String(error?.message||'').trim();
+      setStatus('解除影音連結失敗','err',false,reason||'無法建立獨立音訊，影片原音維持不變');
       showToast(reason?`無法建立獨立音訊：${reason}（影片原音維持不變）`:'無法建立獨立音訊，影片原音維持不變');
       return null;
     }
@@ -3863,7 +3876,9 @@ const Media = {
     const playBtn=$('playBtn'); if(playBtn) playBtn.textContent='▶';
     video.dispatchEvent(new Event('pause'));
     const reason=result?.status==='timeout'?'等待畫面逾時':'畫面載入失敗';
-    setStatus(`${reason}，播放已暫停`,'err');
+    const detail=result?.detail||result?.error?.message;
+    if(detail||result?.message)setStatus(result?.message||`${reason}，播放已暫停`,'err',false,detail);
+    else setStatus(`${reason}，播放已暫停`,'err');
   },
   async _startPresenterPlayback({owns:upstreamOwns=()=>true,started=()=>{},clip=null,pauseBeforePrepare=false}={}){
     // 畫格呈現與起播接受是不同證據。初次播放、呈現後續播及自動跨段
@@ -3933,7 +3948,7 @@ const Media = {
       if(!owns()) return null;
       this.pause({seekOnPause:false});
       const message=clip?`無法播放影片段「${clip.name}」`:'無法播放影片，播放已暫停';
-      setStatus(message,'err');
+      setStatus(message,'err',false,error?.message||String(error));
       if(clip) showToast(message);
       return false;
     }finally{if(this._presenterStart===request)this._presenterStart=null;this._publishPreviewState();}
@@ -4007,7 +4022,7 @@ const Media = {
   _failReverseStartup(work){
     if(!work.owns()) return;
     this.pause({seekOnPause:false});
-    setStatus('反向播放時鐘未恢復，播放已暫停','err');
+    setStatus('反向播放時鐘未恢復，播放已暫停','err',false,'反向播放未能恢復，請重新載入素材');
     showToast('反向播放未能恢復，請重新載入素材');
   },
   async _recoverReverseStartup(work){
@@ -4781,7 +4796,7 @@ const Media = {
       onComplete:token=>this._finishMpvTransitionDuration(token,true),
       onDiscard:token=>this._finishMpvTransitionDuration(token,false),
       onTimeout:()=>{
-        setStatus('mpv 切換影片來源後未收到目標畫格', 'err');
+        setStatus('mpv 切換影片來源後未收到目標畫格', 'err',false,'影片來源切換逾時，請重新定位播放點');
         showToast('影片來源切換逾時，請重新定位播放點');
       },
     });

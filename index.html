@@ -47,7 +47,7 @@
             <option value="30">30</option>
           </select>
         </label>
-        <button class="icon" data-act="project-settings" tabindex="-1" title="設定專案畫布解析度"><span data-ui-icon="canvas" aria-hidden="true"></span> <span class="lbl">專案畫布</span></button>
+        <button class="icon" data-act="project-settings" tabindex="-1" aria-label="專案畫布 1920 x 1080 px，開啟畫布設定" aria-haspopup="dialog" title="專案畫布：1920 x 1080 px；開啟畫布設定"><span data-ui-icon="canvas" aria-hidden="true"></span> <span class="lbl">1920 x 1080</span></button>
       </div>
       <div class="menubar-operations">
         <div class="menubar-group" role="group" aria-label="編輯模式">
@@ -372,8 +372,9 @@
     <!-- ===== 狀態列 ===== -->
     <div class="statusbar">
       <span class="status-primary"><span class="dot" id="stDot"></span><span id="stMsg" role="status" aria-live="polite">就緒</span><button id="stProxyCancelBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">取消 Proxy</button><button id="stStopBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">停止</button><button id="stResumeBtn" style="display:none;margin-left:8px;padding:0 6px;font-size:11px;cursor:pointer;">▶ 繼續佇列</button></span>
-      <div class="spacer"></div>
       <span id="stMedia"></span>
+      <span id="stProxy" class="status-proxy">Proxy：未載入</span>
+      <button type="button" class="status-errors" id="stErrorsBtn" data-act="status-errors" aria-haspopup="dialog" aria-label="查看錯誤回報" title="查看錯誤回報">錯誤<span id="stErrorCount" hidden></span></button>
       <div class="sep"></div>
       <span id="stEngine">音訊引擎：原生</span>
       <div class="sep"></div>

@@ -1,6 +1,6 @@
 import { $, sublist } from './dom.js';
 import { State, cueSuffix } from './state.js';
-import { effStyle, normalizeStyleValue, styleNumberBounds, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot, presetIdentity, capturePresetUpdate } from './substyle.js';
+import { effStyle, styleNumberBounds, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot, presetIdentity, capturePresetUpdate } from './substyle.js';
 import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from './subtitle-style-engine.js';
 import { applyCueStylePatch, applyTrackStylePlan } from './subtitles.js';
 import { History, recordHistory, syncCompareSnapshot } from './history.js';
@@ -191,100 +191,39 @@ async function openCueEditModal(c){
   const orig=c.text||'';
   const trackIdx=c.track||0;
   const trackName=State.tracks[trackIdx]?.name||'';
-  const tc=`${secToEncore(c.start,State.fps,State.dropFrame)} → ${secToEncore(c.end,State.fps,State.dropFrame)}`;
-
-  // 找同 in 點的其他軌道字幕（容差 1 格）
-  const TOL=1/Math.max(State.fps||25,1);
-  const siblings=[];
-  State.tracks.forEach((tk,i)=>{
-    if(i===trackIdx)return;
-    const match=State.cues.find(oc=>(oc.track||0)===i&&Math.abs(oc.start-c.start)<=TOL);
-    if(match)siblings.push({trackName:tk.name,text:match.text||'',tkIdx:i});
-  });
-
-  const mkBlock=(label,text,btnId)=>
-    `<div style="margin-bottom:12px">`+
-      `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">`+
-        `<span style="font-size:12px;color:var(--text-faint)">${escapeHTML(label)}</span>`+
-        `<button id="${escapeHTML(btnId)}" style="font-size:11px;padding:1px 7px">複製</button>`+
-      `</div>`+
-      `<div style="background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;min-height:2.2em">`+
-        `<div id="${btnId==='cueEditCopy'?'cueEditOrig':''}" style="white-space:pre-wrap;font-size:14px;font-family:inherit;color:var(--text);user-select:text;cursor:text">${escapeHTML(text).replace(/\n/g, '<br>')}</div>`+
-      `</div>`+
-    `</div>`;
-
-  const sibHtml=siblings.map(s=>mkBlock('軌道：'+s.trackName,s.text,'cueEditCopySib'+s.tkIdx)).join('');
-
-  // 直接編輯此句的生效樣式；未修改的欄位仍沿用原有設定。
-  const STYLE_FIELDS=[
-    ['color','顏色','color'],['fontSize','字級','num'],['bold','粗體','bool'],['italic','斜體','bool'],
-    ['outline','框線','num'],['outlineColor','框線色','color'],['shadow','陰影','num'],
-    ['letterSpacing','字距','num'],['lineSpacing','行距','num'],['font','字型','text'],['vertical','直書','bool'],
-  ];
-  const effNow=effStyle(c, State.tracks[trackIdx]||null);
-  const styleRow=([k,label,type])=>{
-    const v=effNow[k];
-    let inp;
-    if(type==='color') inp=`<input type="color" id="cueStyle_${k}" value="${v}" style="width:26px;height:20px;padding:0">`;
-    else if(type==='num'){
-      const [min,max]=styleNumberBounds(k);
-      inp=`<input type="number" id="cueStyle_${k}" value="${v}" min="${min}" max="${max}" step="${k==='lineSpacing'?0.1:0.5}" style="width:56px">`;
-    }
-    else if(type==='bool') inp=`<select id="cueStyle_${k}"><option value="1"${v?' selected':''}>開</option><option value="0"${!v?' selected':''}>關</option></select>`;
-    else inp=`<input type="text" id="cueStyle_${k}" value="${escapeHTML(String(v))}" style="width:90px">`;
-    return `<label for="cueStyle_${k}" style="white-space:nowrap">${label}</label>${inp}`;
-  };
-  const styleHtml=
-    `<details id="cueStyleEditor" open style="margin-top:10px;border:1px solid var(--border);border-radius:4px;padding:6px 8px">`+
-    `<summary style="cursor:pointer;font-size:12px;color:var(--text-faint)">修改樣式（此句）</summary>`+
-    `<div style="display:grid;grid-template-columns:auto auto auto auto;gap:8px 14px;padding:10px 2px 4px;font-size:12px;align-items:center">`+
-    STYLE_FIELDS.map(styleRow).join('')+
-    `</div></details>`;
-  const readStyleDraft=()=>{
-    // 以開窗時的原有樣式為草稿，只提交真正改動的欄位。
-    // 座標／角度等未提供控件的設定不重建；owner 逐欄合併期間的背景提交。
-    const style={...owner.baseline.style};
-    for(const [k,label,type] of STYLE_FIELDS){
-      const vi=$('cueStyle_'+k);
-      if(!vi) continue;
-      const raw=type==='num' ? (vi.value.trim()==='' ? NaN : +vi.value) : type==='bool' ? (vi.value==='1') : vi.value;
-      if(Object.is(raw,effNow[k])) continue;
-      const value=normalizeStyleValue(k,raw,true);
-      if(value==null){ showToast(label+'的樣式值無效'); return null; }
-      style[k]=value;
-    }
-    return style;
-  };
+  const cueNumber=State.cues.filter(cue=>(cue.track||0)===trackIdx).indexOf(c)+1;
+  const timecode=value=>c.timed===false || !Number.isFinite(value) ? '--:--:--:--' : secToEncore(value,State.fps,State.dropFrame);
+  // 和字幕字數限制相同，空白、換行不計；以 Unicode 字元避免 emoji 被拆成兩個 UTF-16 單位。
+  const countText=text=>Array.from(String(text).replace(/\s/gu,'')).length+' 字';
   const doConfirm=()=>{
     if(!current()) return;
     const ta=$('cueEditTa');
     if(!ta) return;
     let val=ta.innerText;
     if(val.endsWith('\n') && !orig.endsWith('\n')) val=val.slice(0,-1);
-    const style=readStyleDraft();
-    if(!style) return;
-    const result=owner.commit({text:val,style});
+    const result=owner.commit({text:val});
     if(result.ok) session.close({committed:true});
   };
   const session = openModal('修改字幕文字',
-    `<div style="font-size:12px;color:var(--text-faint);margin-bottom:10px">${escapeHTML(trackName)} ｜ ${tc}</div>`+
-    `<div style="max-height:58vh;overflow-y:auto;padding-right:2px">`+
-    sibHtml+
-    mkBlock('原文',orig,'cueEditCopy')+
-    `<div style="font-size:12px;color:var(--text-faint);margin-bottom:4px">修改 <span style="font-size:10px;opacity:.5">（Enter 確認 · Shift+Enter 換行）</span></div>`+
-    `<div id="cueEditTa" contenteditable="true" style="width:100%;min-height:5em;border:1px solid var(--border);border-radius:4px;background:var(--bg);font-size:14px;font-family:inherit;padding:6px;box-sizing:border-box;color:var(--text);overflow-y:auto;outline:none"></div>`+
-    styleHtml+
-    `</div>`,
+    `<div class="cue-edit-dialog">`+
+    `<div class="cue-edit-meta"><span class="cue-edit-track">${escapeHTML(trackName)}</span><span class="cue-edit-number">第 ${cueNumber} 句</span></div>`+
+    `<div class="cue-edit-timecodes"><span>IN <time id="cueEditIn">${timecode(c.start)}</time></span><span>OUT <time id="cueEditOut">${timecode(c.end)}</time></span></div>`+
+    `<section class="cue-edit-section" aria-labelledby="cueEditOrigLabel"><div class="cue-edit-heading"><span id="cueEditOrigLabel">原文</span><span id="cueEditOrigCount" class="cue-edit-count" title="不含空白與換行">${countText(orig)}</span><button type="button" id="cueEditCopy" aria-label="複製原文">複製</button></div>`+
+    `<div id="cueEditOrig" class="cue-edit-text cue-edit-original" role="textbox" aria-readonly="true" aria-multiline="true" aria-labelledby="cueEditOrigLabel" tabindex="0">${escapeHTML(orig)}</div></section>`+
+    `<section class="cue-edit-section" aria-labelledby="cueEditLabel"><div class="cue-edit-heading"><span id="cueEditLabel">修改文字</span><span id="cueEditCount" class="cue-edit-count" title="不含空白與換行" aria-live="polite">${countText(orig)}</span></div>`+
+    `<div id="cueEditTa" class="cue-edit-text" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="cueEditLabel" aria-describedby="cueEditHint cueEditCount"></div>`+
+    `<p id="cueEditHint" class="cue-edit-hint">Enter 確認 · Shift+Enter 換行</p></section></div>`,
     [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:()=>session.close()}],
     { keepVideo:true, onDismiss:owner.cancel, onReplaced:owner.cancel }); // 對話框靠右停、遮罩透明、不隱藏 mpv → 編輯時看得到後面的畫面
   // seek 到這句的起點，讓後面顯示的正是這句對應的畫面（方便對著影像改字）
-  try{ requestPointerSeek(c.start); }catch(e){}
+  try{ if(c.timed!==false && Number.isFinite(c.start)) requestPointerSeek(c.start); }catch(e){}
   setTimeout(()=>{
     if(!current()) return;
     const ta=$('cueEditTa');
     if(ta){
       ta.dataset.orig=orig;
       ta.innerHTML=escapeHTML(orig).replace(/\n/g, '<br>');
+      ta.addEventListener('input',()=>{if(current()) $('cueEditCount').textContent=countText(ta.innerText);});
       ta.focus();
       try { const r = document.createRange(), s = window.getSelection(); r.selectNodeContents(ta); s.removeAllRanges(); s.addRange(r); } catch (_) {}
       
@@ -296,8 +235,6 @@ async function openCueEditModal(c){
       if(e.key==='Enter') e.stopPropagation();
       if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){
         e.preventDefault();
-        const style=readStyleDraft();
-        if(!style) return;
         const sel=window.getSelection();
         if(!sel.rangeCount)return;
         const range=sel.getRangeAt(0).cloneRange();
@@ -320,7 +257,6 @@ async function openCueEditModal(c){
           textBefore,
           textAfter,
           timelineTime:Media.displayTime(),
-          style,
         });
         if(!result.ok)return;
         const nc=result.cue;
@@ -333,14 +269,18 @@ async function openCueEditModal(c){
       } else if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doConfirm();}
     });
     }
-    siblings.forEach(s=>{
-      const btn=$('cueEditCopySib'+s.tkIdx);
-      if(btn) btn.addEventListener('click',()=>{ navigator.clipboard.writeText(s.text).then(()=>{btn.textContent='已複製';setTimeout(()=>btn.textContent='複製',1500);}); });
-    });
     const copyBtn=$('cueEditCopy');
-    if(copyBtn) copyBtn.addEventListener('click',()=>{ navigator.clipboard.writeText(orig).then(()=>{copyBtn.textContent='已複製';setTimeout(()=>copyBtn.textContent='複製',1500);}); });
-    // 樣式欄位的鍵盤事件不外洩，避免觸發全域快捷鍵。
-    $('cueStyleEditor')?.addEventListener('keydown',e=>e.stopPropagation());
+    if(copyBtn) copyBtn.addEventListener('click',async()=>{
+      if(!current()) return;
+      try {
+        await navigator.clipboard.writeText(orig);
+        if(!current()) return;
+        copyBtn.textContent='已複製';
+        setTimeout(()=>{if(current()) copyBtn.textContent='複製';},1500);
+      } catch(_) {
+        if(current()) showToast('複製失敗，請選取原文後使用 Ctrl+C');
+      }
+    });
   },30);
 }
 

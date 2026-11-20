@@ -28,6 +28,14 @@ async function timeline(){
   return Timeline;
 }
 const mouse=(target,type,x=80,y=100,modifiers={})=>target.dispatchEvent(new MouseEvent(type,{bubbles:true,button:0,clientX:x,clientY:y,...modifiers}));
+function numericDraft(input,text){
+  input.select();
+  for(const digit of text){
+    if(!input.dispatchEvent(new KeyboardEvent('keydown',{key:digit,bubbles:true,cancelable:true})))continue;
+    if(!input.dispatchEvent(new InputEvent('beforeinput',{inputType:'insertText',data:digit,bubbles:true,cancelable:true})))continue;
+    input.setRangeText(digit,input.selectionStart,input.selectionEnd,'end');input.dispatchEvent(new InputEvent('input',{inputType:'insertText',data:digit,bubbles:true}));
+  }
+}
 
 beforeAll(async()=>{
   vi.useFakeTimers();
@@ -69,6 +77,29 @@ beforeEach(async()=>{
 afterAll(()=>{UI.closeModal();vi.clearAllTimers();vi.useRealTimers();});
 
 describe('editor mutation ownership through public commands',()=>{
+  it.each([['tin','start','００００００１２',0.48],['tout','end','０００００２１２',2.48]])('字幕 %s 接收全形數字、拒絕文字且提交一次可復原',async(selector,field,digits,expected)=>{
+    State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
+    document.querySelector(`.sub-row[data-id="a"] .${selector}`).dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await Promise.resolve();
+    const input=document.querySelector('.sub-row[data-id="a"] input.tc-edit');numericDraft(input,digits+'letters');
+    expect(input.value).toMatch(/^\d{2}:\d{2}:\d{2}:12$/);
+    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+    expect(State.cues[0][field]).toBe(expected);expect(History.stack).toHaveLength(2);
+    History.undo();expect(State.cues.find(cue=>cue.id==='a')[field]).toBe(field==='start'?1:2);
+  });
+  it.each([
+    ['showClipFade','cfInV','cfIn'],['showClipFade','cfOutV','cfOut'],
+    ['showClipDuration','cdVal',null],['showClipSpeed','clipSpeedDuration','clipSpeedPercent'],
+    ['showCrossfade','xfTV','xfT'],
+  ])('%s 的 %s 也使用共同數字時碼且保留小數秒', (show,id,linked)=>{
+    const previous=clip('prior'),c=clip('numeric-modal',{offset:4});State.clips=[previous,c];History.reset();
+    Menus[show](c);vi.advanceTimersByTime(0);
+    const input=document.getElementById(id);numericDraft(input,'０００００１１２abc');expect(input.value).toBe('00:00:01:12');
+    input.dispatchEvent(new Event('change',{bubbles:true}));
+    if(linked)expect(Number(document.getElementById(linked).value)).toBeCloseTo(linked==='clipSpeedPercent'?4/1.48*100:1.48,3);
+    numericDraft(input,'1.5');input.dispatchEvent(new Event('change',{bubbles:true}));
+    if(linked)expect(Number(document.getElementById(linked).value)).toBeCloseTo(linked==='clipSpeedPercent'?4/1.5*100:1.5,3);
+    else{click('套用');expect(c.out).toBeCloseTo(1.52,10);History.undo();expect(State.clips.find(item=>item.id===c.id).out).toBe(4);}
+  });
   it.each(['全列表重繪','更新同一列'])('字幕時間草稿在%s時保留並可提交',async kind=>{
     State.selectedIds=['a'];State.selectedId='a';Subtitles.renderSubList();
     const edge=document.querySelector('.sub-row[data-id="a"] .tin');
