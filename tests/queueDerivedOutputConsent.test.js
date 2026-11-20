@@ -91,10 +91,10 @@ it('影片工作改 MP3 時清除影片專用選項，保留選軌與單一音�
   const audioPlan={buses:[{id:'L'},{id:'R'}],streams:[{layout:'mono',busIds:['R']},{layout:'mono',busIds:['L']}]};
   const f=setup({outputName:'delivery_TC.mp4',payload:{audioPlan,timecodeWatermark:{start:'00:00:00:00'},
     targetW:800,targetH:640,chapters:[{kind:'note',title:'備註',start:0}]}});
-  f.invoke({},'job',{format:'mp3',burnTimecode:true});
+  f.invoke({},'job',{format:'mp3',mp3Kbps:128,burnTimecode:true});
   const saved=QueueStore.loadJobs(f.queueDir).jobs[0].payload;
   expect(saved).toMatchObject({outPath:path.join(path.dirname(f.outPath),'delivery.mp3'),timecodeWatermark:null,
-    videoKbps:null,audioPlan:{streams:[{layout:'stereo',busIds:['R','L']}]}});
+    videoKbps:null,mp3Kbps:128,audioPlan:{streams:[{layout:'stereo',busIds:['R','L']}]}});
   expect(saved).not.toHaveProperty('chapters');
   expect(saved).not.toHaveProperty('targetW');
   f.invoke({},'job',{format:'prores'});

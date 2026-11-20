@@ -83,7 +83,7 @@ it('原片模式保留來源資訊，舊本機複製狀態不再顯示',()=>{
   expect(root.querySelector('[data-preview-preparation]').textContent).not.toContain('本機預覽');
   state={...state,localPreparation:'failed'};view.update();
   expect(root.querySelector('[data-preview-preparation]').textContent).not.toContain('本機預覽');
-  expect(modeButton('smooth').title).toContain('480p／1000 kb/s');
+  expect(modeButton('smooth').title).toContain('720p，目標 4000 kb/s');
 });
 
 it('兩顆按鈕切換公開setMode，等待期間不重入；按下狀態以最新snapshot為準',async()=>{

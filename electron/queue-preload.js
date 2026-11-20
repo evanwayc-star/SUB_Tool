@@ -16,6 +16,7 @@ function exactFrameRate(value) {
 contextBridge.exposeInMainWorld('queueAPI', {
   exactFrameRate,
   getAll: () => ipcRenderer.invoke('queue:getAll'),
+  estimateSize: (id, draft) => ipcRenderer.invoke('queue:estimateSize', id, draft),
   setPause: (v) => ipcRenderer.invoke('queue:pause', v),
   setConcurrency: (v) => ipcRenderer.invoke('queue:setConcurrency', v),
   stopJob: (id) => ipcRenderer.invoke('queue:stopJob', id),

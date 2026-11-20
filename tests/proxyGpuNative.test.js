@@ -68,7 +68,8 @@ it('NVENC 實機 Proxy 的畫格、色彩與音訊內容維持正式規格',asyn
   try {
     for(const kind of ['h264','prores']) {
       const source=path.join(dir,`${kind}.mov`);
-      run(ffmpeg,['-v','error','-y','-f','lavfi','-i','color=red:s=320x180:r=5:d=1.2',
+      const hd=kind==='h264';
+      run(ffmpeg,['-v','error','-y','-f','lavfi','-i',`color=red:s=${hd?'1920x1080':'320x180'}:r=5:d=1.2`,
         '-f','lavfi','-i','sine=frequency=440:sample_rate=48000:duration=1.2',
         '-c:v',kind==='h264'?'libx264':'prores_ks',
         ...(kind==='h264'?['-pix_fmt','yuv420p']:['-profile:v','2','-pix_fmt','yuv422p10le']),
@@ -92,7 +93,7 @@ it('NVENC 實機 Proxy 的畫格、色彩與音訊內容維持正式規格',asyn
         outputs.push(output);
       }
       const [gpu,cpu]=outputs,[actual,reference]=outputs.map(output=>videoInfo(output.proxy));
-      expect(actual.streams[0]).toMatchObject({codec_name:'h264',width:854,height:480,pix_fmt:'yuv420p',has_b_frames:0});
+      expect(actual.streams[0]).toMatchObject({codec_name:'h264',width:hd?1280:320,height:hd?720:180,pix_fmt:'yuv420p',has_b_frames:0});
       for(const field of ['color_space','color_primaries','color_transfer']) expect(actual.streams[0][field]).toBe(reference.streams[0][field]);
       expect(actual.frames).toHaveLength(6);
       expect(actual.frames.map(frame=>frame.best_effort_timestamp_time)).toEqual(reference.frames.map(frame=>frame.best_effort_timestamp_time));

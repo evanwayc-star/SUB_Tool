@@ -53,11 +53,12 @@ const { createNativeAudioMeter } = require('./native-audio-meter');
 const { motherSourceFingerprint } = require('./mother-source-evidence');
 const { createVocalWaveformRuntime, validateChunkRequest } = require('./vocal-waveform-runtime');
 const { vocalSourceFingerprint } = require('./vocal-waveform-fingerprint');
+const { accessVocalPeaks } = require('./vocal-waveform-sidecar');
 /* 交付規格派生與 renderer 共用同一份（見 shared/README.md）。已入列工作的
    時間碼起點仍使用送出時凍結的值，不從目前專案狀態重算。 */
-const { deriveDeliverySpec } = require('../shared/delivery-resolution.cjs');
+const { deriveDeliverySpec, deliveryEstimateDimensions } = require('../shared/delivery-resolution.cjs');
 const { exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
-const { DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
+const { deliverySizeLabel, MP3_BITRATES, normalizeMp3Kbps, DELIVERY_FORMAT_PRESETS, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
 const {
   buildIngestArgs,
   createFFmpegExecution,
@@ -1132,13 +1133,24 @@ ipcMain.on('queue:exactFrameRate', (event, value) => {
 
 ipcMain.handle('queue:getAll', () => ({
   jobs: QueueManager.jobs().map(job => ({ ...job,
-    payload: { ...job.payload, audioSummary: QueueHistory.audioSummary(job.payload) },
+    payload: { ...job.payload, audioSummary: QueueHistory.audioSummary(job.payload),
+      ...(job.status === JOB_STATUS.QUEUED || job.status === JOB_STATUS.RUNNING ? { sizeLabel: deliverySizeLabel(job.payload) } : {}) },
   })),
   isPaused: QueueManager.isPaused,
   concurrency: QueueManager.concurrency,
   deliveryFormatPresets: DELIVERY_FORMAT_PRESETS,
+  mp3Bitrates: MP3_BITRATES,
 }));
 ipcMain.handle('queue:getStatus', () => queueStatusSnapshot());
+
+ipcMain.handle('queue:estimateSize', (event, id, draft) => {
+  if (event.sender !== queueWin?.webContents) return null;
+  const p = QueueManager.jobs().find(job => job.id === id && job.status === JOB_STATUS.QUEUED)?.payload;
+  if (!p || !draft) return null;
+  return deliverySizeLabel({ ...p, format: draft.format, mp3Kbps: draft.mp3Kbps,
+    ...deliveryEstimateDimensions({ canvasW: p.canvasW || p.width, canvasH: p.canvasH || p.height,
+      format: draft.format, targetH: draft.targetH, targetW: draft.targetW, videoKbps: draft.videoKbps }) });
+});
 
 ipcMain.handle('queue:pause', (e, paused) => {
   QueueManager.setPaused(paused);
@@ -1346,7 +1358,10 @@ function prepareQueueDeliveryUpdate(job, patch) {
      失敗時 job 必須維持原狀，不可以留下改到一半的狀態。 */
   const nextPayload = { ...p, format, outPath: newPath, ...spec, audioPlan, canvasW, canvasH };
   if (spec.targetW == null) delete nextPayload.targetW;
-  if (format === 'mp3') delete nextPayload.chapters;
+  if (format === 'mp3') {
+    delete nextPayload.chapters;
+    nextPayload.mp3Kbps = normalizeMp3Kbps(patch?.mp3Kbps ?? p.mp3Kbps);
+  } else delete nextPayload.mp3Kbps;
   const outputAuthority = ExportLease.retargetOutputAuthority(job.outputAuthority, newPath);
   // 修改格式或 TC 自動衍生的檔名沒有經過交付清單的覆寫確認。
   // 即使檔案身分可驗證，也不能把它當成使用者同意覆蓋。
@@ -1614,6 +1629,10 @@ ipcMain.handle('audio:vocal-wave-chunk', (e, request) => {
   const chunk = validateChunkRequest(request);
   requireReadablePath('audio:vocal-wave-chunk', chunk.path);
   return vocalWaveformRuntime.readChunk(e.sender, chunk);
+});
+ipcMain.handle('audio:vocal-wave-peaks', (e, request) => {
+  requireReadablePath('audio:vocal-wave-peaks', request?.path);
+  return accessVocalPeaks(request, mediaIntakeRuntime.withAudioEffectCache);
 });
 ipcMain.handle('audio:vocal-wave-cancel', (e, { requestId } = {}) =>
   vocalWaveformRuntime.cancel(e.sender, requestId));

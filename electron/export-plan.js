@@ -30,7 +30,7 @@ const { fixedFrameTime } = require('../shared/clip-visual.cjs');
 const { deliveryFrameRateRatio, exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
 const { normalizeDeliveryChapters } = require('../shared/delivery-chapters.cjs');
 const { deliveryResolution } = require('../shared/delivery-resolution.cjs');
-const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, isAudioDeliveryFormat } = require('../shared/delivery-formats.cjs');
+const { aacKbps, normalizeMp3Kbps, getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, isAudioDeliveryFormat } = require('../shared/delivery-formats.cjs');
 const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter, HARD_LIMITER_PRESETS } = require('../shared/audio-loudness.cjs');
 const { airlineEncoding } = require('./airline-encoding');
 const { discEncoding } = require('./disc-encoding');
@@ -341,7 +341,7 @@ function _buildWavOutput(busLabels, plan, fc) {
 // 這是輸出編碼位元率；輸入始終由母素材直接解碼（見 _buildPlannedAudio）。
 function aacBitrateForChannels(channels) {
   const n = Math.max(1, Math.floor(_finiteNumber(channels, 1)));
-  return n >= 6 ? '640k' : (n >= 2 ? '320k' : '192k');
+  return `${aacKbps(n)}k`;
 }
 
 /* 匯出時間碼只接受 renderer 以 secToEncore() 產生的 SMPTE 字串。不要把任意 drawtext
@@ -450,6 +450,7 @@ function prepareDeliveryPayload(spec = {}) {
   const customSize = !fixedMode && !audioOnly && spec.targetW != null
     ? deliveryResolution({ targetW: spec.targetW, targetH: spec.targetH }) : null;
   const prepared = { ...spec, audioPlan: normalizedPlan,
+    ...(spec.format === 'mp3' ? { mp3Kbps: normalizeMp3Kbps(spec.mp3Kbps) } : {}),
     ...(customSize ? { width: customSize.w, height: customSize.h } : {}),
     ...(preset ? { width: fixedMode.width, height: fixedMode.height, fps: fixedMode.fps,
       videoKbps: preset.videoKbps } : {}) };
@@ -512,11 +513,12 @@ function buildDeliveryArgv(spec = {}, env = {}) {
         fc.push(label + filter + output);
       }
       const channels = Math.min(2, stream.spec.channels);
+      const bitrate = spec.mp3Kbps;
       return {
         args: ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', output, '-vn', '-map_metadata', '-1',
-          '-map_chapters', '-1', '-ar', '48000', '-c:a', 'libmp3lame', '-b:a', '320k', outPath],
-        label: `匯出 MP3（${channels === 1 ? 'Mono' : 'Stereo'}，320 kbps）`,
-        duration: D, plannedEncoder: 'libmp3lame', isGpu: false, kbps: null, audioBitrates: ['320k'], audioChannels: channels,
+          '-map_chapters', '-1', '-ar', '48000', '-c:a', 'libmp3lame', '-b:a', `${bitrate}k`, outPath],
+        label: `匯出 MP3（${channels === 1 ? 'Mono' : 'Stereo'}，${bitrate} kbps）`,
+        duration: D, plannedEncoder: 'libmp3lame', isGpu: false, kbps: null, audioBitrates: [`${bitrate}k`], audioChannels: channels,
       };
     }
     const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);

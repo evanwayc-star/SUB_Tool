@@ -89,6 +89,13 @@ contextBridge.exposeInMainWorld('subtool', {
   extractAudio: (p, idx, duration, codec) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:extractAudio', { path: p, idx, duration, codec }); },
   waveAudio:    (p, duration) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:waveAudio', { path: p, duration }); },
   vocalWaveFingerprint: source => readSourceFingerprint('audio:vocal-wave-fingerprint',source),
+  vocalWavePeaks: (source, descriptor, peaks) => {
+    if (typeof source !== 'string' || !source.trim() || source.length > 32767 || source.includes('\0')
+      || typeof descriptor !== 'string' || descriptor.length > 2048) throw new TypeError('人聲波形參數無效');
+    if (peaks !== undefined && (!(peaks instanceof Float32Array) || peaks.byteLength > 86400 * 100 * 8))
+      throw new TypeError('人聲波形大小無效');
+    return ipcRenderer.invoke('audio:vocal-wave-peaks', {path:source,descriptor,peaks});
+  },
   audioSourceFingerprint: source => readSourceFingerprint('audio:source-fingerprint',source),
   vocalWaveChunk: (request) => {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少人聲波形片段參數');

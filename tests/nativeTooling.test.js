@@ -282,7 +282,7 @@ describe('原生工具候選路徑', () => {
   it('VideoToolbox 探測成功後，proxy 與交付匯出真的使用該編碼器', () => {
     expect(previewVideoEncoderArgs('h264_videotoolbox')).toEqual([
       '-c:v', 'h264_videotoolbox',
-      '-b:v', '1000k', '-maxrate', '1000k', '-bufsize', '2000k',
+      '-b:v', '4000k', '-maxrate', '6000k', '-bufsize', '12000k',
       '-realtime', '1',
       '-allow_sw', '1',
       '-bf', '0',
@@ -301,7 +301,7 @@ describe('原生工具候選路徑', () => {
     expect(previewVideoEncoderArgs('h264_nvenc')).toContain('h264_nvenc');
     expect(previewVideoEncoderArgs('libx264')).toEqual([
       '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-      '-b:v', '1000k', '-maxrate', '1000k', '-bufsize', '2000k',
+      '-b:v', '4000k', '-maxrate', '6000k', '-bufsize', '12000k',
     ]);
     expect(deliveryVideoEncoderArgs('h264_qsv', 6000)).toEqual([
       '-c:v', 'h264_qsv', '-b:v', '6000k', '-maxrate', '6000k', '-bufsize', '12000k',

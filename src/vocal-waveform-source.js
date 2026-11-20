@@ -3,7 +3,7 @@ import { Media } from './media.js';
 import { AudioEngine } from './audio-engine.js';
 import { audioMotherPath } from '../shared/audio-loudness.cjs';
 import { vocalWaveformClient, vocalAbortError } from './vocal-waveform-worker-client.js';
-import { vocalWaveformCache, vocalCacheDescriptor } from './vocal-waveform-cache.js';
+import { vocalWaveformCache, vocalCacheDescriptor, validPeaks } from './vocal-waveform-cache.js';
 import { readMediaBytes } from './decode/response-reader.js';
 
 function keys(source){
@@ -142,8 +142,18 @@ async function runSourceVocals(spec,resolved,{signal,onProgress,identity}){
     .some(item=>signature(sourceSpec(item))===identity);
   const assertOwned=()=>{if(!owns())throw vocalAbortError();};
   const descriptor=await cacheDescriptor(spec,signal);assertOwned();
+  const share=async peaks=>{
+    if(!descriptor || !spec.path || !DESK?.vocalWavePeaks)return null;
+    // A read-only/offline NAS may still display an already computed result.
+    try{return await DESK.vocalWavePeaks(spec.path,descriptor,peaks);}catch{return null;}
+  };
+  const sharedPeaks=await share();assertOwned();
+  if(validPeaks(sharedPeaks,spec.duration)){
+    await vocalWaveformCache.write(descriptor,spec.duration,sharedPeaks);assertOwned();
+    onProgress?.({percent:100,label:'已載入共用人聲快取'});return sharedPeaks;
+  }
   const cached=await vocalWaveformCache.read(descriptor,spec.duration);assertOwned();
-  if(cached){onProgress?.({percent:100,label:'已載入人聲快取'});return cached;}
+  if(cached){await share(cached);assertOwned();onProgress?.({percent:100,label:'已載入人聲快取'});return cached;}
   let webBuffers=null;
   const readChunk=async ({start,duration})=>{
     assertOwned();
@@ -220,7 +230,10 @@ async function runSourceVocals(spec,resolved,{signal,onProgress,identity}){
   if(descriptor){
     const after=await cacheDescriptor(spec,signal);assertOwned();
     if(after&&after!==descriptor)throw new Error('母素材在分析期間變更，請重試');
-    if(after===descriptor){await vocalWaveformCache.write(descriptor,spec.duration,peaks);assertOwned();}
+    if(after===descriptor){
+      await vocalWaveformCache.write(descriptor,spec.duration,peaks);assertOwned();
+      await share(peaks);assertOwned();
+    }
   }
   return peaks;
 }

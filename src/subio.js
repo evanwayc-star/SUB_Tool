@@ -14,8 +14,9 @@ import { applyDeliveryAudioSpec, createDeliveryAudioSpec, videoExportCapability 
 import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, isAudioDeliveryFormat, normalizeDeliveryPresetAudio, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
+import { deliverySizeLabel, MP3_BITRATES, normalizeMp3Kbps, DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, isAudioDeliveryFormat, normalizeDeliveryPresetAudio, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { createDeliveryList, deliveryResolution, projectTagFrom } from './delivery-list.js';
+import { deliveryEstimateDimensions } from '../shared/delivery-resolution.cjs';
 import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission, exportSourceError, formatOverwriteConfirmation } from './delivery-submission.js';
 import { escapeHTML, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
@@ -367,6 +368,19 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
      必須顯示同一份清單，否則「說會燒哪幾軌」與「實際燒了哪幾軌」會不一致。 */
   const activeSubs = burnedSubtitleTrackNames(data.tracks, subtitleCuesForSubmission(data));
 
+  function estimatedSize(row) {
+    const audioPlan = data.audioPlan && {
+      buses: (row.format === 'wav' && row.wavBusIds) || row.audioBuses || data.audioPlan.buses,
+      streams: row.audioPlan?.streams ?? data.audioPlan.streams,
+    };
+    return deliverySizeLabel({
+      format: row.format, duration: data.duration, audioPlan,
+      fps: row.targetFps || data.fps, mp3Kbps: row.mp3Kbps,
+      ...deliveryEstimateDimensions({ format: row.format, canvasW: data.canvasW, canvasH: data.canvasH,
+        targetW: row.targetW, targetH: row.targetH, videoKbps: row.kbps }),
+    });
+  }
+
   function renderRow(r, i) {
     const isWav = r.format === 'wav';
     const audioDelivery = isAudioDeliveryFormat(r.format);
@@ -414,6 +428,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       <section class="delivery-card" aria-label="輸出項目 ${i + 1}">
         <div class="delivery-card-head">
           <span class="delivery-item-title">輸出項目 ${i + 1}</span>
+          <span class="delivery-size" title="依輸出時長、編碼與聲道估算。實際大小會隨畫面內容與封裝而異。">${estimatedSize(r)}</span>
           ${preset ? '<span class="delivery-fixed-badge">固定規格</span>' : ''}
           <button type="button" class="ev-del delivery-btn-del" data-idx="${i}" aria-label="刪除輸出項目 ${i + 1}" title="刪除此輸出項目">刪除</button>
         </div>
@@ -465,7 +480,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         </div>
         <div class="delivery-card-options">
           <div class="delivery-audio-line"><span class="delivery-options-label">音訊</span><span class="delivery-audio-info">${escapeHTML(audioDesc)}</span><button type="button" class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="獨立設定此輸出檔案的音軌與左右聲道">設定輸出音軌</button></div>
-          ${r.format === 'mp3' ? '<span class="delivery-audio-info">48 kHz · 320 kbps</span>' : ''}
+          ${r.format === 'mp3' ? `<label class="delivery-field"><span>MP3 音訊碼率（48 kHz）</span><select class="ev-mp3-kbps delivery-input" data-idx="${i}">${MP3_BITRATES.map(rate => `<option value="${rate}" ${rate === normalizeMp3Kbps(r.mp3Kbps) ? 'selected' : ''}>${rate} kbps</option>`).join('')}</select></label>` : ''}
           ${!audioDelivery ? `<div class="delivery-visual-options"><span class="delivery-sub-chip" title="${escapeHTML(activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕')}">${activeSubs.length ? '字幕：'+escapeHTML(activeSubs.join(', ')) : '無字幕'}</span>
             <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 畫面燒入時間碼</label></div>` : ''}
           ${IS_DESKTOP && ['h264','prores'].includes(r.format) ? `<div class="delivery-visual-options" role="group" aria-label="影片書籤">
@@ -502,6 +517,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     const idxOf = e => +e.target.dataset.idx;
     const after = () => { updateRows(); checkConflicts(); };
 
+    $$('.ev-mp3-kbps').forEach(el => el.onchange = e => { list.setMp3Kbps(idxOf(e), e.target.value); after(); });
     $$('.ev-format').forEach(el => el.onchange = e => { list.setFormat(idxOf(e), e.target.value); after(); });
     $$('.ev-res').forEach(el => el.onchange = e => {
       if (e.target.value === 'custom') {
@@ -519,12 +535,19 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         const name = card.querySelector('.ev-name'), kbps = card.querySelector('.ev-kbps');
         name.value = name.title = row.customName;
         if (kbps) kbps.value = row.kbps;
+        card.querySelector('.delivery-size').textContent = estimatedSize(row);
       };
       pair.oninput = () => { syncSize(); submission.invalidatePreview(); };
       pair.onchange = () => { syncSize(); checkConflicts(); };
     });
     $$('.ev-fps').forEach(el => el.onchange = e => { list.setTargetFps(idxOf(e), e.target.value); after(); });
-    $$('.ev-kbps').forEach(el => el.onchange = e => list.setKbps(idxOf(e), e.target.value));
+    $$('.ev-kbps').forEach(el => {
+      el.oninput = el.onchange = e => {
+        const index = idxOf(e);
+        list.setKbps(index, e.target.value);
+        el.closest('.delivery-card').querySelector('.delivery-size').textContent = estimatedSize(list.get(index));
+      };
+    });
     // 文字欄位失焦時若重建整列，下一個被點擊的 input 會在 mouseup 前消失，
     // 看起來就像檔名完全無法輸入。輸入時同步草稿，失焦只更新驗證與欄位顯示。
     $$('.ev-name').forEach(el => {

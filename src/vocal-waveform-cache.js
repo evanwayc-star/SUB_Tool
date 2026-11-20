@@ -25,7 +25,7 @@ export function vocalPeakLength(duration) {
   return Math.ceil(Math.round(duration * VOCAL_SAMPLE_RATE) / (VOCAL_SAMPLE_RATE / VOCAL_RESOLUTION)) * 2;
 }
 
-function validPeaks(peaks, duration) {
+export function validPeaks(peaks, duration) {
   if (!(peaks instanceof Float32Array) || peaks.length !== vocalPeakLength(duration) || peaks.byteLength > MAX_BYTES) return false;
   for (let i = 0; i < peaks.length; i += 2) {
     if (!Number.isFinite(peaks[i]) || !Number.isFinite(peaks[i + 1]) || peaks[i] > 0 || peaks[i + 1] < 0

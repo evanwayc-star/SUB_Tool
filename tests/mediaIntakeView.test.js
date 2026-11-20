@@ -21,11 +21,12 @@ beforeEach(async()=>{
 
 it.each([false,true])('實際 Proxy 轉檔和停止操作顯示於錯誤按鈕前，左欄獨立顯示操作訊息（含音軌=%s）',async audio=>{
   setStatus('專案已儲存','ok');
-  const work=jobs.ingest({path:'demo.mxf',needsProxy:true});
+  const work=jobs.ingest({path:'demo.mxf',duration:3600,needsProxy:true});
   progress({...requests[0],stage:'transcoding',label:'正在轉檔 Proxy 與分析音訊',pct:42,outputs:{proxy:true,audio}});
   const right=document.getElementById('stBackground');
   expect(right.nextElementSibling.id).toBe('stErrorsBtn');
   expect(right.querySelector('#stIntakeMsg').textContent).toContain('42%');
+  expect(right.querySelector('#stIntakeMsg').textContent).toContain('Proxy 約 1.80 GB');
   expect(right.querySelector('#stProxy').hidden).toBe(true);
   expect(right.contains(document.getElementById('stProxyCancelBtn'))).toBe(true);
   expect(document.getElementById('stMsg').textContent).toBe('專案已儲存');

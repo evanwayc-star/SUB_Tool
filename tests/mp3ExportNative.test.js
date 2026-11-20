@@ -34,23 +34,27 @@ it.skipIf(!existsSync(ffmpeg) || !existsSync(ffprobe))('MP3 解碼保留 Mono、
       '-metadata', 'title=original mother title', '-c:a', 'pcm_s24le', source], options);
     const buses = ids.map((id, sourceChannel) => ({ id, inputs: [{ file: source, sourceStream: 0, sourceChannel, trimEnd: 1 }] }));
     const sum = 1 + 0.707 + 0.707 + 0.5;
-    for (const [streams, gains] of [
-      [[{ layout: 'mono', busIds: [ids[2]] }], [[0, 0, 1, 0, 0, 0]]],
+    for (const [streams, gains, mp3Kbps] of [
+      ...[96, 128, 160, 192, 224, 256, 320].map(rate =>
+        [[{ layout: 'mono', busIds: [ids[2]] }], [[0, 0, 1, 0, 0, 0]], rate]),
       [[{ layout: 'mono', busIds: [ids[5]] }, { layout: 'mono', busIds: [ids[3]] }], [[0, 0, 0, 0, 0, 1], [0, 0, 0, 1, 0, 0]]],
       [[{ layout: '5.1', busIds: ids }], [[1, 0, .707, .5, .707, 0], [0, 1, .707, .5, 0, .707]].map(side => side.map(gain => gain / sum))],
     ]) {
       const outPath = path.join(dir, 'output.mp3');
-      const plan = buildDeliveryArgv({ format: 'mp3', audioPlan: { buses, streams }, duration: 1, outPath });
+      const plan = buildDeliveryArgv({ format: 'mp3', mp3Kbps, audioPlan: { buses, streams }, duration: 1, outPath });
       execFileSync(ffmpeg, ['-nostdin', '-v', 'error', ...plan.args], options);
       const meta = JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_streams', '-show_chapters', '-show_format', '-of', 'json', outPath], options));
       expect(meta.streams).toHaveLength(1);
-      expect(meta.streams[0]).toMatchObject({ codec_name: 'mp3', codec_type: 'audio', sample_rate: '48000', bit_rate: '320000', channels: gains.length });
+      expect(meta.streams[0]).toMatchObject({ codec_name: 'mp3', codec_type: 'audio', sample_rate: '48000', bit_rate: String((mp3Kbps ?? 320) * 1000), channels: gains.length });
       expect(meta.chapters).toEqual([]);
       expect(meta.format.tags?.title).toBeUndefined();
       const samples = execFileSync(ffmpeg, ['-v', 'error', '-i', outPath, '-map', '0:a:0', '-f', 'f32le', 'pipe:1'], options);
       expect(samples.length).toBe(fsHz * gains.length * 4);
       gains.forEach((weights, side) => weights.forEach((gain, i) => {
-        expect(amplitude(samples, gains.length, side, frequencies[i]), `聲道 ${side + 1} 的 ${frequencies[i]} Hz`).toBeCloseTo(0.15 * gain, 2);
+        const measured = amplitude(samples, gains.length, side, frequencies[i]);
+        // LAME 在較低碼率可能衰減約 0.45 dB；保留 320 kbps 與靜音聲道的原精度。
+        if (gain && mp3Kbps < 320) expect(Math.abs(measured / (0.15 * gain) - 1)).toBeLessThan(0.06);
+        else expect(measured, `聲道 ${side + 1} 的 ${frequencies[i]} Hz`).toBeCloseTo(0.15 * gain, 2);
       }));
     }
   } finally {

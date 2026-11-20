@@ -21,7 +21,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
   // 終態事件可能早於 IPC 回覆：畫面可移除已完成工作，交接仍由 session 持有。
   const awaitingReply=new Set();
   const snapshot=()=>({sessionId:session.id,count:pending.size,hasProxy:[...pending.values()].some(job=>job.proxy),
-    jobs:[...pending.values()].map(job=>({requestId:job.requestId,path:job.path,proxy:job.proxy,local:job.local,
+    jobs:[...pending.values()].map(job=>({requestId:job.requestId,path:job.path,proxy:job.proxy,local:job.local,duration:job.duration,
       progress:job.progress?{...job.progress}:null})),
     recoveries:[...recoveries.values()].filter(entry=>entry.owns()&&entry.status!=='working').map(entry=>({
       id:entry.id,path:entry.path,status:entry.status,message:entry.message,saved:entry.saved||null,
@@ -36,7 +36,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     const local=method==='prepareWaveform',sourceWave=method==='prepareSourceWaveform';
     const channel=options.channel;
     const waveStage=channel?'source-channel-waveform':local?'waveform':'source-waveform';
-    const job={owner,requestId,path:options.path||null,recoveryId:channel?null:recoveries.get(options.path)?.id,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,onWaveform,onProgress,
+    const job={owner,requestId,path:options.path||null,duration:options.duration,recoveryId:channel?null:recoveries.get(options.path)?.id,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,onWaveform,onProgress,
       progress:local?{stage:waveStage,label:channel?'讀取聲道波形':'準備波形',pct:null}:sourceWave?{stage:waveStage,label:channel?'檢查聲道波形快取':'等候優先產生波形',pct:null,queued:true}:null};
     if(job.proxy&&job.path)proxyStates.set(job.path,{requestId,state:'preparing',pct:null});
     if(!local) owner.used=true;

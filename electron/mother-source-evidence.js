@@ -48,8 +48,8 @@ function finishEvidence(before, after, digestLength) {
   return before.hash.digest('hex').slice(0, digestLength);
 }
 
-// 跨電腦只有完整內容可識別同一份母素材；本機路徑／檔案身分僅用於
-// 讀取期間的變更檢查，不參與可攜式 digest。固定 buffer 避免大檔整份載入。
+// 比對不同實體複本時讀取完整內容。本機路徑與檔案身分只用於偵測
+// 讀取期間的變更。固定 buffer 避免大檔整份載入。
 async function portableSourceFingerprint(source, {
   shouldContinue = () => true, fileSystem = fsp, onProgress = null,
 } = {}) {
@@ -150,11 +150,13 @@ async function motherSourceFingerprint(source, {
 // 同一 NAS 檔案可由不同 client/mount 開啟；dev 與絕對路徑不是共享身分。
 // 這是有檔案身分的快速 freshness 證據，並非另一種全文 checksum。
 // 非 UNC 路徑只在同一主機／裝置內有效；無法確認的掛載別名安全 miss。
-function sharedSourceFingerprintSync(source, { fileSystem = fs } = {}) {
+function sharedSourceFingerprintSync(source, { fileSystem = fs, networkOnly = false } = {}) {
   const resolved = path.resolve(source), physical = fileSystem.realpathSync.native(resolved);
   let normalized = physical.replaceAll('\\', '/');
   if (normalized.toLowerCase().startsWith('//?/unc/')) normalized = '//' + normalized.slice(8);
-  const unc = /^\/\/([^/]+)\/([^/]+)\//.exec(normalized);
+  // Device namespaces such as //?/C:/ and //./ are never NAS servers.
+  const unc = /^\/\/(?![?.]\/)([^/]+)\/([^/]+)\//.exec(normalized);
+  if (networkOnly && !unc) return null;
   const file = fileSystem.openSync(resolved, 'r');
   try {
     const stat = fileSystem.fstatSync(file, { bigint: true });

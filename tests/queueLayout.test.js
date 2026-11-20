@@ -13,7 +13,8 @@ const openWindows = [];
 async function openQueueWindow(jobs, { getAll } = {}) {
   const queueAPI = {
     exactFrameRate: rate => frameRates.exactDeliveryFrameRate(rate),
-    getAll: vi.fn().mockResolvedValue({ jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: deliveryFormats.DELIVERY_FORMAT_PRESETS }),
+    estimateSize: vi.fn().mockResolvedValue('預估約 2.4 MB'),
+    getAll: vi.fn().mockResolvedValue({ mp3Bitrates: deliveryFormats.MP3_BITRATES, jobs, isPaused: false, concurrency: 1, deliveryFormatPresets: deliveryFormats.DELIVERY_FORMAT_PRESETS }),
     setPause: vi.fn().mockResolvedValue(),
     setConcurrency: vi.fn().mockResolvedValue(),
     stopJob: vi.fn().mockResolvedValue(),
@@ -114,6 +115,27 @@ describe('佇列更新與讀取恢復', () => {
   it.each(['h264', 'prores'])('%s 工作直接顯示實際交付影格率', async format => {
     const { document } = await openQueueWindow([{ id: 'fps', status: 'queued', payload: { format, fps: 23.976, width: 1920, height: 1080 } }]);
     expect(document.querySelector('.job-chip--spec').textContent).toContain('23.976 fps');
+  });
+
+  it('編輯佇列 MP3 碼率即取得新大小，較慢的舊回應不能蓋回去', async () => {
+    const { document, queueAPI } = await openQueueWindow([{ id: 'audio', status: 'queued',
+      payload: { format: 'mp3', duration: 60, sizeLabel: '預估約 2.4 MB' } }]);
+    document.querySelector('[data-action="edit"]').click();
+    const select = document.querySelector('[data-f="mp3Kbps"]');
+    const output = document.querySelector('[data-estimate]');
+    expect(output.textContent).toBe('預估約 2.4 MB');
+    let older;
+    queueAPI.estimateSize.mockImplementationOnce(() => new Promise(resolve => { older = resolve; }))
+      .mockResolvedValueOnce('預估約 960 kB');
+    for (const rate of ['192', '128']) {
+      select.value = rate;
+      select.dispatchEvent(new document.defaultView.Event('change', { bubbles: true }));
+    }
+    expect(queueAPI.estimateSize).toHaveBeenLastCalledWith('audio', expect.objectContaining({ format: 'mp3', mp3Kbps: 128 }));
+    await settle(document);
+    older('預估約 1.4 MB');
+    await settle(document);
+    expect(output.textContent).toBe('預估約 960 kB');
   });
 
   it('進度更新與排序變動保留同一失敗詳情及真實鍵盤焦點，其他進度仍更新', async () => {
@@ -945,10 +967,15 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(box.querySelector('[data-only="video"]').hidden).toBe(true);
     expect(box.querySelector('[data-only="h264"]').hidden).toBe(true);
 
+    if (format === 'mp3') {
+      const bitrate = box.querySelector('[data-f="mp3Kbps"]');
+      expect(bitrate.value).toBe('320');
+      bitrate.value = '192';
+    }
     box.querySelector('[data-f="save"]').click();
     await new Promise(r => setTimeout(r, 0));
-    // WAV 沒有視訊碼率，不可以送 kbps
-    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1', { format, targetH: 0 });
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1', { format, targetH: 0,
+      ...(format === 'mp3' ? { mp3Kbps: 192 } : {}) });
   });
 
   it('自訂高度等於 720p 預設時仍可重開寬高欄位，修改寬度後獨立送出', async () => {

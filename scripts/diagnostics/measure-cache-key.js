@@ -51,11 +51,17 @@ console.log(`  ${String(total).padStart(7)} ms  合計`);
 
 if (!key) process.exit(0);
 
-const sideDir = path.join(path.dirname(SRC), '.subtool_Cache', key);
+const runtime = createMediaIntakeRuntime({ tempRoot: os.tmpdir() });
+const candidates = time('runtime.inspectCache（本機與 NAS 來源識別）', () => runtime.inspectCache(SRC));
+const inspected = candidates?.find(entry => !entry.error) || candidates?.[0];
+if (!inspected?.dir) {
+  console.log('無法辨識此素材的快取目錄。');
+  process.exit(1);
+}
+const sideDir = inspected.dir;
 console.log(`\n影片旁的快取目錄：${sideDir}`);
 console.log(`  存在：${fs.existsSync(sideDir)}`);
 
-const runtime = createMediaIntakeRuntime({ tempRoot: os.tmpdir() });
 console.log('\nisDirWritable（使用 runtime 的實際目錄與探針所有權檢查）：');
 const writable = time('runtime.isDirWritable', () => runtime.isDirWritable(sideDir));
 console.log(`  可寫入：${writable === true}`);
@@ -64,8 +70,6 @@ const metaPath = path.join(sideDir, 'meta.json');
 if (fs.existsSync(metaPath)) {
   console.log('\nmeta.json 的內容檢查（runtime owner 保留 generation 相對路徑）：');
   time('讀 meta.json', () => JSON.parse(fs.readFileSync(metaPath, 'utf8')));
-  const inspected = time('runtime.inspectCache（路徑解析與檔案證據）', () =>
-    runtime.inspectCache(SRC).find(entry => entry.dir === sideDir));
   if (inspected?.error) console.log(`  索引不可用：${inspected.error}`);
   else {
     const files = inspected?.files || [];

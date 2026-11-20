@@ -110,6 +110,18 @@ beforeEach(() => {
 });
 
 describe('匯出交付清單', () => {
+  it('每列依輸出 In/Out 顯示大小，修改碼率即更新該列', async () => {
+    await showExportVideoDialog();
+    await vi.waitFor(() => expect(document.querySelector('.delivery-size')).not.toBeNull());
+    document.getElementById('evAddRowBtn').click();
+    const estimates = [...document.querySelectorAll('.delivery-size')];
+    const other = estimates[1].textContent;
+    const bitrate = document.querySelector('.ev-kbps');
+    bitrate.value = '4000';
+    bitrate.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(estimates[0].textContent).toMatch(/預估約 1[01]([.]\d+)? MB/);
+    expect(estimates[1].textContent).toBe(other);
+  });
   it('影片書籤只提供備註選項，勾選後仍保留自訂樣式字幕燒錄', async () => {
     State.notes = [{ time: 14, text: '備註檢查' }];
     State.cues = [{ start: 14, end: 16, text: '自訂樣式內容', style: { italic: true } }];
@@ -583,6 +595,14 @@ describe('匯出交付清單', () => {
     expect(document.querySelector('.ev-res,.ev-fps,.ev-tc,.ev-kbps,.ev-chapter-notes,.delivery-sub-chip')).toBeNull();
     expect(document.querySelector('.ev-name').value.endsWith('.'+formatName)).toBe(true);
 
+    if (formatName === 'mp3') {
+      const rates = document.querySelector('.ev-mp3-kbps');
+      expect([...rates.options].map(option => Number(option.value))).toEqual([96, 128, 160, 192, 224, 256, 320]);
+      expect(rates.value).toBe('320');
+      rates.value = '256';
+      rates.dispatchEvent(new Event('change', { bubbles: true }));
+      expect(document.querySelector('.ev-mp3-kbps').value).toBe('256');
+    }
     const audioButton = document.querySelector('.ev-audio-btn');
     expect(audioButton).not.toBeNull();
     expect(audioButton.disabled).toBe(false);

@@ -281,6 +281,7 @@ describe('delivery submission lifecycle through its production interface', () =>
       s.list.applyRow(index, { ...s.list.get(index), audioPlan: { streams: [stereo] } });
     }
     const paths = ['D:/交付/母帶.wav', 'D:/交付/試聽.mp3'];
+    s.list.setMp3Kbps(1, 128);
     s.desktop.prepareDeliveryTargets = vi.fn(async () => ({ id: 'audio-targets', existing: [paths[1]] }));
 
     await expect(s.submission.submit()).resolves.toMatchObject({ status: 'submitted', accepted: 2, complete: true });
@@ -288,6 +289,7 @@ describe('delivery submission lifecycle through its production interface', () =>
     expect(s.confirmOverwrite).toHaveBeenCalledWith([paths[1]]);
     const jobs = s.desktop.exportVideo.mock.calls.map(([job]) => job);
     expect(jobs.map(job => [job.format, job.outPath])).toEqual([['wav', paths[0]], ['mp3', paths[1]]]);
+    expect(jobs[1].mp3Kbps).toBe(128);
     for (const job of jobs) expect(job.audioPlan.streams).toEqual([stereo]);
   });
 

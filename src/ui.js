@@ -481,7 +481,8 @@ async function openCacheDialog() {
   
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const locations=info?.source?.path===displayedSource?(info.source.locations||[]).filter(location=>location.kind==='sidecar'):[];
-  const sourceSummary=!displayedSource?'<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-note">請先開啟素材，再查看或清除同資料夾的波形、Proxy 與聲道快取。</p></section>':`<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-path">${esc(displayedSource)}</p>`+
+  const nasNote=info?.source?.path===displayedSource&&info.source.nas?'<p class="cache-note">已辨識 NAS 共享素材，其他工作站可從同一資料夾讀取已完成的快取。</p>':'';
+  const sourceSummary=!displayedSource?'<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-note">請先開啟素材，再查看或清除同資料夾的波形、Proxy 與聲道快取。</p></section>':`<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-path">${esc(displayedSource)}</p>`+nasNote+
     (!info?.source||info.source.path!==displayedSource||info.source.unavailable?'<p class="cache-unavailable">無法確認目前素材的快取紀錄，請檢查來源與目錄權限後重新整理。</p>':locations.length?locations.map(location=>{
       const wave=location.waveform||{};
       const progress=Number.isSafeInteger(wave.completedSamples)&&Number.isSafeInteger(wave.totalSamples)
@@ -491,13 +492,13 @@ async function openCacheDialog() {
         `<p class="cache-path">${esc(location.directory)}</p><dl class="cache-records"><dt>波形</dt><dd>${esc(waveText)}</dd>`+
         (Number.isSafeInteger(wave.bytes)?`<dt>波形檔大小</dt><dd>${_fmtBytes(wave.bytes)}</dd>`:'')+
         `<dt>Proxy</dt><dd>${location.proxy?'已有完整紀錄':'未找到完整紀錄'}</dd><dt>聲道</dt><dd>${Number(location.channels)||0} 條</dd>`+
-        (location.audioEffects?'<dt>音訊平衡</dt><dd>有預聽快取目錄</dd>':'')+'</dl></div>';
+        (location.audioEffects?'<dt>預聽與人聲分析</dt><dd>有快取目錄</dd>':'')+'</dl></div>';
     }).join(''):'<p class="cache-note">尚未找到屬於目前素材的保存紀錄。</p>')+
     '<p class="cache-note">此處只查保存紀錄與檔案大小；使用前重新驗證來源與內容，不代表已完成內容查核。</p></section>';
   const html =
     `<div class="cache-dialog-content">` +
     sourceSummary+
-    `<details class="cache-help"><summary>保存位置與清除範圍</summary><p>Proxy、聲道與波形只保存在素材同資料夾的 <code>.subtool_Cache</code>，無法寫入時會提示原因。同一 NAS 來源可在核對後跨電腦沿用；中斷的波形可從有效檢查點續算，快取不因放置天數過期。</p><p>Proxy 使用 480p、1000 kb/s 與速度優先的編碼設定，直接讀取同資料夾快取。</p><p>清除只處理目前素材的 Proxy、聲道與原音波形快取，其他素材不受影響。</p></details>` +
+    `<details class="cache-help"><summary>保存位置與清除範圍</summary><p>Proxy、聲道與波形只保存在素材同資料夾的 <code>.subtool_Cache</code>，無法寫入時會提示原因。多台電腦使用 NAS 時，直接開啟同一共享資料夾的母素材，即可核對並沿用已完成的快取。移至其他儲存裝置時，請連同整個快取資料夾一起複製。中斷的波形可從有效檢查點續算，快取不因放置天數過期。</p><p>新建 Proxy 最高 720p，目標 4 Mb/s，每小時約 1.8 GB。每小時另計每條播放聲道約 58 MB、每份原音波形 WAV 約 29 MB。</p><p>清除範圍包含目前素材的 Proxy、聲道、原音波形，以及同一來源目錄內的平衡預聽與人聲分析結果。</p></details>` +
     '<p id="cacheActionStatus" role="status" hidden></p>'+
     '<p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p>'+
     `</div>`;
@@ -531,7 +532,7 @@ async function openCacheDialog() {
         if(!ownsSource()){session.close();showToast('目前影片已變更，請重新開啟快取管理並確認');return;}
         let clearing = false;
         const sourceLabel = `<p class="cache-path">${esc(displayedSource)}</p>`;
-        const confirmation = openModal('清除快取？', '<div class="cache-dialog-content"><p>將刪除目前素材在 .subtool_Cache 內的 Proxy、聲道與原音波形快取；其他素材不受影響。</p>' + sourceLabel + '<p class="cache-note">下次開啟同檔可能需要重新轉檔。</p><p id="cacheActionStatus" role="status" hidden></p><p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p></div>', [
+        const confirmation = openModal('清除快取？', '<div class="cache-dialog-content"><p>將清除目前素材的 Proxy、聲道、原音波形，以及同一來源目錄內的平衡預聽與人聲分析結果。</p>' + sourceLabel + '<p class="cache-note">若此素材位於 NAS，其他工作站也會失去已清除的快取，下次開啟時可能需要重新轉檔。</p><p id="cacheActionStatus" role="status" hidden></p><p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p></div>', [
           { label: '確定清除', primary: true, id:'cacheClearConfirm', act: async () => {
             if (!confirmation.isCurrent() || clearing || cacheClearOperations.has(displayedSource)) return;
             if (!ownsSource()) {

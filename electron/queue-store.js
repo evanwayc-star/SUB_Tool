@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { normalizeMp3Kbps } = require('../shared/delivery-formats.cjs');
 const DiagnosticLog = require('./diagnostic-log');
 
 const { isRestorable, isTerminal, JOB_STATUS } = require('./export-queue');
@@ -498,6 +499,7 @@ function toHistoryEntry(job) {
       height: finiteOr(job.payload?.height, 0),
       fps: finiteOr(job.payload?.fps, 0),
       videoKbps: finiteOr(job.payload?.videoKbps, 0),
+      ...(job.payload?.format === 'mp3' ? { mp3Kbps: normalizeMp3Kbps(job.payload.mp3Kbps) } : {}),
       subtitleTracks: Array.isArray(job.payload?.subtitleTracks)
         ? job.payload.subtitleTracks.filter(n => typeof n === 'string')
         : undefined,

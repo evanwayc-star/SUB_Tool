@@ -51,4 +51,8 @@ jobs:
       - name: Prepare verified DVD and BD authoring tools
         run: npm run native:prepare:disc
       - run: npm run build
-      - run: npm run test:ci:windows
+      - name: Run portable tests on Windows for NAS verification
+        if: github.head_ref == 'verify/nas-media-windows'
+        run: npm run test:ci:portable
+      - if: success() || failure()
+        run: npm run test:ci:windows

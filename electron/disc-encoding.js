@@ -1,11 +1,11 @@
 'use strict';
 
 // 光碟的純編碼與容量規則；原生工具、檔案與程序生命週期留在 disc-authoring。
-const { DVD_ISO, BD_ISO, bdVideoMode } = require('../shared/delivery-formats.cjs');
+const { DVD_ISO, BD_ISO, bdVideoMode, discVideoKbps } = require('../shared/delivery-formats.cjs');
 
 const DISC_FORMATS = Object.freeze({
-  'dvd-iso': Object.freeze({ ...DVD_ISO, maxStreams: DVD_ISO.maxAudioStreams, maxVideoKbps: 8500, extension: '.mpg' }),
-  'bd-iso': Object.freeze({ ...BD_ISO, maxStreams: BD_ISO.maxAudioStreams, maxVideoKbps: 30000, extension: '.ts' }),
+  'dvd-iso': Object.freeze({ ...DVD_ISO, maxStreams: DVD_ISO.maxAudioStreams, extension: '.mpg' }),
+  'bd-iso': Object.freeze({ ...BD_ISO, maxStreams: BD_ISO.maxAudioStreams, extension: '.ts' }),
 });
 
 function fail(code, message) { return Object.assign(new Error(message), { code }); }
@@ -37,10 +37,7 @@ function discEncoding(format, { duration, audioPlan, fps } = {}) {
   if (format === 'bd-iso' && !bdMode) throw fail('INVALID_BD_FPS', 'BD 輸出不支援此影格率');
   const audio = discAudioStreams(format, audioPlan);
   if (!Number.isFinite(duration) || duration <= 0) throw fail('INVALID_DISC_DURATION', '光碟時長必須大於零');
-  const audioKbps = spec.audioKbps * audio.length;
-  const budgetKbps = Math.floor(((spec.capacityBytes - 64 * 1024 * 1024) * 0.92 * 8 / duration / 1000 - audioKbps) / 100) * 100;
-  const peakLimit = format === 'dvd-iso' ? 10080 - audioKbps - 500 : 48000 - audioKbps - 2000;
-  const videoKbps = Math.min(spec.maxVideoKbps, budgetKbps, Math.floor(peakLimit / 100) * 100);
+  const videoKbps = discVideoKbps(spec, duration, audio.length);
   if (videoKbps < 1000) throw fail('DISC_CAPACITY_EXCEEDED', '影片長度或音訊組數超過光碟容量；請縮短交付範圍或減少音訊組數');
   const audioArgs = audio.flatMap((stream, index) => [
     `-c:a:${index}`, 'ac3', `-b:a:${index}`, `${spec.audioKbps}k`, `-ar:a:${index}`, String(spec.sampleRate),

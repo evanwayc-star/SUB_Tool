@@ -714,6 +714,7 @@
     let _isPaused = false;
     let _jobs = [];
     let _deliveryFormatPresets = [];
+    let _mp3Bitrates = [320];
     let _isDragging = false;
     let _closing = false;
     let _loadRevision = 0;
@@ -827,7 +828,7 @@
       const format = String(payload?.format || '');
       const preset = deliveryPreset(format);
       const parts = [preset?.label || FORMAT_LABEL[format] || format.toUpperCase() || '—'];
-      if (format === 'mp3') return 'MP3 / 48 kHz / 320 kbps';
+      if (format === 'mp3') return `MP3 / 48 kHz / ${Number(payload.mp3Kbps) || 320} kbps`;
       if (format === 'wav') return parts[0];
       const w = Number(payload?.width), h = Number(payload?.height);
       if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
@@ -1004,6 +1005,7 @@
             </div>
             <p class="job-specline">
               <span class="job-chip job-chip--spec">${escapeHTML(deliverySpec)}</span>
+              ${job.payload?.sizeLabel ? `<span class="job-chip">${escapeHTML(job.payload.sizeLabel)}</span>` : ''}
               ${subtitleLabel ? `<span class="job-chip job-subs" title="${escapeHTML('會燒進這份交付的字幕軌：' + subtitleLabel)}">${escapeHTML(subtitleLabel)}</span>` : ''}
               ${burnsTimecode(job.payload) ? '<span class="job-chip job-chip--tc" title="會在畫面上燒入時間碼">燒入 TC</span>' : ''}
               ${airlineOutput ? `<span class="job-chip job-chip--output">${legacyAirlineOutput ? '舊版分流檔 · 請從交付清單重送以產生 .mpg' : '自動合成 .mpg · MPEG-TS'}</span>` : ''}
@@ -1160,7 +1162,13 @@
         <label data-only="h264">碼率
           <span class="job-editor-unit"><input type="number" data-f="kbps" min="1" step="100" value="${curKbps}"> kbps</span>
         </label>
+        <label data-only="mp3">MP3 音訊碼率
+          <select data-f="mp3Kbps">
+            ${_mp3Bitrates.map(rate => `<option value="${rate}"${rate === (Number(p.mp3Kbps) || 320) ? ' selected' : ''}>${rate} kbps</option>`).join('')}
+          </select>
+        </label>
         <span data-preset-spec hidden></span>
+        <span data-estimate>${escapeHTML(p.sizeLabel || '')}</span>
         <label data-only="video"><input type="checkbox" data-f="tc"${burnsTimecode(p) ? ' checked' : ''}> 燒入 TC</label>
         <span class="job-editor-actions">
           <button type="button" data-f="cancel">取消</button>
@@ -1183,6 +1191,7 @@
           : preset;
         box.querySelectorAll('[data-only="video"]').forEach(n => { n.hidden = isAudioDelivery(f); });
         box.querySelectorAll('[data-only="h264"]').forEach(n => { n.hidden = (f !== 'h264'); });
+        q('[data-only="mp3"]').hidden = f !== 'mp3';
         q('[data-f="res"]').disabled = !!preset;
         q('[data-f="kbps"]').disabled = !!preset;
         if (preset) {
@@ -1217,6 +1226,22 @@
       q('[data-f="res"]').addEventListener('change', syncVisibility);
       syncVisibility();
 
+      let estimateRevision = 0;
+      async function updateEstimate() {
+        const revision = ++estimateRevision;
+        const format = q('[data-f="format"]').value;
+        const resolution = q('[data-f="res"]').value;
+        const custom = resolution === 'custom' && !isAudioDelivery(format);
+        const targetH = custom ? q('[data-f="customH"]').valueAsNumber : Number(resolution) || 0;
+        const targetW = custom ? q('[data-f="customW"]').valueAsNumber : undefined;
+        const draft = { format, targetH, targetW, videoKbps: Math.max(1, Number(q('[data-f="kbps"]').value) || 0),
+          mp3Kbps: Number(q('[data-f="mp3Kbps"]').value) || 320 };
+        const label = await window.queueAPI.estimateSize(job.id, draft).catch(() => null);
+        if (revision === estimateRevision && ownsEditor()) q('[data-estimate]').textContent = label || '預估大小待確認';
+      }
+      box.addEventListener('input', e => { if (e.target.type === 'number') updateEstimate(); });
+      box.addEventListener('change', e => { if (e.target.tagName === 'SELECT') updateEstimate(); });
+
       const close = () => {
         if (!box.isConnected) return;
         box.remove();
@@ -1240,6 +1265,7 @@
             patch.targetW = customW.valueAsNumber;
           }
         }
+        if (format === 'mp3') patch.mp3Kbps = Number(q('[data-f="mp3Kbps"]').value);
         if (format === 'h264') patch.kbps = Number(q('[data-f="kbps"]').value) || 0;
         if (!audioDelivery) patch.burnTimecode = q('[data-f="tc"]').checked;
         q('[data-f="save"]').disabled = true;
@@ -1402,6 +1428,7 @@
         const data = await window.queueAPI.getAll();
         if (!owns()) return;
         _jobs = data.jobs;
+        _mp3Bitrates = data.mp3Bitrates || [320];
         _deliveryFormatPresets = Array.isArray(data.deliveryFormatPresets) ? data.deliveryFormatPresets : [];
         _isPaused = data.isPaused;
 

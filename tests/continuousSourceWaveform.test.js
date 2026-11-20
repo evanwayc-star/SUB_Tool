@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {createRequire} from 'node:module';
@@ -28,8 +29,8 @@ function fixture(duration=13.12725,{allowSidecarCache=false}={}){
     for(const output of args.filter(value=>/\.(?:m4a|wav|mp4)$/.test(value)&&value!==src))
       fs.writeFileSync(output,output.endsWith('wave.wav')?Buffer.concat([header,pcm]):Buffer.alloc(100,4));
   });
-  const create=(sendProgress=()=>{})=>{
-    const authority=new FileAuthority({internalDirectories:[cacheRoot,tempRoot]});authority.grantTrustedFile(src);
+  const create=(sendProgress=()=>{},source=src)=>{
+    const authority=new FileAuthority({internalDirectories:[cacheRoot,tempRoot]});authority.grantTrustedFile(source);
     const runtime=createMediaIntakeRuntime({cacheRoot,tempRoot,allowSidecarCache,fileAuthority:authority,
       ffmpegExecution:{execute},describeAudio:async()=>audio,sendProgress});runtimes.push(runtime);return runtime;
   };
@@ -78,6 +79,68 @@ it.each([undefined,{sourceStream:0,sourceChannel:0}])('重開 %j 直接讀取已
   expect(reopened.displayPeaks).toEqual(expected);
   expect(inspect.mock.calls.filter(([file])=>file===legacy.wave)).toHaveLength(0);
   expect(f.execute).toHaveBeenCalledOnce();
+});
+
+it.each([undefined,{sourceStream:0,sourceChannel:0}])('母素材與快取複製到新機時重用 %j 的 PCM 與峰值，拒收損毀的複本',async channel=>{
+  const origin=fixture(2,{allowSidecarCache:true}), moved=fixture(2,{allowSidecarCache:true});
+  const first=await origin.create().waveform({...origin.request,displayPeaks:true,channel});
+  fs.cpSync(path.join(origin.root,'.subtool_Cache'),path.join(moved.root,'.subtool_Cache'),{recursive:true});
+  const request={...moved.request,displayPeaks:true,channel};
+  const reused=await moved.create().waveform(request);
+  expect(reused.cached).toBe(true);
+  expect(reused.wave).toBe(path.join(moved.root,path.relative(origin.root,first.wave)));
+  expect(fs.readFileSync(reused.wave).subarray(44)).toEqual(origin.pcm);
+  expect(reused.displayPeaks).toEqual(first.displayPeaks);
+  expect(moved.execute).not.toHaveBeenCalled();
+  const incomplete=fs.readFileSync(reused.wave);incomplete[64]^=127;fs.writeFileSync(reused.wave,incomplete);
+  const repaired=await moved.create().waveform(request);
+  expect(repaired.cached).toBe(false);
+  expect(fs.readFileSync(repaired.wave).subarray(44)).toEqual(origin.pcm);
+  expect(moved.execute).toHaveBeenCalledOnce();
+});
+
+it('搬移後同名同大小但未取樣處有差異的母檔必須產生自己的波形',async()=>{
+  const origin=fixture(2,{allowSidecarCache:true}), moved=fixture(2,{allowSidecarCache:true});
+  const first=await origin.create().waveform({...origin.request,displayPeaks:true});
+  fs.cpSync(path.join(origin.root,'.subtool_Cache'),path.join(moved.root,'.subtool_Cache'),{recursive:true});
+  const fd=fs.openSync(moved.src,'r+');
+  try { fs.writeSync(fd,Buffer.from([99]),0,1,1500000); } finally { fs.closeSync(fd); }
+  const rebuilt=await moved.create().waveform({...moved.request,displayPeaks:true});
+  expect(rebuilt.cached).toBe(false);
+  expect(rebuilt.wave).not.toBe(path.join(moved.root,path.relative(origin.root,first.wave)));
+  expect(moved.execute).toHaveBeenCalledOnce();
+});
+
+it('同一 NAS 母檔在兩個客戶端掛載路徑重用 MIX 與聲道，冷建與重開都免全文讀取',async()=>{
+  const a=fixture(2,{allowSidecarCache:true}), b=fixture(2,{allowSidecarCache:true});
+  const firstMount=path.join(a.root,'mapped-A'), mount=path.join(b.root,'mapped-B');
+  const input=path.join(firstMount,'source.mov'), source=path.join(mount,'source.mov');
+  fs.mkdirSync(firstMount);fs.renameSync(a.src,input);
+  const native=fs.realpathSync.native.bind(fs.realpathSync);
+  vi.spyOn(fs.realpathSync,'native').mockImplementation((file,...args)=>
+    [input,source].includes(file)?'//subtool-test-nas/projects/source.mov':native(file,...args));
+  const fullReads=vi.spyOn(fsp,'open');
+  const channel={sourceStream:0,sourceChannel:0}, request={...a.request,src:input,displayPeaks:true};
+  const originalKey=cacheKeyFor(input);
+  const first=a.create(undefined,input), mix=await first.waveform(request), separate=await first.waveform({...request,channel});
+  expect(a.execute).toHaveBeenCalledTimes(2);
+  await first.close();
+  fs.renameSync(firstMount,mount);
+  expect(cacheKeyFor(source)).not.toBe(originalKey);
+  const decoy=path.join(mount,'.subtool_Cache','b'.repeat(16),'continuous-waveforms');
+  fs.mkdirSync(decoy,{recursive:true});
+  const enumerate=vi.spyOn(fs,'opendirSync'), list=vi.spyOn(fsp,'readdir');
+  const other=b.create(undefined,source);
+  for(const [options,saved] of [[{},mix],[{channel},separate]]){
+    const hit=await other.waveform({...request,src:source,...options});
+    expect(hit.cached).toBe(true);
+    expect(hit.displayPeaks).toEqual(saved.displayPeaks);
+    expect(fs.readFileSync(hit.wave).subarray(44)).toEqual(a.pcm);
+  }
+  expect(b.execute).not.toHaveBeenCalled();
+  expect(fullReads.mock.calls.filter(([name])=>name===source||name===input)).toEqual([]);
+  const unrelated=([name])=>typeof name==='string'&&(path.basename(name)==='.subtool_Cache'||name.includes('b'.repeat(16)));
+  expect([...enumerate.mock.calls,...list.mock.calls].filter(unrelated)).toEqual([]);
 });
 
 it('舊 ingest MIX 在首次從已完成 WAV 補出峰值後，重開只讀顯示快取',async()=>{

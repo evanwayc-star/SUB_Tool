@@ -1,3 +1,5 @@
+import { PREVIEW_PROXY_HEIGHT, PREVIEW_PROXY_KBPS } from '../shared/preview-proxy.cjs';
+
 const WAIT_TEXT={seeking:'定位中…',video:'等待影片…',audio:'等待聲道…'};
 
 const PROXY_STATUS={
@@ -46,7 +48,7 @@ export function bindPreviewStatusView({root,readState,setMode,now=Date.now}){
       button.setAttribute('aria-pressed',String(button.dataset.previewMode===state.mode));
       button.disabled=changing||!state.available;
       button.title=!state.available?(state.phase==='idle'?'載入影片後即可選擇預覽模式':'目前無法切換預覽模式'):
-        button.dataset.previewMode==='original'?'讀取原始影片，檢查原始畫質':'使用同資料夾的 480p／1000 kb/s Proxy，適合流暢剪輯';
+        button.dataset.previewMode==='original'?'讀取原始影片，檢查原始畫質':`使用素材旁的 Proxy。新建規格最高 ${PREVIEW_PROXY_HEIGHT}p，目標 ${PREVIEW_PROXY_KBPS} kb/s`;
     }
     const sourceLabel=state.compositePreview?'合成預覽':state.phase==='idle'&&!state.available?'尚未載入影片':
       state.network?

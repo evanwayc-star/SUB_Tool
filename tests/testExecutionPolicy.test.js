@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
@@ -8,7 +7,8 @@ import { expect, it } from 'vitest';
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 it('完整測試先完成 portable 群，再讓桌面測試獨占同一份資源', () => {
-  const parent = realpathSync(tmpdir());
+  // This is itself a Vite project. Windows TEMP may contain a literal "#".
+  const parent = realpathSync(path.join(ROOT, 'node_modules'));
   const directory = mkdtempSync(path.join(parent, 'subtool-test-execution-'));
   try {
     mkdirSync(path.join(directory, 'tests'));

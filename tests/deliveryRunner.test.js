@@ -447,6 +447,7 @@ describe('delivery runner public interface', () => {
     const f = make({ mediaProbe: () => ({ hasAudio, audioVideoStartOffsets, audioBitrates: vi.fn(async () => []) }) });
     const job = videoJob();
     job.payload = { ...job.payload, format, fps: 29.97, duration: 3,
+      ...(format === 'mp3' ? { mp3Kbps: 96 } : {}),
       clips: ['wav', 'mp3'].includes(format) ? [] : [{ ...job.payload.clips[0], out: 3 }],
       outPath: 'D:/out/delivery.' + (['wav', 'mp3'].includes(format) ? format : format === 'prores' ? 'mov' : /-iso$/.test(format) ? 'iso' : format === 'mod-fhd' ? 'ts' : format.startsWith('airline-') ? 'mpg' : 'mp4'),
       audioPlan: { buses: ['left', 'right'].map(id => ({ id, inputs: [{ file: source, trimStart: 0, trimEnd: 3,
@@ -459,7 +460,7 @@ describe('delivery runner public interface', () => {
     expect(graph).toContain('asetpts=PTS-STARTPTS+1.000000/TB,aresample=first_pts=0,atrim=');
     expect(f.queue.reportProgress).toHaveBeenLastCalledWith(job.id, expect.objectContaining({ done: true }));
     if (format === 'mp3') expect(f.sent.at(-1).payload.result).toMatchObject({
-      encoder: 'libmp3lame', gpu: false, audioChannels: 2, audioBitrates: ['320k'], videoKbps: null,
+      encoder: 'libmp3lame', gpu: false, audioChannels: 2, audioBitrates: ['96k'], videoKbps: null,
     });
   });
   it.skipIf(process.platform !== 'win32')('Windows 同母檔的大小寫別名只探測一次，音訊路由仍使用同一份開聲時間', async () => {

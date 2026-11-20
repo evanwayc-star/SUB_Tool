@@ -27,7 +27,7 @@
      一份。MOD-FHD 的固定規格則由 shared/delivery-formats.cjs 提供。
 ============================================================================== */
 import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
-import { getDeliveryFormatPreset, getDeliveryFormatOption, isAudioDeliveryFormat, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
+import { normalizeMp3Kbps, getDeliveryFormatPreset, getDeliveryFormatOption, isAudioDeliveryFormat, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
 import { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight, validCustomDeliverySize } from '../shared/delivery-resolution.cjs';
 import { supportsDeliveryChapters } from '../shared/delivery-chapters.cjs';
 
@@ -275,6 +275,11 @@ export function createDeliveryList({
       refreshName(r);
     },
 
+    setMp3Kbps(i, value) {
+      const row = at(i);
+      if (row?.format === 'mp3') row.mp3Kbps = normalizeMp3Kbps(value);
+    },
+
     setKbps(i, kbps) {
       const r = at(i);
       if (!r) return;
@@ -412,6 +417,7 @@ export function createDeliveryList({
           format: r.format,
           duration,
           videoKbps: spec.videoKbps,
+          ...(r.format === 'mp3' ? { mp3Kbps: normalizeMp3Kbps(r.mp3Kbps) } : {}),
           audioPlan,
           timecodeWatermark: spec.timecodeWatermark,
           chapters: supportsDeliveryChapters(r.format) && chaptersForRow ? chaptersForRow(r) : [],
@@ -428,7 +434,7 @@ export function createDeliveryList({
 
   // A later edit owns a new draft even when its fields subsequently return to
   // the captured values. No-op blur/change events do not revoke ownership.
-  for (const method of ['setFormat', 'setTargetHeight', 'setCustomResolution', 'setTargetFps', 'setKbps', 'setBurnTimecode', 'setChapterOptions', 'setOutDir', 'setName']) {
+  for (const method of ['setFormat', 'setTargetHeight', 'setCustomResolution', 'setTargetFps', 'setKbps', 'setMp3Kbps', 'setBurnTimecode', 'setChapterOptions', 'setOutDir', 'setName']) {
     const mutate = api[method];
     api[method] = (index, ...args) => {
       const row = at(index), before = row ? JSON.stringify(row) : null;

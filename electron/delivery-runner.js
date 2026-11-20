@@ -180,6 +180,7 @@ function createDeliveryRunner(options = {}) {
       checkCancelled();
       const plan = buildDeliveryArgv({
         format, clips, videoTracks, width, height, fps, duration, videoKbps,
+        mp3Kbps: payload.mp3Kbps,
         targetW: payload.targetW, targetH: payload.targetH, canvasW: payload.canvasW, canvasH: payload.canvasH,
         audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName: assName, outPath,
         chapters: payload.chapters, chapterFileName,

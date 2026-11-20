@@ -114,7 +114,7 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 |---|---|
 | 本機 `source-v3` | 完整路徑、stat 與前／中／尾有界取樣，用於同機交接與換檔偵測。各功能保留 namespace 與能力核對。 |
 | `source-v4-shared-file` | 同一 NAS 物件。用 UNC server／share、檔名、size、inode、奈秒時間及取樣，排除 client 的 dev 與掛載路徑。無可靠 UNC 別名時不推定跨機。未取樣內容不受全文保證。 |
-| `source-v3-sha256` | 要比較不同複製檔時，以 1 MiB buffer 讀完整來源、比讀前後身分與大小。僅 SHA 型完成紀錄可依全文相等跨檔重用。 |
+| `source-v3-sha256` | 本機可攜快取及無可靠 NAS 檔案身分時，使用母素材完整 SHA-256。複製到另一台後驗全文，成功後保存該來源的查驗紀錄供下次開啟；原機與同一實體共享檔有可信識別時可走快速路徑。 |
 
 `source-<key>.json` receipt 只證明來源查驗。元件正式提交點是 `generation-*/cache-meta.json`，根 `meta.json` 為相容索引。並行工作使用獨立世代，合併同來源／相容配置的完成元件。重用、補建、發布及清理均重核來源與根目錄。暫時 I/O 錯誤保留既有內容。背景工作取消後要等 native close、worker 及交接收尾，遲到結果不得再發布。[共享身分測試](../tests/mediaIntakeSharedFileEvidence.test.js) · [跨機快取回歸](../tests/mediaIntakePortableCacheNative.test.js)
 
@@ -168,11 +168,11 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 
 #### Proxy 的 GPU 路徑
 
-`previewPipelineCandidates()` 依同一來源的 probe 與 encoder 選候選，`buildIngestArgs()` 產生實際參數。Proxy 為 480p、1000 kb/s 目標、最快 preset、無 B 幀、短 GOP。保留來源 PTS 與縮放前的色彩解讀。
+`previewPipelineCandidates()` 依同一來源的 probe 與 encoder 選候選，`buildIngestArgs()` 產生實際參數。新建 Proxy 最高 720p、4000 kb/s 目標、6000 kb/s 峰值、最快 preset、無 B 幀、短 GOP。保留來源 PTS 與縮放前的色彩解讀。
 
 | 來源 | 路徑 |
 |---|---|
-| SDR H.264／HEVC、8-bit 4:2:0，無旋轉或交錯 | 可用時 CUDA 解碼＋縮放，再 NVENC |
+| SDR H.264／HEVC 的 8-bit 4:2:0，或 HEVC Main10 的 10-bit 4:2:0，無旋轉或交錯 | 可用時 CUDA 解碼＋縮放，再 NVENC |
 | 其他支援的 SDR YUV（如 ProRes） | CPU 解碼／轉 4:2:0，再上傳 CUDA 縮放、NVENC |
 | RGB、full-range、HDR、旋轉／交錯或資訊不足 | 相容色彩／幾何流程，再用實際 encoder |
 | QSV、AMF、VideoToolbox、CPU | 相容路徑，不用 CUDA 縮放 |

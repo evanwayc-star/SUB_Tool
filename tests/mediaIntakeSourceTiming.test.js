@@ -237,7 +237,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
     { name: 'HD 601 缺矩陣', size: '1920x1080', matrix: 'smpte170m', omitted: ['colorSpace'], expectedMatrix: 'bt709', expectedRgb: [255, 23, 0] },
     { name: 'SD 只有 709 矩陣邊轉邊播', size: '320x180', matrix: 'bt709', omitted: ['colorPrimaries', 'colorTransfer'], expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0], mode: 'stream' },
     { name: 'SD 無標籤邊轉邊播', size: '320x180', matrix: null, expectedMatrix: 'smpte170m', expectedRgb: [253, 0, 0], mode: 'stream' },
-  ])('$name 母素材在 480p Proxy 保留來源觀感與實際 RGB', async ({ size, sar, matrix, omitted = [], expectedMatrix, expectedRgb, mode = 'ingest' }) => {
+  ])('$name 母素材在預覽 Proxy 保留來源觀感與實際 RGB', async ({ size, sar, matrix, omitted = [], expectedMatrix, expectedRgb, mode = 'ingest' }) => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-')); roots.push(directory);
     const source = path.join(directory, 'sd-red.mp4'), cache = path.join(directory, 'cache');
     const untagged = matrix ? path.join(directory, 'untagged.mp4') : source;
@@ -272,6 +272,7 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
       const outputMatrix = video.color_space || 'bt709';
       const pixel = run(['-i', result.proxy, '-vf', `crop=2:2:0:0,scale=in_color_matrix=${outputMatrix}:out_range=pc,format=rgb24`, '-frames:v', '1', '-f', 'rawvideo', 'pipe:1']);
       expect([...pixel.subarray(0, 3)]).toEqual(expectedRgb);
+      expect(video.height).toBe(Math.min(720, Number(size.split('x')[1])));
       expect(video.color_space).toBe(expectedMatrix);
       expect(video.color_primaries).toBe(expectedMatrix);
       expect(video.color_transfer).toBe(expectedMatrix);

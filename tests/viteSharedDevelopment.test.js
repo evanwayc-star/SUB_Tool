@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
@@ -26,9 +25,10 @@ for (const name of readdirSync(join(root, 'src'), { recursive: true }).filter(na
   }
 }
 
+const cacheParent = realpathSync(join(root, 'node_modules'));
 let server, cacheDir, origin;
 beforeAll(async () => {
-  cacheDir = mkdtempSync(join(realpathSync(tmpdir()), 'subtool-vite-shared-'));
+  cacheDir = mkdtempSync(join(cacheParent, 'subtool-vite-shared-'));
   server = await createServer({ root, configFile: join(root, 'vite.config.mjs'), cacheDir,
     plugins: [{
       name: 'test-shared-named-import',
@@ -49,7 +49,7 @@ afterAll(async () => {
   try { await server?.close(); }
   finally {
     if (cacheDir) {
-      expect(dirname(cacheDir)).toBe(realpathSync(tmpdir()));
+      expect(dirname(cacheDir)).toBe(cacheParent);
       expect(basename(cacheDir)).toMatch(/^subtool-vite-shared-/u);
       rmSync(cacheDir, { recursive: true, force: true });
     }
@@ -77,9 +77,10 @@ describe('真實 Vite 開發伺服器的共用 CJS 規則', () => {
     expect(response.ok).toBe(true);
     const transformed=await response.text();
     const optimizedUrls=[];
-    const executable=transformed.replace(/(from\s*["'])(\/@fs\/[^"']+)(["'])/gu,(_match,prefix,url,suffix)=>{
+    const executable=transformed.replace(/(from\s*["'])(\/(?:@fs|node_modules)\/[^"']+)(["'])/gu,(_match,prefix,url,suffix)=>{
       optimizedUrls.push(url);
-      return `${prefix}${viteFsFileUrl(url)}${suffix}`;
+      const target = url.startsWith('/@fs/') ? viteFsFileUrl(url) : new URL(url.slice(1), pathToFileURL(root)).href;
+      return `${prefix}${target}${suffix}`;
     });
     expect(optimizedUrls).toHaveLength(2);
     // optimizer 初次建立仍在背景進行；必須透過 Vite 等待輸出就緒後才交給 Node。

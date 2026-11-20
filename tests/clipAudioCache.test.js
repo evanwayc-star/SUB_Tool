@@ -118,6 +118,32 @@ describe('反轉片段預覽音訊', () => {
       expect(reverse).toHaveBeenCalledWith(request);
     } finally { warn.mockRestore(); }
   });
+  it('不同工作站以相同 NAS 身分取得同一段反向 PCM，不啟動探測與轉檔', async () => {
+    const f = fixture();
+    const sharedFingerprint = vi.fn(() => 'b'.repeat(64));
+    const probe = vi.fn(async () => null);
+    const options = { ...f.options, sharedFingerprint, probe };
+    const first = await createClipAudioCache(options).reverse(f.request);
+    const alias = path.join(f.directory, 'second-mount', 'mother.wav');
+    fs.mkdirSync(path.dirname(alias)); fs.copyFileSync(f.source, alias);
+    const secondOwner = new FileAuthority();
+    secondOwner.grantTrustedFile(alias, { read: true, write: false });
+    const second = await createClipAudioCache({ ...options, fileAuthority: secondOwner }).reverse({ ...f.request, path: alias });
+    expect(sharedFingerprint).toHaveBeenCalledWith(alias, { networkOnly: true });
+    expect(second).toEqual(first);
+    expect(fs.readFileSync(second.path)).toEqual(wav());
+    expect(secondOwner.canRead(second.path)).toBe(true);
+    expect(secondOwner.canWrite(second.path)).toBe(false);
+    expect(probe).toHaveBeenCalledOnce();
+    expect(f.execute).toHaveBeenCalledOnce();
+  });
+  it('同機升級可繼續讀取原掛載路徑已有的反向 WAV', async () => {
+    const f = fixture({ sharedFingerprint: () => null });
+    const before = await f.runtime.reverse(f.request);
+    const after = await createClipAudioCache({ ...f.options, sharedFingerprint: () => 'b'.repeat(64) }).reverse(f.request);
+    expect(after).toEqual(before);
+    expect(f.execute).toHaveBeenCalledOnce();
+  });
   it('完整 PCM 才授權，去重並在新 runtime 中復用；來源或裁切修改使快取失效', async () => {
     const f = fixture();
     const [first, second] = await Promise.all([f.runtime.reverse(f.request), f.runtime.reverse(f.request)]);
