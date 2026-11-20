@@ -20,24 +20,24 @@ const AIRLINE_DMPES = Object.freeze({
   format: 'airline-dmpes', label: '航空-DMPES-H264-1.5M (立體聲)', fileLabel: '航空-DMPES-H264-1.5M', extension: '.mpg', transport: 'airline',
   displayAspect: '16:9',
   scan: 'progressive', audioLabel: 'AAC-LC / ADTS',
-  width: 720, height: 480, fps: 29.97, videoKbps: 1500, audioKbps: 128, sampleRate: 48000,
+  width: 720, height: 480, fps: 29.97, videoKbps: 1500, muxBps: 1855594, audioKbps: 128, sampleRate: 48000,
 });
 
 const AIRLINE_DMPES_4M = Object.freeze({
   ...AIRLINE_DMPES,
-  format: 'airline-dmpes-4m', label: '航空-DMPES-H264-4M (立體聲)', fileLabel: '航空-DMPES-H264-4M', videoKbps: 4000,
+  format: 'airline-dmpes-4m', label: '航空-DMPES-H264-4M (立體聲)', fileLabel: '航空-DMPES-H264-4M', videoKbps: 4000, muxBps: 4600000,
 });
 
 const DVD_ISO = Object.freeze({
   format: 'dvd-iso', label: 'DVD-ISO (4.5G)', fileLabel: 'DVD-ISO-4.5G', extension: '.iso', kind: 'disc',
-  capacityBytes: 4500000000, displayAspect: '16:9',
+  capacityBytes: 4500000000, maxVideoKbps: 8500, displayAspect: '16:9',
   scan: 'interlaced', width: 720, height: 480, fps: 29.97, videoKbps: null,
   audioLabel: 'AC-3', audioKbps: 384, sampleRate: 48000, maxAudioStreams: 8,
 });
 
 const BD_ISO = Object.freeze({
   format: 'bd-iso', label: 'BD-ISO (24G)', fileLabel: 'BD-ISO-24G', extension: '.iso', kind: 'disc',
-  capacityBytes: 24000000000, displayAspect: '16:9',
+  capacityBytes: 24000000000, maxVideoKbps: 30000, displayAspect: '16:9',
   scan: 'progressive', width: 1920, height: 1080, fps: 24, videoKbps: null,
   audioLabel: 'AC-3', audioKbps: 640, sampleRate: 48000, maxAudioStreams: 32,
 });
@@ -60,6 +60,15 @@ function availableBdVideoModes(projectFps) {
   return BD_VIDEO_MODES.filter(mode => !Number.isFinite(source) || mode.fps + 0.001 >= source);
 }
 
+const MP3_BITRATES = Object.freeze([96, 128, 160, 192, 224, 256, 320]);
+
+function normalizeMp3Kbps(value) {
+  if (value == null) return 320;
+  const kbps = Number(value);
+  if (!MP3_BITRATES.includes(kbps)) throw new Error('MP3 音訊碼率不在支援範圍內。');
+  return kbps;
+}
+
 const DELIVERY_FORMAT_PRESETS = Object.freeze([DVD_ISO, BD_ISO, MOD_FHD, AIRLINE_DMPES, AIRLINE_DMPES_4M, AIRLINE_EXW]);
 const DELIVERY_FORMAT_OPTIONS = Object.freeze([
   Object.freeze({ format: 'prores', label: 'ProRes422HQ-MOV', extension: '.mov' }),
@@ -79,6 +88,18 @@ function getDeliveryFormatOption(format) {
 
 function isAudioDeliveryFormat(format) {
   return format === 'wav' || format === 'mp3';
+}
+
+// 留 64 MiB 給光碟結構，並為封裝保留 8%。預估與實際編碼共用這個容量預算。
+function discVideoKbps(preset, duration, streamCount) {
+  const audioKbps = preset.audioKbps * streamCount;
+  const budget = (preset.capacityBytes - 64 * 1024 * 1024) * 0.92 * 8 / duration / 1000 - audioKbps;
+  const peak = preset.format === 'dvd-iso' ? 10080 - audioKbps - 500 : 48000 - audioKbps - 2000;
+  return Math.floor(Math.min(preset.maxVideoKbps, budget, peak) / 100) * 100;
+}
+
+function aacKbps(channels) {
+  return channels >= 6 ? 640 : channels >= 2 ? 320 : 192;
 }
 
 function validStreamBuses(stream, count) {
@@ -130,8 +151,60 @@ function deliveryPresetAudioProblem(format, plan) {
   return `${preset.label} 需要單一 Stereo（2 聲道）；請在「音軌」選擇要交付的兩條專案音軌。`;
 }
 
+// Return a planning estimate in decimal bytes. Encoded payload, mux headers and
+// optical-disc authoring vary with the material, especially for ProRes and exW.
+function estimateDeliveryBytes(spec) {
+  if (!spec || !Number.isFinite(spec.duration) || spec.duration <= 0) return null;
+  const { format, duration, audioPlan } = spec;
+  const preset = getDeliveryFormatPreset(format);
+  const streams = audioPlan?.streams ?? [{ layout: 'stereo' }];
+  if (!Array.isArray(streams)) return null;
+  const channels = streams.map(s => ({ mono: 1, stereo: 2, stereoLtRt: 2, '5.1': 6 })[s?.layout] || 0);
+  const bytes = kbps => Math.round(kbps * 125 * duration);
+  if (format === 'wav') {
+    const count = audioPlan?.buses?.length;
+    return count > 0 ? bytes(48 * 24 * count) : null;
+  }
+  if (format === 'mp3') {
+    try { return bytes(normalizeMp3Kbps(spec.mp3Kbps)); } catch { return null; }
+  }
+  if (preset?.kind === 'disc') {
+    const video = discVideoKbps(preset, duration, streams.length);
+    if (video < 1000 || !streams.length || streams.length > preset.maxAudioStreams) return null;
+    // Modeled 5% mux overhead plus a small filesystem / navigation allowance.
+    return Math.min(preset.capacityBytes, bytes((video + preset.audioKbps * streams.length) * 1.05) + 1024 * 1024);
+  }
+  if (preset?.muxBps) return bytes(preset.muxBps / 1000);
+  if (preset?.muxKbps) return bytes(preset.muxKbps);
+  if (preset?.transport === 'airline') return bytes((preset.videoKbps + preset.audioKbps) * 1.05);
+  if (!(spec.width > 0 && spec.height > 0)) return null;
+
+  if (format === 'h264') {
+    const video = spec.videoKbps;
+    const encodedKbps = Math.max(100, Math.min(200000, Math.round(video || 5000)));
+    return bytes(encodedKbps + channels.reduce((sum, n) => sum + aacKbps(n), 0));
+  }
+  if (format === 'prores') {
+    // ProRes 422 HQ nominal target at 1920×1080 / 29.97 fps, plus 24-bit PCM.
+    if (!(spec.fps > 0)) return null;
+    const video = 220000 * spec.width * spec.height / (1920 * 1080) * spec.fps / 29.97;
+    return bytes(video + channels.reduce((sum, n) => sum + 48 * 24 * n, 0));
+  }
+  return null;
+}
+
+function deliverySizeLabel(spec) {
+  const bytes = estimateDeliveryBytes(spec);
+  if (!(bytes > 0) || !Number.isFinite(bytes)) return '預估大小待確認';
+  const [scale, unit] = bytes >= 1e9 ? [1e9, 'GB'] : bytes >= 1e6 ? [1e6, 'MB'] : [1e3, 'kB'];
+  return `預估約 ${Number((bytes / scale).toFixed(1))} ${unit}`;
+}
+
 module.exports = {
+  estimateDeliveryBytes, deliverySizeLabel,
   MOD_FHD, AIRLINE_EXW, AIRLINE_DMPES, AIRLINE_DMPES_4M, DVD_ISO, BD_ISO,
+  MP3_BITRATES, normalizeMp3Kbps,
+  discVideoKbps, aacKbps,
   BD_VIDEO_MODES, bdVideoMode, availableBdVideoModes,
   DELIVERY_FORMAT_PRESETS, DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, getDeliveryFormatOption,
   isAudioDeliveryFormat, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem,

@@ -56,6 +56,19 @@ describe('同一共享檔案的快速證據', () => {
     files.fileSystem.realpathSync = { native: () => physicalPath };
     return files;
   }
+  it('100 GB 的 NAS 母檔只在首、中、尾定點讀取，保留超過 32 位元的位移', () => {
+    const size = 100_000_000_000;
+    const files = sharedFiles(Buffer.alloc(0), { size: BigInt(size) });
+    files.read.mockImplementation((target, offset, length) => {
+      target.fill(17, offset, offset + length);
+      return length;
+    });
+    const witness = sharedSourceFingerprintSync('Z:/mother.mov', { fileSystem: files.fileSystem, networkOnly: true });
+    expect(witness).toMatch(/^[a-f0-9]{64}$/);
+    expect(files.read.mock.calls.map(([, , length, position]) => [position, length])).toEqual([
+      [0, 1048576], [(size - 65536) / 2, 65536], [size - 65536, 65536],
+    ]);
+  });
   it('同一 NAS 的 client 裝置及掛載路徑不同，仍以同一檔案證據命中且只讀取固定取樣', () => {
     const physicalPath = '\\\\Storage\\DCP\\folder\\mother.mov', bytes = Buffer.alloc(8 * 1024 * 1024, 17);
     const first = sharedFiles(bytes, {}, physicalPath), second = sharedFiles(bytes, { dev: 999n }, physicalPath);
@@ -63,6 +76,19 @@ describe('同一共享檔案的快速證據', () => {
     expect(a).toMatch(/^[a-f0-9]{64}$/);
     expect(sharedSourceFingerprintSync('Z:\\folder\\mother.mov', { fileSystem: second.fileSystem })).toBe(a);
     expect(first.read.mock.calls.reduce((sum, call) => sum + call[2], 0)).toBe(1179648);
+  });
+  it('僅在實際路徑解析為 UNC 時採用跨客戶端身分，排除本機裝置命名空間', () => {
+    const source = 'Z:/jobs/mother.mov', bytes = Buffer.from('nas');
+    for (const physical of ['C:/jobs/mother.mov', '\\\\?\\C:/jobs/mother.mov', '\\\\.\\C:/jobs/mother.mov']) {
+      const local = sharedFiles(bytes, {}, physical);
+      expect(sharedSourceFingerprintSync(source, { fileSystem: local.fileSystem, networkOnly: true })).toBeNull();
+      expect(local.read).not.toHaveBeenCalled();
+    }
+    const unc = sharedFiles(bytes, {}, '\\\\server\\share\\jobs\\mother.mov');
+    const mapped = sharedFiles(bytes, { dev: 9n }, '\\\\?\\UNC\\server\\share\\jobs\\mother.mov');
+    const witness = sharedSourceFingerprintSync(source, { fileSystem: mapped.fileSystem, networkOnly: true });
+    expect(witness).toMatch(/^[a-f0-9]{64}$/);
+    expect(witness).toBe(sharedSourceFingerprintSync(source, { fileSystem: unc.fileSystem, networkOnly: true }));
   });
   it.each(['ino', 'mtimeNs', 'ctimeNs', 'birthtimeNs'])('共享檔案 %s 改變就不沿用，不能靠取樣相同認領', field => {
     const bytes = Buffer.alloc(4 * 1024 * 1024, 7), first = sharedFiles(bytes), second = sharedFiles(bytes, { [field]: 999n });

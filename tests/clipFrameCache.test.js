@@ -68,6 +68,30 @@ afterEach(() => {
 });
 
 describe('固定畫面的母素材幀快取', () => {
+  it('不同工作站以相同 NAS 身分取得同一張完整 PNG', async () => {
+    const f = fixture();
+    const sharedFingerprint = vi.fn(() => 'a'.repeat(64));
+    const first = await createClipFrameCache({ ...f.options, sharedFingerprint }).frame(f.request);
+    const alias = path.join(f.directory, 'second-mount', 'mother.mp4');
+    fs.mkdirSync(path.dirname(alias)); fs.copyFileSync(f.source, alias);
+    const secondOwner = new FileAuthority();
+    secondOwner.grantTrustedFile(alias, { read: true, write: false });
+    const second = await createClipFrameCache({ ...f.options, sharedFingerprint, fileAuthority: secondOwner })
+      .frame({ ...f.request, path: alias });
+    expect(sharedFingerprint).toHaveBeenCalledWith(alias, { networkOnly: true });
+    expect(second).toEqual(first);
+    expect(fs.readFileSync(second.path)).toEqual(PNG);
+    expect(secondOwner.canRead(second.path)).toBe(true);
+    expect(secondOwner.canWrite(second.path)).toBe(false);
+    expect(f.execute).toHaveBeenCalledOnce();
+  });
+  it('同機升級可繼續讀取原掛載路徑已有的固定畫格', async () => {
+    const f = fixture({ sharedFingerprint: () => null });
+    const before = await f.runtime.frame(f.request);
+    const after = await createClipFrameCache({ ...f.options, sharedFingerprint: () => 'a'.repeat(64) }).frame(f.request);
+    expect(after).toEqual(before);
+    expect(f.execute).toHaveBeenCalledOnce();
+  });
   it('source-aware cache root keeps the generated frame beside its mother source', async () => {
     const cacheRoot = vi.fn(source => path.join(path.dirname(source), '.subtool_Cache', 'clip-frames'));
     const s = fixture({ cacheRoot });

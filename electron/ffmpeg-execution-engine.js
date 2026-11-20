@@ -136,9 +136,10 @@ function videoEncoderCandidates(platform = process.platform) {
   return [];
 }
 
-const PREVIEW_PROXY_PROFILE = '480p-1000k-fast-v1';
+const { PREVIEW_PROXY_HEIGHT, PREVIEW_PROXY_KBPS, PREVIEW_PROXY_MAX_KBPS } = require('../shared/preview-proxy.cjs');
+const PREVIEW_PROXY_PROFILE = '720p-4000k-fast-v2';
 function previewVideoEncoderArgs(encoderName) {
-  const rate = ['-b:v', '1000k', '-maxrate', '1000k', '-bufsize', '2000k'];
+  const rate = ['-b:v', `${PREVIEW_PROXY_KBPS}k`, '-maxrate', `${PREVIEW_PROXY_MAX_KBPS}k`, '-bufsize', `${2 * PREVIEW_PROXY_MAX_KBPS}k`];
   switch (encoderName) {
     case 'h264_videotoolbox':
       return ['-c:v', 'h264_videotoolbox', ...rate, '-realtime', '1', '-allow_sw', '1', '-bf', '0'];
@@ -444,7 +445,9 @@ function previewPipelineCandidates({ encoder = 'libx264', video, needsProxy = tr
     && video.colorSpace !== 'gbr' && !['pc', 'jpeg', 'full'].includes(video.colorRange)
     && ['yuv420p', 'nv12', 'yuv422p', 'yuv422p10le', 'yuv420p10le', 'p010le', 'yuv444p', 'yuv444p10le'].includes(video.pixelFormat);
   if (gpuScale) {
-    if (['h264', 'hevc'].includes(video.codec) && ['yuv420p', 'nv12'].includes(video.pixelFormat)) {
+    const nvdec420 = ['h264', 'hevc'].includes(video.codec) && ['yuv420p', 'nv12'].includes(video.pixelFormat);
+    const hevcMain10 = video.codec === 'hevc' && ['yuv420p10le', 'p010le'].includes(video.pixelFormat);
+    if (nvdec420 || hevcMain10) {
       candidates.push({ encoder, mode: 'cuda', label: 'GPU 解碼／縮放／編碼' });
     }
     candidates.push({ encoder, mode: 'cuda-upload', label: 'GPU 縮放／編碼' });
@@ -492,7 +495,14 @@ function buildIngestArgs({
   if (fc && fc.length) args.push('-filter_complex', fc.join(';'));
 
   if (needsProxy && proxyPath) {
-    let vf = 'setpts=PTS-STARTPTS,scale=-2:480,format=yuv420p';
+    // Evaluate after autorotation so a low-resolution source keeps its own height.
+    const height = `'clip(trunc(ih/2)*2,2,${PREVIEW_PROXY_HEIGHT})'`;
+    const cpuScale = `scale=-2:${height}`;
+    const upload = pipeline?.mode === 'cuda-upload' ? 'format=yuv420p,hwupload_cuda,' : '';
+    const scale = ['cuda', 'cuda-upload'].includes(pipeline?.mode)
+      ? `${upload}scale_cuda=-2:${height}:format=yuv420p:interp_algo=bicubic`
+      : `${cpuScale},format=yuv420p`;
+    let vf = `setpts=PTS-STARTPTS,${scale}`;
     // Freeze the source interpretation before changing its dimensions. Chromium
     // replaces incomplete H.264 color metadata as a whole using source height,
     // even when a matrix alone was tagged; fully specified sources retain theirs.
@@ -506,13 +516,13 @@ function buildIngestArgs({
       // tagged 709 Proxy; relabeling an implicit 601 conversion would alter color.
       const primaries = missingColor(video.colorPrimaries) ? 'bt709' : 'auto';
       const transfer = missingColor(video.colorTransfer) ? 'bt709' : 'auto';
-      vf = `setpts=PTS-STARTPTS,scale=-2:480:out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=${primaries}:color_trc=${transfer}:range=limited`;
+      vf = `setpts=PTS-STARTPTS,${cpuScale}:out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=${primaries}:color_trc=${transfer}:range=limited`;
     } else if (video?.codec === 'vp9' && vp9FrameMatrix && incompleteColor) {
       // Chromium's VP9 decoder expands the bitstream's SDR color enum into a
       // complete color space. H.264 would discard this partial tag after resize.
       // Complete the tag after scaling so FFmpeg keeps the decoded sample values.
       const range = missingColor(video.colorRange) ? 'limited' : 'auto';
-      vf = `setpts=PTS-STARTPTS,scale=-2:480,format=yuv420p,setparams=colorspace=${vp9FrameMatrix}:color_primaries=${vp9FrameMatrix}:color_trc=${vp9FrameMatrix}:range=${range}`;
+      vf = `setpts=PTS-STARTPTS,${scale},setparams=colorspace=${vp9FrameMatrix}:color_primaries=${vp9FrameMatrix}:color_trc=${vp9FrameMatrix}:range=${range}`;
     } else if (video?.width > 0 && video?.height > 0
       && (usesFrameColor ? missingColor(video.colorSpace) : incompleteColor)) {
       // Chromium's natural size grows height for narrow pixels (SAR < 1).
@@ -523,11 +533,7 @@ function buildIngestArgs({
       const primaries = usesFrameColor && !missingColor(video.colorPrimaries) ? 'auto' : matrix;
       const transfer = usesFrameColor && !missingColor(video.colorTransfer) ? 'auto' : matrix;
       const range = missingColor(video.colorRange) ? 'limited' : 'auto';
-      vf = `setpts=PTS-STARTPTS,setparams=colorspace=${matrix}:color_primaries=${primaries}:color_trc=${transfer}:range=${range},scale=-2:480,format=yuv420p`;
-    }
-    if (pipeline?.mode === 'cuda' || pipeline?.mode === 'cuda-upload') {
-      const upload = pipeline.mode === 'cuda-upload' ? 'format=yuv420p,hwupload_cuda,' : '';
-      vf = vf.replace('scale=-2:480,format=yuv420p', `${upload}scale_cuda=-2:480:format=yuv420p:interp_algo=bicubic`);
+      vf = `setpts=PTS-STARTPTS,setparams=colorspace=${matrix}:color_primaries=${primaries}:color_trc=${transfer}:range=${range},${scale}`;
     }
     const vencArgs = previewVideoEncoderArgs(encoder);
     args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);

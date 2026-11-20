@@ -1,5 +1,5 @@
 // @subtool-ci windows
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -12,6 +12,8 @@ import { nativeTestTools } from './fixtures/native-tools.cjs';
 const require = createRequire(import.meta.url);
 const { createAudioNormalizationRuntime } = require('../electron/audio-normalization-runtime.js');
 const { createMediaIntakeRuntime } = require('../electron/media-intake-runtime.js');
+const { accessVocalPeaks } = require('../electron/vocal-waveform-sidecar.js');
+const { vocalSourceFingerprint } = require('../electron/vocal-waveform-fingerprint.js');
 const { FileAuthority } = require('../electron/file-authority.js');
 const { motherSourceFingerprint } = require('../electron/mother-source-evidence.js');
 const { createFFmpegExecution } = require('../electron/ffmpeg-execution-engine.js');
@@ -53,6 +55,78 @@ function amplitude(bytes, frequency, start = .62, end = .78) {
 }
 
 describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('平衡化預覽 WAV 的來源時鐘', () => {
+  it('兩個桌面掛載同一 NAS 素材，共用音訊平衡、報告與峰值，回傳各自有效的來源指紋',async()=>{
+    const root=fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()),'subtool-effect-nas-'));
+    const mounts=['client-A','client-B'].map(label=>path.join(root,label));
+    const sources=mounts.map(dir=>path.join(dir,'film.wav')),runtimes=[];
+    const real=fs.realpathSync.native;
+    let shared=false;
+    vi.spyOn(fs.realpathSync,'native').mockImplementation((file,...args)=>
+      shared && sources.includes(file)?'//studio-nas/projects/film.wav':real(file,...args));
+    try{
+      fs.mkdirSync(mounts[0]);
+      const generated=spawnSync(FFMPEG,['-hide_banner','-v','error','-f','lavfi','-i','sine=frequency=400:duration=2','-c:a','pcm_s16le',sources[0]],{windowsHide:true});
+      expect(generated.status).toBe(0);
+      const ff=createFFmpegExecution({getFFmpegPath:()=>FFMPEG,getUserDataDir:()=>root});
+      const execute=vi.fn((args,opts)=>ff.execute(args,{...opts,executionKind:'direct'}));
+      const open=source=>{
+        const authority=new FileAuthority();authority.grantTrustedFile(source);
+        const runtime=createMediaIntakeRuntime({fileAuthority:authority,tempRoot:root,cacheRoot:root});
+        runtimes.push(runtime);
+        const probe=createMediaProbe({executable:FFPROBE});
+        return createAudioNormalizationRuntime({createTempPath:()=>path.join(root,'temp.wav'),execute,
+          fingerprintSource:motherSourceFingerprint,probe:(file,opts)=>probe.describe(file,opts),
+          withEffectCache:(file,work)=>runtime.withAudioEffectCache(file,work),grantRead(){}});
+      };
+      const legacy=open(sources[0]),legacyOptions={sourceStream:0,maximumAmplitude:-5,targetLoudness:-18};
+      const old=await legacy.normalize(sources[0],legacyOptions);
+      await runtimes.pop().close();execute.mockClear();
+      shared=true;
+      const first=open(sources[0]),opts={sourceStream:0,maximumAmplitude:-3,targetLoudness:-14};
+      expect(await first.normalize(sources[0],legacyOptions)).toMatchObject({cacheHit:true,outputPath:old.outputPath});
+      expect(execute).not.toHaveBeenCalled();
+      const original=await first.normalize(sources[0],opts);
+      expect(original.cacheHit).toBe(false);
+      const recipe={resolution:100,streams:[{sourceStream:0,cacheKey:original.cacheKey}]},peaks=Float32Array.of(-.25,.75);
+      await first.displayPeaks(sources[0],{...recipe,peaks});
+      const vocalRecipe=async source=>JSON.stringify([1,'a'.repeat(64),'b'.repeat(64),44100,100,
+        await vocalSourceFingerprint(source),2,[0]]);
+      const vocals=Float32Array.from({length:400},(_,i)=>i%2?0.75:-0.25);
+      expect(await accessVocalPeaks({path:sources[0],descriptor:await vocalRecipe(sources[0]),peaks:vocals},
+        runtimes[0].withAudioEffectCache)).toBe(true);
+      const report=await first.analyze(sources[0]),pcm=fs.readFileSync(original.outputPath);
+      await runtimes.pop().close();
+      fs.renameSync(mounts[0],mounts[1]);execute.mockClear();
+      // Some read-only SMB exports reject mkdir even when the directory exists.
+      const writes=[];
+      for(const [api,name] of [[fs,'mkdirSync'],[fs,'openSync'],[fs.promises,'open']]){
+        const original=api[name];
+        vi.spyOn(api,name).mockImplementation((file,...args)=>{
+          if(typeof file==='string' && file.startsWith(mounts[1]) && (name==='mkdirSync'||/[wa+]/.test(args[0]))){
+            writes.push(file);throw Object.assign(new Error('NAS 唯讀'),{code:'EROFS'});
+          }
+          return original.call(api,file,...args);
+        });
+      }
+      const second=open(sources[1]),warm=await second.normalize(sources[1],opts);
+      expect(warm.cacheHit).toBe(true);
+      expect(warm.sourceFingerprint).not.toBe(original.sourceFingerprint);
+      expect(warm.sourceFingerprint).toBe(await motherSourceFingerprint(sources[1]));
+      expect(fs.readFileSync(warm.outputPath)).toEqual(pcm);
+      expect(await second.analyze(sources[1])).toEqual(report);
+      expect((await second.displayPeaks(sources[1],recipe)).peaks).toEqual(peaks);
+      expect(await accessVocalPeaks({path:sources[1],descriptor:await vocalRecipe(sources[1])},
+        runtimes[0].withAudioEffectCache)).toEqual(vocals);
+      expect(execute).not.toHaveBeenCalled();
+      expect(writes).toEqual([]);
+      const info=await runtimes[0].cacheInfo(sources[1],{sourceOnly:true});
+      expect(info.source.locations).toEqual(expect.arrayContaining([expect.objectContaining({audioEffects:true})]));
+    }finally{
+      await Promise.all(runtimes.map(runtime=>runtime.close()));vi.restoreAllMocks();
+      if(path.dirname(root)!==fs.realpathSync(tmpdir())||!path.basename(root).startsWith('subtool-effect-nas-'))throw new Error('測試目錄衝突');
+      fs.rmSync(root,{recursive:true,force:true});
+    }
+  });
   it('以同一遍產生預聽及真實逐聲道波形，重啟重用兩者、精準報告和顯示峰值',async()=>{
     const directory=fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()),'subtool-normalization-hot-'));
     try{

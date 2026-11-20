@@ -3,6 +3,7 @@
 import { $ } from './dom.js';
 import { on } from './events.js';
 import { MediaIntakeJobs } from './media-intake-jobs.js';
+import { PREVIEW_PROXY_KBPS } from '../shared/preview-proxy.cjs';
 import { setMediaProcessingStatus, setMediaIntakeStatus, showToast } from './ui.js';
 
 const starts=new Map();
@@ -14,7 +15,8 @@ function verificationBytes({stage,processedBytes,totalBytes}){
   return `（${format(processedBytes)} / ${format(totalBytes)} ${unit}）`;
 }
 
-function progressText(data,requestId,shortLabel=null){
+function progressText(data,job,shortLabel=null){
+  const {requestId,duration}=job;
   const stage=data.stage||'transcoding',label=data.label||'處理中';
   const pct=typeof data.pct==='number'&&Number.isFinite(data.pct)?Math.max(0,Math.min(100,data.pct)):null;
   const identity=stage+'\0'+label;
@@ -30,8 +32,13 @@ function progressText(data,requestId,shortLabel=null){
     const fmt=seconds=>`${Math.floor(seconds/60).toString().padStart(2,'0')}:${(seconds%60).toString().padStart(2,'0')}`;
     time=` [已用 ${fmt(Math.floor(elapsed/1000))} / 預估剩餘 ${fmt(remaining)}]`;
   }
-  if(shortLabel) return (pct==null?'':`${Math.floor(pct)}% `)+shortLabel+time;
-  return label+'…'+(pct==null?'':` ${Math.floor(pct)}%`)+verificationBytes(data)+time;
+  let estimate='';
+  if(stage==='transcoding'&&data.outputs?.proxy&&Number.isFinite(duration)&&duration>0){
+    const mb=duration*PREVIEW_PROXY_KBPS/8000;
+    estimate=mb>=1000?` · Proxy 約 ${(mb/1000).toFixed(2)} GB`:` · Proxy 約 ${mb.toFixed(1)} MB`;
+  }
+  if(shortLabel) return (pct==null?'':`${Math.floor(pct)}% `)+shortLabel+estimate+time;
+  return label+'…'+(pct==null?'':` ${Math.floor(pct)}%`)+verificationBytes(data)+estimate+time;
 }
 
 export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
@@ -81,10 +88,10 @@ export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
         const label=stage==='source-verification'?'驗證母素材':stage==='cache-check'?'檢查快取':
           stage==='transcoding'&&(other.progress.outputs?.proxy??String(other.progress.label||'').includes('Proxy'))?'Proxy 轉檔':
             stage==='transcoding'?'音訊分析':other.progress.label||'處理中';
-        const parts=[progressText(data,visible.requestId,data.stage==='source-channel-waveform'?data.label:'波形'),'｜',progressText(other.progress,other.requestId,label)+extra];
-        const detail=progressText(data,visible.requestId)+'；'+progressText(other.progress,other.requestId)+extra;
+        const parts=[progressText(data,visible,data.stage==='source-channel-waveform'?data.label:'波形'),'｜',progressText(other.progress,other,label)+extra];
+        const detail=progressText(data,visible)+'；'+progressText(other.progress,other)+extra;
         setMediaIntakeStatus(parts.join(''),'busy',detail,parts);
-      }else setMediaIntakeStatus(progressText(data,visible.requestId)+extra);
+      }else setMediaIntakeStatus(progressText(data,visible)+extra);
     }else if(recovery){
       const name=String(recovery.path||'素材').split(/[\\/]/).pop();
       const waves=(recovery.saved?.locations||[]).map(location=>location.waveform).filter(wave=>wave&&Number.isSafeInteger(wave.completedSamples));
@@ -130,7 +137,7 @@ export function handleMediaIntakeProgress(data){
   // 已持有的進度由 jobs snapshot 顯示，含本機波形整理；非 intake 的 extractAudio 保留舊入口。
   if(!owned){
     if($('stMedia')) $('stMedia').style.display='none';
-    setMediaProcessingStatus(progressText(data,data.jobId),'busy');
+    setMediaProcessingStatus(progressText(data,{requestId:data.jobId}),'busy');
   }
   return true;
 }

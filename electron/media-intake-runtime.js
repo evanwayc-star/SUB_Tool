@@ -144,7 +144,7 @@ function createMediaIntakeRuntime(options = {}) {
   const activeCacheDirs = new Map();
   const activeCacheSources = new Map();
   const portableHits = new Map();
-  const portableHashes = new Set();
+  const portableHashes = new Map();
   const waveformTasks = new Set();
   const cacheInfoTasks = new Set();
   const completedContinuousWaves = new Map();
@@ -283,12 +283,30 @@ function createMediaIntakeRuntime(options = {}) {
     };
   }
 
+  // A directory hint is reusable only for the same canonical file, strict
+  // sampled key and nanosecond stat snapshot. Admission still verifies the
+  // full shared witness on the publication before adopting any artifacts.
+  let lastNetworkSource;
+  function networkCacheKey(src, key) {
+    if (!allowSidecarCache) return null;
+    const physical = fs.realpathSync.native(src), stat = fs.statSync(src, { bigint: true });
+    const revision = [key, physical, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs].join('\0');
+    if (lastNetworkSource?.revision === revision) return lastNetworkSource.witness;
+    const witness = sharedSourceFingerprintSync(src, { networkOnly: true });
+    lastNetworkSource = { revision, witness };
+    return witness;
+  }
+
   function cacheCandidates(src, key = cacheKeyFor(src), onUncertain = null) {
     const candidates = [];
     if (allowSidecarCache) {
       try {
         const sourceDir = path.dirname(src);
-        if (sourceDir && sourceDir !== '.') candidates.push(path.join(sourceDir, '.subtool_Cache', key));
+        if (sourceDir && sourceDir !== '.') {
+          const root = path.join(sourceDir, '.subtool_Cache'), network = networkCacheKey(src, key);
+          if (network && network.slice(0, 16) !== key) candidates.push(path.join(root, network.slice(0, 16)));
+          candidates.push(path.join(root, key));
+        }
       } catch (error) {}
     }
     else candidates.push(path.join(cacheRoot(), key));
@@ -449,11 +467,11 @@ function createMediaIntakeRuntime(options = {}) {
     };
   }
 
-  function metaToStore(meta, dir) {
+  function metaToStore(meta, dir, proxyProfileVersion) {
     const relative = file => file ? path.relative(dir, file).split(path.sep).join('/') : file;
     return {
       proxy: relative(meta.proxy),
-      ...(meta.proxy && options.describeVideo ? { proxyColorVersion: 1, proxyProfileVersion: PREVIEW_PROXY_PROFILE } : {}),
+      ...(meta.proxy && options.describeVideo ? { proxyColorVersion: 1, proxyProfileVersion } : {}),
       wave: relative(meta.wave),
       ...(meta.wave ? { waveMixVersion: 1 } : {}),
       channels: (meta.channels || []).map(channel => ({
@@ -560,13 +578,16 @@ function createMediaIntakeRuntime(options = {}) {
     return true;
   }
 
-  function writeMeta(metaPath, publicationPath, meta, sourceContent, sourceKey, audio, verify) {
+  function writeMeta(metaPath, publicationPath, meta, proxyProfileVersion, sourceContent, sourceKey, audio, verify) {
     verify();
     const current = inspectCacheDirectory(path.dirname(metaPath), audio);
     if (current.sourceContent && !sameSourceContent(current.sourceContent, sourceContent)) throw cacheDirectoryChanged();
     const keys = !current.error && sameSourceContent(current.sourceContent, sourceContent) ? current.sourceKeys : [];
     if (!current.error && sameSourceContent(current.sourceContent, sourceContent)) {
-      meta.proxy ||= current.meta.proxy;
+      if (!meta.proxy && current.meta.proxy) {
+        meta.proxy = current.meta.proxy;
+        proxyProfileVersion = current.proxyProfileVersion;
+      }
       if (!audio.length) {
         meta.wave = current.meta.wave || meta.wave;
         if (current.meta.channels.length) meta.channels = current.meta.channels;
@@ -575,7 +596,7 @@ function createMediaIntakeRuntime(options = {}) {
     const dir = path.dirname(metaPath);
     const artifactSizes = Object.fromEntries([...new Set([meta.proxy, meta.wave, ...meta.channels.map(channel => channel.file)].filter(Boolean))]
       .map(file => [path.relative(dir, file).split(path.sep).join('/'), fs.statSync(file).size]));
-    const raw = { ...metaToStore(meta, dir), artifactSizes, publicationVersion: 1, sourceContent,
+    const raw = { ...metaToStore(meta, dir, proxyProfileVersion), artifactSizes, publicationVersion: 1, sourceContent,
       sourceKeys: [...new Set([...keys, sourceKey])] };
     // 每個 writer 只發布自己的 generation；相容索引可被另一台電腦覆寫，
     // 完成紀錄仍獨立存在，讀取端依母素材與聲道 layout 合併完整元件。
@@ -672,7 +693,9 @@ function createMediaIntakeRuntime(options = {}) {
       }
       const variants = resolved.map(({ meta, raw }) => {
         const inspected = inspectMeta(meta, sizes);
-        if (options.describeVideo && (raw.proxyColorVersion !== 1 || raw.proxyProfileVersion !== PREVIEW_PROXY_PROFILE)) inspected.meta.proxy = null;
+        const supportedProfile = [PREVIEW_PROXY_PROFILE, '480p-1000k-fast-v1'].includes(raw.proxyProfileVersion);
+        if (options.describeVideo && (raw.proxyColorVersion !== 1 || !supportedProfile)) inspected.meta.proxy = null;
+        inspected.proxyProfileVersion = raw.proxyProfileVersion;
         // Even a previously versioned entry can be a proxy-only publication
         // made from ambiguous old metadata. Reject that wave without dropping
         // the actual file, Proxy, or channel artifacts.
@@ -695,8 +718,10 @@ function createMediaIntakeRuntime(options = {}) {
         matching.find(variant => variant.meta.channels.some(valid => valid.file === variant.audioLayout[index].file))?.audioLayout[index] || channel);
       const validChannels = new Set(matching.flatMap(variant => variant.meta.channels.map(channel => channel.file)));
       const files = [...new Map(variants.flatMap(variant => variant.files).map(entry => [entry.file, entry])).values()];
+      const proxyVariant = variants.find(variant => variant.meta.proxy);
       const result = { dir, files, retained: uncertain || verifiedSource || variants.some(variant => variant.retained), audioLayout,
-        meta: { proxy: variants.find(variant => variant.meta.proxy)?.meta.proxy || null,
+        proxyProfileVersion: proxyVariant?.proxyProfileVersion,
+        meta: { proxy: proxyVariant?.meta.proxy || null,
           wave: matching.find(variant => variant.meta.wave)?.meta.wave || null,
           channels: audioLayout.filter(channel => validChannels.has(channel.file)) }, sourceContent, sourceKeys, sharedSourceKeys };
       if (!sameCacheDirectory(owner, cacheDirectoryOwner(dir))) throw cacheDirectoryChanged();
@@ -720,6 +745,8 @@ function createMediaIntakeRuntime(options = {}) {
       if (portableHits.get(key) === portable) portableHits.delete(key);
       return { dir, files: [], error: 'CACHE_SOURCE_MISMATCH' };
     }
+    const networkBucket = src && isSidecarCandidate(src, dir) && path.basename(dir) === networkCacheKey(src, key)?.slice(0, 16);
+    if (networkBucket && !hit.sourceContent && hit.files.length) return { dir, files: [], error: 'CACHE_SOURCE_UNVERIFIED' };
     if (hit.sourceContent?.format === SHARED_FILE_SOURCE_FORMAT) {
       // This record certifies one physical source file, never another file with
       // similar samples. Central copies additionally retain the local strict key.
@@ -743,7 +770,8 @@ function createMediaIntakeRuntime(options = {}) {
     }
     // 新格式已明示來源證據時，不能僅憑本機 key 的目錄名稱認領別的母素材。
     // 沒有新證據的舊 metadata 保留 strict-key 相容；未綁定的新內容先全文驗證。
-    if (hit.sourceContent && !mapped && !hit.sourceKeys.includes(key)) {
+    const sharedPublication = networkBucket && hit.sourceContent?.format === SHARED_FILE_SOURCE_FORMAT;
+    if (hit.sourceContent && !mapped && !hit.sourceKeys.includes(key) && !sharedPublication) {
       return { dir, files: [], error: 'CACHE_SOURCE_UNVERIFIED' };
     }
     return hit;
@@ -769,8 +797,9 @@ function createMediaIntakeRuntime(options = {}) {
     return partial?.hit || null;
   }
 
-  async function preparePortableCache({ src, audio = [], needsProxy }, session, requireContent = false, { knownOnly = false } = {}) {
-    if (!knownOnly) reportProgress(session, { jobId: 'ingest', stage: 'cache-check', label: '檢查 Proxy 與音訊快取', pct: null });
+  async function preparePortableCache({ src, audio = [], needsProxy }, session, requireContent = false, { knownOnly = false,
+    onProgress = payload => reportProgress(session, { jobId: 'ingest', ...payload }) } = {}) {
+    if (!knownOnly) onProgress({ stage: 'cache-check', label: needsProxy ? '檢查 Proxy 與音訊快取' : '檢查素材快取', pct: null });
     const sourceKey = cacheKeyFor(src);
     const current = () => !closed && !cancelled(session);
     const ensureCurrent = () => { if (!current()) throw new IngestSupersededError(); };
@@ -813,7 +842,6 @@ function createMediaIntakeRuntime(options = {}) {
       return { sourceKey, sourceContent: knownContent, sharedSourceKey: sharedSourceKey || null };
     }
     const candidates = [];
-    let invalidSourceEvidence = false;
     if (!directComplete) {
       const roots = allowSidecarCache ? [sidecarRoot(src)] : [cacheRoot()];
       const size = fs.statSync(src).size;
@@ -840,7 +868,6 @@ function createMediaIntakeRuntime(options = {}) {
                 ensureCurrent(); verifyRoot();
                 if ((await file.stat()).size > 1024 * 1024) continue;
                 const raw = JSON.parse(await file.readFile('utf8'));
-                if (raw?.sourceContent && !validSourceContent(raw.sourceContent)) invalidSourceEvidence = true;
                 verifyRoot(); if (acceptedRecord(metadata, raw)) records.push({ ...metadata, raw });
               } catch (error) { ensureCurrent(); }
               finally { if (file) await file.close(); }
@@ -889,16 +916,16 @@ function createMediaIntakeRuntime(options = {}) {
     // Waveform-first lookup can reuse an existing receipt, but must never begin
     // a full mother-source hash just to discover whether an old wave exists.
     if (knownOnly) return { sourceKey, sourceContent: null, sharedSourceKey: sharedSourceKey || null };
-    // A first publication beside the same identifiable file does not need a
-    // portable content digest. Distinct-file candidates still take the full SHA
-    // path below; a file-identity record cannot certify a copied mother source.
-    if (!knownContent && !candidates.length && !invalidSourceEvidence && allowSidecarCache && sharedKey()) {
-      const dir = writeCacheDir(src);
-      if (isSidecarCandidate(src, dir)) {
-        const sourceContent = { format: SHARED_FILE_SOURCE_FORMAT, size: fs.statSync(src).size,
-          sharedSourceKey: sharedKey() };
+    // A new NAS sidecar stays with the original file on its share. Use its
+    // bounded witness immediately; copied SHA publications still take the
+    // full verification path to preserve existing portable artifacts.
+    if (!direct?.sourceContent && !candidates.some(candidate => candidate.sourceContent.format === PORTABLE_SOURCE_FORMAT)) {
+      const network = networkCacheKey(src, sourceKey);
+      if (network && network === sharedKey()) {
+        const dir = writeCacheDir(src);
+        const sourceContent = { format: SHARED_FILE_SOURCE_FORMAT, size: fs.statSync(src).size, sharedSourceKey: network };
         bindSource(dir, sourceContent);
-        return { sourceKey, sourceContent, sharedSourceKey: sharedSourceKey || null };
+        return { sourceKey, sourceContent, sharedSourceKey: network };
       }
     }
     let sha256 = knownContent?.sha256;
@@ -907,15 +934,32 @@ function createMediaIntakeRuntime(options = {}) {
       // receipt publication. A new sample cannot certify an older SHA.
       if (allowSidecarCache) sharedKey();
       let lastPercent = -1, lastReport = -Infinity;
-      const hash = portableSourceFingerprint(src, { shouldContinue: current, onProgress: ({ processedBytes, totalBytes, completed }) => {
+      const reportHash = ({ processedBytes, totalBytes, completed }) => {
         const pct = totalBytes ? processedBytes / totalBytes * 100 : completed ? 100 : null;
         const timestamp = now(), integer = pct === null ? -1 : Math.floor(pct);
         if (integer === lastPercent && timestamp - lastReport < 250) return;
         lastPercent = integer; lastReport = timestamp;
-        reportProgress(session, { jobId: 'ingest', stage: 'source-verification', label: '驗證母素材內容', pct, processedBytes, totalBytes });
-      } });
-      portableHashes.add(hash);
-      try { sha256 = await hash; } finally { portableHashes.delete(hash); }
+        onProgress({ stage: 'source-verification', label: '驗證母素材內容', pct, processedBytes, totalBytes });
+      };
+      // Simultaneous Proxy and waveform requests can share the read while
+      // retaining separate cancellation, progress, and publication checks.
+      const hashKey = sourceKey + '/' + (sharedSourceKey || '');
+      let job = portableHashes.get(hashKey);
+      const reader = { current, onProgress: reportHash };
+      if (!job || ![...job.readers].some(watcher => watcher.current())) {
+        const readers = new Set([reader]);
+        const promise = portableSourceFingerprint(src, {
+          shouldContinue: () => [...readers].some(watcher => watcher.current()),
+          onProgress: event => { for (const watcher of readers) if (watcher.current()) watcher.onProgress(event); },
+        });
+        job = { promise, readers };
+        portableHashes.set(hashKey, job);
+      } else job.readers.add(reader);
+      try { sha256 = await job.promise; }
+      finally {
+        job.readers.delete(reader);
+        if (!job.readers.size && portableHashes.get(hashKey) === job) portableHashes.delete(hashKey);
+      }
     }
     check();
     const sourceContent = { format: PORTABLE_SOURCE_FORMAT, size: fs.statSync(src).size, sha256 };
@@ -1059,7 +1103,7 @@ function createMediaIntakeRuntime(options = {}) {
 
   // Effect previews can be large. Keep them under the same source bucket and
   // cleanup leases as Proxy/WAV, including a reader lease for an installed preview.
-  async function withAudioEffectCache(src, work) {
+  async function withAudioEffectCache(src, work, { sharedOnly = false, legacyOnly = false } = {}) {
     if (!allowSidecarCache || !fileAuthority.canRead(src)) throw new Error('無法使用此素材的音訊平衡快取');
     const generation = runtimeGeneration;
     const checkSession = () => { if (closed || generation !== runtimeGeneration) throw new IngestSupersededError(); };
@@ -1069,9 +1113,21 @@ function createMediaIntakeRuntime(options = {}) {
       checkSession();
       const key = await cacheKeyForAsync(src);
       checkSession();
-      let bucket = path.join(sidecarRoot(src), key);
+      const sharedSourceKey = legacyOnly ? null : networkCacheKey(src, key);
+      if (sharedOnly && !sharedSourceKey) return null;
+      let evidence;
+      if (sharedSourceKey) {
+        evidence = await preparePortableCache({ src }, { isCancelled: () => generation !== runtimeGeneration }, true,
+          { onProgress: () => {} });
+        checkSession();
+        if (evidence.sourceKey !== key || networkCacheKey(src, key) !== sharedSourceKey) throw cacheDirectoryChanged();
+      }
+      let bucket = path.join(sidecarRoot(src), sharedSourceKey?.slice(0, 16) || key);
+      if (evidence) bucket = readCache(src, [], false)?.dir || bucket;
       const existingRoot = sidecarAuthority(src);
-      const existing = existingRoot && fs.existsSync(bucket) ? inspectSourceCache(bucket, [], key, null, true, src) : null;
+      const existing = existingRoot && fs.existsSync(bucket) ? inspectSourceCache(bucket, [], key, portableHits.get(key), true, src) : null;
+      if (legacyOnly && (!existingRoot || !fs.existsSync(path.join(bucket, 'audio-effects'))
+        || (existing?.error && !existing.metadataMissing))) return null;
       if (!existing || (existing.error && !existing.metadataMissing)) bucket = writeCacheDir(src);
       const rootOwner = sidecarAuthority(src);
       if (!rootOwner || !isSidecarCandidate(src, bucket)) throw cachePathEscape();
@@ -1083,8 +1139,15 @@ function createMediaIntakeRuntime(options = {}) {
       };
       grantManagedCleanupRoot(bucket, checkRoot);
       checkRoot();
-      try { fs.mkdirSync(directory); } catch (error) { if (error.code !== 'EEXIST') throw error; }
-      const owner = cacheDirectoryOwner(directory);
+      let owner;
+      try { owner = cacheDirectoryOwner(directory); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        if (legacyOnly) return null;
+        checkRoot();
+        try { fs.mkdirSync(directory); } catch (mkdirError) { if (mkdirError.code !== 'EEXIST') throw mkdirError; }
+        owner = cacheDirectoryOwner(directory);
+      }
       const verify = () => {
         checkRoot();
         if (!sameCacheDirectory(owner, cacheDirectoryOwner(directory))) throw cacheDirectoryChanged();
@@ -1092,13 +1155,15 @@ function createMediaIntakeRuntime(options = {}) {
       verify();
       const retain = () => { verify(); return protectCacheDir(bucket, src); };
       const release = retain();
-      try { return await work({ directory, verify, retain }); }
+      try { return await work({ directory, verify, retain, sharedSourceKey,
+        readLegacy: sharedSourceKey ? reader => withAudioEffectCache(src, reader, { legacyOnly: true }) : null }); }
       finally { release(); }
     } finally { releaseSource(); }
   }
 
   function sourceCacheInfo(src, session) {
-    const key = cacheKeyFor(src), shared = allowSidecarCache ? sharedSourceFingerprintSync(src) : null;
+    const key = cacheKeyFor(src), network = networkCacheKey(src, key);
+    const shared = network || (allowSidecarCache ? sharedSourceFingerprintSync(src) : null);
     const local = crypto.createHash('sha256').update('strict-source-wave-v1\0' + key).digest('hex');
     const sourceSnapshot = fs.statSync(src, { bigint: true });
     const verifySource = () => {
@@ -1108,10 +1173,16 @@ function createMediaIntakeRuntime(options = {}) {
         throw new Error('查詢快取期間母素材已變更');
     };
     const directories = new Set(cacheCandidates(src, key)), sidecar = allowSidecarCache && sidecarAuthority(src);
-    if (sidecar) for (const entry of readCleanupEntries(sidecarRoot(src), 2048))
-      if (entry.isDirectory() && !entry.isSymbolicLink() && /^[a-f0-9]{16}$/.test(entry.name)) directories.add(path.join(sidecarRoot(src), entry.name));
     const locations = [];
-    for (const directory of directories) {
+    function* infoDirectories() {
+      yield* directories;
+      if (!sidecar || (network && locations.some(location => path.basename(location.directory) === network.slice(0, 16)))) return;
+      for (const entry of readCleanupEntries(sidecarRoot(src), 2048)) {
+        const candidate = path.join(sidecarRoot(src), entry.name);
+        if (!directories.has(candidate) && entry.isDirectory() && !entry.isSymbolicLink() && /^[a-f0-9]{16}$/.test(entry.name)) yield candidate;
+      }
+    }
+    for (const directory of infoDirectories()) {
       verifySource();
       try { if (!fs.lstatSync(directory).isDirectory()) continue; }
       catch (error) { if (error.code === 'ENOENT') continue; throw error; }
@@ -1126,7 +1197,8 @@ function createMediaIntakeRuntime(options = {}) {
       const matching = !hit.error && (isSidecar && shared && hit.sharedSourceKeys.includes(shared)
         || path.basename(directory) === key && (!hit.sourceContent || hit.sourceKeys.includes(key))
           && (!hit.sharedSourceKeys.length || hit.sharedSourceKeys.includes(shared)));
-      const waveform = describeContinuousWaveformCache(directory, { sourceKey: shared || local, verify });
+      const waveform = describeContinuousWaveformCache(directory, { sourceKey: shared || local,
+        sourceSHA256: matching ? hit.sourceContent?.sha256 : null, verify });
       let audioEffects = false;
       if (matching || (isSidecar && path.basename(directory) === key && hit.metadataMissing)) {
         try { cacheDirectoryOwner(path.join(directory, 'audio-effects')); audioEffects = true; }
@@ -1143,7 +1215,7 @@ function createMediaIntakeRuntime(options = {}) {
     verifySource();
     if (cacheKeyFor(src) !== key || (shared && sharedSourceFingerprintSync(src) !== shared)) throw new Error('母素材已變更');
     verifySource();
-    return { path: src, locations };
+    return { path: src, locations, ...(network ? { nas: true } : {}) };
   }
 
   function centralCacheInfo(session) {
@@ -2349,6 +2421,7 @@ function createMediaIntakeRuntime(options = {}) {
       if (wave !== continuousWave.wave) waveCopy = { source: continuousWave.wave, destination: wave };
     }
     const meta = { proxy, channels, wave };
+    const proxyProfileVersion = buildProxy ? PREVIEW_PROXY_PROFILE : hit?.proxyProfileVersion;
     const args = buildIngestArgs({
       src,
       needsProxy: buildProxy,
@@ -2449,7 +2522,8 @@ function createMediaIntakeRuntime(options = {}) {
           throw new Error('既有媒體快取在補建期間變更');
         }
         if (!metaValid(meta)) throw new Error('媒體轉檔沒有產生完整快取');
-        writeMeta(metaPath, path.join(outputDir, 'cache-meta.json'), meta, portable.sourceContent, sourceKey, audioSources, verifyPublication);
+        writeMeta(metaPath, path.join(outputDir, 'cache-meta.json'), meta, proxyProfileVersion,
+          portable.sourceContent, sourceKey, audioSources, verifyPublication);
         committed = true;
       },
       dispose() {
@@ -2523,11 +2597,12 @@ function createMediaIntakeRuntime(options = {}) {
     }
   }
 
-  async function continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached, displayPeaks }, session, progress) {
+  async function continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached, displayPeaks }, session, progress, cachedMix) {
     const ensureCurrent = () => { if (closed || cancelled(session)) throw new IngestSupersededError(); };
     const totalSamples = Math.round(duration * 4000);
     const localKey = crypto.createHash('sha256').update('strict-source-wave-v1\0' + sourceKey).digest('hex');
-    const sharedKey = allowSidecarCache ? sharedSourceFingerprintSync(src) : null;
+    const networkKey = allowSidecarCache ? networkCacheKey(src, sourceKey) : null;
+    const sharedKey = networkKey || (allowSidecarCache ? sharedSourceFingerprintSync(src) : null);
     const sourceSnapshot = fs.statSync(src, { bigint: true });
     const checkSource = (full = false) => {
       ensureCurrent();
@@ -2541,37 +2616,63 @@ function createMediaIntakeRuntime(options = {}) {
     };
     checkSource(true);
     const recipeAudio = audio.map(stream => ({ channels: stream.channels, timestampOffset: timestampOffset(stream) }));
-    const specFor = () => ({ version: 1, sharedSourceKey: sharedKey || localKey,
-      audio: recipeAudio, totalSamples, ...(channel ? { channel } : {}) });
+    const legacySpec = { version: 1, sharedSourceKey: sharedKey || localKey,
+      audio: recipeAudio, totalSamples, ...(channel ? { channel } : {}) };
+    let spec = networkKey ? { ...legacySpec, version: 3 } : legacySpec;
     if (!audio.length) {
       progress({ pct: 100, done: true, outcome: 'success', label: '來源沒有音訊' });
       return { wave: null, channels: [], cached: false, temporary: false, start: 0, duration, complete: true, sourceKey };
     }
+    const findWave = (dirs, recipe) => {
+      let best = null;
+      for (const dir of dirs) {
+        checkSource();
+        if (!canUseCacheCandidate(dir)) continue;
+        const sidecar = isSidecarCandidate(src, dir) ? sidecarAuthority(src) : null;
+        if (isSidecarCandidate(src, dir) && !sidecar) continue;
+        const verify = () => {
+          checkSource(); assertCleanupAncestors(path.join(dir, '.wave-continuous-check'));
+          if (sidecar) captureOutputAuthority(path.join(sidecar.requestedPath, '.wave-continuous-check'), sidecar);
+        };
+        const state = inspectContinuousWaveformCache(dir, { spec: recipe, verify, displayPeaks });
+        if (state.isComplete) return { dir, state, recipe };
+        if (state.retained && (!best || state.completedSamples > best.state.completedSamples)) best = { dir, state, recipe };
+      }
+      return best;
+    };
     const candidates = new Set(cacheCandidates(src, sourceKey));
-    if (sharedKey) {
-      const authority = sidecarAuthority(src), root = sidecarRoot(src);
-      if (authority) {
-        captureOutputAuthority(path.join(root, '.wave-continuous-check'), authority);
-        for (const entry of readCleanupEntries(root)) if (entry.isDirectory() && !entry.isSymbolicLink() && /^[a-f0-9]{16}$/.test(entry.name))
-          candidates.add(path.join(root, entry.name));
-        captureOutputAuthority(path.join(root, '.wave-continuous-check'), authority);
+    let selected = ignoreCached ? null : findWave(candidates, spec);
+    if (!selected && !ignoreCached && spec !== legacySpec) selected = findWave(candidates, legacySpec);
+    if (!selected && allowSidecarCache) {
+      const evidence = await preparePortableCache({ src, audio: channel ? [] : audio, needsProxy: false }, session, true, {
+        onProgress: ({ stage: phase, ...payload }) => progress({ phase, ...payload }),
+      });
+      checkSource(true);
+      if (!ignoreCached && !channel && evidence.sourceContent) {
+        const completedMix = cachedMix(readCache(src, audio, false));
+        if (completedMix) return completedMix;
+      }
+      if (evidence.sourceContent?.sha256 || evidence.sharedSourceKey) {
+        if (evidence.sourceContent?.sha256) spec = { ...spec, version: 2, sharedSourceKey: evidence.sourceContent.sha256 };
+        for (const dir of cacheCandidates(src, sourceKey)) candidates.add(dir);
+        if (!ignoreCached) selected = findWave(candidates, spec);
+        if (!selected && !ignoreCached && spec !== legacySpec) selected = findWave(candidates, legacySpec);
+      }
+      // Older releases and foreign profiles can have a per-client cache folder.
+      // Search those only on a miss; a warm NAS hit only opens its source folder.
+      if (!selected && !ignoreCached && sharedKey) {
+        const authority = sidecarAuthority(src), root = sidecarRoot(src);
+        if (authority) {
+          const sentinel = path.join(root, '.wave-continuous-check');
+          captureOutputAuthority(sentinel, authority);
+          const others = readCleanupEntries(root).filter(entry => entry.isDirectory() && !entry.isSymbolicLink()
+            && /^[a-f0-9]{16}$/.test(entry.name)).map(entry => path.join(root, entry.name)).filter(dir => !candidates.has(dir));
+          captureOutputAuthority(sentinel, authority);
+          selected = findWave(others, spec) || (spec !== legacySpec && findWave(others, legacySpec));
+        }
       }
     }
-    let selected = null;
-    if (!ignoreCached) for (const dir of candidates) {
-      checkSource();
-      if (!canUseCacheCandidate(dir)) continue;
-      const sidecar = isSidecarCandidate(src, dir) ? sidecarAuthority(src) : null;
-      if (isSidecarCandidate(src, dir) && !sidecar) continue;
-      const verify = () => {
-        checkSource(); assertCleanupAncestors(path.join(dir, '.wave-continuous-check'));
-        if (sidecar) captureOutputAuthority(path.join(sidecar.requestedPath, '.wave-continuous-check'), sidecar);
-      };
-      const state = inspectContinuousWaveformCache(dir, { spec: specFor(dir), verify, displayPeaks });
-      if (state.retained && (!selected || state.isComplete || state.completedSamples > selected.state.completedSamples))
-        selected = { dir, state };
-      if (state.isComplete) break;
-    }
+    if (selected) spec = selected.recipe;
     const completedResult = (result, dir) => {
       const observed = fs.lstatSync(result.wave, { bigint: true });
       const completed = { ...result, ...(channel ? { channel } : {}), channels: [], continuous: true, cacheDir: dir, recipeAudio, totalSamples, sharedSourceKey: sharedKey,
@@ -2597,7 +2698,7 @@ function createMediaIntakeRuntime(options = {}) {
         if (!sameCacheDirectory(directoryOwner, cacheDirectoryOwner(dir))) throw cacheDirectoryChanged();
       };
       const unprotect = protectCacheDir(dir, src);
-      try { return { dir, verify, unprotect, store: openContinuousWaveformCache(dir, specFor(), { verify, ignoreCached }) }; }
+      try { return { dir, verify, unprotect, store: openContinuousWaveformCache(dir, spec, { verify, ignoreCached }) }; }
       catch (error) { unprotect(); throw error; }
     };
     const preferred = selected && (selected.state.isComplete || isDirWritable(selected.dir)) ? selected.dir : writeCacheDir(src);
@@ -2609,7 +2710,7 @@ function createMediaIntakeRuntime(options = {}) {
         ownProcess: child => ownWaveformProcess(child, session.ownProcess) });
       verify();
       if (displayPeaks) {
-        const display = waveformDisplayCache(dir, result.wave, { ...specFor(), pcmSHA256:store.pcmSHA256 }, verify);
+        const display = waveformDisplayCache(dir, result.wave, { ...spec, pcmSHA256:store.pcmSHA256 }, verify);
         if (display && !result.displayPeaks) progress({phase:'reading',label:'讀取已產生的波形',pct:null});
         const peaks = result.displayPeaks || display?.fromWave();
         if (peaks) { display.save(peaks);result.displayPeaks=peaks; }
@@ -2726,13 +2827,15 @@ function createMediaIntakeRuntime(options = {}) {
     if (displayPeaks) progress({phase:'cache-check',label:channel?'檢查聲道波形快取':'檢查波形快取',pct:null});
     else progress({ pct: start / duration * 100 });
     let hit = ignoreCached || channel ? null : readCache(src, audio, false);
-    if (!channel && continuous && !ignoreCached && !(hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio)))) {
+    if (!channel && continuous && !ignoreCached && !(hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio)))
+      && !(allowSidecarCache && networkCacheKey(src, sourceKey))) {
       await preparePortableCache({ src, audio, needsProxy: false }, session, false, { knownOnly: true });
       check(); hit = readCache(src, audio, false);
     }
     check();
-    if (hit?.meta.wave && sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio))
-      && !(displayPeaks && isContinuousWaveformCachePath(hit.meta.wave))) {
+    const cachedMix = hit => {
+      if (!hit?.meta.wave || !sameAudioLayout(hit.audioLayout, flattenSourceChannels(audio))
+        || (continuous && isContinuousWaveformCachePath(hit.meta.wave))) return null;
       let peaks;
       if (displayPeaks) {
         const wave = hit.meta.wave, guard = captureStreamGuard(hit.dir, inspectedCacheOwners.get(hit), wave);
@@ -2748,7 +2851,9 @@ function createMediaIntakeRuntime(options = {}) {
       progress({ pct: 100, done: true, outcome: 'success', label: '波形已就緒' });
       ensureCurrent();
       return { wave: hit.meta.wave, ...(peaks?{displayPeaks:peaks}:{}), channels: [], cached: true, temporary: false, start: 0, duration, complete: true, sourceKey };
-    }
+    };
+    const existing = cachedMix(hit);
+    if (existing) return existing;
     // 主程序重用既有 probe owner；renderer 的舊描述不可決定換檔後的聲道或來源時鐘。
     if (options.describeAudio) {
       audio = await options.describeAudio(src);
@@ -2757,7 +2862,7 @@ function createMediaIntakeRuntime(options = {}) {
     }
     if (channel && (!audio[channel.sourceStream] || channel.sourceChannel >= audio[channel.sourceStream].channels))
       throw new RangeError(`來源音訊沒有 S${channel.sourceStream + 1} · Ch${channel.sourceChannel + 1}`);
-    if (continuous) return continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached, displayPeaks }, session, progress);
+    if (continuous) return continuousWaveform({ src, duration, audio, channel, sourceKey, ignoreCached, displayPeaks }, session, progress, cachedMix);
     const localWaveKey = crypto.createHash('sha256').update('strict-source-wave-v1\0' + sourceKey).digest('hex');
     // 共享證據仍含 NAS 檔案身分與完整時間戳；不把同樣取樣內容的另一份檔案當成同一來源。
     const sharedWaveKey = allowSidecarCache ? sharedSourceFingerprintSync(src) : null;
@@ -3236,7 +3341,7 @@ function createMediaIntakeRuntime(options = {}) {
       const cleanupCloseFailure = cleanupCloseResults.find(result=>result.status==='rejected');
       if (cleanupCloseFailure) throw cleanupCloseFailure.reason;
     } finally { drainingCleanup = false; }
-    await Promise.allSettled([...portableHashes]);
+    await Promise.allSettled([...portableHashes.values()].map(job => job.promise));
     if (!streamServer) { await Promise.all([...drainingServers].map(drainServer)); return; }
     const server = streamServer;
     await streamServerReady.catch(() => {});

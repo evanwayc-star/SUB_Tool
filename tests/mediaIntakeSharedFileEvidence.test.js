@@ -72,6 +72,11 @@ function sharedContent(source) {
     sharedSourceKey: sharedSourceFingerprintSync(source) };
 }
 
+function portableContent() {
+  return { format: 'source-v3-sha256', size: sourceBytes.length,
+    sha256: crypto.createHash('sha256').update(sourceBytes).digest('hex') };
+}
+
 function overrideSharedSourceStat(source, fields) {
   const tracked = new Set(), open = fs.openSync, close = fs.closeSync;
   const statSync = fs.statSync, fstatSync = fs.fstatSync;
@@ -124,18 +129,52 @@ afterEach(async () => {
 });
 
 describe('同一共享母素材的快速身分證據與完整內容證據分離', () => {
-  it('冷建 sidecar 只發布共享檔案證據，實際來源全文讀取為零', async () => {
+  it('NAS 冷建及不同掛載命中穩定 bucket，保留 Proxy 與聲道 bytes 且不讀母檔全文', async () => {
+    const original = fixture(), sources = new Set([original.source]);
+    const native = fs.realpathSync.native;
+    vi.spyOn(fs.realpathSync, 'native').mockImplementation((file, ...args) => sources.has(file)
+      ? '\\\\fileserver\\production\\mother.mxf' : native(file, ...args));
+    const meter = sourceReadMeter(original.source);
+    const first = runtimeFor(original.root, 'nas-writer'), audio = [{ channels: 2 }];
+    const saved = await first.runtime.ingest(request(original.source, audio));
+    expect(first.run).toHaveBeenCalledOnce();
+    const witness = sharedSourceFingerprintSync(original.source, { networkOnly: true });
+    expect(witness).toMatch(/^[a-f0-9]{64}$/);
+    expect(path.basename(cacheDirectory(saved.proxy))).toBe(witness.slice(0, 16));
+    expect(metadata(saved.proxy).sourceContent).toEqual(sharedContent(original.source));
+    await first.runtime.close();
+    const media = path.join(original.root, 'different-mount');
+    fs.renameSync(original.media, media);
+    const source = path.join(media, path.basename(original.source));
+    sources.add(source); meter.add(source);
+    const reader = runtimeFor(original.root, 'nas-reader');
+    const listings = vi.spyOn(fsp, 'readdir');
+    const result = await reader.runtime.ingest(request(source, audio));
+    expect(listings.mock.calls.filter(([dir]) => dir === path.join(media, '.subtool_Cache'))).toHaveLength(0);
+    expect(result.cached).toBe(true);
+    expect(reader.run).not.toHaveBeenCalled();
+    expect(meter.reads.bytes).toBe(0);
+    expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
+    expect(result.channels).toHaveLength(2);
+    for (const channel of result.channels) expect(fs.readFileSync(channel.file)).toEqual(outputBytes(channel.file));
+    const scans = vi.spyOn(fs, 'opendirSync');
+    const info = await reader.runtime.cacheInfo(source, { sourceOnly: true });
+    expect(info.source).toMatchObject({ nas: true, locations: [{ proxy: true, channels: 2 }] });
+    expect(scans.mock.calls.some(([dir]) => dir === path.join(media, '.subtool_Cache'))).toBe(false);
+  });
+
+  it('冷建 sidecar 全文只讀一次，發布可跨實體檔案使用的內容證據', async () => {
     const original = fixture(), meter = sourceReadMeter(original.source);
     const writer = runtimeFor(original.root, 'cold-writer');
     const result = await writer.runtime.ingest(request(original.source));
-    expect(meter.reads).toEqual({ opens: 0, calls: 0, bytes: 0 });
+    expect(meter.reads.opens).toBe(1);
+    expect(meter.reads.bytes).toBe(sourceBytes.length);
     expect(writer.run).toHaveBeenCalledOnce();
     expect(result.cached).toBe(false);
     expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
-    expect(metadata(result.proxy).sourceContent).toEqual(sharedContent(original.source));
-    expect(metadata(result.proxy).sourceContent).not.toHaveProperty('sha256');
+    expect(metadata(result.proxy).sourceContent).toEqual(portableContent());
     const publication = JSON.parse(fs.readFileSync(path.join(path.dirname(result.proxy), 'cache-meta.json'), 'utf8'));
-    expect(publication.sourceContent).toEqual(sharedContent(original.source));
+    expect(publication.sourceContent).toEqual(portableContent());
   });
 
   it('僅重新命名母素材父目錄並更換 profile，沿用相鄰 sidecar 的同一 Proxy bytes 且不讀全文', async () => {
@@ -155,7 +194,7 @@ describe('同一共享母素材的快速身分證據與完整內容證據分離'
     expect(result.cached).toBe(true);
     expect(result.proxy).toBe(path.join(media, path.relative(original.media, saved.proxy)));
     expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
-    expect(metadata(result.proxy).sourceContent).toEqual(sharedContent(source));
+    expect(metadata(result.proxy).sourceContent).toEqual(portableContent());
   });
 
   it('writer 完成後取消不能發布產物，重開重試仍不全文讀取來源', async () => {
@@ -165,12 +204,13 @@ describe('同一共享母素材的快速身分證據與完整內容證據分離'
     await expect(writer.runtime.ingest(request(original.source), { isCancelled: () => cancelled })).rejects.toThrow(/取代|取消/);
     expect(writer.runtime.inspectCache(original.source).every(hit => !hit.meta?.proxy)).toBe(true);
     await writer.runtime.close();
+    meter.reset();
     const reader = runtimeFor(original.root, 'retry-reader');
     const result = await reader.runtime.ingest(request(original.source));
     expect(meter.reads).toEqual({ opens: 0, calls: 0, bytes: 0 });
     expect(reader.run).toHaveBeenCalledOnce();
     expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
-    expect(metadata(result.proxy).sourceContent).toEqual(sharedContent(original.source));
+    expect(metadata(result.proxy).sourceContent).toEqual(portableContent());
   });
 
   it('串流 writer 完成後取消不發布 Proxy，重開串流重試仍無全文讀取', async () => {
@@ -182,6 +222,7 @@ describe('同一共享母素材的快速身分證據與完整內容證據分離'
     expect(interrupted.response).toBeNull();
     expect(writer.runtime.inspectCache(original.source).every(hit => !hit.meta?.proxy)).toBe(true);
     await writer.runtime.close();
+    meter.reset();
     const reader = runtimeFor(original.root, 'retry-stream-reader');
     const work = await reader.runtime.stream(request(original.source));
     await work.completion;
@@ -190,7 +231,7 @@ describe('同一共享母素材的快速身分證據與完整內容證據分離'
     expect(reader.run).toHaveBeenCalledOnce();
     expect(result.cached).toBe(false);
     expect(fs.readFileSync(result.proxy)).toEqual(proxyBytes);
-    expect(metadata(result.proxy).sourceContent).toEqual(sharedContent(original.source));
+    expect(metadata(result.proxy).sourceContent).toEqual(portableContent());
     reader.runtime.releaseStream(result.streamLeaseId);
   });
 
@@ -216,7 +257,8 @@ describe('同一共享母素材的快速身分證據與完整內容證據分離'
     expect(changed).toBe(true);
     expect(cacheKeyFor(original.source)).toBe(key);
     expect(sharedSourceFingerprintSync(original.source)).not.toBe(witness);
-    expect(meter.reads).toEqual({ opens: 0, calls: 0, bytes: 0 });
+    expect(meter.reads.opens).toBe(1);
+    expect(meter.reads.bytes).toBe(sourceBytes.length);
     expect(writer.run).toHaveBeenCalledOnce();
     expect(publications).toEqual([]);
     const directory = path.join(original.media, '.subtool_Cache', key);
@@ -243,6 +285,7 @@ describe('同一共享母素材的快速身分證據與完整內容證據分離'
   it('母素材與 shared-only sidecar 複製到不同 inode，即使 bytes 相同也全文驗證一次並重建 Proxy', async () => {
     const original = fixture(), writer = runtimeFor(original.root, 'copy-writer');
     const saved = await writer.runtime.ingest(request(original.source));
+    rewriteSourceContent(cacheDirectory(saved.proxy), sharedContent(original.source));
     const moved = transfer(original), meter = sourceReadMeter(moved.source);
     expect(sharedSourceFingerprintSync(moved.source)).not.toBe(sharedSourceFingerprintSync(original.source));
     const oldProxy = path.join(moved.media, path.relative(original.media, saved.proxy));
@@ -294,6 +337,6 @@ describe('同一共享母素材的快速身分證據與完整內容證據分離'
     for (const file of kept) expect([result.proxy, result.wave, ...result.channels.map(channel => channel.file)]).toContain(file);
     const repaired = component === 'channel' ? result.channels[0].file : result[component];
     expect(fs.readFileSync(repaired)).toEqual(outputBytes(repaired));
-    expect(metadata(result.proxy).sourceContent).toEqual(sharedContent(original.source));
+    expect(metadata(result.proxy).sourceContent).toEqual(portableContent());
   });
 });

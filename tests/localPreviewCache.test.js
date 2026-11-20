@@ -75,13 +75,33 @@ it('重新開啟可直接重用已完成同夾資產，不轉檔、不複製到�
   expect(f.execute).not.toHaveBeenCalled();expect(fs.existsSync(f.cacheRoot)).toBe(false);
 });
 
-it('舊 720p Proxy 規格只重建影片，保留已驗證聲道與波形',async()=>{
-  const f=await fixture({describeVideo:async()=>({codec:'h264',width:1920,height:1080,fps:25})});
-  for(const entry of fs.readdirSync(f.shared,{recursive:true,withFileTypes:true})){
+function setRecordedProfile(shared, profile) {
+  for(const entry of fs.readdirSync(shared,{recursive:true,withFileTypes:true})){
     if(!entry.isFile()||!['meta.json','cache-meta.json'].includes(entry.name))continue;
     const file=path.join(entry.parentPath||entry.path,entry.name),raw=JSON.parse(fs.readFileSync(file,'utf8'));
-    if(raw.proxy){raw.proxyProfileVersion='720p-crf26-v1';fs.writeFileSync(file,JSON.stringify(raw));}
+    if(raw.proxy){raw.proxyProfileVersion=profile;fs.writeFileSync(file,JSON.stringify(raw));}
   }
+}
+
+it('上版 480p Proxy 直接命中；補波形時保留來源規格',async()=>{
+  const f=await fixture({describeVideo:async()=>({codec:'h264',width:1920,height:1080})});
+  const profile='480p-1000k-fast-v1';
+  setRecordedProfile(f.shared,profile);
+  const runtime=createMediaIntakeRuntime(f.options);runtimes.push(runtime);f.execute.mockClear();
+  const request={src:f.source,duration:1,audio,needsProxy:true};
+  expect(await runtime.ingest(request)).toMatchObject({cached:true,proxy:f.saved.proxy});
+  expect(f.execute).not.toHaveBeenCalled();
+  fs.unlinkSync(f.saved.wave);
+  expect(await runtime.ingest(request)).toMatchObject({cached:false,proxy:f.saved.proxy});
+  expect(f.execute).toHaveBeenCalledOnce();
+  expect(f.execute.mock.calls[0][0]).not.toContain('-c:v');
+  const index=path.resolve(f.saved.proxy,'..','..','meta.json');
+  expect(JSON.parse(fs.readFileSync(index,'utf8')).proxyProfileVersion).toBe(profile);
+});
+
+it('舊 720p Proxy 規格只重建影片，保留已驗證聲道與波形',async()=>{
+  const f=await fixture({describeVideo:async()=>({codec:'h264',width:1920,height:1080,fps:25})});
+  setRecordedProfile(f.shared,'720p-crf26-v1');
   const oldProxy=fs.readFileSync(f.saved.proxy);f.execute.mockClear();
   const runtime=createMediaIntakeRuntime(f.options);runtimes.push(runtime);
   const result=await runtime.ingest({src:f.source,duration:1,audio,needsProxy:true});
@@ -89,8 +109,8 @@ it('舊 720p Proxy 規格只重建影片，保留已驗證聲道與波形',async
   expect(result.channels).toEqual(f.saved.channels);expect(result.wave).toBe(f.saved.wave);
   expect(f.execute).toHaveBeenCalledOnce();
   const args=f.execute.mock.calls[0][0],outputs=args.filter(arg=>/\.(mp4|m4a|wav)$/.test(arg));
-  expect(outputs).toEqual([result.proxy]);expect(args[args.indexOf('-vf')+1]).toContain('scale=-2:480');
-  expect(args[args.indexOf('-b:v')+1]).toBe('1000k');
+  expect(outputs).toEqual([result.proxy]);expect(args[args.indexOf('-vf')+1]).toContain("scale=-2:'clip(trunc(ih/2)*2,2,720)'");
+  expect(args[args.indexOf('-b:v')+1]).toBe('4000k');
   expect(fs.readFileSync(f.saved.proxy)).toEqual(oldProxy);
   expect(fs.existsSync(f.cacheRoot)).toBe(false);
 });

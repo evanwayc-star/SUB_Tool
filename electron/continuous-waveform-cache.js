@@ -22,7 +22,7 @@ const sameSnapshot = (a, b) => sameFile(a, b) && a.size === b.size && a.mtimeNs 
 const token = () => crypto.randomBytes(12).toString('hex');
 
 function recipe(spec) {
-  if (!spec || spec.version !== 1 || typeof spec.sharedSourceKey !== 'string' || !/^[a-f0-9]{64}$/.test(spec.sharedSourceKey)
+  if (!spec || ![1, 2, 3].includes(spec.version) || typeof spec.sharedSourceKey !== 'string' || !/^[a-f0-9]{64}$/.test(spec.sharedSourceKey)
     || !Number.isSafeInteger(spec.totalSamples) || spec.totalSamples < 1 || spec.totalSamples > MAX_TOTAL_SAMPLES
     || !Array.isArray(spec.audio) || !spec.audio.length || spec.audio.length > 256) throw new TypeError('連續波形規格無效');
   const audio = spec.audio.map(stream => {
@@ -30,7 +30,9 @@ function recipe(spec) {
       || (stream.timestampOffset !== undefined && !Number.isFinite(stream.timestampOffset))) throw new TypeError('連續波形音訊配置無效');
     return { channels: stream.channels, timestampOffset: stream.timestampOffset || 0 };
   });
-  const result = { version: 1, sharedSourceKey: spec.sharedSourceKey, audio, totalSamples: spec.totalSamples };
+  // v1 is bound to the writer. v2 verifies all source bytes, v3 verifies
+  // the same NAS file on the same share, regardless of the client mount.
+  const result = { version: spec.version, sharedSourceKey: spec.sharedSourceKey, audio, totalSamples: spec.totalSamples };
   if (spec.channel !== undefined) {
     const { sourceStream, sourceChannel } = spec.channel || {};
     if (!Number.isInteger(sourceStream) || !Number.isInteger(sourceChannel) || sourceChannel < 0
@@ -75,10 +77,14 @@ function storeAt(directory, create = false) {
 function generationAt(store, name) {
   if (!GENERATION.test(name)) throw changed();
   store.verify();
-  const folder = path.join(store.folder, name), stat = fs.lstatSync(folder);
+  const folder = path.join(store.folder, name), stat = fs.lstatSync(folder, { bigint: true });
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw changed();
   const sentinel = path.join(folder, 'checkpoint.json'), authority = captureOutputAuthority(sentinel, store.parent);
-  const verify = () => { store.verify(); assertOutputAuthority(authority, sentinel); };
+  const verify = () => {
+    store.verify();
+    if (!sameFile(stat, fs.lstatSync(folder, { bigint: true }))) throw changed();
+    assertOutputAuthority(authority, sentinel);
+  };
   verify();
   return { folder, verify };
 }
@@ -139,10 +145,21 @@ function readCandidate(store, name, expected, verify, metadataOnly = false) {
   // A crash between final rename and the completion receipt leaves the same
   // verified full prefix available for a new writer, without claiming complete.
   if (!raw.complete && !fs.existsSync(file)) file = path.join(generation.folder, 'wave.wav');
-  const evidence = metadataOnly ? { stat: regular(file) } : readPcmEvidence(file, spec, raw.completedSamples, raw.sha256, raw.complete);
+  const stat = regular(file);
+  const originalOwner = String(stat.ino) === raw.owner.ino && String(stat.birthtimeNs) === raw.owner.birthtimeNs;
+  const portable = raw.complete && spec.version >= 2;
+  if (!originalOwner && !portable) throw changed();
+  // A drive letter and a UNC mount can report different client-local device
+  // IDs for the very same server file. The v3 recipe already binds the share.
+  const originalSnapshot = originalOwner && (spec.version === 3 || String(stat.dev) === raw.owner.dev)
+    && ['mtimeNs','ctimeNs'].every(field => String(stat[field]) === raw.owner[field]);
+  // Copied, replaced or modified portable WAVs must pass the original PCM digest
+  // before their saved peaks or playback path can be handed to another process.
+  const evidence = metadataOnly && (metadataOnly === 'describe' || !portable || originalSnapshot) ? { stat }
+    : readPcmEvidence(file, spec, raw.completedSamples, raw.sha256, raw.complete);
   if (evidence.stat.size < BigInt(44 + raw.completedSamples * 2)
     || (raw.complete && evidence.stat.size !== BigInt(44 + spec.totalSamples * 2))) throw changed();
-  if (String(evidence.stat.ino) !== raw.owner.ino || String(evidence.stat.birthtimeNs) !== raw.owner.birthtimeNs) throw changed();
+  if (!sameSnapshot(stat, evidence.stat)) throw changed();
   const check = () => {
     verify(); generation.verify(); assertRecord(recordFile, proof);
     if (!sameSnapshot(evidence.stat, regular(file))) throw changed();
@@ -177,10 +194,11 @@ function scan(directory, expected, verify = () => {}, metadataOnly = false) {
 
 // Display-only records: never authorize resume / playback or claim PCM integrity.
 // The ordinary cache reader above still hashes every confirmed prefix.
-function describeContinuousWaveformCache(directory, { sourceKey, verify = () => {} } = {}) {
+function describeContinuousWaveformCache(directory, { sourceKey, sourceSHA256, verify = () => {} } = {}) {
   try {
-    const result = scan(directory, null, verify, true);
-    const matches = result.candidates.filter(candidate => candidate.spec.sharedSourceKey === sourceKey);
+    const result = scan(directory, null, verify, 'describe');
+    const matches = result.candidates.filter(candidate => candidate.spec.sharedSourceKey ===
+      (candidate.spec.version === 2 ? sourceSHA256 : sourceKey));
     const best = matches.find(candidate => !candidate.spec.channel);
     const summary = best ? { state: best.complete ? 'complete' : 'partial', completedSamples: best.samples,
       totalSamples: best.spec.totalSamples, bytes: Number(best.stat.size), verified: false }
@@ -260,7 +278,7 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
     if (recordProof) assertRecord(recordFile, recordProof);
     else { try { fs.lstatSync(recordFile); throw changed(); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
     const bytes = Buffer.from(JSON.stringify({ version: 1, spec: normalized, completedSamples: written, complete: done, sha256,
-      owner: { ino: String(snapshot.ino), birthtimeNs: String(snapshot.birthtimeNs) } }));
+      owner: Object.fromEntries(['ino','birthtimeNs','dev','mtimeNs','ctimeNs'].map(field => [field, String(snapshot[field])])) }));
     const temporary = path.join(generation.folder, '.checkpoint-' + token() + '.tmp');
     let metadataFd, metadataOwner;
     try {
@@ -327,7 +345,8 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
     complete() {
       if (complete) { check(); return current; }
       if (closed || written !== normalized.totalSamples) throw new Error('連續波形 sample 數尚未完整');
-      api.checkpoint(); const expected = hash.copy().digest('hex'), beforeClose = snapshot;
+      if (completed !== written) api.checkpoint();
+      const expected = hash.copy().digest('hex'), beforeClose = snapshot;
       fs.closeSync(fd); fd = undefined;
       generation.verify(); verify();
       const evidence = readPcmEvidence(partial, normalized, written, expected, true);

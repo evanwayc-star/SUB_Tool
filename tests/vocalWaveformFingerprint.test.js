@@ -18,6 +18,7 @@ it('preload只能送有效路徑，main指紋IPC只读既有capability而不授�
   expect(() => api.vocalWaveFingerprint('../bad\0file')).toThrow(); expect(() => api.vocalWaveFingerprint(null)).toThrow();
   await api.vocalWaveFingerprint('mother.wav'); expect(invoke).toHaveBeenCalledWith('audio:vocal-wave-fingerprint', 'mother.wav');
   expect(typeof api.audioSourceFingerprint).toBe('function');
+  expect(() => api.vocalWavePeaks('../bad\0file','[]')).toThrow();
   expect(() => api.audioSourceFingerprint('../bad\0file')).toThrow(); expect(() => api.audioSourceFingerprint(null)).toThrow();
   expect(await api.audioSourceFingerprint('mother.wav')).toBe('a'.repeat(64));
   expect(invoke).toHaveBeenLastCalledWith('audio:source-fingerprint', 'mother.wav');
@@ -37,4 +38,23 @@ it('preload只能送有效路徑，main指紋IPC只读既有capability而不授�
     authority.grantTrustedFile(source, { read: true, write: false });
     expect(await handler({}, source)).toBe('a'.repeat(64)); expect(fingerprint).toHaveBeenCalledWith(source);
   } finally { warning.mockRestore(); }
+});
+
+it('NAS 人聲峰值讀寫都只接受已授權的母素材',async()=>{
+  const main=await fs.readFile('electron/main.js','utf8'),ast=parse(main,{ecmaVersion:'latest',sourceType:'script'});
+  const registration=ast.body.find(node=>node.expression?.arguments?.[0]?.value==='audio:vocal-wave-peaks');
+  const accessVocalPeaks=vi.fn(),authority=new FileAuthority(),mediaIntakeRuntime={withAudioEffectCache:vi.fn()};
+  let handler;
+  vm.runInNewContext(main.slice(registration.start,registration.end),{
+    ipcMain:{handle:(_,callback)=>{handler=callback;}},
+    requireReadablePath:createIpcGuards(authority).requireReadablePath,mediaIntakeRuntime,accessVocalPeaks,
+  });
+  const source=path.resolve('unauthorized.wav'),request={path:source,descriptor:'[]'};
+  const warning=vi.spyOn(console,'warn').mockImplementation(()=>{});
+  try{
+    for(const args of [request,{...request,peaks:new Float32Array(2)}])expect(()=>handler({},args)).toThrow(/未授權/);
+    expect(accessVocalPeaks).not.toHaveBeenCalled();
+    authority.grantTrustedFile(source,{read:true,write:false});
+    handler({},request);expect(accessVocalPeaks).toHaveBeenCalledWith(request,mediaIntakeRuntime.withAudioEffectCache);
+  }finally{warning.mockRestore();}
 });

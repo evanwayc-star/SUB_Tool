@@ -58,7 +58,7 @@ function airlineTransportProfile(format = 'airline-dmpes') {
     videoBuffer: 125000, initialLead: 0.4, audioLead: 0.35,
   };
   const high = format === 'airline-dmpes-4m';
-  return { muxRate: high ? 4600000 : 1855594,
+  return { muxRate: getDeliveryFormatPreset(high ? 'airline-dmpes-4m' : 'airline-dmpes').muxBps,
     videoDrain: high ? 4800000 : 1799961.6,
     videoBuffer: high ? 347124 : 130124, initialLead: 0.7, audioLead: 0.1 };
 }

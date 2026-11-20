@@ -20,6 +20,15 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers(); delete window.subtool; });
 
 describe('modal lifecycle ownership', () => {
+  it('共用素材的快取視窗顯示 NAS 身分，清除前提醒其他工作站',async()=>{
+    const {State}=await import('../src/state.js');
+    State.mediaPath='Z:/movies/demo.mov';
+    window.subtool={cacheInfo:async path=>({source:{path,nas:true,locations:[]}})};
+    await ui.openCacheDialog();
+    expect(document.querySelector('.cache-source-summary').textContent).toContain('已辨識 NAS 共享素材');
+    document.getElementById('cacheClear').click();
+    expect(document.getElementById('modalBody').textContent).toContain('其他工作站');
+  });
   it('浮動面板開啟只聚焦中性容器，不預選按鈕或輸入框；關閉返回原操作',()=>{
     const trigger=document.createElement('button');trigger.setAttribute('aria-controls','notesPanel');
     const panel=document.createElement('div');panel.id='notesPanel';panel.className='float-panel';

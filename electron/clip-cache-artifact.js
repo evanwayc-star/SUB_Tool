@@ -11,6 +11,12 @@ function directory(file) {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw changed();
   return stat;
 }
+function openDirectory(file) {
+  try { return directory(file); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  fs.mkdirSync(file, { recursive: true });
+  return directory(file);
+}
 function regular(file) {
   const stat = fs.lstatSync(file, { bigint: true });
   if (!stat.isFile() || stat.isSymbolicLink()) throw changed();
@@ -21,14 +27,12 @@ function createClipCacheArtifact(directoryPath, key, extension) {
   const parent = path.dirname(directoryPath);
   let sidecarOwner = null;
   if (path.basename(parent).toLowerCase() === '.subtool_cache') {
-    fs.mkdirSync(parent, { recursive: true });
-    sidecarOwner = directory(parent); // Reject a junction before creating children.
+    sidecarOwner = openDirectory(parent); // Reject a junction before creating children.
   }
   const verifySidecar = () => { if (sidecarOwner && !same(sidecarOwner, directory(parent))) throw changed(); };
   verifySidecar();
-  fs.mkdirSync(directoryPath, { recursive: true });
+  const rootOwner = openDirectory(directoryPath);
   verifySidecar();
-  const rootOwner = directory(directoryPath);
   const verifyRoot = () => { verifySidecar(); if (!same(rootOwner, directory(directoryPath))) throw changed(); };
   const bucket = path.join(directoryPath, key);
   let bucketOwner = null;

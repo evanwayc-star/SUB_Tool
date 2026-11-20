@@ -20,6 +20,30 @@ beforeEach(()=>{
 });
 afterEach(()=>vi.unstubAllGlobals());
 
+it('選用人聲時從共用 NAS 峰值還原，並保留本機顯示快取，不再解碼或執行模型',async()=>{
+  const peaks=Float32Array.from({length:8000},(_,i)=>i%2?.4:-.2);
+  mocks.desktop.vocalWaveFingerprint.mockResolvedValue('f'.repeat(64));
+  mocks.desktop.vocalWavePeaks=vi.fn().mockResolvedValue(peaks);
+  try {
+    expect(await analyzeSourceVocals('audio')).toEqual(peaks);
+    expect(mocks.cache.write).toHaveBeenCalledWith(expect.any(String),40,peaks);
+    expect(mocks.desktop.vocalWaveChunk).not.toHaveBeenCalled();
+    expect(mocks.analyze).not.toHaveBeenCalled();
+  } finally {delete mocks.desktop.vocalWavePeaks;}
+});
+
+it('本機已有的人聲結果可補存共用快取，唯讀 NAS 仍能使用本機峰值',async()=>{
+  const peaks=new Float32Array(8000);
+  mocks.desktop.vocalWaveFingerprint.mockResolvedValue('f'.repeat(64));
+  mocks.cache.read.mockResolvedValue(peaks);
+  mocks.desktop.vocalWavePeaks=vi.fn().mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('read only'));
+  try {
+    expect(await analyzeSourceVocals('audio')).toBe(peaks);
+    expect(mocks.desktop.vocalWavePeaks).toHaveBeenLastCalledWith('mother.mkv',expect.any(String),peaks);
+    expect(mocks.analyze).not.toHaveBeenCalled();
+  } finally {delete mocks.desktop.vocalWavePeaks;}
+});
+
 it('以活躍來源 ID 解析重新建立的片段；只讀母素材完整時長，不讀效果檔或播放區間',async()=>{
   expect(resolveVocalSource(source)).toBe(mocks.state.clips[0]);
   mocks.desktop.vocalWaveChunk.mockResolvedValue(pcm(44100));

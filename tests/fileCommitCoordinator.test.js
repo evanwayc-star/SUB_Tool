@@ -11,13 +11,13 @@ const roots = [];
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const tick = () => new Promise(resolve => setTimeout(resolve, 30));
 function root() {
-  const result = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-commit-coordinator-'));
+  const result = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-commit-coordinator-'));
   roots.push(result); return result;
 }
 afterEach(() => {
   for (const directory of roots.splice(0)) {
-    const actual = fs.realpathSync(directory);
-    if (path.dirname(actual) !== fs.realpathSync(os.tmpdir()) || !path.basename(actual).startsWith('subtool-commit-coordinator-')) throw new Error('拒絕刪除測試目錄外路徑');
+    const actual = fs.realpathSync.native(directory);
+    if (path.relative(path.dirname(actual), fs.realpathSync.native(os.tmpdir())) !== '' || !path.basename(actual).startsWith('subtool-commit-coordinator-')) throw new Error('拒絕刪除測試目錄外路徑');
     fs.rmSync(actual, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
   }
 });
@@ -64,7 +64,7 @@ it('部分模式標示無法解析的項目，仍保護其餘合法目標', asyn
 it('部分模式處理全部拒絕與空清單，但 I/O 錯誤仍向 caller 拋出', async () => {
   const base = root(), bad = path.join(base, 'directory'), denied = path.join(base, 'denied'); fs.mkdirSync(bad);
   const io = { ...fs.promises, lstat(file,...args) {
-    if (file === denied) return Promise.reject(Object.assign(new Error('拒絕讀取'), {code:'EACCES'}));
+    if (path.relative(file, denied) === '') return Promise.reject(Object.assign(new Error('拒絕讀取'), {code:'EACCES'}));
     return fs.promises.lstat(file,...args);
   } };
   const coordinator = createFileCommitCoordinator({io}), work = vi.fn();
@@ -112,8 +112,8 @@ it('8.3 短檔名展開為同一目錄項後與長名稱互斥', async () => {
   const base = root(), full = path.join(base, 'long-project-document.subtool'), short = path.join(base, 'LONGPR~1.SUB');
   fs.writeFileSync(full, 'project');
   const io = { ...fs.promises,
-    lstat: (file, ...args) => fs.promises.lstat(file === short ? full : file, ...args),
-    realpath: (file, ...args) => fs.promises.realpath(file === short ? full : file, ...args),
+    lstat: (file, ...args) => fs.promises.lstat(path.relative(file, short) === '' ? full : file, ...args),
+    realpath: (file, ...args) => fs.promises.realpath(path.relative(file, short) === '' ? full : file, ...args),
   };
   const coordinator = createFileCommitCoordinator({ io, caseInsensitive:true }), release = deferred(), started = deferred(), second = vi.fn();
   const a = coordinator.withCommitTargets([full], async () => { started.resolve(); await release.promise; });

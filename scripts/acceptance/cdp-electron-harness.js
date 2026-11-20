@@ -261,8 +261,8 @@ async function dispatchKey(client, key, code = key) {
 }
 
 function verifiedCleanup(profileDir, expectedPrefix, { maxRetries = 10, retryDelay = 100 } = {}) {
-  const tempRoot = fs.realpathSync(os.tmpdir());
-  const resolved = fs.realpathSync(profileDir);
+  const tempRoot = fs.realpathSync.native(os.tmpdir());
+  const resolved = fs.realpathSync.native(profileDir);
   if (path.dirname(resolved) !== tempRoot || !path.basename(resolved).startsWith(expectedPrefix)) {
     throw new Error(`拒絕清除未驗證的路徑：${resolved}`);
   }

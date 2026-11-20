@@ -5,11 +5,15 @@ const fs = require('fs/promises');
 const path = require('path');
 const { createHash } = require('crypto');
 const { createClipCacheArtifact } = require('./clip-cache-artifact');
-const { motherSourceFingerprint } = require('./mother-source-evidence');
+const { motherSourceFingerprint, sharedSourceFingerprintSync } = require('./mother-source-evidence');
 const { sourceClockSeek, sourceAudioClockFilter } = require('./media-source-clock');
 const SAMPLE_RATE = 48000;
 // 沿用既有反向音訊 key 的指紋 namespace，既有完整 WAV 仍可重用。
 const FINGERPRINT_OPTIONS = Object.freeze({ namespace: 'vocal-source-v1' });
+function reverseKey(input, identity) {
+  return createHash('sha256').update(JSON.stringify({ version: 2, identity, in: input.in,
+    out: input.out, stream: input.sourceStream, sampleRate: SAMPLE_RATE })).digest('hex');
+}
 
 function validateReverseAudioRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少反向音訊參數');
@@ -79,11 +83,16 @@ async function completeWave(file, duration, verify = null, { sampleRate = SAMPLE
 }
 
 function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null, isClosing = () => false,
+  sharedFingerprint = sharedSourceFingerprintSync,
   timeoutMs = 600000, terminationGraceMs = 1000 } = {}) {
   if (!cacheRoot || !fileAuthority?.canRead || !fileAuthority?.grantTrustedFile || typeof execute !== 'function') throw new TypeError('反向音訊快取缺少必要 adapter');
   const inFlight = new Map();
   const activeRequests = new Set();
   const root = source => path.resolve(typeof cacheRoot === 'function' ? cacheRoot(source) : cacheRoot);
+  const fingerprint = source => {
+    const nas = sharedFingerprint(source, { networkOnly: true });
+    return nas ? 'nas:' + nas : motherSourceFingerprint(source, FINGERPRINT_OPTIONS);
+  };
   const assertSource = source => {
     if (!fileAuthority.canRead(source)) throw Object.assign(new Error('未授權存取此檔案'), { code: 'UNAUTHORIZED_PATH' });
     if (isClosing()) throw Object.assign(new Error('反向音訊工作已取消'), { name: 'AbortError' });
@@ -97,16 +106,12 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null,
   async function reverseRequest(request) {
     const input = validateReverseAudioRequest(request);
     assertSource(input.path);
-    const identity = await motherSourceFingerprint(input.path, FINGERPRINT_OPTIONS);
+    const identity = await fingerprint(input.path);
     assertSource(input.path);
-    const media = probe ? await probe(input.path) : null;
-    assertSource(input.path);
-    const clock = media?.video || media?.audio?.[input.sourceStream];
-    const key = createHash('sha256').update(JSON.stringify({ version: 2, identity, in: input.in,
-      out: input.out, stream: input.sourceStream, sampleRate: SAMPLE_RATE })).digest('hex');
+    const key = reverseKey(input, identity);
     let pending = inFlight.get(key);
     if (!pending) {
-      pending = generate(input, identity, key, clock);
+      pending = generate(input, identity, key);
       inFlight.set(key, pending);
       void pending.finally(() => { if (inFlight.get(key) === pending) inFlight.delete(key); }).catch(() => {});
     }
@@ -114,17 +119,31 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null,
     assertSource(input.path);
     return result;
   }
-  async function generate(request, identity, key, clock) {
+  async function generate(request, identity, key) {
     const duration = request.out - request.in;
     const store = createClipCacheArtifact(root(request.path), key, 'wav');
     assertSource(request.path);
-    for (const existing of store.candidates()) {
-      if (!await completeWave(existing.path, duration, existing.verify)) continue;
-      if (await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== identity) throw new Error('音訊來源在建立快取期間已變更');
-      existing.verify(); assertSource(request.path);
-      fileAuthority.grantTrustedFile(existing.path, { read: true, write: false });
-      return { path: existing.path, duration };
+    async function findCached(candidateStore, legacyIdentity) {
+      for (const existing of candidateStore.candidates()) {
+        if (!await completeWave(existing.path, duration, existing.verify)) continue;
+        if ((legacyIdentity && await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== legacyIdentity)
+          || await fingerprint(request.path) !== identity) throw new Error('音訊來源在建立快取期間已變更');
+        existing.verify(); assertSource(request.path);
+        fileAuthority.grantTrustedFile(existing.path, { read: true, write: false });
+        return { path: existing.path, duration };
+      }
     }
+    let cached = await findCached(store);
+    if (!cached && identity.startsWith('nas:')) {
+      const legacyIdentity = await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS);
+      assertSource(request.path);
+      const legacy = createClipCacheArtifact(root(request.path), reverseKey(request, legacyIdentity), 'wav');
+      cached = await findCached(legacy, legacyIdentity);
+    }
+    if (cached) return cached;
+    const media = probe ? await probe(request.path) : null;
+    const clock = media?.video || media?.audio?.[request.sourceStream];
+    assertSource(request.path);
     const artifact = store.reserve();
     let timer = null, killTimer = null, timedOut = false, failure = null;
     try {
@@ -148,10 +167,10 @@ function createClipAudioCache({ cacheRoot, fileAuthority, execute, probe = null,
       if (timedOut) throw new Error('反向音訊準備逾時');
       assertSource(request.path);
       artifact.verify();
-      if (await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== identity) throw new Error('音訊來源在建立快取期間已變更');
+      if (await fingerprint(request.path) !== identity) throw new Error('音訊來源在建立快取期間已變更');
       artifact.verify();
       if (!await completeWave(artifact.path, duration, artifact.verify)) throw new Error('反向音訊未產生完整 PCM WAV');
-      if (await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== identity) throw new Error('音訊來源在建立快取期間已變更');
+      if (await fingerprint(request.path) !== identity) throw new Error('音訊來源在建立快取期間已變更');
       assertSource(request.path);artifact.verify();
       const output = artifact.publish();
       fileAuthority.grantTrustedFile(output, { read: true, write: false });

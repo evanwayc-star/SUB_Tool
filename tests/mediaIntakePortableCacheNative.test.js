@@ -5,7 +5,6 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { createHash } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { nativeTestTools } from './fixtures/native-tools.cjs';
 
@@ -25,9 +24,9 @@ function run(args) {
 }
 
 it.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe)).each([
-  { name: '同共享檔案換掛載與 profile', legacySha: false },
-  { name: '舊完整 SHA 快取跨複製檔', legacySha: true },
-])('$name：沿用真 Proxy／聲道，不再執行 FFmpeg，像素與 PCM 內容相同', async ({ legacySha }) => {
+  { name: '同共享檔案換掛載與 profile', copySource: false },
+  { name: '新建快取連素材複製到另一部電腦', copySource: true },
+])('$name：沿用真 Proxy／聲道，不再執行 FFmpeg，像素與 PCM 內容相同', async ({ copySource }) => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-portable-intake-native-'));
   const firstMedia = path.join(root, 'computer-A', 'media'), secondMedia = path.join(root, 'computer-B', 'different-drive');
   fs.mkdirSync(firstMedia, { recursive: true });
@@ -61,29 +60,14 @@ it.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe)).each([
     expect(Math.sqrt(energy / 1400)).toBeLessThan(0.15);
     const originalKey = cacheKeyFor(source);
     await first.close();
-    if (legacySha) {
-      // This branch exercises genuine legacy content evidence across distinct
-      // files. Shared-file evidence must never be treated as a content hash.
-      const sourceContent = { format: 'source-v3-sha256', size: fs.statSync(source).size,
-        sha256: createHash('sha256').update(fs.readFileSync(source)).digest('hex') };
-      const seedLegacy = directory => {
-        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-          const file = path.join(directory, entry.name);
-          if (entry.isDirectory()) seedLegacy(file);
-          else if (entry.name.endsWith('.json')) {
-            const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-            if (raw.sourceContent) fs.writeFileSync(file, JSON.stringify({ ...raw, sourceContent }));
-          }
-        }
-      };
-      seedLegacy(path.join(firstMedia, '.subtool_Cache'));
+    if (copySource) {
       fs.cpSync(firstMedia, secondMedia, { recursive: true });
     } else {
       fs.mkdirSync(path.dirname(secondMedia), { recursive: true });
       fs.renameSync(firstMedia, secondMedia);
     }
     const copiedSource = path.join(secondMedia, path.basename(source));
-    if (legacySha) fs.utimesSync(copiedSource, new Date('2026-01-01'), new Date('2026-01-01'));
+    if (copySource) fs.utimesSync(copiedSource, new Date('2026-01-01'), new Date('2026-01-01'));
     expect(cacheKeyFor(copiedSource)).not.toBe(originalKey);
     const secondCache = path.join(root, 'profile-B', 'mediacache');
     const execute = vi.fn(async () => { throw new Error('另一電腦不應重新計算已有 Proxy'); });

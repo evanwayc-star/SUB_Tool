@@ -1778,7 +1778,7 @@ const Media = {
     const recovery=this._registerIntakeRecovery(p,()=>this._bgAudioIngest(p,audio,dur,primary,{needsProxy,restorePreview}),sourceCurrent);
     let res;
     let stagedElements=[],stagedTracks=[];
-    // 需要 Proxy 時同 pass 產 480p 短 GOP 預覽檔：多軌合成時交給 WebCodecs，
+    // 需要 Proxy 時同 pass 產 短 GOP 預覽檔：多軌合成時交給 WebCodecs，
     // 持續倒帶時則暫時交給 mpv，避免母素材的長 GOP 造成反向預解碼停頓。
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
@@ -3427,7 +3427,7 @@ const Media = {
     this.ensureCtx();
     // queue:true —— 不可搶佔/殺掉進行中的 ingest（可能正是餵播放器的 streamIngest 背景轉檔
     // 或主媒體音軌抽取，殺掉會讓播放中斷）；改為排入佇列、依序執行
-    // needsProxy:true（v4.25）：加入的片段一律備短 GOP proxy（現為 480p）——原檔可能非原生（ProRes/MXF）
+    // needsProxy:true（v4.25）：加入的片段一律備短 GOP proxy——原檔可能非原生（ProRes/MXF）
     // 或過大（>600MB WebCodecs 讀不進來）；沒有 proxy 時預覽引擎解不了它 →【無法參與疊層合成】
     // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
     if(DESK?.prepareSourceWaveform){

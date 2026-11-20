@@ -17,9 +17,12 @@ const write = promisify(fs.write);
 const payloadDigest = async bytes => bytes.length < 65536 ? digest(bytes)
   : Buffer.from(await webcrypto.subtle.digest('SHA-256',bytes));
 
-function fileStamp(file) {
+function fileStamp(file, shared = false) {
   const stat = fs.lstatSync(file, {bigint:true});
   if(!stat.isFile() || stat.isSymbolicLink() || stat.nlink!==1n)throw changed();
+  // The NAS recipe binds the server/share. Device numbers belong to each client.
+  if(shared && stat.ino>0n && stat.birthtimeNs>0n && stat.mtimeNs>0n)
+    return ['nas',stat.ino,stat.birthtimeNs,stat.size,stat.mtimeNs].join(':');
   return [stat.dev,stat.ino,stat.birthtimeNs,stat.size,stat.mtimeNs].join(':');
 }
 async function readSmallFile(file,limit,verify){
@@ -86,9 +89,11 @@ function createAudioEffectCache({withEffectCache,grantRead,probe,fingerprintSour
     const identity=await fingerprintSource(src);
     options.signal?.throwIfAborted();
     let measuredReport=null,analyzing=false;
-    try{return await withEffectCache(src,async({directory,verify})=>{
-      const store=createClipCacheArtifact(directory,recipeKey('mix-measurement-v1',identity),'json');
-      const cached=await readRecord(store,16384,verify);
+    try{return await withEffectCache(src,async({directory,verify,sharedSourceKey,readLegacy})=>{
+      const measurementStore=(folder,id)=>createClipCacheArtifact(folder,recipeKey('mix-measurement-v1',id),'json');
+      const store=measurementStore(directory,sharedSourceKey||identity);
+      const cached=await readRecord(store,16384,verify) || await readLegacy?.(old=>
+        readRecord(measurementStore(old.directory,identity),16384,old.verify));
       if(cached){
         let report;
         try{report=JSON.parse(cached);}catch{/* a malformed receipt is a miss */}
@@ -118,39 +123,50 @@ function createAudioEffectCache({withEffectCache,grantRead,probe,fingerprintSour
     const identity=await fingerprintSource(src);
     lifecycle.signal?.throwIfAborted();
     const {preset,...settings}=options; // UI preset name cannot change PCM.
-    const key=recipeKey('audio-effect-pcm-v1',identity,stream,settings);
-    return withEffectCache(src,async({directory,verify,retain})=>{
+    const pcmKey=id=>recipeKey('audio-effect-pcm-v1',id,stream,settings);
+    return withEffectCache(src,async context=>{
+      const {directory,verify,sharedSourceKey,readLegacy}=context;
+      const key=pcmKey(sharedSourceKey||identity);
       const current=()=>{lifecycle.signal?.throwIfAborted();verify();};
       const store=createClipCacheArtifact(directory,key,'wav');
-      const deliver=(outputPath,wavePath,report,cached)=>{
-        current();
+      const deliver=(outputPath,wavePath,report,cached,reader,recipe)=>{
+        current();reader.verify();
         grantRead(outputPath);grantRead(wavePath);
-        const result={outputPath,wavePath,cacheKey:key,cacheHit:cached,sourceFingerprint:identity,options,report:report.report,isSilence:report.isSilence};
+        const result={outputPath,wavePath,cacheKey:recipe,cacheHit:cached,sourceFingerprint:identity,options,report:report.report,isSilence:report.isSilence};
         lifecycle.onProgress?.({pct:100,stage:cached?'cached':'done',label:cached?'已讀取音訊平衡快取':'音訊平衡快取已就緒'});
-        if(lifecycle.retainPreview && retain)result.leaseId=lifecycle.retainPreview(retain());
+        if(lifecycle.retainPreview && reader.retain)result.leaseId=lifecycle.retainPreview(reader.retain());
         return result;
       };
-      for(const entry of store.candidates()){
-        const folder=path.dirname(entry.path),wave=path.join(folder,'wave.wav');
-        const owned=()=>{current();entry.verify();};
-        let record;
-        try{
-          const data=await readSmallFile(path.join(folder,'effect.json'),32768,owned);
-          if(!digest(data.subarray(32)).equals(data.subarray(0,32)))continue;
-          record=JSON.parse(data.subarray(32));
-          if(record.key!==key||record.reusable!==true||fileStamp(entry.path)!==record.output||fileStamp(wave)!==record.wave)continue;
-        }catch{continue;}
-        const media=await probe(src,{signal:lifecycle.signal});
-        owned();
-        const expectedChannels=media.audio?.[stream]?.channels,duration=Number(media.duration);
-        if(!expectedChannels||!duration
-          || !await completeWave(entry.path,duration,owned,{sampleRate:null,expectedChannels})
-          || !await completeWave(wave,duration,owned,{sampleRate:4000,expectedChannels}))continue;
-        if(await fingerprintSource(src)!==identity)throw changed();
-        owned();
-        if(fileStamp(entry.path)!==record.output||fileStamp(wave)!==record.wave)throw changed();
-        return deliver(entry.path,wave,record,true);
+      async function readPreview(reader,recipe,candidates){
+        const shared=Boolean(reader.sharedSourceKey);
+        for(const entry of candidates.candidates()){
+          const folder=path.dirname(entry.path),wave=path.join(folder,'wave.wav');
+          const owned=()=>{current();reader.verify();entry.verify();};
+          let record;
+          try{
+            const data=await readSmallFile(path.join(folder,'effect.json'),32768,owned);
+            if(!digest(data.subarray(32)).equals(data.subarray(0,32)))continue;
+            record=JSON.parse(data.subarray(32));
+            if(record.key!==recipe||record.reusable!==true||fileStamp(entry.path,shared)!==record.output||fileStamp(wave,shared)!==record.wave)continue;
+          }catch{continue;}
+          const media=await probe(src,{signal:lifecycle.signal});
+          owned();
+          const expectedChannels=media.audio?.[stream]?.channels,duration=Number(media.duration);
+          if(!expectedChannels||!duration
+            || !await completeWave(entry.path,duration,owned,{sampleRate:null,expectedChannels})
+            || !await completeWave(wave,duration,owned,{sampleRate:4000,expectedChannels}))continue;
+          if(await fingerprintSource(src)!==identity)throw changed();
+          owned();
+          if(fileStamp(entry.path,shared)!==record.output||fileStamp(wave,shared)!==record.wave)throw changed();
+          return deliver(entry.path,wave,record,true,reader,recipe);
+        }
+        return null;
       }
+      const hit=await readPreview(context,key,store) || await readLegacy?.(old=>{
+        const legacyKey=pcmKey(identity);
+        return readPreview(old,legacyKey,createClipCacheArtifact(old.directory,legacyKey,'wav'));
+      });
+      if(hit)return hit;
       current();
       const out=store.reserve();
       let wave,metadata,published=false;
@@ -167,12 +183,12 @@ function createAudioEffectCache({withEffectCache,grantRead,probe,fingerprintSour
         // otherwise defers the last-write update until our reservation handle closes.
         const now=new Date();
         fs.futimesSync(out.fd,now,now);fs.futimesSync(wave.fd,now,now);
-        const record={key,reusable:result.reusable,report:result.report,isSilence:result.isSilence,output:fileStamp(out.path),wave:fileStamp(wave.file)};
+        const record={key,reusable:result.reusable,report:result.report,isSilence:result.isSilence,output:fileStamp(out.path,!!sharedSourceKey),wave:fileStamp(wave.file,!!sharedSourceKey)};
         const bytes=Buffer.from(JSON.stringify(record));
         metadata=companion(out,'effect.json');
         await writeAll(metadata.fd,digest(bytes));await writeAll(metadata.fd,bytes);
         owned();metadata.verify();out.publish();published=true;
-        return deliver(out.path,wave.file,record,false);
+        return deliver(out.path,wave.file,record,false,context,key);
       }finally{
         try{
           for(const file of [metadata,wave].filter(Boolean)){
@@ -199,20 +215,24 @@ function createAudioEffectCache({withEffectCache,grantRead,probe,fingerprintSour
       }
     }
     const identity=await fingerprintSource(src);
-    return withEffectCache(src,async({directory,verify})=>{
-      const key=recipeKey('audio-effect-display-v1',identity,streams.map(s=>[s.sourceStream,s.cacheKey]),
-        channel?[channel.sourceStream,channel.sourceChannel]:null,resolution);
-      const store=createClipCacheArtifact(directory,key,'peaks');
+    return withEffectCache(src,async({directory,verify,sharedSourceKey,readLegacy})=>{
+      const displayStore=(folder,id)=>createClipCacheArtifact(folder,
+        recipeKey('audio-effect-display-v1',id,streams.map(s=>[s.sourceStream,s.cacheKey]),
+          channel?[channel.sourceStream,channel.sourceChannel]:null,resolution),'peaks');
+      const store=displayStore(directory,sharedSourceKey||identity);
       if(peaks!==undefined){
         const bytes=Buffer.from(peaks.buffer,peaks.byteOffset,peaks.byteLength);
+        if(await fingerprintSource(src)!==identity)throw changed();
         await writeRecord(store,bytes,verify);
         return {saved:true};
       }
-      const bytes=await readRecord(store,maxPeakBytes,verify);
+      const bytes=await readRecord(store,maxPeakBytes,verify) || await readLegacy?.(old=>
+        readRecord(displayStore(old.directory,identity),maxPeakBytes,old.verify));
       if(!bytes||bytes.length%8)return {peaks:null};
+      if(await fingerprintSource(src)!==identity)throw changed();
       return {peaks:new Float32Array(bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.length))};
     });
   }
   return {normalize:cachedNormalize,analyze:measured,displayPeaks};
 }
-module.exports={createAudioEffectCache};
+module.exports={createAudioEffectCache,readRecord,writeRecord};

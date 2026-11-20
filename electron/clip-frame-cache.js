@@ -8,11 +8,15 @@ const { createClipCacheArtifact } = require('./clip-cache-artifact');
 const { Readable, Writable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { crc32, createInflate } = require('node:zlib');
-const { motherSourceFingerprint } = require('./mother-source-evidence');
+const { motherSourceFingerprint, sharedSourceFingerprintSync } = require('./mother-source-evidence');
 const { exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
 const { sourceVideoClockSeek, sourceFrameSelectionFilter } = require('./media-source-clock');
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const FINGERPRINT_OPTIONS = Object.freeze({ namespace: 'clip-frame-source-v1' });
+function frameKey(identity, time) {
+  return createHash('sha256').update(JSON.stringify({ version: 5, ...identity, time })).digest('hex');
+}
 // 驗證以串流進行；此工作預算仍容納 8192×8192 的 16-bit RGBA。
 const PNG_BYTE_LIMIT = 1024 * 1024 * 1024;
 const PNG_FORMATS = {
@@ -142,6 +146,7 @@ async function pngDimensions(file, verify = null) {
 }
 
 function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPreviewCacheMedia = () => false,
+  sharedFingerprint = sharedSourceFingerprintSync,
   isClosing = () => false, timeoutMs = 60000, terminationGraceMs = 1000 } = {}) {
   if (!cacheRoot || !fileAuthority?.canRead || !fileAuthority?.grantTrustedFile
     || typeof probe !== 'function' || typeof execute !== 'function') throw new TypeError('固定畫面快取缺少必要 adapter');
@@ -165,7 +170,8 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
   async function fingerprint(source) {
     const resolved = await fs.realpath(source);
     if (isDerived(resolved)) throw new Error('固定畫面必須讀取母素材，不能使用預覽快取');
-    return { resolved, fingerprint: await motherSourceFingerprint(source, { namespace: 'clip-frame-source-v1' }) };
+    const nas = sharedFingerprint(source, { networkOnly: true });
+    return { resolved, fingerprint: nas ? 'nas:' + nas : await motherSourceFingerprint(source, FINGERPRINT_OPTIONS) };
   }
   const sameSource = (left, right) => left.resolved === right.resolved && left.fingerprint === right.fingerprint;
 
@@ -191,7 +197,10 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
     // FPS 推算末格：VFR 的最後一格與 nominal 格網可能完全不同。
     const normalized = { ...input, time: Math.min(input.time, Math.max(0, duration - 1e-6)) };
     // v5 隔離舊 seek 重基準的 timebase 捨入；同一目標仍共享完整 PNG。
-    const key = createHash('sha256').update(JSON.stringify({ version: 5, ...identity, time: normalized.time })).digest('hex');
+    // Keep the local key for existing frames. The same SMB file can have a
+    // different resolved drive letter on each workstation.
+    const cacheIdentity = identity.fingerprint.startsWith('nas:') ? { fingerprint: identity.fingerprint } : identity;
+    const key = frameKey(cacheIdentity, normalized.time);
     let pending = inFlight.get(key);
     if (!pending) {
       pending = generate(normalized, identity, key, media.video);
@@ -206,14 +215,26 @@ function createClipFrameCache({ cacheRoot, fileAuthority, probe, execute, isPrev
   async function generate(request, identity, key, clock) {
     const store = createClipCacheArtifact(root(request.path), key, 'png');
     assertSource(request.path);
-    for (const candidate of store.candidates()) {
-      const existing = await pngDimensions(candidate.path, candidate.verify);
-      if (!existing) continue;
-      if (!sameSource(identity, await fingerprint(request.path))) throw new Error('母素材在擷取期間已變更，請重新固定畫面');
-      candidate.verify(); assertSource(request.path);
-      fileAuthority.grantTrustedFile(candidate.path, { read: true, write: false });
-      return { ok: true, path: candidate.path, time: request.time, ...existing };
+    async function findCached(candidateStore, legacyFingerprint) {
+      for (const candidate of candidateStore.candidates()) {
+        const existing = await pngDimensions(candidate.path, candidate.verify);
+        if (!existing) continue;
+        if ((legacyFingerprint && await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS) !== legacyFingerprint)
+          || !sameSource(identity, await fingerprint(request.path))) throw new Error('母素材在擷取期間已變更，請重新固定畫面');
+        candidate.verify(); assertSource(request.path);
+        fileAuthority.grantTrustedFile(candidate.path, { read: true, write: false });
+        return { ok: true, path: candidate.path, time: request.time, ...existing };
+      }
     }
+    let cached = await findCached(store);
+    if (!cached && identity.fingerprint.startsWith('nas:')) {
+      const legacyFingerprint = await motherSourceFingerprint(request.path, FINGERPRINT_OPTIONS);
+      assertSource(request.path);
+      const legacyKey = frameKey({ resolved: identity.resolved, fingerprint: legacyFingerprint }, request.time);
+      cached = await findCached(createClipCacheArtifact(root(request.path), legacyKey, 'png'), legacyFingerprint);
+    }
+    if (cached) return cached;
+    assertSource(request.path);
     const artifact = store.reserve();
     let child = null, timer = null, killTimer = null, timedOut = false, failure = null;
     try {

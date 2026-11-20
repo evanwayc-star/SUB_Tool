@@ -117,4 +117,12 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetW, 
   };
 }
 
-module.exports = { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight, validCustomDeliverySize };
+// While typing a custom width/height, the draft can be incomplete. Preserve
+// that state so the estimate can clear without interrupting the input field.
+function deliveryEstimateDimensions({ format, canvasW, canvasH, targetW, targetH, videoKbps }) {
+  if (targetW != null && !validCustomDeliverySize(targetW, targetH)) return { width: null, height: null };
+  const size = deliveryResolution({ canvasW, canvasH, targetW, targetH });
+  return { width: size.w, height: size.h, videoKbps: format === 'h264' && !(videoKbps > 0) ? suggestKbps(size) : videoKbps };
+}
+
+module.exports = { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight, validCustomDeliverySize, deliveryEstimateDimensions };

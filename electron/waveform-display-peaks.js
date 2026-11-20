@@ -81,7 +81,9 @@ function waveformDisplayCache(directory, wave, spec, verify) {
     if (!sameSnapshot(snapshot, fs.lstatSync(wave, statOptions))) throw changed();
   };
   const identity = ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs', 'ctimeNs'].map(field => String(snapshot[field]));
-  const key = digest(JSON.stringify([spec, ...identity]));
+  // Portable continuous caches accept a moved WAV only after checking its PCM digest. Its
+  // peaks describe that content, so the filesystem identity may change on copy.
+  const key = digest(JSON.stringify(spec.version >= 2 && spec.pcmSHA256 ? [spec] : [spec, ...identity]));
   const file = wave + '.peaks-v1', count = peakCount(samples);
   function read() {
     let fd;

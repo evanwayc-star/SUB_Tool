@@ -18,11 +18,12 @@
 | 來源 stream／channel 展開順序、聲道快取檔名 | `channel-layout.cjs` |
 | 片段時長、淡入淡出時間窗 | `clip-fade.cjs` |
 | 固定畫面的來源時間、末格索引、靜態視覺判斷 | `clip-visual.cjs` |
-| 影音交付選項、固定規格、BD 模式及音訊編組限制 | `delivery-formats.cjs` |
+| 影音交付選項、固定規格、BD 模式、音訊編組與成品大小估算 | `delivery-formats.cjs` |
 | MP4／MOV 書籤範圍、同時點合併、FFmetadata | `delivery-chapters.cjs` |
 | 標準 FPS、NTSC 有理數、格率解析與比對 | `delivery-frame-rate.cjs` |
 | 交付尺寸、建議碼率、衍生 TC 規格 | `delivery-resolution.cjs` |
 | 圖片／片段疊層幾何 | `image-geometry.cjs` |
+| 桌面預覽 Proxy 的高度上限與編碼碼率，供轉檔及容量估算共用 | `preview-proxy.cjs` |
 | 播放器與來源時間的原點、裁切內的微秒目標 | `media-source-clock.cjs` |
 | 專案畫布寬高及像素額度 | `project-canvas.cjs` |
 | UTF-16LE BOM 編碼、UTF-8／UTF-16LE／UTF-16BE 解碼 | `text-encoding.cjs` |

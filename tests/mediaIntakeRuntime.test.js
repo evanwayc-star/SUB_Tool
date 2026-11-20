@@ -892,9 +892,11 @@ describe('native media intake runtime', () => {
     const work = await runtime.stream({ src: source, duration: 1, audio: [] });
     const fsp = require('node:fs/promises');
     const originalStat = fsp.stat;
-    let polls = 0;
+    const admittedProxy = await fsp.realpath(work.response.proxy);
+    let polls = 0, signalFirstPoll;
+    const firstPoll = new Promise(resolve => { signalFirstPoll = resolve; });
     const stat = vi.spyOn(fsp, 'stat').mockImplementation((file, ...args) => {
-      if (file === work.response.proxy) polls++;
+      if (file === admittedProxy) { polls++; signalFirstPoll(); }
       return originalStat(file, ...args);
     });
     let request;
@@ -903,7 +905,8 @@ describe('native media intake runtime', () => {
       request.on('error', resolve);
     });
     try {
-      await vi.waitFor(() => expect(polls).toBe(1));
+      await Promise.race([firstPoll, ended.then(error => { throw error; })]);
+      expect(polls).toBe(1);
       if (action === 'disconnect') request.destroy(new Error('client gone'));
       else if (action === 'release') runtime.releaseStream(work.response.streamLeaseId);
       else await runtime.close();
@@ -1056,7 +1059,7 @@ describe('native media intake runtime', () => {
     expect(JSON.parse(fs.readFileSync(path.join(cacheDirectory(first.proxy), 'meta.json'), 'utf8')))
       .toEqual({ proxy: path.relative(cacheDirectory(first.proxy), first.proxy).split(path.sep).join('/'), wave: null, channels: [], publicationVersion: 1,
         artifactSizes: { [path.relative(cacheDirectory(first.proxy), first.proxy).split(path.sep).join('/')]: Buffer.byteLength('proxy bytes') },
-        sourceContent: { format: 'source-v4-shared-file', size: fs.statSync(source).size, sharedSourceKey: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        sourceContent: { format: 'source-v3-sha256', size: fs.statSync(source).size, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
         sourceKeys: [cacheKeyFor(source)] });
     expect(second).toEqual({ ...first, cached: true });
     expect(spawnCount).toBe(1);

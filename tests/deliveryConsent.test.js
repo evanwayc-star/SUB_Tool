@@ -63,7 +63,8 @@ it('完整內容證據偵測同 inode 同大小且時間戳相同的原位覆寫
   };
   const io={...fs,lstatSync:(name,...args)=>{
     const stat=fs.lstatSync(name,...args);
-    return path.resolve(String(name))===path.resolve(file)&&typeof stat.mtimeNs==='bigint'?withFrozenTimes(stat):stat;
+    // Windows may spell the same physical path differently for the handle and lstat.
+    return stat.ino===original.ino&&stat.dev===original.dev&&typeof stat.mtimeNs==='bigint'?withFrozenTimes(stat):stat;
   },promises:{open:async(...args)=>{
     const handle=await fs.promises.open(...args);
     return {read:(...params)=>handle.read(...params),close:()=>handle.close(),

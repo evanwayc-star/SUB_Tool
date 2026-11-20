@@ -248,7 +248,7 @@ describe('驗收暫存清理的有界重試與路徑護欄', () => {
   function fakeCleanup(resolvedTarget) {
     const tempRoot=path.resolve(os.tmpdir());
     const target=path.join(tempRoot,'subtool-cleanup-unit');
-    vi.spyOn(fs,'realpathSync').mockImplementation(value=>value===os.tmpdir()?tempRoot:resolvedTarget||target);
+    vi.spyOn(fs.realpathSync,'native').mockImplementation(value=>value===os.tmpdir()?tempRoot:resolvedTarget||target);
     const remove=vi.spyOn(fs,'rmSync').mockImplementation(()=>{});
     const wait=vi.spyOn(Atomics,'wait').mockReturnValue('timed-out');
     return {tempRoot,target,remove,wait};
