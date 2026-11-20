@@ -11,13 +11,13 @@ const roots = [];
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const tick = () => new Promise(resolve => setTimeout(resolve, 30));
 function root() {
-  const result = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-commit-coordinator-'));
+  const result = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-commit-coordinator-'));
   roots.push(result); return result;
 }
 afterEach(() => {
   for (const directory of roots.splice(0)) {
-    const actual = fs.realpathSync(directory);
-    if (path.dirname(actual) !== fs.realpathSync(os.tmpdir()) || !path.basename(actual).startsWith('subtool-commit-coordinator-')) throw new Error('拒絕刪除測試目錄外路徑');
+    const actual = fs.realpathSync.native(directory);
+    if (path.relative(path.dirname(actual), fs.realpathSync.native(os.tmpdir())) !== '' || !path.basename(actual).startsWith('subtool-commit-coordinator-')) throw new Error('拒絕刪除測試目錄外路徑');
     fs.rmSync(actual, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
   }
 });

@@ -21,14 +21,14 @@ function sourceWaveBytes(samples) {
 }
 let root;
 afterEach(() => {
-  if (root && path.dirname(root) === fs.realpathSync(os.tmpdir()) && path.basename(root).startsWith('subtool-wave-owner-')) {
+  if (root && path.dirname(root) === fs.realpathSync.native(os.tmpdir()) && path.basename(root).startsWith('subtool-wave-owner-')) {
     fs.rmSync(root, { recursive: true, force: true });
   }
   root = null;
 });
 
 it('來源波形 writer 啟動時暫存路徑被取代，不覆寫新物件', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov');
   const tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache');
@@ -55,7 +55,7 @@ it('來源波形 writer 啟動時暫存路徑被取代，不覆寫新物件', as
 });
 
 it.each(['sync', 'microtask'])('成功進度通知 %s 取代暫存檔時，不交接或刪除新的同名檔', async (timing) => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov');
   const tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache');
@@ -83,7 +83,7 @@ it.each(['sync', 'microtask'])('成功進度通知 %s 取代暫存檔時，不�
 });
 
 it('完成通知後母素材變更，回收本工作 WAV 而不交接舊波形', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot);
@@ -103,7 +103,7 @@ it('完成通知後母素材變更，回收本工作 WAV 而不交接舊波形',
 });
 
 it('完成通知後失去工作資格，回收本工作 WAV 而不交接', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot);
@@ -123,7 +123,7 @@ it('完成通知後失去工作資格，回收本工作 WAV 而不交接', async
 });
 
 it.each([false, true])('正式交接後同路徑被替換時，%s 次前清理不會刪除新物件', async (cleanFirst) => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   const original = path.join(tempRoot, 'original-wave.wav');
@@ -149,7 +149,7 @@ it.each([false, true])('正式交接後同路徑被替換時，%s 次前清理�
 });
 
 it('波形路徑清理後不可在同一 runtime 重用，以免舊清理刪除新工作', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -166,7 +166,7 @@ it('波形路徑清理後不可在同一 runtime 重用，以免舊清理刪除�
 });
 
 it('不同私有路徑可正常產生多段並分別清理', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -193,7 +193,7 @@ it.each([
   { allowSidecarCache: false, readOnlySidecar: false },
   { allowSidecarCache: true, readOnlySidecar: true },
 ])('已完成波形片段在 consumer 清理及重開 runtime 後沿用，不重新解碼母素材（sidecar=$allowSidecarCache，重開後唯讀=$readOnlySidecar）', async ({ allowSidecarCache, readOnlySidecar }) => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -274,7 +274,7 @@ it.each([
 });
 
 it('素材旁波形快取不可寫時明確失敗，清掉自己的暫存且不改寫母片或回退中央', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), sidecarRoot = path.join(root, '.subtool_Cache');
   fs.mkdirSync(tempRoot); fs.mkdirSync(sidecarRoot); fs.writeFileSync(source, 'mother source');
@@ -307,7 +307,7 @@ it('素材旁波形快取不可寫時明確失敗，清掉自己的暫存且不�
 });
 
 it.each(['cancel', 'source', 'content'])('完成通知後 %s 失權，不留下可重用片段', async reason => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -340,7 +340,7 @@ it.each(['cancel', 'source', 'content'])('完成通知後 %s 失權，不留下�
 });
 
 it('同一共享檔案由另一掛載路徑重開，沿用另一 strict key 目錄的完成波形而不等 Proxy', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const firstMedia = path.join(root, 'first-mount'), secondMedia = path.join(root, 'second-mount');
   fs.mkdirSync(firstMedia); fs.mkdirSync(secondMedia);
   const source = path.join(firstMedia, 'mother.mov'), alias = path.join(secondMedia, 'mother.mov');
@@ -393,7 +393,7 @@ it('同一共享檔案由另一掛載路徑重開，沿用另一 strict key 目�
 });
 
 it.each(['new', 'cached'])('%s 波形交接前共享檔案證據變更，即使 strict key 相同也拒絕交付', async mode => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp'), cacheRoot = path.join(root, 'cache');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
   const originalKey = cacheKeyFor(source), sourceStat = fs.statSync(source, { bigint: true });
@@ -431,7 +431,7 @@ it.each(['new', 'cached'])('%s 波形交接前共享檔案證據變更，即使 
 });
 
 it('來源波形消失後不會誤刪後來新建的同名檔案', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -452,7 +452,7 @@ it('來源波形消失後不會誤刪後來新建的同名檔案', async () => {
 });
 
 it('波形的父目錄被替換時，即使新路徑是同 inode 的硬連結也不能刪除', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   const oldTemp = path.join(root, 'original-temp'), original = path.join(oldTemp, 'source-wave.wav');
@@ -472,7 +472,7 @@ it('波形的父目錄被替換時，即使新路徑是同 inode 的硬連結也
 });
 
 it('writer 執行期間父目錄被替換時，不刪除新目錄的同 inode 連結', async (context) => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   const oldTemp = path.join(root, 'original-temp'), original = path.join(oldTemp, 'source-wave.wav');
@@ -506,7 +506,7 @@ it('writer 執行期間父目錄被替換時，不刪除新目錄的同 inode �
 });
 
 it('writer 執行期間父目錄身分無法再證明時，失敗清理不刪除目錄項', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -534,7 +534,7 @@ it('writer 執行期間父目錄身分無法再證明時，失敗清理不刪除
 });
 
 it('首次來源波形工作前私有根已換檔時，不採納替換後目錄或啟動 writer', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -552,7 +552,7 @@ it('首次來源波形工作前私有根已換檔時，不採納替換後目錄�
 });
 
 it('完成進度同步呼叫清理不能提前移除尚未交接的波形', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -573,7 +573,7 @@ it('完成進度同步呼叫清理不能提前移除尚未交接的波形', asyn
 });
 
 it('進度通知同步啟動較新的同路徑工作時，較舊呼叫不得移除新 owner', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');
@@ -603,7 +603,7 @@ it('進度通知同步啟動較新的同路徑工作時，較舊呼叫不得移�
 });
 
 it('無法核對來源波形檔時不刪除並保留退出防線', async () => {
-  root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-wave-owner-'));
+  root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-wave-owner-'));
   const source = path.join(root, 'mother.mov'), tempRoot = path.join(root, 'temp');
   const cacheRoot = path.join(root, 'cache'), output = path.join(tempRoot, 'source-wave.wav');
   fs.mkdirSync(tempRoot); fs.writeFileSync(source, 'mother source');

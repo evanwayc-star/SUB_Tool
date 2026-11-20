@@ -15,7 +15,7 @@ const fixtures = [];
 const aliasRoots = [];
 
 function fixture() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-disc-owner-test-'));
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-disc-owner-test-'));
   fixtures.push(dir);
   return dir;
 }

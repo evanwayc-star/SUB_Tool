@@ -30,7 +30,7 @@ describe('光碟 watchdog 暫存、取消與復原', () => {
   let tempDir, queueDir, outPath, encoderPath, bootstrapPath, controllers;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-disc-watchdog-'));
+    tempDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-disc-watchdog-'));
     queueDir = path.join(tempDir, 'queue');
     outPath = path.join(tempDir, 'existing.iso');
     encoderPath = path.join(tempDir, 'encoder.cjs');

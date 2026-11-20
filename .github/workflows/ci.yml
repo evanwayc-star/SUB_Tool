@@ -51,6 +51,22 @@ jobs:
       - name: Prepare verified DVD and BD authoring tools
         run: npm run native:prepare:disc
       - run: npm run build
+      - name: Stage bundled Windows tools for package verification
+        if: github.head_ref == 'verify/nas-media-windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'mpv-x64.7z'
+          $dir = Join-Path $env:RUNNER_TEMP 'mpv-x64'
+          Invoke-WebRequest 'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/mpv-x86_64-20261111-git-bcde6b93cc.7z' -OutFile $archive
+          if ((Get-FileHash $archive).Hash -ne 'f259b5fd4b5c395617c948a4fadcdf55bba1c5282fb7c13e88626b3f71072baf') { throw 'mpv archive checksum mismatch' }
+          7z x $archive "-o$dir" -y | Out-Null
+          if ($LASTEXITCODE) { throw 'mpv extraction failed' }
+          New-Item -ItemType Directory -Force electron/ffmpeg, electron/mpv | Out-Null
+          Copy-Item $env:FFMPEG_PATH, $env:FFPROBE_PATH electron/ffmpeg
+          $mpv = Get-ChildItem $dir -Recurse -File -Filter mpv.exe | Select-Object -First 1
+          Copy-Item $mpv.FullName electron/mpv
+          $dll = Get-ChildItem $dir -Recurse -File -Filter d3dcompiler_43.dll | Select-Object -First 1
+          if ($dll) { Copy-Item $dll.FullName electron/mpv } else { Copy-Item "$env:SystemRoot/System32/d3dcompiler_43.dll" electron/mpv }
       - name: Run portable tests on Windows for NAS verification
         if: github.head_ref == 'verify/nas-media-windows'
         run: npm run test:ci:portable

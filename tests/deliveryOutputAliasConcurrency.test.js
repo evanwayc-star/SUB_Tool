@@ -32,7 +32,7 @@ afterEach(() => {
 });
 
 it.runIf(process.platform === 'win32')('已存在輸出檔的長檔名與 8.3 別名不能同時保留兩份佇列工作', context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const source = path.join(root, 'source.mp4');
   const target = path.join(root, 'A Very Long Delivery Target Filename.mp4');
@@ -69,7 +69,7 @@ it.runIf(process.platform === 'win32')('已存在輸出檔的長檔名與 8.3 �
 });
 
 it.runIf(process.platform === 'win32')('跨 watchdog 長短名稱同時指向同一目的檔時只可啟動一個 writer', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Concurrent Delivery Filename.mp4');
   const script = path.join(root, 'writer.cjs');
@@ -107,7 +107,7 @@ it.runIf(process.platform === 'win32')('跨 watchdog 長短名稱同時指向同
 }, 30000);
 
 it.runIf(process.platform === 'win32')('取得 canonical reservation 時目的檔被替換，不啟動 writer 並回滾所有新鎖', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Lock Change Target Filename.mp4'), queueDir = path.join(root, 'queue');
   const old = path.join(root, 'old-file.bin'), shim = path.join(root, 'swap.cjs');
@@ -146,7 +146,7 @@ it.runIf(process.platform === 'win32')('取得 canonical reservation 時目的�
 }, 30000);
 
 it('不同 queueDir 的 watchdog 不能同時寫入同一個現存目的檔', async () => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'shared-target.mp4');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt');
@@ -177,7 +177,7 @@ it('不同 queueDir 的 watchdog 不能同時寫入同一個現存目的檔', as
 }, 30000);
 
 it('不同 profile 同時啟動時，真 watchdog 只准一個 writer 取得共用鎖', async () => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'simultaneous.mp4'), script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt');
   fs.writeFileSync(target, 'previous');
@@ -199,7 +199,7 @@ it('不同 profile 同時啟動時，真 watchdog 只准一個 writer 取得共�
 }, 30000);
 
 it('共用鎖的原程序消失時，僅在暫存成品不存在後復原並准入另一個 profile', async () => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'recovery.mp4'), oldQueue = path.join(root, 'old-profile');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt');
@@ -234,7 +234,7 @@ it('共用鎖的原程序消失時，僅在暫存成品不存在後復原並准�
 }, 30000);
 
 it('偽造的共用鎖不得要求復原或中止其他 profile 的真 watchdog', async () => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const victim = path.join(root, 'victim.mp4'), target = path.join(root, 'forged.mp4');
   const queueDir = path.join(root, 'victim-profile'), script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started');
@@ -268,7 +268,7 @@ it('偽造的共用鎖不得要求復原或中止其他 profile 的真 watchdog'
 }, 30000);
 
 it('原 profile 佇列根目錄被替換後不復原共用鎖', async () => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'replaced-root.mp4'), queueDir = path.join(root, 'old-profile');
   fs.writeFileSync(target, 'previous'); fs.mkdirSync(path.join(queueDir, 'output-leases'), { recursive: true });
@@ -286,7 +286,7 @@ it('原 profile 佇列根目錄被替換後不復原共用鎖', async () => {
 });
 
 it('共用鎖根目錄遭替換時不得發布，保留原輸出與已完成暫存成品', async () => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'lost-lock.mp4'), queueDir = path.join(root, 'queue');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt'), gate = path.join(root, 'gate');
@@ -311,7 +311,7 @@ it('共用鎖根目錄遭替換時不得發布，保留原輸出與已完成暫�
 }, 30000);
 
 it('watchdog 在 writer 啟動與 PID 入鎖之間崩潰時保留兩個鎖', async () => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'spawn-gap.mp4'), queueDir = path.join(root, 'queue');
   const script = path.join(root, 'writer.cjs'), shim = path.join(root, 'delay-owner.cjs');
@@ -387,7 +387,7 @@ it('watchdog 在 writer 啟動與 PID 入鎖之間崩潰時保留兩個鎖', asy
 }, 30000);
 
 it.runIf(process.platform === 'win32')('兩份 reservation 均記錄真實 writer PID，重啟時等程序結束後才釋放', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Live Writer Target Filename.mp4'), queueDir = path.join(root, 'queue');
   fs.writeFileSync(target, 'original target');
@@ -423,7 +423,7 @@ it.runIf(process.platform === 'win32')('兩份 reservation 均記錄真實 write
 }, 30000);
 
 it.runIf(process.platform === 'win32')('長短名 watchdog 同時啟動時原子保留同一現存目的檔', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Simultaneous Target Filename.mp4');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt');
@@ -456,7 +456,7 @@ it.runIf(process.platform === 'win32')('長短名 watchdog 同時啟動時原子
 }, 30000);
 
 it('不同 hardlink 目錄項及不同 symlink 可分別保留各自目的地', () => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'target.mp4'), hard = path.join(root, 'hard.mp4');
   const link1 = path.join(root, 'first-link.mp4'), link2 = path.join(root, 'second-link.mp4');
@@ -476,7 +476,7 @@ it('不同 hardlink 目錄項及不同 symlink 可分別保留各自目的地', 
 });
 
 it.runIf(process.platform === 'win32')('最末 symlink 的長短名代表同一連結，但不指向目標的 reservation', context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'target.mp4');
   const link = path.join(root, 'A Very Long Symbolic Output Filename.mp4');
@@ -501,7 +501,7 @@ it.runIf(process.platform === 'win32')('最末 symlink 的長短名代表同一�
 });
 
 it.runIf(process.platform === 'win32')('短名 watchdog 取消時原 lease 與 canonical reservation 都依 owner 釋放', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Cancellation Target Filename.mp4');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt');
@@ -534,7 +534,7 @@ it.runIf(process.platform === 'win32')('短名 watchdog 取消時原 lease 與 c
 }, 30000);
 
 it.runIf(process.platform === 'win32')('重啟可回收未寫入的 canonical reservation 與原始 reservation', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Restart Target Filename.mp4'), queueDir = path.join(root, 'queue');
   fs.writeFileSync(target, 'original target');
@@ -559,7 +559,7 @@ it.runIf(process.platform === 'win32')('重啟可回收未寫入的 canonical re
 }, 30000);
 
 it.runIf(process.platform === 'win32')('輸出變更而保留成品時，重啟保持長短名雙鎖直到使用者移走成品', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Retained Target Filename.mp4'), queueDir = path.join(root, 'queue');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt'), gate = path.join(root, 'finish');
@@ -620,7 +620,7 @@ it.runIf(process.platform === 'win32')('輸出變更而保留成品時，重啟�
 }, 30000);
 
 it.runIf(process.platform === 'win32')('原本不存在的長名工作已啟動後目的出現，短名不能另啟動 writer', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Newly Created Target Filename.mp4');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt'), queueDir = path.join(root, 'queue');
@@ -651,7 +651,7 @@ it.runIf(process.platform === 'win32')('原本不存在的長名工作已啟動�
 }, 30000);
 
 it.runIf(process.platform === 'win32')('watchdog 異常結束而 writer 尚存活時，重啟不提前釋放別名鎖', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Crash Recovery Target Filename.mp4');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt'), queueDir = path.join(root, 'queue');
@@ -694,7 +694,7 @@ it.runIf(process.platform === 'win32')('watchdog 異常結束而 writer 尚存�
 }, 30000);
 
 it.runIf(process.platform === 'win32').each(['long-first', 'short-first'])('既有 %s 舊 lease 存在時不得以另一別名啟動 writer', async (order, context) => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Legacy Delivery Filename.mp4');
   const script = path.join(root, 'writer.cjs');
@@ -728,7 +728,7 @@ it.runIf(process.platform === 'win32').each(['long-first', 'short-first'])('既�
 }, 30000);
 
 it.runIf(process.platform === 'win32')('短名 primary 已被舊工作持有時，先取得的 canonical 鎖必須回滾', async context => {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-output-alias-'));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'subtool-output-alias-'));
   roots.push(root);
   const target = path.join(root, 'A Very Long Rollback Target Filename.mp4');
   const script = path.join(root, 'writer.cjs'), marker = path.join(root, 'started.txt');
