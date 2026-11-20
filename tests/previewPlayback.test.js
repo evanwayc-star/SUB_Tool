@@ -75,8 +75,85 @@ async function fixture({path='C:/mother.mov',mode='original',prepareLocalPreview
   };
   const dispose=()=>{for(const work of presentations)work.resolve(work.result);Media.reset();delete window.subtool;};
   return {Media,State,Seq,clip,adapter,mpv,desktop,elements,trace,assets,register,startAt,accepted,finishPresentation,
+    disconnect:()=>nativeEvent({event:'disconnected',sourceSessionId:`source-${session}`}),
+    failCurrentSource:()=>nativeEvent({event:'end-file',reason:'error',sourceSessionId:`source-${session}`}),
     holdPresent:()=>{holdPresent=true;},emit:(name,data)=>nativeEvent({event:'property-change',name,data,sourceSessionId:`source-${session}`}),dispose};
 }
+
+it('剛完成的 Proxy 無法載入時在原位置呈現母片，後續播放與定位不會重試壞檔，至手動重試為止',async()=>{
+  const f=await fixture({mode:'smooth'});
+  try{
+    await f.Media.seek(4);
+    f.mpv.loadfile.mockResolvedValueOnce({ok:false,error:{code:'MPV_LOAD_FAILED'}});
+    f.Media._publishPreviewAssets(f.clip,f.assets,f.Media.captureMediaOwnership());
+    await vi.waitFor(()=>expect(f.mpv.loadfile.mock.calls.map(([path])=>path)).toEqual([f.assets.proxy,f.clip.path]));
+    await vi.waitFor(()=>expect(f.Media.presentedTime()).toBe(4));
+    expect(f.Media.previewState()).toMatchObject({available:true,sourceKind:'original',proxyFailed:true});
+    await f.startAt(7);
+    expect(f.adapter.ownsNativeSourcePath(f.clip.path)).toBe(true);
+    expect(f.mpv.loadfile).toHaveBeenCalledTimes(2);
+    expect(await f.Media.setPreviewMode('smooth')).toBe(true);
+    expect(f.adapter.ownsNativeSourcePath(f.assets.proxy)).toBe(true);
+    expect(f.Media.displayTime()).toBe(7);
+  }finally{f.dispose();}
+});
+
+it('mpv 失連後直接播放會重新啟動來源，在原位置取得畫格再恢復聲道',async()=>{
+  const f=await fixture();
+  try{
+    await f.Media.seek(4);
+    f.disconnect();await flush();
+    expect(f.adapter.ownsNativeSourcePath(f.clip.path)).toBe(false);
+    f.mpv.loadfile.mockResolvedValueOnce({ok:false,error:{code:'MPV_DISCONNECTED'}});
+    f.Media.play();
+    await vi.waitFor(()=>expect(f.mpv.launch).toHaveBeenCalledTimes(2));
+    await vi.waitFor(()=>expect(f.elements.every(el=>!el.paused)).toBe(true));
+    expect(f.adapter.ownsNativeSourcePath(f.clip.path)).toBe(true);
+    expect(f.mpv.present.mock.calls.at(-1)[0]).toBe(4);
+    expect(f.elements.map(el=>el.currentTime)).toEqual([4,4]);
+  }finally{f.dispose();}
+});
+
+it('原片與 Proxy 暫時都無法載入仍可在原位置手動切回原片',async()=>{
+  const f=await fixture();
+  try{
+    await f.Media.seek(5);f.register();
+    f.mpv.loadfile.mockRejectedValueOnce(new Error('bad proxy')).mockRejectedValueOnce(new Error('NAS offline'));
+    expect(await f.Media.setPreviewMode('smooth')).toBe(false);
+    expect(f.Media.previewState()).toMatchObject({available:true,proxyFailed:true,position:5});
+    expect(f.Media.inGap()).toBe(true);
+    expect(await f.Media.setPreviewMode('original')).toBe(true);
+    expect(f.adapter.ownsNativeSourcePath(f.clip.path)).toBe(true);
+    expect(f.Media.presentedTime()).toBe(5);
+  }finally{f.dispose();}
+});
+
+it('已經在播放的 Proxy 中途讀取失敗，保留播放意圖並在同一畫格交回母片',async()=>{
+  const f=await fixture();
+  try{
+    f.register();await f.Media.setPreviewMode('smooth');await f.startAt(6);
+    f.failCurrentSource();
+    await vi.waitFor(()=>expect(f.adapter.ownsNativeSourcePath(f.clip.path)).toBe(true));
+    await vi.waitFor(()=>expect(f.elements.every(el=>!el.paused)).toBe(true));
+    expect(f.Media.previewState()).toMatchObject({sourceKind:'original',proxyFailed:true,phase:'playing'});
+    expect(f.mpv.present.mock.calls.at(-1)[0]).toBe(6);
+  }finally{f.dispose();}
+});
+
+it('Proxy 已載入但仍在切換時收到讀取錯誤，也會讓原片呈現最新播放點',async()=>{
+  const f=await fixture(),direction=deferred();
+  try{
+    await f.Media.seek(4);f.register();
+    f.mpv.direction.mockImplementationOnce(()=>direction.promise);
+    const switched=f.Media.setPreviewMode('smooth');
+    await vi.waitFor(()=>expect(f.adapter.ownsNativeSourcePath(f.assets.proxy)).toBe(true));
+    f.failCurrentSource();direction.resolve(true);
+    await switched;
+    await vi.waitFor(()=>expect(f.adapter.ownsNativeSourcePath(f.clip.path)).toBe(true));
+    await vi.waitFor(()=>expect(f.Media.presentedTime()).toBe(4));
+    await vi.waitFor(()=>expect(f.Media.previewState()).toMatchObject({sourceKind:'original',proxyFailed:true,phase:'paused'}));
+  }finally{direction.resolve(true);f.dispose();}
+});
 
 it('順暢預覽正播使用已登記 proxy，原始模式切回母片且不改專案路徑或片段幾何',async()=>{
   const f=await fixture();

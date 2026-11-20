@@ -7,6 +7,9 @@
 import { clamp } from './util.js';
 import {sourceFrameTargetUs} from '../shared/media-source-clock.cjs';
 
+// Two bounded probe/load attempts cover a Proxy failure followed by its mother.
+export const SOURCE_ACTIVATION_TIMEOUT_MS = 180000;
+
 /**
  * 建立「要求位置」與「實際呈現位置」之間的單一協調核心。
  *
@@ -100,11 +103,27 @@ export function createMediaPresentationCore({
   function start(request) {
     active = request;
     const requestTimeout = Number(request.options.timeoutMs ?? timeoutMs);
-    if (Number.isFinite(requestTimeout) && requestTimeout > 0) {
+    const armTimeout = duration => {
+      if (request.timer != null) clearTimeoutFn(request.timer);
+      request.timer = null;
+      if (!Number.isFinite(duration) || duration <= 0) return;
       request.timer = setTimeoutFn(() => {
         releaseActive(request, { status: 'timeout', presentedTime: lastPresentedTime });
-      }, requestTimeout);
-    }
+      }, duration);
+    };
+    armTimeout(requestTimeout);
+    const activateSource = async work => {
+      const budget = Number(request.options.sourceActivationTimeoutMs);
+      if (!Number.isFinite(budget) || budget <= 0) return work();
+      request.activatingSource = true;
+      armTimeout(Math.min(budget, SOURCE_ACTIVATION_TIMEOUT_MS));
+      try { return await work(); }
+      finally {
+        request.activatingSource = false;
+        // A replaced activation cannot change the newer request's deadline.
+        if (active === request && !request.settled) armTimeout(requestTimeout);
+      }
+    };
 
     let outbound;
     try {
@@ -115,6 +134,7 @@ export function createMediaPresentationCore({
         requestId: request.id,
         signal: request.controller?.signal || null,
         isLatestRequest: () => active === request && pending == null,
+        activateSource,
         ...(request.options.whilePresented ? { waitForFrame: true } : {}),
         ...(hasRequestedTolerance
           ? { tolerance: Math.max(0, requestedTolerance) }
@@ -142,6 +162,8 @@ export function createMediaPresentationCore({
   function request(targetTime, options = {}) {
     const next = makeRequest(targetTime, options);
     if (!active) {
+      // An abort listener can synchronously issue an even newer request.
+      if (pending) { const queued = pending; pending = null; finish(queued, { status: 'superseded', presentedTime: lastPresentedTime }); }
       start(next);
       return next.promise;
     }
@@ -157,6 +179,9 @@ export function createMediaPresentationCore({
     if (pending && canSharePresentation(pending, next)) return pending.promise;
     if (pending) finish(pending, { status: 'superseded', presentedTime: lastPresentedTime });
     pending = next;
+    // Source I/O has its own ownership guard; unlike a native frame/capture, it
+    // must not keep the latest target waiting behind a long NAS probe.
+    if (active.activatingSource) releaseActive(active, { status: 'superseded', presentedTime: lastPresentedTime });
     return next.promise;
   }
 
@@ -287,6 +312,7 @@ export function createMediaPresentationSession(options = {}) {
     requestId,
     tolerance: requestedTolerance,
     isLatestRequest,
+    activateSource,
     waitForFrame = false,
   } = {}) {
     if (signal?.aborted) {
@@ -310,7 +336,7 @@ export function createMediaPresentationSession(options = {}) {
       sourceTarget = timeline.sourceTime?.(targetTime, clip);
       if (!Number.isFinite(Number(sourceTarget))) throw new Error('timeline source mapping is unavailable');
       if (timeline.requiresClip?.(clip)) {
-        await timeline.ensureClip?.(clip, sourceTarget, false,{signal,owns:isLatestRequest});
+        await activateSource(() => timeline.ensureClip?.(clip, sourceTarget, false,{signal,owns:isLatestRequest}));
         if (signal?.aborted||(typeof isLatestRequest==='function'&&!isLatestRequest())) {
           throw Object.assign(new Error('media presentation aborted'), { name: 'AbortError' });
         }

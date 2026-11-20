@@ -37,6 +37,19 @@ export function detectOverlaps(cues, eps = 0.001) {
   return set;
 }
 
+// Each cue intersects the earlier cue with the furthest end. That intersection
+// covers its overlap with every earlier cue, without listing all O(N²) pairs.
+// Keep one genuine pair on each range for timeline click-to-select behavior.
+export function subtitleOverlapRanges(cues, { start = -Infinity, end = Infinity, eps = 0.001 } = {}) {
+  const ranges = [];
+  if (!(end > start)) return ranges;
+  for (const [cue, previous] of overlapPredecessors(cues, eps)) {
+    const from = Math.max(cue.start, start), to = Math.min(cue.end, previous.end, end);
+    if (to > from) ranges.push({ track: cue.track || 0, start: from, end: to, id1: previous.id, id2: cue.id });
+  }
+  return ranges;
+}
+
 // Consecutive equal text forms one editing group. Separated repetitions and
 // another track start new groups; blank subtitles never form a text group.
 export function consecutiveIdenticalGroups(cues=[]){

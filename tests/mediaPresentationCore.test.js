@@ -337,6 +337,106 @@ describe('media presentation session', () => {
     return { session, calls, clip, adapter, timeline, player, commitPresented, playback };
   }
 
+  it.each([12000, 140000])('來源啟用 %s ms（含 Proxy 退回母片）使用獨立期限，完成後仍有完整畫格期限', async activationMs => {
+    vi.useFakeTimers();
+    let activated = false, finishFrame;
+    const adapter = { type: 'mpv', present: vi.fn(() => new Promise(resolve => { finishFrame = resolve; })) };
+    const { session, playback } = createSession({
+      timeline: { requiresClip: () => !activated, ensureClip: async () => {
+        // Two sequential attempts represent a rejected Proxy followed by its mother.
+        await new Promise(resolve => setTimeout(resolve, activationMs / 2));
+        await new Promise(resolve => setTimeout(resolve, activationMs / 2));
+        activated = true;
+      } },
+      player: { adapter: () => adapter, isNative: () => true },
+    });
+    const pending = session.requestPlayback(104, { timeoutMs: 10000, sourceActivationTimeoutMs: 180000 });
+    session.setPlaybackIntent(true);
+    await vi.advanceTimersByTimeAsync(activationMs - 1);
+    expect(session.isPlaybackPending()).toBe(true);
+    expect(adapter.present).not.toHaveBeenCalled(); expect(playback.fail).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(adapter.present).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(session.isPlaybackPending()).toBe(true);
+    finishFrame({ backend: 'mpv', presentedSourceTime: 4 });
+    await expect(pending).resolves.toMatchObject({ status: 'presented', presentedTime: 104 });
+    expect(playback.resume).toHaveBeenCalledOnce(); expect(playback.fail).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('已載入來源保留 10 秒畫格期限，完成過來源啟用=%s', async activate => {
+    vi.useFakeTimers();
+    let activated = !activate;
+    const adapter = { type: 'mpv', present: vi.fn(() => new Promise(() => {})) };
+    const { session } = createSession({
+      timeline: { requiresClip: () => !activated, ensureClip: async () => { activated = true; } },
+      player: { adapter: () => adapter, isNative: () => true },
+    });
+    const pending = session.requestPlayback(104, { timeoutMs: 10000, sourceActivationTimeoutMs: 180000 });
+    await vi.advanceTimersByTimeAsync(9999); expect(session.isPending()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ status: 'timeout', requestedTime: 104 });
+    expect(adapter.present).toHaveBeenCalledOnce();
+  });
+
+  it('來源啟用期限有界，逾時撤銷工作且晚到來源不可提交或恢復播放', async () => {
+    vi.useFakeTimers();
+    let finishSource, sourceSignal;
+    const { session, adapter, commitPresented, playback } = createSession({ timeline: {
+      requiresClip: () => true, ensureClip: (_clip, _time, _resume, { signal }) => {
+        sourceSignal = signal; return new Promise(resolve => { finishSource = resolve; });
+      },
+    } });
+    const pending = session.requestPlayback(104, { timeoutMs: 10000, sourceActivationTimeoutMs: 180000 });
+    session.setPlaybackIntent(true);
+    await vi.advanceTimersByTimeAsync(179999); expect(sourceSignal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ status: 'timeout', requestedTime: 104 });
+    expect(sourceSignal.aborted).toBe(true);
+    finishSource(); await vi.advanceTimersByTimeAsync(0);
+    expect(adapter.present).not.toHaveBeenCalled(); expect(commitPresented).not.toHaveBeenCalled();
+    expect(playback.resume).not.toHaveBeenCalled(); expect(playback.fail).toHaveBeenCalledOnce();
+  });
+
+  it.each(['new-seek', 'reset'])('來源啟用不阻擋 %s，舊工作晚到不能清掉或提交新的請求', async action => {
+    vi.useFakeTimers();
+    let finishSource, sourceSignal;
+    const { session, adapter, commitPresented } = createSession({ timeline: {
+      clipAt: target => ({ id: target }), requiresClip: clip => clip.id === 104,
+      ensureClip: (_clip, _time, _resume, { signal }) => {
+        sourceSignal = signal; return new Promise(resolve => { finishSource = resolve; });
+      },
+    } });
+    const old = session.requestPlayback(104, { timeoutMs: 10000, sourceActivationTimeoutMs: 180000 });
+    if (action === 'reset') session.reset('new-workspace');
+    const latest = session.requestPlayback(108, { timeoutMs: 10000, sourceActivationTimeoutMs: 180000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sourceSignal.aborted).toBe(true);
+    await expect(old).resolves.toMatchObject({ status: action === 'reset' ? 'cancelled' : 'superseded' });
+    await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 107.99 });
+    finishSource(); await vi.advanceTimersByTimeAsync(0);
+    expect(adapter.present).toHaveBeenCalledOnce(); expect(commitPresented).toHaveBeenCalledOnce();
+    expect(session.presentedTime()).toBe(107.99);
+  });
+
+  it('撤銷來源啟用的同步通知再要求新位置時，最新通知優先於原先排隊的目標', async () => {
+    const budgets = { timeoutMs: 10000, sourceActivationTimeoutMs: 180000 };
+    let newest, finishSource;
+    const { session, adapter } = createSession({ timeline: {
+      clipAt: target => ({ id: target }), requiresClip: clip => clip.id === 104,
+      ensureClip: (_clip, _time, _resume, { signal }) => {
+        signal.addEventListener('abort', () => { newest = session.requestPlayback(110, budgets); }, { once: true });
+        return new Promise(resolve => { finishSource = resolve; });
+      },
+    } });
+    const old = session.requestPlayback(104, budgets), replaced = session.requestPlayback(108, budgets);
+    await expect(old).resolves.toMatchObject({ status: 'superseded' });
+    await expect(replaced).resolves.toMatchObject({ status: 'superseded' });
+    await expect(newest).resolves.toMatchObject({ status: 'presented', presentedTime: 109.99 });
+    expect(adapter.present).toHaveBeenCalledOnce(); expect(adapter.present.mock.calls[0][0]).toBe(10);
+    finishSource();
+  });
+
   it('一般跳轉後的播放意圖會等實際畫格呈現完成才恢復', async () => {
     let finishPresentation;
     const waitingAdapter = {

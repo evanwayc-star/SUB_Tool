@@ -395,11 +395,20 @@ function createMpvHost(deps) {
     return { request, promise };
   }
 
-  function settleFileLoad(ready) {
+  function loadFailure(code, message, details = {}) {
+    return { code, message, ...details };
+  }
+
+  function failedLoadResult(session) {
+    return { ok: false, duration: 0, ...(session?.loadError ? { error: session.loadError } : {}) };
+  }
+
+  function settleFileLoad(ready, error = null) {
     const waiter = pendingFileLoad;
     if (!waiter) return;
     pendingFileLoad = null;
     clearTimer(waiter.timer);
+    if (error) waiter.session.loadError = error;
     waiter.resolve(ready);
   }
 
@@ -409,7 +418,8 @@ function createMpvHost(deps) {
       const waiter = { resolve, timer: null, session, firstFrame, entryId: null, reading: false };
       pendingFileLoad = waiter;
       waiter.timer = setTimer(() => {
-        if (pendingFileLoad === waiter) settleFileLoad(false);
+        if (pendingFileLoad === waiter) settleFileLoad(false,
+          loadFailure('MPV_LOAD_TIMEOUT', firstFrame ? 'mpv 初始畫格等待逾時' : 'mpv 來源載入逾時'));
       }, firstFrame ? 15000 : 8000);
     });
   }
@@ -418,7 +428,8 @@ function createMpvHost(deps) {
     const waiter = pendingFileLoad;
     if (!waiter || waiter.session !== session || session !== fileLoadSession) return;
     const entryId = receipt?.playlist_entry_id;
-    if (!Number.isSafeInteger(entryId) || entryId < 0) return settleFileLoad(false);
+    if (!Number.isSafeInteger(entryId) || entryId < 0) return settleFileLoad(false,
+      loadFailure('MPV_LOAD_FAILED', 'mpv 載入回覆缺少有效來源識別', { reason: 'invalid-receipt' }));
     session.entryId = entryId;
     waiter.entryId = entryId;
     maybeFinishFileLoad(waiter);
@@ -532,7 +543,7 @@ function createMpvHost(deps) {
       && waiter.session.client === client && waiter.session.generation === generation
       && phase === fileLoadPhase && waiter.entryId != null && waiter.entryId === phase?.entryId;
     if (!owns()) return;
-    if (phase.ended) return settleFileLoad(false);
+    if (phase.ended) return settleFileLoad(false, phase.loadError);
     if (!phase.loaded || (waiter.firstFrame && !phase.restarted) || waiter.reading) return;
     waiter.reading = true;
     // path 是查詢當下的來源，不能替排隊的舊 file-loaded 作證。先以 loadfile
@@ -547,9 +558,12 @@ function createMpvHost(deps) {
       if (!waiter.firstFrame) return settleFileLoad(true);
       // launch 原有首幀契約：同 entry 的 restart 後才讀回有限來源時鐘。
       const time = await send(['get_property', 'time-pos'], true, { requireSuccess: true });
-      if (owns()) settleFileLoad(typeof time === 'number' && Number.isFinite(time));
-    }).catch(() => {
-      if (owns()) settleFileLoad(false);
+      if (owns()) {
+        const valid = typeof time === 'number' && Number.isFinite(time);
+        settleFileLoad(valid, valid ? null : loadFailure('MPV_LOAD_FAILED', 'mpv 初始畫格尚未就緒：無有效來源時鐘', { reason: 'invalid-frame' }));
+      }
+    }).catch(error => {
+      if (owns()) settleFileLoad(false, loadFailure('MPV_LOAD_FAILED', 'mpv 來源驗證失敗：' + error.message, { reason: 'verification' }));
     });
   }
 
@@ -615,12 +629,15 @@ function createMpvHost(deps) {
     sourceAudioGraph = '';
     const current = client;
     const sourceSessionId = fileLoadSession?.sourceSessionId;
+    const disconnectError = emitDisconnected ? loadFailure('MPV_DISCONNECTED', 'mpv 播放連線已中斷') : null;
+    // The source may still be probing, before a file-load waiter exists.
+    if (fileLoadSession && disconnectError) fileLoadSession.loadError = disconnectError;
     client = null;
     buffer = '';
     playerPaused = true;
     clearCallbacks(null);
     cancelPresent();
-    settleFileLoad(false);
+    settleFileLoad(false, disconnectError);
     fileLoadSession = null;
     sourceObserverSessions.clear();
     fileLoadPhase = null;
@@ -1135,6 +1152,10 @@ function createMpvHost(deps) {
               maybeFinishFileLoad(pendingFileLoad);
             } else if (message.event === 'end-file' && fileLoadPhase && message.playlist_entry_id === fileLoadPhase.entryId) {
               fileLoadPhase.ended = true;
+              const reason = typeof message.reason === 'string' ? message.reason : 'end-file';
+              const mpvError = typeof message.file_error === 'string' ? message.file_error : null;
+              fileLoadPhase.loadError = loadFailure('MPV_LOAD_FAILED', 'mpv 來源載入失敗：' + (mpvError || reason),
+                { reason, ...(mpvError ? { mpvError } : {}) });
               maybeFinishFileLoad(pendingFileLoad);
             }
             if (message.event === 'property-change' && message.name === 'duration') {
@@ -1358,7 +1379,11 @@ function createMpvHost(deps) {
       acknowledgeFileLoad(startupSession, receipt);
       const loaded = await ready;
       if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
-      if (!loaded) throw new Error('mpv 初始畫格未在期限內就緒');
+      if (!loaded) {
+        const error = new Error('mpv 初始畫格未就緒' + (startupSession.loadError ? '：' + startupSession.loadError.message : ''));
+        error.code = startupSession.loadError?.code || 'MPV_LOAD_FAILED';
+        throw error;
+      }
       if (!await installSourceObservers(startupSession)) throw new Error('mpv 啟動已被新的媒體取代');
       const duration = await send(['get_property', 'duration'], true);
       if (token !== generation || fileLoadSession !== startupSession) throw new Error('mpv 啟動已被新的媒體取代');
@@ -1484,7 +1509,7 @@ function createMpvHost(deps) {
   async function loadFile(filePath) {
     cancelCanvas();
     cancelPlaybackReady();
-    if (!client) return null;
+    if (!client) return failedLoadResult({ loadError: loadFailure('MPV_DISCONNECTED', 'mpv 播放連線已中斷') });
     directionGeneration++;
     settleFileLoad(false);
     const previousSource = fileLoadSession?.loading ? null : fileLoadSession;
@@ -1493,7 +1518,7 @@ function createMpvHost(deps) {
     const session = { client, generation, path: filePath, loading: true, awaitingPositioning:true, sourceSessionId: randomBytes(16).toString('hex') };
     fileLoadSession = session;
     const current = () => session === fileLoadSession && session.client === client && session.generation === generation;
-    const superseded = () => ({ ok: false, duration: 0 });
+    const superseded = () => failedLoadResult(session);
     // 同一個 mpv process 會沿用 pipe，但舊來源的呈現請求絕不可由新來源的
     // time-pos／playback-restart 完成。
     cancelPresent();
@@ -1527,13 +1552,13 @@ function createMpvHost(deps) {
       const receipt = await send(['loadfile', filePath, 'replace'], true, { requireSuccess: true });
       acknowledgeFileLoad(session, receipt);
     } catch (error) {
-      if (!current()) return superseded();
+      if (!current()) return failedLoadResult(session);
       settleFileLoad(false);
       throw error;
     }
     if (!await ready || !current()) {
       log('[mpv] loadfile: matching source load did not complete:', filePath);
-      return { ok: false, duration: 0 };
+      return failedLoadResult(session);
     }
     // loadfile reuses the process, but every input graph belongs to one source.
     // Rebuild all native streams while still paused, before accepting mixer IPC.

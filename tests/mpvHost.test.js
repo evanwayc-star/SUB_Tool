@@ -1519,8 +1519,149 @@ describe('Windows mpv host lifecycle', () => {
       if(failure==='disconnect')socket.emit('close');
       const result=await outcome;
       if(failure==='error'||failure==='timeout')expect(result.error?.message).toMatch(/loading failed|逾時/);
-      else expect(result.value).toEqual({ok:false,duration:0});
+      else expect(result.value).toEqual({ok:false,duration:0,error:failure==='disconnect'
+        ?{code:'MPV_DISCONNECTED',message:expect.any(String)}
+        :{code:'MPV_LOAD_FAILED',message:expect.any(String),reason:'invalid-receipt'}});
     }finally{host.quit();}
+  });
+
+  it.each(['before-ACK','after-ACK'])('目前 entry 的 end-file 錯誤保留 native 原因，且同路徑重試不受舊事件影響（%s）', async order => {
+    const { host, sockets, children } = make();
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    const emit = message => socket.emit('data', Buffer.from(JSON.stringify(message) + '\n'));
+    const source = 'D:/media/retry.mxf';
+    let command, entryId = 1;
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command[0] === 'loadfile') { command = message; entryId++; return; }
+      if (message.command[0] === 'get_property' && message.command[1] === 'path') {
+        queueMicrotask(() => emit({ request_id: message.request_id, data: source, error: 'success' })); return;
+      }
+      write(raw);
+    });
+    try {
+      const loading = host.loadFile(source);
+      await flushReady();
+      const ack = () => emit({ request_id: command.request_id, data: { playlist_entry_id: entryId }, error: 'success' });
+      const failed = () => {
+        emit({ event: 'start-file', playlist_entry_id: 2 });
+        emit({ event: 'end-file', playlist_entry_id: 2, reason: 'error', file_error: 'loading failed' });
+      };
+      if (order === 'before-ACK') { failed(); ack(); } else { ack(); failed(); }
+      expect(await loading).toMatchObject({ ok: false, duration: 0,
+        error: { code: 'MPV_LOAD_FAILED', reason: 'error', mpvError: 'loading failed', message: expect.stringContaining('loading failed') } });
+      let settled = false;
+      const retry = host.loadFile(source).then(result => { settled = true; return result; });
+      await flushReady(); ack();
+      emit({ event: 'end-file', playlist_entry_id: 2, reason: 'error', file_error: 'old source error' });
+      await flushReady();
+      expect(settled).toBe(false);
+      emit({ event: 'start-file', playlist_entry_id: 3 });
+      emit({ event: 'file-loaded' });
+      expect(await retry).toEqual({ ok: true, duration: 123.5, sourceSessionId: expect.any(String) });
+      expect(children).toHaveLength(1);
+    } finally { host.quit(); }
+  });
+
+  it('載入逾時有獨立原因且不自行重試；下一次明確 loadfile 只接受新 entry', async () => {
+    const timers = [];
+    const { host, sockets, children } = make({ setTimer: (callback, ms) => {
+      const timer = { callback, ms }; timers.push(timer); return timer;
+    } });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0], write = socket.write.getMockImplementation();
+    const emit = message => socket.emit('data', Buffer.from(JSON.stringify(message) + '\n'));
+    const source = 'D:/media/slow.mxf';
+    let entryId = 1;
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command[0] === 'loadfile') {
+        entryId++;
+        queueMicrotask(() => emit({ request_id: message.request_id, data: { playlist_entry_id: entryId }, error: 'success' }));
+        return;
+      }
+      if (message.command[0] === 'get_property' && message.command[1] === 'path') {
+        queueMicrotask(() => emit({ request_id: message.request_id, data: source, error: 'success' })); return;
+      }
+      write(raw);
+    });
+    try {
+      const loading = host.loadFile(source);
+      await flushReady();
+      timers.findLast(timer => timer.ms === 8000).callback();
+      expect(await loading).toMatchObject({ ok: false, duration: 0, error: { code: 'MPV_LOAD_TIMEOUT' } });
+      expect(entryId).toBe(2);
+      let settled = false;
+      const retry = host.loadFile(source).then(result => { settled = true; return result; });
+      await flushReady();
+      emit({ event: 'start-file', playlist_entry_id: 2 }); emit({ event: 'file-loaded' });
+      emit({ event: 'end-file', playlist_entry_id: 2, reason: 'stop' });
+      await flushReady(); expect(settled).toBe(false);
+      emit({ event: 'start-file', playlist_entry_id: 3 }); emit({ event: 'file-loaded' });
+      expect(await retry).toMatchObject({ ok: true, sourceSessionId: expect.any(String) });
+      expect(entryId).toBe(3); expect(children).toHaveLength(1);
+    } finally { host.quit(); }
+  });
+
+  it.each(['pipe-close','process-close'])('失去 %s 後 loadfile 明確回報失連；既有 launch 能建立新 pipe 並忽略舊來源', async failure => {
+    const { host, sockets, children, events } = make();
+    const initial = await host.launch({ src: 'D:/media/initial.mxf' });
+    const oldSocket = sockets[0];
+    if (failure === 'pipe-close') oldSocket.emit('close');
+    else children[0].child.emit('close', 1);
+    try {
+      expect(await host.loadFile('D:/media/next.mxf')).toMatchObject({ ok: false, duration: 0,
+        error: { code: 'MPV_DISCONNECTED' } });
+      expect(children).toHaveLength(1);
+      const fresh = await host.launch({ src: 'D:/media/next.mxf', bounds: { x: 10, y: 20, w: 300, h: 200 } });
+      expect(fresh).toMatchObject({ ok: true, sourceSessionId: expect.any(String) });
+      expect(fresh.sourceSessionId).not.toBe(initial.sourceSessionId);
+      expect(children).toHaveLength(2);
+      const pipeArg = child => child.args.find(arg => arg.startsWith('--input-ipc-server='));
+      expect(pipeArg(children[1])).not.toBe(pipeArg(children[0]));
+      events.length = 0;
+      oldSocket.emit('data', Buffer.from('{"event":"end-file","playlist_entry_id":1,"reason":"error"}\n'));
+      children[0].child.emit('close', 1);
+      expect(events).toEqual([]);
+      expect(host.snapshot()).toMatchObject({ hasClient: true, hasProcess: true, hasHostWindow: true });
+    } finally { host.quit(); }
+  });
+
+  it.each(['disconnect','quit'])('loadfile 尚在 probe 時 %s，不發出晚到 load，且只把真正失連列為可重啟原因', async action => {
+    let resolveProbe;
+    const pendingProbe = new Promise(resolve => { resolveProbe = resolve; });
+    const { host, sockets } = make({ describeSource: source => source.endsWith('pending.mxf') ? pendingProbe : null });
+    await host.launch({ src: 'D:/media/initial.mxf' });
+    const socket = sockets[0]; socket.write.mockClear();
+    try {
+      const loading = host.loadFile('D:/media/pending.mxf');
+      if (action === 'disconnect') socket.emit('close'); else host.quit();
+      resolveProbe(null);
+      expect(await loading).toEqual({ ok: false, duration: 0, ...(action === 'disconnect'
+        ? { error: { code: 'MPV_DISCONNECTED', message: expect.any(String) } } : {}) });
+      expect(socket.write.mock.calls.map(([raw]) => JSON.parse(raw).command)
+        .filter(command => command[0] === 'loadfile')).toEqual([]);
+    } finally { host.quit(); }
+  });
+
+  it('首次載入的 native end-file 原因仍留在拒絕訊息，失敗清理不留下宿主', async () => {
+    const socket = socketThatReportsDuration(), write = socket.write.getMockImplementation();
+    socket.write.mockImplementation(raw => {
+      const message = JSON.parse(raw);
+      if (message.command[0] !== 'loadfile') return write(raw);
+      queueMicrotask(() => socket.emit('data', Buffer.from([
+        { event: 'start-file', playlist_entry_id: 1 },
+        { event: 'end-file', playlist_entry_id: 1, reason: 'error', file_error: 'unrecognized file format' },
+        { request_id: message.request_id, data: { playlist_entry_id: 1 }, error: 'success' },
+      ].map(value => JSON.stringify(value)).join('\n') + '\n')));
+    });
+    const { host, children } = make({ socketFactory: () => socket });
+    await expect(host.launch({ src: 'D:/media/bad.mxf' })).rejects.toMatchObject({
+      code: 'MPV_LOAD_FAILED', message: expect.stringContaining('unrecognized file format'),
+    });
+    expect(children[0].child.kill).toHaveBeenCalledOnce();
+    expect(host.snapshot()).toMatchObject({ hasClient: false, hasProcess: false, hasHostWindow: false });
   });
 
   it.each(['quit','disconnect','new-source'])('loadFile path 查詢期間 %s，晚到舊查詢不能交接或破壞新來源',async action=>{
@@ -1540,7 +1681,8 @@ describe('Windows mpv host lifecycle', () => {
       if(action==='disconnect')socket.emit('close');
       if(action==='new-source')latest=host.loadFile('D:/media/latest.mxf');
       socket.emit('data',Buffer.from(JSON.stringify({request_id:held.request_id,data:'D:/media/old.mxf',error:'success'})+'\n'));
-      expect(await old).toEqual({ok:false,duration:0});
+      expect(await old).toEqual({ok:false,duration:0,...(action==='disconnect'
+        ?{error:{code:'MPV_DISCONNECTED',message:expect.any(String)}}:{})});
       if(latest)expect(await latest).toEqual({ok:true,duration:123.5,sourceSessionId:expect.any(String)});
     }finally{host.quit();}
   });

@@ -213,7 +213,7 @@ import { $, video } from './dom.js';
 import { clamp, readFile, b64ToBytes, baseName, escapeHTML } from './util.js';
 import { ExternalAudioLibrary, makeAudioSourceId, sourceChannelDescriptors, serializeAsset, assetRange } from './external-audio.js';
 import { MediaIntakeSession, maxKnownSourceDuration, probeAudioChannelDescriptors, setMediaElementSource, waitForOwnedMediaMetadata } from './media-intake-engine.js';
-import { ResetEpoch, createMediaPresentationSession } from './media-presentation-core.js';
+import { ResetEpoch, createMediaPresentationSession, SOURCE_ACTIVATION_TIMEOUT_MS } from './media-presentation-core.js';
 import { MediaPlaybackRuntime } from './media-playback-runtime.js';
 import { clipSourceFingerprint, liveClipForSource, sourceWaveformChunkLength } from './media-intake-engine.js';
 import { createSourceWaveformProgress } from './source-waveform-progress.js';
@@ -745,8 +745,13 @@ const Media = {
       changed:()=>this._publishPreviewState(),
     });
   },
+  _previewClip(){
+    // A failed native load hides the previous frame. Keep the clip at the
+    // playhead available to the two source buttons while it is being retried.
+    return this._activeClip()||(this.inGap()&&this.seqOn()?Seq.clipAt(this.displayTime()):null);
+  },
   previewState(){
-    const clip=this._activeClip(),record=clip?this._previewSources?.get(clipSourceFingerprint(clip)):null;
+    const clip=this._previewClip(),record=clip?this._previewSources?.get(clipSourceFingerprint(clip)):null;
     const path=this.mpvMode?this._mpvPath:clip?.path;
     const proxy=!!path&&path!==clip?.path;
     const position=this.displayTime();
@@ -763,7 +768,7 @@ const Media = {
         &&!clip.reverse&&!this._nativeReverse&&!this._reverseShuttleMuted,
       sourceKind:proxy?'proxy':'original',
       compositePreview,
-      network:isNetworkPreviewPath(path),phase,proxyAvailable:!!record?.assets.proxy,
+      network:isNetworkPreviewPath(path||clip?.path),phase,proxyAvailable:!!record&&!record.failed,proxyFailed:!!record?.failed,
       position,sourceTime:this.vTime()};
   },
   _publishPreviewState(){
@@ -775,12 +780,16 @@ const Media = {
   },
   async setPreviewMode(mode){
     if(mode!=='smooth'&&mode!=='original')return false;
-    if(this._nativeReverse||this._reverseShuttleMuted||this._activeClip()?.reverse)return false;
+    if(this._nativeReverse||this._reverseShuttleMuted||this._previewClip()?.reverse)return false;
     const version=++this._previewModeVersion;
     const ownsTarget=this.capturePlaybackTargetOwnership();
     State.previewMode=mode;void saveConfig();
     this._previewFailure=false;
-    const clip=this._activeClip(),target=this.displayTime();
+    const clip=this._previewClip(),target=this.displayTime();
+    if(mode==='smooth'&&clip){
+      const catalog=this._previewSources;
+      catalog?.setFailed(catalog.get(clipSourceFingerprint(clip)),false);
+    }
     this._publishPreviewState();
     if(version!==this._previewModeVersion||!ownsTarget())return false;
     if(!this.mpvMode||!clip?.path||Seq.isStill(clip)||clip.reverse)return true;
@@ -2276,10 +2285,7 @@ const Media = {
         clipAt:targetTime=>Seq.clipAt(targetTime),
         enterGap:(targetTime,work)=>this._enterGap(targetTime,()=>!work?.signal?.aborted&&(!work?.owns||work.owns())),
         sourceTime:(targetTime,clip)=>this._transport.sourceTime(targetTime,clip),
-        requiresClip:clip=>clip.id!==this.activeClipId||this._gap||
-          (this.mpvMode?!!clip.path&&(this._clipPreviewPath(clip)!==this._mpvPath||
-            !getPlayerAdapter().ownsNativeSourcePath?.(this._clipPreviewPath(clip))):
-            !!clip.web?.url&&clip.web.url!==video.src),
+        requiresClip:clip=>this._needsClipActivation(clip),
         ensureClip:(clip,sourceTarget,resume,work)=>this._ensureClip(clip,sourceTarget,resume,work),
         isVirtual:()=>this.audioOnlyTimeline()||(!this.mpvMode&&!video.hasAttribute('src')),
         seekVirtual:(targetTime,options)=>this._transport.seekVirtual(targetTime,options),
@@ -2446,9 +2452,9 @@ const Media = {
         session.observePlaybackState(false,{source:'mpv',reason:'error',owns});
         if(!owns()) return;
       }
-      setStatus('mpv 連線中斷，請重新開啟素材','err');
+      setStatus('mpv 連線中斷，按播放可重新連線','err');
       if(!owns()) return;
-      showToast('mpv 播放連線中斷，請重新開啟素材');
+      showToast('mpv 連線中斷，按播放或點選字幕可重新連線');
       return;
     }
     if(e.event==='property-change'){
@@ -2527,14 +2533,29 @@ const Media = {
       }
     }
     if(e.event==='end-file'&&this.mpvMode){
-      if(this._seqSwitching || this.mpvSourceTransitionPending()) return;
       // 主動停住的 mpv 舊 end-file 不可停止間隙或外部音訊播放頭。
       if(this._gap || this.audioOnlyTimeline()) return;
       if(e.reason==='error'){
+        const clip=this._activeClip(),adapter=getPlayerAdapter();
+        if(!adapter.ownsNativeSourceSession(e.sourceSessionId))return;
+        const ownsTarget=this.capturePlaybackTargetOwnership(),target=this.displayTime();
+        const record=clip&&!clip.reverse?this._previewSources?.get(clipSourceFingerprint(clip)):null;
+        if(record&&!record.failed&&record.assets.proxy!==clip.path&&adapter.ownsNativeSourcePath(record.assets.proxy)){
+          this._previewSources.setFailed(record,true);
+          if(ownsTarget()&&adapter.ownsNativeSourceSession(e.sourceSessionId)&&this._activeClip()===clip){
+            this.cancelPresentation('preview-source-failed');
+            void this.seek(target,{resumePlayback:this.playing});
+          }
+          return;
+        }
+        if(this._seqSwitching||this.mpvSourceTransitionPending())return;
+        this._mpvPath=null; // A subsequent Play must reload this failed entry.
         this.observePlayerPlaybackState(false,{source:'mpv',reason:'error'});
-        setStatus('mpv 播放失敗（解碼或濾鏡錯誤）','err'); showToast('mpv 播放此影片段失敗');
+        if(!ownsTarget())return;
+        setStatus('mpv 播放失敗，按播放可重試','err'); showToast('mpv 播放此影片段失敗，按播放可重試');
         return;
       }
+      if(this._seqSwitching||this.mpvSourceTransitionPending())return;
       const c=this.seqOn()?this._activeClip():null;
       if(c && this.playing){ this._mpvTime=c.reverse?c.in:c.out; if(this.seqContinueAtEnd()) return; }
       this.observePlayerPlaybackState(false,{source:'mpv',reason:'end-file'});
@@ -2705,8 +2726,14 @@ const Media = {
     return this._reverseProxySourcePath===clip.path ? this._reverseProxyPath : null;
   },
   _forwardPreviewPath(clip){
-    const assets=clip&&State.previewMode!=='original'?this._previewSources?.get(clipSourceFingerprint(clip))?.assets:null;
-    return assets?.proxy||clip?.path||null;
+    const record=clip&&State.previewMode!=='original'?this._previewSources?.get(clipSourceFingerprint(clip)):null;
+    return record&&!record.failed?record.assets.proxy:clip?.path||null;
+  },
+  _needsClipActivation(clip){
+    if(clip.id!==this.activeClipId||this._gap)return true;
+    if(!this.mpvMode)return !!clip.web?.url&&clip.web.url!==video.src;
+    const path=this._clipPreviewPath(clip);
+    return !!clip.path&&(path!==this._mpvPath||!getPlayerAdapter().ownsNativeSourcePath?.(path));
   },
   /* 把播放器對到指定 clip 的來源時間（必要時換檔）。resume=切換後是否續播 */
   async _ensureClip(c, localT, resume,work={}){
@@ -2737,7 +2764,7 @@ const Media = {
     }
     if(c.reverse && !await this.prepareClipReverseAudio(c)) return;
     if(!currentRequest()||!State.clips.includes(c)) return;
-    const previewPath=this.mpvMode?this._clipPreviewPath(c):null;
+    let previewPath=this.mpvMode?this._clipPreviewPath(c):null;
     this._setMpvSeekProfile(c);
     // 不保存開始載入那一刻的 play/pause；完成時必須重新讀最新意圖。
     // requestPlayback 明確傳 false，確保畫格證明到達前永不偷跑。
@@ -2777,7 +2804,14 @@ const Media = {
     this._seqSwitchSettled=switchSettled;
     this._resolveSeqSwitch=settleSwitch;
     let retryIfSuperseded=true;
+    const abortSwitch=()=>{
+      if(this._seqSwitchToken===switchToken){this._seqSwitchToken=null;this._seqSwitching=false;}
+      settleSwitch();
+      if(this._seqSwitchSettled===switchSettled){this._seqSwitchSettled=null;this._resolveSeqSwitch=null;}
+    };
+    work.signal?.addEventListener('abort',abortSwitch,{once:true});
     try{
+      if(!currentRequest())return;
       this.activeClipId = c.id;
       this._leaveGap();
       this._applyClipRate(c);
@@ -2797,13 +2831,33 @@ const Media = {
           }
           this.stopElementSources();
           if(this._mpvPath !== previewPath || !adapter.ownsNativeSourcePath?.(previewPath)){
-            const r = await adapter.loadfile(previewPath).catch(err=>{ console.error('mpv loadfile', err); return null; });
+            const catalog=this._previewSources;
+            const record=!c.reverse&&previewPath!==c.path?catalog?.get(clipSourceFingerprint(c)):null;
+            // Reconnecting to the same path starts a new child at zero. Until
+            // this activation commits, Play must obtain a frame at the playhead.
+            if(this._mpvPath===previewPath)this._mpvPath=null;
+            const load=path=>adapter.loadfile(path).catch(error=>({ok:false,error}));
+            let r=await load(previewPath);
             if(!owns()) return;
-            if(!r || r.ok === false){ // 無聲失敗要浮上來（先前被吞掉，看起來像「無法播放」）
+            // Only this request may retire the Proxy it actually tried. The next
+            // seek uses the mother until the user retries or a new generation arrives.
+            if((!r||r.ok===false)&&record&&record.assets.proxy===previewPath&&catalog.get(record.key)===record){
+              catalog.setFailed(record,true);
+              if(!owns())return;
+              previewPath=c.path;
+              this._setMpvSeekProfile(c);
+              r=await load(previewPath);
+              if(!owns())return;
+            }
+            if(!r || r.ok === false){
               retryIfSuperseded=false;
+              this._mpvPath=null;
+              this._failPlaybackPresentation({status:'failed'});
+              if(!owns())return;
+              const reason=r?.error?.message||'請確認檔案可讀取，再按播放重試';
               setStatus(`mpv 無法載入「${c.name}」`, 'err');
-              showToast(`mpv 無法載入影片段「${c.name}」（格式不支援或檔案無法讀取）`);
-              this._enterGap(_tl);
+              showToast(`mpv 無法載入影片段「${c.name}」：${reason}`);
+              if(owns())this._enterGap(_tl);
               return;
             }
             if(getPlayerAdapter()!==adapter || !adapter.ownsNativeSourcePath?.(previewPath)) return;
@@ -2811,6 +2865,8 @@ const Media = {
             // report a provisional shorter duration; preserve the known end.
             if(r && r.duration && !c.reverse&&previewPath===c.path) Seq.observeSourceDuration(c, maxKnownSourceDuration(c.dur,r.duration));
             this._mpvPath = previewPath;
+            emit('mpv:sync'); // A recreated native window needs the current viewport and occluders.
+            if(!owns())return;
           }
           this._reverseProxyActive=!!c.reverse;
           this._mpvTime = localT;
@@ -2872,6 +2928,7 @@ const Media = {
       }
       if(owns()) emit('render:videoSub');
     } finally {
+      work.signal?.removeEventListener('abort',abortSwitch);
       if(this._seqSwitchToken===switchToken){
         const retryCurrentTimeline=retryIfSuperseded&&!owns()&&currentRequest()&&this._ownsAssetOperation(projectOperation);
         const retryAt=this.displayTime();
@@ -4080,8 +4137,7 @@ const Media = {
     video.dispatchEvent(new Event('play'));
 
     const hit=this.seqOn()?Seq.clipAt(target):null;
-    const needsActivation=!!hit&&(hit.id!==this.activeClipId||this._gap||
-      (this.mpvMode&&this._clipPreviewPath(hit)!==this._mpvPath));
+    const needsActivation=!!hit&&this._needsClipActivation(hit);
     // 已送出的 loadfile 不能撤回；較新的 Play 先等它收尾，再呈現最新目標。
     if(this._reverseSourcePromise){
       session.setPlaybackIntent(false);
@@ -4095,7 +4151,7 @@ const Media = {
     }
     // 若另一種呈現工作仍在進行，也把目前播放目標併入同一 session，避免舊畫格先起播。
     if(!session.isPlaybackPending()&&(needsActivation||session.isPending())){
-      session.requestPlayback(target,{timeoutMs:10000});
+      session.requestPlayback(target,{timeoutMs:10000,sourceActivationTimeoutMs:SOURCE_ACTIVATION_TIMEOUT_MS});
     }
     session.setPlaybackIntent(true);
   },
@@ -4236,6 +4292,7 @@ const Media = {
       const session=this._ensurePresentationSession();
       const pending=session.requestPlayback(t,{
         timeoutMs:10000,
+        sourceActivationTimeoutMs:SOURCE_ACTIVATION_TIMEOUT_MS,
         ...(hasPresentationTolerance?{tolerance:Math.max(0,presentationTolerance)}:{}),
       });
       if((resumeRecovery||previewChanged||options.resumePlayback)&&this.playing)session.setPlaybackIntent(true);

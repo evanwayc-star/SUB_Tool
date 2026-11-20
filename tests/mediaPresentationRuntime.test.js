@@ -255,6 +255,76 @@ describe('Media presentation runtime', () => {
     }finally{reverse?.mockRestore();runtime.stopBoundsFeeder();Media.resetPresentationSession('activation-test-finished');}
   });
 
+  it.each(['seek','play','proxy-fallback'])('公開 %s 允許超過 10 秒的原生來源載入，實際呈現後才繼續', async action => {
+    vi.useFakeTimers();
+    const { activateMpvTransport } = await import('../src/media-player-adapter.js');
+    const { clipSourceFingerprint } = await import('../src/media-intake-engine.js');
+    const previousMode = State.previewMode;
+    const bridge = { launch: vi.fn(async () => nativeSuccess()), loadfile: vi.fn(path => new Promise(resolve => {
+      setTimeout(() => resolve(path.endsWith('proxy.mp4') ? { ok: false, error: { code: 'MPV_LOAD_FAILED' } } : nativeSuccess()), 12000);
+    })), present: vi.fn(async time => ({ backend: 'mpv', presentedSourceTime: time })),
+    seek: vi.fn(async () => true), play: vi.fn(async () => null), pause: vi.fn(async () => {}),
+    rate: vi.fn(async () => {}), direction: vi.fn(async () => true), mute: vi.fn(async () => {}) };
+    const runtime = activateMpvTransport({ mpv: bridge }); await runtime.enterMpv({ src: 'C:/program.mov' });
+    State.clips[0].path = 'C:/program.mov';
+    const clip = { id: 'slow', name: 'slow.mov', path: 'C:/slow.mov', in: 0, out: 10, dur: 10, offset: 110, vtrack: 0 };
+    State.clips.push(clip); Media._mpvPath = 'C:/program.mov'; Media.tracks = []; Media.externalAudioSources = [];
+    State.previewMode = action === 'proxy-fallback' ? 'smooth' : 'original';
+    if (action === 'proxy-fallback') Media._previewCatalog().register(clipSourceFingerprint(clip),
+      { path: clip.path, proxy: 'C:/cache/proxy.mp4', channels: [] }, Media.captureMediaOwnership());
+    try {
+      let pending;
+      if (action === 'play') { Media._transport.seek(112, { duration: State.duration, fps: State.fps }); Media.play(); }
+      else pending = Media.seek(112);
+      await vi.advanceTimersByTimeAsync(10001);
+      expect(Media.playbackTransitionPending()).toBe(true); expect(bridge.present).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(action === 'proxy-fallback' ? 13999 : 1999);
+      if (pending) await expect(pending).resolves.toMatchObject({ status: 'presented', presentedTime: 112 });
+      expect(Media.presentedTime()).toBe(112);
+      expect(runtime.ownsNativeSourcePath(clip.path)).toBe(true);
+      expect(bridge.present).toHaveBeenCalledOnce(); expect(bridge.present.mock.calls[0][0]).toBe(2);
+      expect(bridge.loadfile.mock.calls.map(([path]) => path)).toEqual(action === 'proxy-fallback'
+        ? ['C:/cache/proxy.mp4', clip.path] : [clip.path]);
+      if (action === 'play') expect(bridge.play).toHaveBeenCalledOnce();
+    } finally {
+      Media.pause({ seekOnPause: false }); Media.resetPresentationSession('slow-load-test-finished');
+      runtime.stopBoundsFeeder(); State.previewMode = previousMode; vi.clearAllTimers(); vi.useRealTimers();
+    }
+  });
+
+  it.each(['new-seek','reset'])('未完成的原生載入不阻擋 %s；舊載入 finally 不能清掉新切換', async action => {
+    vi.useFakeTimers();
+    const { activateMpvTransport } = await import('../src/media-player-adapter.js');
+    const loads = [], previousMode = State.previewMode;
+    const bridge = { launch: vi.fn(async () => nativeSuccess()),
+      loadfile: vi.fn(() => new Promise(resolve => loads.push(resolve))),
+      present: vi.fn(async time => ({ backend: 'mpv', presentedSourceTime: time })),
+      seek: vi.fn(async () => true), pause: vi.fn(async () => {}), rate: vi.fn(async () => {}),
+      direction: vi.fn(async () => true), mute: vi.fn(async () => {}) };
+    const runtime = activateMpvTransport({ mpv: bridge }); await runtime.enterMpv({ src: 'C:/program.mov' });
+    State.previewMode = 'original'; State.clips[0].path = 'C:/program.mov';
+    State.clips.push({ id: 'slow', path: 'C:/slow.mov', in: 0, out: 10, dur: 10, offset: 110, vtrack: 0 });
+    Media._mpvPath = 'C:/program.mov'; Media.tracks = []; Media.externalAudioSources = [];
+    try {
+      const old = Media.seek(112); await vi.advanceTimersByTimeAsync(0);
+      expect(loads).toHaveLength(1);
+      if (action === 'reset') Media.resetPresentationSession('new-workspace');
+      const latest = Media.seek(114); await vi.advanceTimersByTimeAsync(0);
+      expect(loads).toHaveLength(2);
+      await expect(old).resolves.toMatchObject({ status: 'cancelled' });
+      loads[0](nativeSuccess()); await vi.advanceTimersByTimeAsync(0);
+      expect(Media._seqSwitching).toBe(true); expect(bridge.present).not.toHaveBeenCalled();
+      loads[1](nativeSuccess()); await vi.advanceTimersByTimeAsync(0);
+      await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 114 });
+      expect(Media._seqSwitching).toBe(false); expect(bridge.present).toHaveBeenCalledOnce();
+      expect(runtime.ownsNativeSourcePath('C:/slow.mov')).toBe(true);
+    } finally {
+      for (const finish of loads) finish(nativeSuccess());
+      Media.resetPresentationSession('slow-owner-test-finished'); runtime.stopBoundsFeeder();
+      State.previewMode = previousMode; vi.clearAllTimers(); vi.useRealTimers();
+    }
+  });
+
   it.each(['false','reject'])('公開原生跨段 direction %s 不可當成已接受的方向繼續起播',async outcome=>{
     const {activateMpvTransport}=await import('../src/media-player-adapter.js');
     const bridge={launch:vi.fn(async()=>nativeSuccess()),loadfile:vi.fn(async()=>nativeSuccess()),
@@ -333,7 +403,7 @@ describe('Media presentation runtime', () => {
     try{
       Media.play();
       Media.observeMpvEvent(reason==='pause'?{event:'property-change',name:'pause',data:true}:
-        {event:'end-file',reason:reason==='error'?'error':'eof'});
+        {event:'end-file',reason:reason==='error'?'error':'eof',sourceSessionId:runtime.nativePlaybackState().sourceSessionId});
       expect(Media.playing).toBe(reason==='pause');
       resolve(null);await starting;for(let i=0;i<8;i++)await Promise.resolve();
       await vi.waitFor(()=>expect(elements).toHaveBeenCalledTimes(reason==='pause'?1:0));
@@ -744,7 +814,7 @@ describe('Media presentation runtime', () => {
         domMock.frameCallbacks.shift()(0,{mediaTime:raw});
         const result=await pending;expect(result.status).toBe('presented');expect(result.presentedTime).toBeCloseTo(1.08,12);
         expect(Media.displayTime()).toBeCloseTo(1.08,12);
-        if(oldRequest)expect(await oldRequest).toMatchObject({status:'failed',error:{name:'AbortError'}});
+        if(oldRequest)expect(await oldRequest).toMatchObject({status:'superseded'});
       }else{
         if(action==='pause')Media.pause();else Media.reset();
         const stoppedRaw=raw,afterCancel=writes.length;

@@ -225,6 +225,7 @@ export function createNativePreviewRuntime({
   let boundsListener = null;
   let boundsTimer = null;
   let lastBounds = null;
+  let readLaunchBounds = null;
   let generation = 0;
   let nativeSourceRequest = 0;
   let nativeSourceSession = null;
@@ -437,6 +438,7 @@ export function createNativePreviewRuntime({
     activeTransport = html5For(nextVideo);
     activeTransport.cancelPendingSeek();
     nativeVisible = false;
+    readLaunchBounds = null;
     stopBoundsFeeder();
     subtitleGuideActive = false;
     imageGuideActive = false;
@@ -512,6 +514,7 @@ export function createNativePreviewRuntime({
       mode = 'mpv';
       activeTransport = new MpvTransport(bridge);
       nativeVisible = true;
+      readLaunchBounds = () => readBounds?.() || lastBounds || bounds;
       startBoundsFeeder({ readBounds, boundsElement });
       return result;
     },
@@ -524,7 +527,7 @@ export function createNativePreviewRuntime({
 
     setMpvBridge(nextBridge) {
       const next = nextBridge || null;
-      if (bridge !== next) revokeNativeSource();
+      if (bridge !== next) { revokeNativeSource(); readLaunchBounds = null; }
       bridge = next;
       attachNativeEvents();
     },
@@ -615,16 +618,21 @@ export function createNativePreviewRuntime({
       if (mode !== 'mpv' || !bridge?.loadfile) return false;
       revokeNativeSource();
       const sourceRequest = nativeSourceRequest, currentBridge = bridge;
+      const owns = () => mode === 'mpv' && bridge === currentBridge && sourceRequest === nativeSourceRequest;
       nativeSourcePending = true;
       let result;
       try {
         result = await currentBridge.loadfile(filePath);
+        // A dead child cannot accept loadfile. Recreate it only for the latest
+        // request and let the host probe this source's own audio and canvas.
+        if (owns() && readLaunchBounds && result?.error?.code === 'MPV_DISCONNECTED') {
+          result = await currentBridge.launch({ src:filePath, bounds:readLaunchBounds() });
+        }
       } catch (error) {
         if (sourceRequest === nativeSourceRequest) revokeNativeSource();
         throw error;
       }
-      if (mode === 'mpv' && bridge === currentBridge && sourceRequest === nativeSourceRequest
-        && !acceptNativeSource(result, sourceRequest, filePath)) return { ok: false, duration: 0 };
+      if (!owns() || !acceptNativeSource(result, sourceRequest, filePath)) return { ok: false, duration: 0 };
       return result;
     },
     ownsNativeSourceSession(id) { return mode === 'mpv' && !!nativeSourceSession && id === nativeSourceSession; },

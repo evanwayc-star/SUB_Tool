@@ -42,6 +42,7 @@ import { History, recordHistory } from './history.js';
 import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 import { refreshMpvSubs } from './video-renderer.js';
 import { subtitlePreviewIndex } from './subtitle-preview-index.js';
+import { subtitleOverlapRanges } from './subtitle-audit.js';
 import { beginTimelineTrackEdit, updateTimelineTrack, ABSENT } from './timeline-edit-transaction.js';
 import {
   beginTimelineGestureLifecycle,
@@ -1192,7 +1193,6 @@ function renderCueBlocks(){
   const t0 = State.viewStart, t1 = State.viewStart + vw / State.pxPerSec;
   
   const displayList = { cues: [], overlaps: [] };
-  const byTrack = new Map();
   const trackIndices = new Map();
   const trackTotals = new Map();
   
@@ -1208,10 +1208,6 @@ function renderCueBlocks(){
     const cueIndex = idx + 1;
 
     if(c.timed === false) continue;
-    let arr = byTrack.get(tk);
-    if(!arr){ arr = []; byTrack.set(tk, arr); }
-    arr.push(c);
-    
     if(c.end < t0 || c.start > t1) continue;
     
     displayList.cues.push({
@@ -1229,24 +1225,9 @@ function renderCueBlocks(){
     });
   }
   
-  for(const [tk, tc] of byTrack){
-    tc.sort((a,b) => a.start - b.start);
-    for(let i=0; i<tc.length-1; i++){
-      for(let j=i+1; j<tc.length; j++){
-        if(tc[j].start >= tc[i].end - 0.001) break;
-        const os = tc[j].start, oe = Math.min(tc[i].end, tc[j].end);
-        if(oe <= t0 || os >= t1) continue;
-        const vs = Math.max(os, t0), ve = Math.min(oe, t1);
-        
-        displayList.overlaps.push({
-          track: tk,
-          x: timeToX(vs),
-          w: timeToX(ve) - timeToX(vs),
-          id1: tc[i].id,
-          id2: tc[j].id
-        });
-      }
-    }
+  for(const range of subtitleOverlapRanges(State.cues,{start:t0,end:t1})){
+    displayList.overlaps.push({track:range.track,x:timeToX(range.start),
+      w:timeToX(range.end)-timeToX(range.start),id1:range.id1,id2:range.id2});
   }
   
   paintSubtitleBlocks(rows, displayList);

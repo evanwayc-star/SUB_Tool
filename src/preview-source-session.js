@@ -15,8 +15,12 @@ export function createPreviewSourceSession({changed=()=>{}}={}) {
     const previous=get(key);
     if(previous&&previous.assets.proxy===assets.proxy)return previous;
     const completed={...assets,channels:(assets.channels||[]).map(channel=>({...channel}))};
-    const record={key,generation,owns,assets:completed};
+    const record={key,generation,owns,assets:completed,failed:false};
     sources.set(key,record);changed();return record;
   }
-  return {get,register,reset(){generation++;sources.clear();changed();}};
+  function setFailed(record,failed){
+    if(!record||!current(record)||record.failed===failed)return;
+    record.failed=failed;changed();
+  }
+  return {get,register,setFailed,reset(){generation++;sources.clear();changed();}};
 }
