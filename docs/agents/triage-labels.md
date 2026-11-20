@@ -1,13 +1,13 @@
-# Triage 標籤對照
+# Triage 標籤
 
-`/triage` 等 skill 使用左欄角色；操作 GitHub 時使用中欄的實際標籤。讀票與更新方式見 [Issue tracker](issue-tracker.md)。
+工程 skill 的角色與 GitHub 現行標籤同名。依票況使用既有標籤：
 
-| Skill 角色 | GitHub 標籤 | 狀態 |
-|---|---|---|
-| `needs-triage` | `needs-triage` | 等待維護者評估 |
-| `needs-info` | `needs-info` | 等待補充資訊 |
-| `ready-for-agent` | `ready-for-agent` | 規格完整，可由 AI 自主執行 |
-| `ready-for-human` | `ready-for-human` | 需要人工實作 |
-| `wontfix` | `wontfix` | 決定不處理 |
+| 角色／標籤 | 使用時機 |
+|---|---|
+| `needs-triage` | 等待維護者評估 |
+| `needs-info` | 需要補充資訊 |
+| `ready-for-agent` | 規格完整，Agent 可自主實作 |
+| `ready-for-human` | 需要人工實作 |
+| `wontfix` | 已決定不處理 |
 
-目前全部沿用預設名稱；`wontfix` 使用 repo 既有標籤，不另建同義標籤。未來若調整 GitHub 命名，只改中欄映射，保留 skill 固定角色。
+GitHub 若改名，在本表記錄角色對應的新標籤，保留 skill 角色名稱。讀票、換標籤與關票見 [Issue 工作流程](issue-tracker.md)。
