@@ -131,6 +131,6 @@ it.each(['clearAll', 'cleanOrphans'])('%s 同層候選共用有界快照預算�
   const remaining = dirs.filter(dir => fs.existsSync(dir));
   expect(remaining).toHaveLength(1);
   expect(fs.readdirSync(remaining[0])).toHaveLength(10000);
-// 此案例建立 20,000 個實體檔並驗證全文清理；60 秒只作防掛上限，
+// 此案例建立 20,000 個實體檔並驗證全文清理；Windows CI 的大量檔案 I/O 需要較長防掛上限，
 // 不取代內容、身分、部分完成與關閉生命週期的獨立斷言。
-}, 60000);
+}, process.platform === 'win32' ? 180000 : 60000);
