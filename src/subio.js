@@ -15,7 +15,7 @@ import { buildExportSnapshot } from './delivery-job.js';
 import { anySourceSolo, sourceTrackAudible } from './project-audio.js';
 import { DELIVERY_FRAME_RATES, normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { DELIVERY_FORMAT_OPTIONS, getDeliveryFormatPreset, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
-import { createDeliveryList, projectTagFrom } from './delivery-list.js';
+import { createDeliveryList, deliveryResolution, projectTagFrom } from './delivery-list.js';
 import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission, exportSourceError, formatOverwriteConfirmation } from './delivery-submission.js';
 import { escapeHTML, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
@@ -372,6 +372,9 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     const preset = getDeliveryFormatPreset(r.format);
     const bdMode = r.format === 'bd-iso' ? bdVideoMode(r.targetFps) : null;
     const displayMode = bdMode || preset;
+    const customSize = !isWav && !preset &&
+      (r.targetW != null || (r.targetH > 0 && ![720,1080,2160].includes(r.targetH)));
+    const sizeOption = customSize ? 'custom' : r.targetH;
 
     const ap = r.audioPlan;
     let audioDesc = '依專案音軌順序';
@@ -420,15 +423,18 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
             <div class="delivery-field"><label for="evRes${i}">畫面尺寸</label>
               <select id="evRes${i}" class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 此格率為 ${displayMode.width}×${displayMode.height}，${displayMode.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
                 ${preset ? `<option value="${displayMode.height}" selected>${displayMode.width}×${displayMode.height}${displayMode.scan === 'interlaced' ? 'i' : 'p'}</option>` : `
-                <option value="0" ${r.targetH===0?'selected':''}>專案畫布（${data.canvasW}×${data.canvasH}）</option>
-                <option value="2160" ${r.targetH===2160?'selected':''}>4K (2160p)</option>
-                <option value="1080" ${r.targetH===1080?'selected':''}>1080p</option>
-                <option value="720" ${r.targetH===720?'selected':''}>720p</option>
-                <option value="custom" ${(r.targetH>0 && ![1080,720,2160].includes(r.targetH))?'selected':''}>自訂...</option>
+                <option value="0" ${sizeOption===0?'selected':''}>專案畫布（${data.canvasW}×${data.canvasH}）</option>
+                <option value="2160" ${sizeOption===2160?'selected':''}>4K (2160p)</option>
+                <option value="1080" ${sizeOption===1080?'selected':''}>1080p</option>
+                <option value="720" ${sizeOption===720?'selected':''}>720p</option>
+                <option value="custom" ${customSize?'selected':''}>自訂...</option>
                 `}
               </select>
-            ${(!preset && r.targetH>0 && ![1080,720,2160].includes(r.targetH)) ?
-              `<label class="delivery-field delivery-field--custom"><span>高度（px）</span><input type="number" class="ev-custom-res delivery-input" data-idx="${i}" value="${r.targetH}" min="16" step="2"></label>`
+            ${customSize ?
+              `<div class="delivery-custom-size">
+                <label class="delivery-field"><span>寬度（px）</span><input type="number" class="ev-custom-width delivery-input" data-idx="${i}" value="${escapeHTML(String(r.targetW ?? deliveryResolution({ canvasW: data.canvasW, canvasH: data.canvasH, targetH: r.targetH }).w))}" required min="16" max="8192" step="2"></label>
+                <label class="delivery-field"><span>高度（px）</span><input type="number" class="ev-custom-res ev-custom-height delivery-input" data-idx="${i}" value="${escapeHTML(String(r.targetH))}" required min="16" max="8192" step="2"></label>
+              </div>`
               : ''}
             </div>
             <label class="delivery-field"><span>影格率</span>
@@ -493,10 +499,25 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
 
     $$('.ev-format').forEach(el => el.onchange = e => { list.setFormat(idxOf(e), e.target.value); after(); });
     $$('.ev-res').forEach(el => el.onchange = e => {
-      list.setTargetHeight(idxOf(e), e.target.value === 'custom' ? 480 : parseInt(e.target.value, 10));
+      if (e.target.value === 'custom') {
+        const size = deliveryResolution({ canvasW: data.canvasW, canvasH: data.canvasH, targetH: 480 });
+        list.setCustomResolution(idxOf(e), size.w, size.h);
+      } else list.setTargetHeight(idxOf(e), Number(e.target.value));
       after();
     });
-    $$('.ev-custom-res').forEach(el => el.onchange = e => { list.setTargetHeight(idxOf(e), parseInt(e.target.value, 10)); after(); });
+    c.querySelectorAll('.delivery-custom-size').forEach(pair => {
+      const width = pair.querySelector('.ev-custom-width'), height = pair.querySelector('.ev-custom-height');
+      const card = pair.closest('.delivery-card'), index = Number(width.dataset.idx);
+      const syncSize = () => {
+        list.setCustomResolution(index, width.valueAsNumber, height.valueAsNumber);
+        const row = list.get(index);
+        const name = card.querySelector('.ev-name'), kbps = card.querySelector('.ev-kbps');
+        name.value = name.title = row.customName;
+        if (kbps) kbps.value = row.kbps;
+      };
+      pair.oninput = () => { syncSize(); submission.invalidatePreview(); };
+      pair.onchange = () => { syncSize(); checkConflicts(); };
+    });
     $$('.ev-fps').forEach(el => el.onchange = e => { list.setTargetFps(idxOf(e), e.target.value); after(); });
     $$('.ev-kbps').forEach(el => el.onchange = e => list.setKbps(idxOf(e), e.target.value));
     // 文字欄位失焦時若重建整列，下一個被點擊的 input 會在 mouseup 前消失，
@@ -547,7 +568,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     if (focusClass) {
       const index = Math.min(focusIndex, list.count() - 1);
       const target = c.querySelector(`.${focusClass}[data-idx="${index}"]`)
-        || (focusClass === 'ev-custom-res' ? c.querySelector(`.ev-res[data-idx="${index}"]`) : null)
+        || (focusClass.startsWith('ev-custom-') ? c.querySelector(`.ev-res[data-idx="${index}"]`) : null)
         || $('evAddRowBtn');
       target.focus();
       if (selection && target.tagName === 'INPUT' && target.type === 'text') target.setSelectionRange(...selection);

@@ -25,8 +25,7 @@ contextBridge.exposeInMainWorld('queueAPI', {
   clearJob: (id) => ipcRenderer.invoke('queue:clearJob', id),
   clearCompleted: () => ipcRenderer.invoke('queue:clearCompleted'),
   reorderJob: (id, newIndex) => ipcRenderer.invoke('queue:reorderJob', id, newIndex),
-  /* 只送 {format, targetH, kbps}；輸出路徑與實際尺寸一律由主行程推導
-     （路徑同資料夾、只換副檔名；解析度依專案畫布比例重算）。 */
+  /* 自訂尺寸送 targetW/targetH；只選高度的工作沿用專案比例。主行程驗證規格與輸出路徑。 */
   updateDelivery: (id, patch) => ipcRenderer.invoke('queue:updateDelivery', id, patch),
   showMainWindow: () => ipcRenderer.invoke('app:showMainWindow'),
   openPath: (p) => ipcRenderer.invoke('app:openPath', p),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDeliveryArgv } from '../electron/export-plan.js';
+import { buildDeliveryArgv, prepareDeliveryPayload } from '../electron/export-plan.js';
 
 const source = { path: 'master.mov', type: 'video', in: 0, out: 10, offset: 0,
   natW: 1920, natH: 1080, fps: 25 };
@@ -17,6 +17,23 @@ const env = {
 const value = (args, key) => args[args.indexOf(key) + 1];
 
 describe('完整交付規格由正式 plan 編譯', () => {
+  it.each(['h264', 'prores'])('%s 以明確寬高建立成品，字幕與畫布一起等比置中', format => {
+    const input = spec(format, { targetW: 320, targetH: 480, canvasW: 1920, canvasH: 1080, assFileName: 'test.ass' });
+    expect(prepareDeliveryPayload(input)).toMatchObject({ width: 320, height: 480 });
+    const graph = value(buildDeliveryArgv(input, env).args, '-filter_complex');
+    expect(graph).toContain('s=320x180:r=25');
+    expect(graph).toContain('ass=test.ass[vout];[vout]pad=320:480:');
+  });
+
+  it.each([[15, 32], [16, 17], [0, 16], ['16', 16], [256, 8194], [8192, 4322]])(
+    '交付准入拒絕不合法的明確尺寸 %s × %s', (targetW, targetH) => {
+      expect(() => prepareDeliveryPayload(spec('h264', { targetW, targetH }))).toThrow(/自訂寬度與高度/);
+    });
+
+  it.each(['wav', 'mod-fhd', 'dvd-iso'])('%s 忽略先前格式的自訂寬度', format => {
+    expect(prepareDeliveryPayload(spec(format, { targetW: 777, targetH: 888 }))).not.toHaveProperty('targetW');
+  });
+
   it.each([
     ['prores', 'prores_ks', '1280x720', '25', null],
     ['h264', 'libx264', '1280x720', '25', 8000],

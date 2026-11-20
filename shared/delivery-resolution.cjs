@@ -6,10 +6,16 @@
    
    【鐵律與不變量】
    CONTEXT.md 定義：交付解析度 ＝ 一份交付實際寫進檔案的畫面尺寸。
-   - 這裡實作「同比例等比縮放」：給定目標高度，依專案畫布的高寬比算出寬度。
+   - 高度預設依專案比例推導寬度；自訂寬高直接指定交付幀的像素尺寸。
    - 【偶數尺寸防護】：H.264 / H.265 的 YUV 4:2:0 色度子採樣要求寬度與高度必須為偶數，
      奇數寬度會導致 FFmpeg 編碼器直接報錯中斷。因此計算出之寬度必須向下對齊偶數。
    ============================================================================== */
+
+// 自訂交付幀的編碼／合成上限，支援橫式與直式 8K。
+function validCustomDeliverySize(width, height) {
+  return [width, height].every(n => Number.isSafeInteger(n) && n >= 16 && n <= 8192 && n % 2 === 0)
+    && width * height <= 8192 * 4320;
+}
 
 function normalizeTargetHeight(value) {
   const n = Number(value);
@@ -19,16 +25,23 @@ function normalizeTargetHeight(value) {
 }
 
 /**
- * 依據專案畫布比例與目標高度，計算出合法的交付解析度（寬高皆為偶數）。
+ * 取得自訂交付寬高，或依專案畫布比例與目標高度計算交付解析度。
  *
  * @param {object} [options]
  * @param {number} [options.canvasW=1920] 專案畫布寬度（像素）
  * @param {number} [options.canvasH=1080] 專案畫布高度（像素）
+ * @param {number} [options.targetW] 自訂交付寬度；搭配 targetH 指定實際成品尺寸
  * @param {number} [options.targetH] 目標高度（像素）；若為 0 或未提供則維持畫布尺寸
  * @param {boolean} [options.isWav=false] 是否為純音訊 WAV 匯出（WAV 無視訊軌，直接回傳畫布尺寸）
  * @returns {{w: number, h: number}} 交付解析度物件（寬高必定為偶數且大於等於 2）
  */
-function deliveryResolution({ canvasW, canvasH, targetH, isWav } = {}) {
+function deliveryResolution({ canvasW, canvasH, targetW, targetH, isWav } = {}) {
+  if (!isWav && targetW != null) {
+    if (!validCustomDeliverySize(targetW, targetH)) {
+      throw new Error('自訂寬度與高度須為 16 至 8192 的偶數，總像素不可超過 8192 × 4320');
+    }
+    return { w: targetW, h: targetH };
+  }
   const rawW = Number(canvasW);
   const rawH = Number(canvasH);
   const W = Number.isFinite(rawW) && rawW > 0 ? Math.floor(rawW) : 1920;
@@ -72,7 +85,7 @@ function suggestKbps({ w, h } = {}) {
 
 // 交付清單建立工作與佇列修改工作共用同一份規格派生。呼叫端保留各自的
 // 時間碼來源：新工作以輸出 FPS 換算，已入列工作使用送出時凍結的起點。
-function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH = 0,
+function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetW, targetH = 0,
   projectFps, bdMode = null,
   fps, videoKbps = 0, previousWidth, previousHeight, kbpsOverride, resetVideoBitrate = false,
   burnTimecode = false, timecodeStart = null } = {}) {
@@ -85,7 +98,7 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH =
   const height = fixed?.height || normalizeTargetHeight(targetH);
   const { w, h } = fixed
     ? { w: fixed.width, h: fixed.height }
-    : deliveryResolution({ canvasW, canvasH, targetH: height, isWav });
+    : deliveryResolution({ canvasW, canvasH, targetW, targetH, isWav });
   let kbps = preset ? preset.videoKbps : (resetVideoBitrate ? 0 : Number(videoKbps) || 0);
   if (format === 'h264') {
     if (kbpsOverride != null) kbps = Math.max(1, Math.floor(Number(kbpsOverride) || 0));
@@ -97,10 +110,11 @@ function deriveDeliverySpec({ format, preset = null, canvasW, canvasH, targetH =
   }
   return {
     width: w, height: h, targetH: height,
+    ...(!fixed && !isWav && targetW ? { targetW: w } : {}),
     fps: bdMode?.fps || preset?.fps || fps,
     videoKbps: kbps,
     timecodeWatermark: !isWav && burnTimecode ? { start: timecodeStart } : null,
   };
 }
 
-module.exports = { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight };
+module.exports = { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight, validCustomDeliverySize };

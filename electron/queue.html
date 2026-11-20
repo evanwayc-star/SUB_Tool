@@ -423,6 +423,7 @@
     }
     .job-editor input[type="checkbox"] { width: 16px; min-height: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
     .job-editor-unit { display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-weight: 500; }
+    .job-editor-size { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
     .job-editor [data-preset-spec] { grid-column: 1 / -1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--text-dim); line-height: 1.5; }
     .job-editor-actions { display: flex; grid-column: 1 / -1; gap: 8px; justify-content: flex-end; padding-top: 8px; border-top: 1px solid var(--border); }
     .job-editor-error { grid-column: 1 / -1; color: #fca5a5; font-size: 12px; }
@@ -1126,7 +1127,9 @@
       const currentPreset = deliveryPreset(curFormat);
       // Fixed delivery bitrates (such as exW 500K) are not H.264 preferences.
       const curKbps = !currentPreset && Number(p.videoKbps) > 0 ? Number(p.videoKbps) : 8000;
-      const known = RES_OPTIONS.some(([v]) => v === curTargetH);
+      const known = !p.targetW && RES_OPTIONS.some(([v]) => v === curTargetH);
+      const initialW = Number(p.targetW) || Number(p.width) || Number(p.canvasW) || 1920;
+      const initialH = curTargetH || Number(p.height) || Number(p.canvasH) || 1080;
       const formatOptions = Object.entries(FORMAT_LABEL);
       // 固定格式的 TC／音訊在送出前完成設定，既有一般工作要從交付清單新增。
       if (currentPreset) formatOptions.push([currentPreset.format, currentPreset.label]);
@@ -1142,13 +1145,14 @@
         </label>
         <label data-only="video">解析度
           <select data-f="res">
-            ${RES_OPTIONS.map(([v, t]) => `<option value="${v}"${v === curTargetH ? ' selected' : ''}>${t}</option>`).join('')}
+            ${RES_OPTIONS.map(([v, t]) => `<option value="${v}"${known && v === curTargetH ? ' selected' : ''}>${t}</option>`).join('')}
             <option value="custom"${known ? '' : ' selected'}>自訂…</option>
           </select>
         </label>
-        <label data-only="video" data-custom${known ? ' hidden' : ''}>高度
-          <input type="number" data-f="customH" min="16" step="2" value="${known ? '' : curTargetH}">
-        </label>
+        <div class="job-editor-size" data-custom${known ? ' hidden' : ''}>
+          <label>寬度 (px)<input type="number" data-f="customW" min="16" max="8192" step="2" required value="${initialW}"></label>
+          <label>高度 (px)<input type="number" data-f="customH" min="16" max="8192" step="2" required value="${initialH}"></label>
+        </div>
         <label data-only="h264">碼率
           <span class="job-editor-unit"><input type="number" data-f="kbps" min="1" step="100" value="${curKbps}"> kbps</span>
         </label>
@@ -1176,7 +1180,6 @@
         box.querySelectorAll('[data-only="video"]').forEach(n => { n.hidden = (f === 'wav'); });
         box.querySelectorAll('[data-only="h264"]').forEach(n => { n.hidden = (f !== 'h264'); });
         q('[data-f="res"]').disabled = !!preset;
-        q('[data-f="customH"]').disabled = !!preset;
         q('[data-f="kbps"]').disabled = !!preset;
         if (preset) {
           const resolution = q('[data-f="res"]');
@@ -1202,7 +1205,9 @@
               : `${preset.videoKbps} kbps${preset.transport === 'airline' ? ' · 自動合成 .mpg（MPEG-TS）' : ''}`)
           : '';
         const isCustom = q('[data-f="res"]').value === 'custom';
-        box.querySelector('[data-custom]').hidden = (f === 'wav') || !isCustom;
+        const customGroup = q('[data-custom]');
+        customGroup.hidden = (f === 'wav') || !!preset || !isCustom;
+        for (const input of customGroup.querySelectorAll('input')) input.disabled = customGroup.hidden;
       };
       q('[data-f="format"]').addEventListener('change', syncVisibility);
       q('[data-f="res"]').addEventListener('change', syncVisibility);
@@ -1219,8 +1224,17 @@
         if (!ownsEditor()) return;
         const format = q('[data-f="format"]').value;
         const resVal = q('[data-f="res"]').value;
-        const targetH = resVal === 'custom' ? Number(q('[data-f="customH"]').value) || 0 : Number(resVal);
+        const isCustom = format !== 'wav' && resVal === 'custom';
+        const customW = q('[data-f="customW"]'), customH = q('[data-f="customH"]');
+        const targetH = isCustom ? customH.valueAsNumber : Number(resVal) || 0;
         const patch = { format, targetH };
+        if (isCustom) {
+          if (!customW.reportValidity() || !customH.reportValidity()) return;
+          // 保留舊版僅指定高度的工作，直到使用者真的改動其中一個尺寸。
+          if (p.targetW || known || initialW !== customW.valueAsNumber || initialH !== targetH) {
+            patch.targetW = customW.valueAsNumber;
+          }
+        }
         if (format === 'h264') patch.kbps = Number(q('[data-f="kbps"]').value) || 0;
         if (format !== 'wav') patch.burnTimecode = q('[data-f="tc"]').checked;
         q('[data-f="save"]').disabled = true;

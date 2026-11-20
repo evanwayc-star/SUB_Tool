@@ -87,6 +87,33 @@ describe('交付解析度', () => {
   it('等比縮放到指定高度', () => {
     expect(deliveryResolution({ canvasW: 1920, canvasH: 1080, targetH: 720 })).toEqual({ w: 1280, h: 720 });
   });
+  it('同高度的自訂列各自命名、保留手改檔名，重開草稿及送出仍為指定寬高', () => {
+    const list = base();
+    list.setOutDir(0, 'D:/成品');
+    list.setCustomResolution(0, 640, 480);
+    list.add();
+    list.setCustomResolution(1, 384, 480);
+    expect(list.outPaths().map(o => o.name)).toEqual(['ST_拼桌_29.97fps_640x480.mp4', 'ST_拼桌_29.97fps_384x480.mp4']);
+    expect(list.problems()).toEqual([]);
+    list.setName(0, '客戶成品.mp4');
+    const previous = list.captureSubmissionRows();
+    list.setCustomResolution(0, 1280, 720);
+    list.setCustomResolution(0, 640, 480);
+    expect(previous.matches(0)).toBe(false);
+    list.setKbps(0, 6000);
+    list.setCustomResolution(0, 640, 480);
+    const restored = base({ initial: list.rows() });
+    expect(restored.toJobs({})).toMatchObject([
+      { width: 640, height: 480, targetW: 640, targetH: 480, videoKbps: 6000, defaultName: '客戶成品.mp4' },
+      { width: 384, height: 480, targetW: 384, targetH: 480, videoKbps: 553 },
+    ]);
+    restored.setTargetHeight(0, 720);
+    restored.setFormat(1, 'airline-exw');
+    const [standard, fixed] = restored.toJobs({});
+    expect(standard).toMatchObject({ width: 1280, height: 720, defaultName: '客戶成品.mp4' });
+    expect(standard).not.toHaveProperty('targetW');
+    expect(fixed).not.toHaveProperty('targetW');
+  });
   it('奇數自訂高度先對齊為實際輸出高度，再依畫布比例計算寬度', () => {
     const list = base();
     list.setTargetHeight(0, 17);

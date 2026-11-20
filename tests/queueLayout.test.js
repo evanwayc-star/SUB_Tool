@@ -950,6 +950,31 @@ describe('匯出佇列監控緊湊工作區', () => {
     expect(queueAPI.updateDelivery).toHaveBeenCalledWith('q1', { format: 'wav', targetH: 0 });
   });
 
+  it('自訂高度等於 720p 預設時仍可重開寬高欄位，修改寬度後獨立送出', async () => {
+    const jobs = [{ id: 'portrait', status: 'queued', payload: {
+      outPath: 'clip.mp4', format: 'h264', targetW: 480, targetH: 720, width: 480, height: 720,
+      canvasW: 1920, canvasH: 1080, videoKbps: 900,
+    } }];
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    const row = document.querySelector('[data-job-id="portrait"]');
+    row.querySelector('[data-action="edit"]').click();
+    const box = row.querySelector('.job-editor');
+    expect(box.querySelector('[data-f="res"]').value).toBe('custom');
+    expect(box.querySelector('[data-custom]').hidden).toBe(false);
+    const w = box.querySelector('[data-f="customW"]');
+    expect(w.value).toBe('480');
+    expect(box.querySelector('[data-f="customH"]').value).toBe('720');
+    w.value = '719';
+    box.querySelector('[data-f="save"]').click();
+    expect(queueAPI.updateDelivery).not.toHaveBeenCalled();
+    w.value = '720';
+    box.querySelector('[data-f="save"]').click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(queueAPI.updateDelivery).toHaveBeenCalledWith('portrait', {
+      format: 'h264', targetW: 720, targetH: 720, kbps: 900, burnTimecode: false,
+    });
+  });
+
   it('MOD-FHD 顯示固定交付規格，編輯時鎖定解析度與碼率', async () => {
     const jobs = [{ id: 'mod', status: 'queued', payload: {
       outPath: 'C:\\out\\a.ts', format: 'mod-fhd', width: 1920, height: 1080,

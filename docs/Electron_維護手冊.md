@@ -257,7 +257,7 @@ API 前綴為 `window.subtool.mpv`，定位參數一律為影片來源秒數。�
 | `clearJob(id)` | `queue:clearJob` | 移除可清工作 |
 | `clearCompleted()` | `queue:clearCompleted` | 清完成紀錄 |
 | `reorderJob(id, newIndex)` | `queue:reorderJob` | 排隊順序 |
-| `updateDelivery(id, patch)` | `queue:updateDelivery` | format／targetH／kbps，路徑與尺寸由 main 推導 |
+| `updateDelivery(id, patch)` | `queue:updateDelivery` | 更新格式、畫面尺寸與碼率。高度預設只傳 targetH，自訂尺寸同時傳 targetW、targetH，main 核對規格並推導輸出路徑 |
 | `showMainWindow()` | `app:showMainWindow` | 回主視窗 |
 | `openPath(path)` | `app:openPath` | 開允許的成品 |
 | `showItemInFolder(path)` | `app:showItemInFolder` | 定位允許的成品 |
@@ -465,6 +465,8 @@ PCM 取樣前按影片來源原點對齊，resampler 與指定聲道的 pan 在�
 ### 交付
 
 `delivery-runner.js` 接凍結快照、核對能力、probe 母素材，再交 `export-plan.js` 產生 argv、實際片長、聲道及規格。純計畫自行決定 codec／mux、音訊尾端及光碟容量，runner 不另配一份設定。所有 execution 明確指定 `direct` 或 `queued-delivery`；交付缺少 queue dir／job id／outPath 直接拒絕，不得退回 direct 繞 watchdog。
+
+H.264 與 ProRes 工作可用 `targetW`、`targetH` 指定成品寬高。FFmpeg 先依專案畫布比例合成影片、子母畫面及字幕，再置中補黑邊至指定尺寸，最後依成品大小燒入選用的時間碼。只有 `targetH` 的舊佇列工作仍依畫布比例推算寬度。
 
 `ffmpeg-execution-engine.js` 的交付能力 owner 從同一純計畫取得實際 encoder，在送出及重跑準備前以短編碼核對可執行性，光碟另執行所需工具的版本探針。探針不讀母素材、不建成品；視訊看實際 frame 與完成標記，不能因短 GPU 編碼的 mux 時間為零而誤判失敗。成功不跨工作快取，避免相同執行檔的 DLL、系統 runtime 或 GPU 狀態變更後沿用舊結果。取消及退出等待原探針 close，失敗退出後才恢復准入。這只驗證能力，成品內容仍由原交付驗收負責。
 

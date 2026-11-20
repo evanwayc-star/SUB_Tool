@@ -28,7 +28,7 @@
 ============================================================================== */
 import { normalizeDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 import { getDeliveryFormatPreset, getDeliveryFormatOption, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode, availableBdVideoModes } from '../shared/delivery-formats.cjs';
-import { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight } from '../shared/delivery-resolution.cjs';
+import { deliveryResolution, suggestKbps, deriveDeliverySpec, normalizeTargetHeight, validCustomDeliverySize } from '../shared/delivery-resolution.cjs';
 import { supportsDeliveryChapters } from '../shared/delivery-chapters.cjs';
 
 /** 交付格式對應的副檔名；未知格式一律當 MP4。 */
@@ -67,7 +67,7 @@ function audioTagFrom(audioPlan) {
 }
 
 /** 一列交付的預設檔名。純函式：同樣的輸入永遠得到同樣的名字。 */
-export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPlan, burnTimecode }) {
+export function defaultDeliveryName({ projectTag, fps, format, targetW, targetH, audioPlan, burnTimecode }) {
   const ext = extensionFor(format);
   const preset = getDeliveryFormatPreset(format);
   const tcTag = burnTimecode ? '_TC' : '';
@@ -76,7 +76,8 @@ export function defaultDeliveryName({ projectTag, fps, format, targetH, audioPla
     return `ST_${projectTag}_${preset.fileLabel || preset.label}_${mode.height}${mode.scan === 'interlaced' ? 'i' : 'p'}_${mode.fps}fps${tcTag}${ext}`;
   }
   const isWav = format === 'wav';
-  const tag = (!isWav && targetH > 0) ? '_' + targetH + 'p' : '';
+  let tag = '';
+  if (!isWav && targetH > 0) tag = targetW > 0 ? `_${targetW}x${targetH}` : `_${targetH}p`;
   return `ST_${projectTag}_${normalizeDeliveryFrameRate(fps)}fps${audioTagFrom(audioPlan)}${tag}${tcTag}${ext}`;
 }
 
@@ -117,6 +118,7 @@ function newRow({ audioOnly, defaultAudioLayout, outDir = '' }) {
 
 function applyFormatPreset(row, projectFps) {
   const preset = getDeliveryFormatPreset(row.format);
+  if (preset || row.format === 'wav') delete row.targetW;
   if (preset) {
     const mode = row.format === 'bd-iso'
       ? availableBdVideoModes(projectFps).find(item => item.fps === row.targetFps) || availableBdVideoModes(projectFps)[0]
@@ -126,8 +128,14 @@ function applyFormatPreset(row, projectFps) {
     row.targetFps = mode.fps;
     row.kbps = preset.videoKbps;
     row.audioPlan = normalizeDeliveryPresetAudio(row.format, row.audioPlan);
-  } else row.targetH = normalizeTargetHeight(row.targetH);
+  } else if (row.targetW == null) row.targetH = normalizeTargetHeight(row.targetH);
 }
+
+function invalidCustomSize(row) {
+  return row.targetW != null && !validCustomDeliverySize(row.targetW, row.targetH);
+}
+
+const customSizeError = '自訂寬度與高度請輸入 16 至 8192 的偶數，總像素最多為 8192 × 4320。';
 
 /**
  * 建立一份交付清單。
@@ -158,12 +166,12 @@ export function createDeliveryList({
     : [newRow({ audioOnly, defaultAudioLayout })];
 
   const nameFor = r => defaultDeliveryName({
-    projectTag, fps: r.format === 'wav' ? fps : normalizeDeliveryFrameRate(r.targetFps, fps || 25), format: r.format, targetH: r.targetH, audioPlan: r.audioPlan, burnTimecode: r.burnTimecode
+    projectTag, fps: r.format === 'wav' ? fps : normalizeDeliveryFrameRate(r.targetFps, fps || 25), format: r.format, targetW: r.targetW, targetH: r.targetH, audioPlan: r.audioPlan, burnTimecode: r.burnTimecode
   });
 
   /* 使用者沒有自己改過名字的列，要跟著格式／解析度／編組變動重新產生。
      改過的列只換副檔名，不能把使用者打的名字蓋掉。 */
-  const refreshName = r => { if (!r.nameModified) r.customName = nameFor(r); };
+  const refreshName = r => { if (!r.nameModified && !invalidCustomSize(r)) r.customName = nameFor(r); };
 
   const at = i => rows[i] || null;
   const rowRevisions = new WeakMap();
@@ -220,10 +228,10 @@ export function createDeliveryList({
       // A fixed format's bitrate is not an editable H.264 preference. Drop it
       // even when passing through ProRes/WAV before returning to H.264.
       if (leavingPreset && !getDeliveryFormatPreset(format)) r.kbps = 0;
-      if (format === 'h264' && !(r.kbps > 0)) {
-        r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav: false }));
+      if (format === 'h264' && !(r.kbps > 0) && !invalidCustomSize(r)) {
+        r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetW: r.targetW, targetH: r.targetH }));
       }
-      if (!r.nameModified) r.customName = nameFor(r);
+      if (!r.nameModified) refreshName(r);
       else if (r.customName) r.customName = r.customName.replace(/\.[a-zA-Z0-9]+$/, '') + extensionFor(format);
     },
 
@@ -231,10 +239,23 @@ export function createDeliveryList({
        套在 4K 上則會糊掉（v4.32 使用者回報「輸出像 proxy」的成因）。 */
     setTargetHeight(i, h) {
       const r = at(i); if (!r) return;
+      delete r.targetW;
       r.targetH = (r.format === 'bd-iso' ? bdVideoMode(r.targetFps)?.height : getDeliveryFormatPreset(r.format)?.height) || normalizeTargetHeight(h);
       if (r.format === 'h264') {
         r.kbps = suggestKbps(deliveryResolution({ canvasW, canvasH, targetH: r.targetH, isWav: false }));
       }
+      refreshName(r);
+    },
+
+    setCustomResolution(i, width, height) {
+      const r = at(i);
+      if (!r || r.format === 'wav' || getDeliveryFormatPreset(r.format)) return;
+      if (r.targetW === width && r.targetH === height) return;
+      // 留下未輸入的欄位，讓送出驗證指出問題；清空不代表切回專案畫布。
+      r.targetW = Number.isFinite(width) ? width : '';
+      r.targetH = Number.isFinite(height) ? height : '';
+      if (invalidCustomSize(r)) return;
+      if (r.format === 'h264') r.kbps = suggestKbps({ w: width, h: height });
       refreshName(r);
     },
 
@@ -309,6 +330,9 @@ export function createDeliveryList({
         out.push({ kind: 'blocking', code: 'empty', index: -1, message: '清單不能為空' });
         return out;
       }
+      const sizeIndex = rows.findIndex(invalidCustomSize);
+      if (sizeIndex !== -1) out.push({ kind: 'blocking', code: 'custom-size', index: sizeIndex,
+        message: `第 ${sizeIndex + 1} 列：${customSizeError}` });
       if (desktop) {
         const i = rows.findIndex(r => !r.outDir);
         if (i !== -1) out.push({ kind: 'blocking', code: 'missing-dir', index: i, message: `錯誤：第 ${i + 1} 列缺少輸出目錄！` });
@@ -348,6 +372,7 @@ export function createDeliveryList({
      */
     toJobs({ clips, videoTracks, duration, assText, subtitleTracks, timelineStartTimecode, timecodeForFps, composeAudioPlan, compiledAudioPlan, chaptersForRow }) {
       return rows.map(r => {
+        if (invalidCustomSize(r)) throw new Error(customSizeError);
         const isWav = r.format === 'wav';
         const preset = getDeliveryFormatPreset(r.format);
         // FPS-SYNC：固定格式以規格的 FPS 換算 TC，專案時間軸的秒數不變。
@@ -355,7 +380,7 @@ export function createDeliveryList({
           || normalizeDeliveryFrameRate(isWav ? fps : r.targetFps, normalizeDeliveryFrameRate(fps));
         const startTimecode = timecodeForFps ? timecodeForFps(outputFps) : timelineStartTimecode;
         const spec = deriveDeliverySpec({
-          format: r.format, preset, canvasW, canvasH, targetH: r.targetH, projectFps: fps,
+          format: r.format, preset, canvasW, canvasH, targetW: r.targetW, targetH: r.targetH, projectFps: fps,
           bdMode: r.format === 'bd-iso' ? bdVideoMode(outputFps) : null,
           fps: outputFps, videoKbps: r.kbps,
           burnTimecode: r.burnTimecode, timecodeStart: startTimecode,
@@ -372,6 +397,7 @@ export function createDeliveryList({
              用交付尺寸回推會累積捨入誤差（寬度取偶數），所以把畫布原值帶著走。
              targetH 則是為了讓下拉能顯示目前選的是哪一項（0＝來源解析度）。 */
           canvasW, canvasH, targetH: spec.targetH,
+          ...(spec.targetW ? { targetW: spec.targetW } : {}),
           /* 會被燒進這份交付的字幕軌名稱。與 ASS 產生端同一條篩選規則
              （formats.js 依 tracks[tk].visible === false 排除），所以顯示不會說謊。 */
           subtitleTracks: Array.isArray(subtitleTracks) ? subtitleTracks.slice() : [],
@@ -397,7 +423,7 @@ export function createDeliveryList({
 
   // A later edit owns a new draft even when its fields subsequently return to
   // the captured values. No-op blur/change events do not revoke ownership.
-  for (const method of ['setFormat', 'setTargetHeight', 'setTargetFps', 'setKbps', 'setBurnTimecode', 'setChapterOptions', 'setOutDir', 'setName']) {
+  for (const method of ['setFormat', 'setTargetHeight', 'setCustomResolution', 'setTargetFps', 'setKbps', 'setBurnTimecode', 'setChapterOptions', 'setOutDir', 'setName']) {
     const mutate = api[method];
     api[method] = (index, ...args) => {
       const row = at(index), before = row ? JSON.stringify(row) : null;

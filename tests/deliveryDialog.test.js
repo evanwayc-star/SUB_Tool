@@ -142,7 +142,7 @@ describe('匯出交付清單', () => {
     else expect(updated.value).toBe(value);
   });
 
-  it('自訂高度正規化為預設尺寸時，焦點回尺寸選單且保留其他列草稿', async () => {
+  it('編輯自訂寬高會保留輸入焦點、同列另一欄與其他輸出草稿', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-res')).not.toBeNull());
     document.getElementById('evAddRowBtn').click();
@@ -150,12 +150,21 @@ describe('匯出交付清單', () => {
     name.value = '客戶保留名稱.mp4'; name.dispatchEvent(new Event('input', { bubbles: true }));
     const resolution = document.querySelector('.ev-res');
     resolution.focus(); resolution.value = 'custom'; resolution.dispatchEvent(new Event('change', { bubbles: true }));
-    const height = document.querySelector('.ev-custom-res');
-    height.focus(); height.value = '721'; height.dispatchEvent(new Event('change', { bubbles: true }));
-    expect(document.querySelector('.ev-custom-res')).toBeNull();
-    expect(document.activeElement === document.querySelector('.ev-res')).toBe(true);
-    expect(document.querySelector('.ev-res').value).toBe('720');
+    const width = document.querySelector('.ev-custom-width'), height = document.querySelector('.ev-custom-height');
+    expect([width.value, height.value]).toEqual(['852', '480']);
+    width.focus();
+    for (const value of ['', '6', '64', '640']) {
+      width.value = value; width.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(document.activeElement).toBe(width);
+      expect(width.value).toBe(value);
+      expect(height.value).toBe('480');
+    }
+    height.value = '720'; height.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(document.querySelector('.ev-res').value).toBe('custom');
+    expect(document.querySelector('.ev-name').value).toContain('_640x720.mp4');
+    expect(document.querySelector('.ev-kbps').value).toBe('1382');
     expect(document.querySelector('.ev-name[data-idx="1"]').value).toBe('客戶保留名稱.mp4');
+    expect(document.querySelector('.ev-res[data-idx="1"]').value).toBe('0');
   });
 
   it('刪除後聚焦鄰近輸出；最後一份刪除後顯示新增指引並回到新增按鈕', async () => {
@@ -294,25 +303,31 @@ describe('匯出交付清單', () => {
     }));
   });
 
-  it('手動輸入奇數高度時，畫面與送出的尺寸及預設檔名一致', async () => {
+  it('自訂寬高須通過驗證才可加入序列，修正後送出明確的雙軸規格', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-res')).not.toBeNull());
     const resolution = document.querySelector('.ev-res');
     resolution.value = 'custom';
     resolution.dispatchEvent(new Event('change', { bubbles: true }));
-    const custom = document.querySelector('.ev-custom-res');
-    custom.value = '721';
-    custom.dispatchEvent(new Event('change', { bubbles: true }));
-    expect(document.querySelector('.ev-res').value).toBe('720');
-    expect(document.querySelector('.ev-name').value).toContain('_720p.mp4');
+    const width = document.querySelector('.ev-custom-width'), height = document.querySelector('.ev-custom-height');
     const outDir = document.querySelector('.ev-outdir');
     outDir.value = 'D:/交付';
     outDir.dispatchEvent(new Event('input', { bubbles: true }));
-    window.subtool.exportVideo.mockResolvedValue('job-odd-height');
     const submit = spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn');
+    for (const [w,h] of [['', '720'], ['640','721'], ['8192','8192']]) {
+      width.value = w; height.value = h;
+      height.dispatchEvent(new Event('change', { bubbles: true }));
+      expect(document.getElementById('evConflictMsg').textContent).toContain('自訂寬度與高度');
+      await submit.act();
+      expect(window.subtool.exportVideo).not.toHaveBeenCalled();
+      expect([width.value, height.value]).toEqual([w,h]);
+    }
+    width.value = '640'; height.value = '720';
+    width.dispatchEvent(new Event('input', { bubbles: true }));
+    window.subtool.exportVideo.mockResolvedValue('job-custom');
     await submit.act();
     expect(window.subtool.exportVideo).toHaveBeenCalledWith(expect.objectContaining({
-      width: 1280, height: 720, targetH: 720, defaultName: expect.stringContaining('_720p.mp4'),
+      width: 640, height: 720, targetW: 640, targetH: 720, defaultName: expect.stringContaining('_640x720.mp4'),
     }));
   });
 

@@ -29,6 +29,7 @@ const { clipLength, fadeWindow } = require('../shared/clip-fade.cjs');
 const { fixedFrameTime } = require('../shared/clip-visual.cjs');
 const { deliveryFrameRateRatio, exactDeliveryFrameRate } = require('../shared/delivery-frame-rate.cjs');
 const { normalizeDeliveryChapters } = require('../shared/delivery-chapters.cjs');
+const { deliveryResolution } = require('../shared/delivery-resolution.cjs');
 const { getDeliveryFormatPreset, normalizeDeliveryPresetAudio, deliveryPresetAudioProblem, bdVideoMode } = require('../shared/delivery-formats.cjs');
 const { buildLimiterFilter, normalizeAudioLimiterSpec, audioLimiterFilter, HARD_LIMITER_PRESETS } = require('../shared/audio-loudness.cjs');
 const { airlineEncoding } = require('./airline-encoding');
@@ -446,9 +447,13 @@ function prepareDeliveryPayload(spec = {}) {
     throw new Error('BD 輸出影格率必須是支援的光碟格式，且不得低於專案 FPS');
   }
   const fixedMode = bdMode || preset;
+  const customSize = !fixedMode && !isWav && spec.targetW != null
+    ? deliveryResolution({ targetW: spec.targetW, targetH: spec.targetH }) : null;
   const prepared = { ...spec, audioPlan: normalizedPlan,
+    ...(customSize ? { width: customSize.w, height: customSize.h } : {}),
     ...(preset ? { width: fixedMode.width, height: fixedMode.height, fps: fixedMode.fps,
       videoKbps: preset.videoKbps } : {}) };
+  if (!customSize) delete prepared.targetW;
   // The persisted job keeps SMPTE ';'. FFmpeg's '.' spelling belongs only in argv.
   if (!isWav) _normaliseExportTimecodeWatermark(prepared.timecodeWatermark, prepared.fps);
   const duration = Math.max(0.05, _finiteNumber(prepared.duration, 0), _planDuration(normalizedPlan));
@@ -509,12 +514,17 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   }
 
   const encodedW = Math.max(2, Math.round(width || 1920));
-  const H = Math.max(2, Math.round(height || 1080));
+  const frameH = Math.max(2, Math.round(height || 1080));
   // 非方形像素先以顯示比例合成與燒字幕，最後才壓成規格的編碼尺寸。
   // 直接在 720×480 / 352×240 上 contain 會把字幕與素材一起橫向拉變形。
   const outputSar = airline?.sar || disc?.sar || '1/1';
   const sarParts = outputSar.split('/').map(Number);
-  const W = isAirline || isDisc ? Math.max(2, Math.round(encodedW * sarParts[0] / sarParts[1] / 2) * 2) : encodedW;
+  const frameW = isAirline || isDisc ? Math.max(2, Math.round(encodedW * sarParts[0] / sarParts[1] / 2) * 2) : encodedW;
+  // 自訂寬高時，整個專案（含 PiP 與字幕）先依專案比例合成，再置中補邊。
+  const projectBox = spec.targetW ? sharedImageBox({ stageW: frameW, stageH: frameH,
+    natW: spec.canvasW, natH: spec.canvasH }) : null;
+  const W = projectBox ? Math.max(2, Math.round(projectBox.w / 2) * 2) : frameW;
+  const H = projectBox ? Math.max(2, Math.round(projectBox.h / 2) * 2) : frameH;
   // FPS-SYNC：NTSC 格率必須用精確有理數；轉換只改 cadence，不改時間軸秒數。
   const outputRate = deliveryFrameRateRatio(fps);
   // 隔行輸出先以每幀兩個場的時率合成，再交織成上場優先的影格；
@@ -768,6 +778,10 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     fc.push(`${vc}ass=${_drawtextValue(assFileName)}${fdirArg}[vout]`);
     vfinal = '[vout]';
   }
+  if (W !== frameW || H !== frameH) {
+    fc.push(`${vfinal}pad=${frameW}:${frameH}:(ow-iw)/2:(oh-ih)/2:color=black[vframe]`);
+    vfinal = '[vframe]';
+  }
   if (isInterlaced) {
     // 半開交付範圍可剩單一末場；補 clone 完成最後一格，末端 trim 仍限制交付格數。
     fc.push(`${vfinal}format=yuv420p,tpad=stop_mode=clone:stop=1,tinterlace=mode=interleave_top,setfield=tff[vmod]`);
@@ -776,7 +790,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   // 時間碼在 ASS／場交織之後，按輸出幀率計數，避免 59.94 場合成時跑成兩倍速。
   if (timecodeWatermark) {
     const tcOut = '[vtimecode]';
-    fc.push(_buildExportTimecodeFilter(vfinal, timecodeWatermark, W, H, tcOut, timecodeFontFile));
+    fc.push(_buildExportTimecodeFilter(vfinal, timecodeWatermark, frameW, frameH, tcOut, timecodeFontFile));
     vfinal = tcOut;
   }
   if (isAirline) {

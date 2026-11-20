@@ -73,6 +73,20 @@ it('同路徑修改保留當初已授權的既有輸出檔',()=>{
   expect(fs.readFileSync(f.outPath,'utf8')).toBe('existing output');
 });
 
+it('自訂尺寸持久化，保留其他欄位修改；切回高度預設後，重新以畫布比例計算',()=>{
+  const f=setup();
+  const persisted=()=>QueueStore.loadJobs(f.queueDir).jobs[0].payload;
+  f.invoke({},'job',{targetW:480,targetH:720});
+  expect(persisted()).toMatchObject({targetW:480,targetH:720,width:480,height:720,outPath:f.outPath});
+  f.invoke({},'job',{kbps:2400});
+  expect(persisted()).toMatchObject({targetW:480,width:480,height:720,videoKbps:2400});
+  expect(()=>f.invoke({},'job',{targetW:481,targetH:720})).toThrow(/自訂寬度與高度/);
+  expect(persisted().targetW).toBe(480);
+  f.invoke({},'job',{targetH:720});
+  expect(persisted()).not.toHaveProperty('targetW');
+  expect(persisted()).toMatchObject({width:1280,height:720,targetH:720,outPath:f.outPath});
+});
+
 it('只修改解析度時保留原副檔名大小寫，另一個大小寫不同的目錄項目不受影響',()=>{
   const f=setup({existingOutput:true,outputName:'delivery.MP4'});
   const other=path.join(path.dirname(f.outPath),'delivery.mp4');

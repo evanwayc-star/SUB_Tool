@@ -1322,7 +1322,8 @@ function prepareQueueDeliveryUpdate(job, patch) {
   const wantsTc = patch?.burnTimecode != null ? !!patch.burnTimecode : !!p.timecodeWatermark;
   const spec = deriveDeliverySpec({
     format, preset, canvasW, canvasH,
-    targetH: patch?.targetH != null ? Math.max(0, Math.floor(Number(patch.targetH) || 0)) : (Number(p.targetH) || 0),
+    targetW: patch?.targetW ?? (patch?.targetH == null ? p.targetW : undefined),
+    targetH: patch?.targetH ?? p.targetH ?? 0,
     fps: p.fps, projectFps: p.projectFps, bdMode: format === 'bd-iso' ? bdVideoMode(p.fps) : null,
     videoKbps: p.videoKbps, previousWidth: p.width, previousHeight: p.height,
     resetVideoBitrate: p.format !== format && !!getDeliveryFormatPreset(p.format),
@@ -1343,6 +1344,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
   /* 先用候選物件跑一次准入檢查，通過才真的改到 job 上——
      失敗時 job 必須維持原狀，不可以留下改到一半的狀態。 */
   const nextPayload = { ...p, format, outPath: newPath, ...spec, audioPlan, canvasW, canvasH };
+  if (spec.targetW == null) delete nextPayload.targetW;
   const outputAuthority = ExportLease.retargetOutputAuthority(job.outputAuthority, newPath);
   // 修改格式或 TC 自動衍生的檔名沒有經過交付清單的覆寫確認。
   // 即使檔案身分可驗證，也不能把它當成使用者同意覆蓋。
@@ -1357,6 +1359,7 @@ function prepareQueueDeliveryUpdate(job, patch) {
     payload: nextPayload,
     outputAuthority,
     result: { format, outPath: newPath, width: spec.width, height: spec.height, targetH: spec.targetH,
+      ...(spec.targetW ? { targetW: spec.targetW } : {}),
       videoKbps: spec.videoKbps, fps: spec.fps, burnTimecode: !!spec.timecodeWatermark },
     /* 同資料夾、同主檔名，只換副檔名。能力只在 job 快照成功落盤後才擴張，
        失敗時不留下 renderer 看不到的半份授權。 */
