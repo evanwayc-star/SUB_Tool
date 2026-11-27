@@ -190,7 +190,9 @@ async function capture(client, outputPath) {
         const engineRect = document.querySelector('.asr-engine-card').getBoundingClientRect();
         const lowerDividerCenter = (contentRect.right + engineRect.left) / 2;
         const providerLabels = [...document.getElementById('asrProvider').options].map(option => option.textContent.trim());
-        const builtinLabels = [...document.getElementById('asrBuiltinModel').options].map(option => option.textContent.trim());
+        const fields = [...document.querySelectorAll('.asr-engine-card input, .asr-engine-card select, .asr-engine-card textarea')]
+          .filter(control => control.getClientRects().length)
+          .map(control => control.id).sort();
         return {
           taskMode: document.getElementById('asrTaskMode').value,
           transcriptDisplay: getComputedStyle(row).display,
@@ -201,8 +203,8 @@ async function capture(client, outputPath) {
           equalColumnDelta: Math.abs(contentRect.width - engineRect.width),
           centerDelta: Math.abs(lowerDividerCenter - (modeRect.left + modeRect.width / 2)),
           providerLabels,
-          builtinLabels,
-          modelLabelsArePlain: [...providerLabels, ...builtinLabels].every(label => !/[()（）]/u.test(label))
+          fields,
+          providerLabelsArePlain: providerLabels.every(label => !/[()（）]/u.test(label))
         };
       })()`),
       '文本匹配模式切換'
@@ -242,7 +244,8 @@ async function capture(client, outputPath) {
         wide.sourceSummary.durationPillCount !== 0 || wide.sourceSummary.rowDurationCount !== 1 ||
         align.taskMode !== 'align' || align.transcriptDisplay !== 'flex' || align.contentDisplay !== 'flex' || align.lineCount !== '3 行' ||
         !align.target.includes('文本匹配') || align.primaryAction !== '開始匹配' ||
-        align.equalColumnDelta > 1 || align.centerDelta > 1 || !align.modelLabelsArePlain ||
+        align.equalColumnDelta > 1 || align.centerDelta > 1 || !align.providerLabelsArePlain ||
+        align.fields.join(',') !== 'asrApiKey,asrLanguage,asrProvider' ||
         narrow.horizontalOverflow || !narrow.footerVisible || narrow.modalWidth > 620) {
       throw new Error(`ASR UI 真機驗收失敗：${JSON.stringify({ wide, align, narrow })}`);
     }

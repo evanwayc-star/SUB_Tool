@@ -33,6 +33,27 @@ describe('獨立來源波形交接',()=>{
     expect(f.owner.snapshot().peaks).toHaveLength(4);expect(f.decode).not.toHaveBeenCalled();
     expect(f.bridge.cleanupAudio).not.toHaveBeenCalled();entry.cancel();
   });
+  it('共享快取在交接時失效，等待本機重新產生的第一批波形',async()=>{
+    const f=fixture(),native=deferred(),sourceCheck=deferred();
+    f.bridge.sourceWaveformContinuous=true;
+    let send;
+    f.jobs.prepareSourceWaveform.mockImplementation((_request,onWaveform)=>{send=onWaveform;return native.promise;});
+    const entry=f.owner.begin({path:'A',name:'A',audio:[{channels:1}],duration:2,owns:()=>true});
+    await vi.waitFor(()=>expect(send).toBeTypeOf('function'));
+    const batch={sourceKey:key,startSample:0,completedSamples:4000,totalSamples:8000,sampleRate:4000,resolution:1};
+    send({...batch,peaks:new Float32Array([-.25,.5])});
+    f.bridge.mediaSourceKey.mockReturnValueOnce(sourceCheck.promise);
+    const transfer=vi.fn(),handoff=entry.handoff(key,transfer);
+    send({reset:true,sourceKey:key});
+    expect(f.owner.snapshot()).toBeNull();
+    sourceCheck.resolve(key);await Promise.resolve();
+    expect(transfer).not.toHaveBeenCalled();
+    const fresh=new Float32Array([-.75,1]);send({...batch,peaks:fresh});
+    expect(await handoff).toBe(true);
+    expect(transfer).toHaveBeenCalledWith(fresh);
+    native.resolve({wave:'local.wav',sourceKey:key,start:0,duration:2,complete:true});
+    await entry.finished;
+  });
   it('連續工作取消後的進度不能重新顯示，完成來源不一致時撤回已顯示波形',async()=>{
     const f=fixture(),gate=deferred();let send;f.bridge.sourceWaveformContinuous=true;
     f.jobs.prepareSourceWaveform.mockImplementation((_request,onWaveform)=>{send=onWaveform;return gate.promise;});

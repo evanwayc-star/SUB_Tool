@@ -86,7 +86,10 @@ function runSourceWaveformWorker(config, { describeAudio, execute, progress, pub
     })();
     native.add(work);
     work.then(value => reply({ type: 'reply', id: message.id, value }), error => {
-      if (error.code !== 'SOURCE_WAVE_RESUME_MISMATCH') { failure ||= error; cancel(); }
+      // The worker owns both bounded retries. A bad PCM prefix stops only its
+      // current decoder. Cancelling the entire job here would preempt recovery.
+      const retryable = message.type === 'execute' && ['SOURCE_WAVE_RESUME_MISMATCH', 'CONTINUOUS_WAVE_CACHE_CHANGED'].includes(error.code);
+      if (!retryable) { failure ||= error; cancel(); }
       reply({ type: 'reply', id: message.id, error: errorData(error) });
     }).finally(() => native.delete(work));
   });

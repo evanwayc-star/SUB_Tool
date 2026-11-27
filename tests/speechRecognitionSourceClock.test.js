@@ -8,7 +8,7 @@ vi.mock('../src/decode/source-frame-index.js', () => ({ sourcePresentationMetada
 
 import { sourcePresentationMetadata } from '../src/decode/source-frame-index.js';
 import { AudioEngine } from '../src/audio-engine.js';
-import { getClipAudioBuffer } from '../src/speech-recognition.js';
+import { getClipAudioBuffer, getClipRecognitionSource } from '../src/speech-recognition.js';
 
 function pcm(channels, rate = 16000) {
   const data = channels.map(channel => Float32Array.from(channel));
@@ -32,6 +32,16 @@ beforeEach(() => {
 });
 
 describe('ASR original audio source clock admission', () => {
+  it('in timeline scope, skips a video with a confirmed empty audio track list and surfaces actual audio decoding errors', async () => {
+    const clip = { web:{url:'blob:video'}, in:0, out:2 };
+    const error = new DOMException('Cannot decode audio', 'EncodingError');
+    const options = { skipSilentVideo:true, fetchImpl:async () => ({arrayBuffer:async () => new ArrayBuffer(8)}),
+      decodeAudioData:async () => { throw error; } };
+    sourcePresentationMetadata.mockResolvedValueOnce({ duration:2, presentationTimestampOffset:0 });
+    await expect(getClipRecognitionSource(clip, options)).resolves.toBeNull();
+    sourcePresentationMetadata.mockResolvedValueOnce({ duration:2, audioPresentationTimestampOffsets:[null] });
+    await expect(getClipRecognitionSource(clip, options)).rejects.toBe(error);
+  });
   it('rechecks ownership after the bounded clock resolves before allocating normalized PCM', async () => {
     let owns = true;
     const createBuffer = vi.spyOn(AudioEngine, 'createBuffer');

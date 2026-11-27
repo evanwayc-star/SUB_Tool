@@ -57,8 +57,13 @@ export function bindPreviewStatusView({root,readState,setMode,now=Date.now}){
     const details=[];
     if(state.compositePreview)details.push('合成可能使用 Proxy；檢查原始畫質請回到單一滿版、無合成效果的片段');
     if(!state.available&&state.phase!=='idle')details.push('目前無法切換預覽模式');
-    if(state.available&&state.mode==='smooth'&&state.sourceKind==='original'&&!state.proxyAvailable)
-      details.push(state.proxyFailed?'Proxy 無法讀取，暫用原片。按「Proxy 預覽」可重試':'預覽準備中，暫用原片');
+    if(state.available&&state.mode==='smooth'&&state.sourceKind==='original'&&!state.proxyAvailable){
+      if(state.proxyFailed){
+        const reason=state.proxyPreparation==='failed'?'Proxy 產生失敗':'Proxy 無法讀取';
+        details.push(reason+'，暫用原片'+(state.canRetryProxy?'。按「Proxy 預覽」可重試':''));
+      }else if(state.proxyPreparation==='stopped')details.push('Proxy 背景處理已停止，暫用原片');
+      else if(state.proxyPreparation==='preparing'||state.proxyPreparation==='encoding')details.push('預覽準備中，暫用原片');
+    }
     setText(preparation,details.join(' · '));if(preparation)preparation.hidden=!details.length;
 
     const waiting=Object.hasOwn(WAIT_TEXT,state.phase);

@@ -8,6 +8,30 @@ function deferred() {
 }
 
 describe('native preview runtime', () => {
+  it('keeps subtitle edits and their acknowledgements with the loaded source', async () => {
+    const edit = deferred(), load = deferred();
+    const mpv = {
+      launch: vi.fn().mockResolvedValue({ ok: true, sourceSessionId: 'first' }),
+      loadfile: vi.fn(() => load.promise),
+      subSet: vi.fn().mockReturnValueOnce(edit.promise).mockResolvedValue(true),
+    };
+    const runtime = createNativePreviewRuntime({ mpv });
+    await runtime.enterMpv({ src: 'first.mov' });
+    const oldEdit = runtime.subSet('old ASS');
+    expect(mpv.subSet).toHaveBeenCalledWith('old ASS', 'first');
+
+    const loading = runtime.loadfile('second.mov');
+    await expect(runtime.subSet('between sources')).resolves.toBe(false);
+    expect(mpv.subSet).toHaveBeenCalledTimes(1);
+    load.resolve({ ok: true, sourceSessionId: 'second' });
+    await loading;
+    await expect(runtime.subSet('new ASS')).resolves.toBe(true);
+    expect(mpv.subSet).toHaveBeenLastCalledWith('new ASS', 'second');
+
+    edit.resolve(true);
+    await expect(oldEdit).resolves.toBe(false);
+  });
+
   it('舊啟動完成時不會關閉較新來源的原生預覽', async () => {
     const oldLaunch = deferred();
     const mpv = {

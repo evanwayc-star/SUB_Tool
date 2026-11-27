@@ -35,7 +35,7 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub const VERSION: &str = "3.0.0-rust";
-const VISION_ENGINE_VERSION: &str = "3.0.0";
+pub const VISION_ENGINE_VERSION: &str = "subtool-vision-quality-v1";
 const VISION_PROMPT_VERSION: &str = "variety-multislot-v3";
 const PROOFREAD_VERSION: &str = "src-proofread-v3";
 const AUTO_GLOSSARY_VERSION: &str = "auto-glossary-v1";
@@ -44,7 +44,7 @@ const WINDOW_SECONDS: f64 = 8.0;
 const OVERLAP_SECONDS: f64 = 1.5;
 const JPEG_QUALITY: u8 = 92;
 const ESCALATE_FRAME_WIDTH: u32 = 1440;
-const ESCALATE_REVIEW_POLICY: &str = "review-v2";
+const ESCALATE_REVIEW_POLICY: &str = "review-v3";
 const TRANSLATE_BATCH_SIZE: usize = 30;
 const PROOFREAD_BATCH_SIZE: usize = 50;
 
@@ -570,8 +570,8 @@ fn find_hard_windows(records: &[WindowVisionRecord]) -> Vec<(usize, Option<Strin
         .collect()
 }
 
-fn needs_high_resolution_review(model: &str, flagship_model: &str, frame_width: u32) -> bool {
-    model != flagship_model || frame_width < ESCALATE_FRAME_WIDTH
+fn review_frame_width(initial_width: u32) -> u32 {
+    initial_width.max(ESCALATE_FRAME_WIDTH)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1379,14 +1379,12 @@ fn execute_single_job(
     let mut escalated_usage = TokenUsage::default();
     let mut escalated_cost_usd = 0.0;
 
-    // Stage 2b: Automatic Two-Pass Flagship Escalation (1440px high-detail) on hard windows
+    // Stage 2b: Independently review every hard window, even after a flagship initial scan.
     let flagship_model = flagship_model_for(cfg.provider);
-    if cfg.smart_accuracy
-        && needs_high_resolution_review(&cfg.vision_model, flagship_model, cfg.frame_width)
-        && !ordered_records.is_empty()
-    {
+    if cfg.smart_accuracy && !ordered_records.is_empty() {
         let hard = find_hard_windows(&ordered_records);
         if !hard.is_empty() {
+            let review_width = review_frame_width(cfg.frame_width);
             let mut hard_specs = Vec::with_capacity(hard.len());
             let mut hints_map = HashMap::new();
             let mut reason_summary = Vec::new();
@@ -1403,14 +1401,14 @@ fn execute_single_job(
                 "[Escalate] 啟動高解析複檢：共 {} 個疑難批次 → {} @ {}px [{}]",
                 hard_specs.len(),
                 flagship_model,
-                ESCALATE_FRAME_WIDTH,
+                review_width,
                 reason_summary.join(", ")
             )));
 
             // Older reviews could be biased by the conflicting transcription as a hint.
             // Keep the initial scan cache, but regenerate reviews under the new policy.
             let esc_cache_dir = cache_dir.join(format!(
-                "escalated_{flagship_model}_{ESCALATE_FRAME_WIDTH}_{ESCALATE_REVIEW_POLICY}"
+                "escalated_{flagship_model}_{review_width}_{ESCALATE_REVIEW_POLICY}"
             ));
             let (mut esc_map, esc_u) = run_vision_windows(
                 job_index,
@@ -1422,11 +1420,11 @@ fn execute_single_job(
                 track_fps,
                 frame_track.as_ref(),
                 cfg.fps as f64,
-                ESCALATE_FRAME_WIDTH,
+                review_width,
                 cfg.source_lang,
                 cfg.provider,
                 flagship_model,
-                "high",
+                crate::llm::vision_detail(cfg.provider, flagship_model),
                 cfg.workers.min(4),
                 &api_key,
                 &esc_cache_dir,
@@ -2067,14 +2065,11 @@ mod tests {
     }
 
     #[test]
-    fn flagship_initial_scan_still_needs_review_below_1440_pixels() {
-        assert!(needs_high_resolution_review("gpt-5.4", "gpt-5.4", 1280));
-        assert!(needs_high_resolution_review(
-            "gpt-5.4-mini",
-            "gpt-5.4",
-            1440
-        ));
-        assert!(!needs_high_resolution_review("gpt-5.4", "gpt-5.4", 1440));
+    fn review_never_reduces_the_initial_resolution() {
+        assert_eq!(review_frame_width(960), 1440);
+        assert_eq!(review_frame_width(1280), 1440);
+        assert_eq!(review_frame_width(1440), 1440);
+        assert_eq!(review_frame_width(1920), 1920);
     }
 
     #[test]
@@ -2220,11 +2215,11 @@ mod tests {
             glossary_path: output.join("unused.json"),
             source_lang: SourceLang::Auto,
             provider: Provider::OpenAI,
-            vision_model: "gpt-5.4-mini".into(),
+            vision_model: "gpt-5.4".into(),
             translate_model: "unused".into(),
-            fps: 2.0,
-            frame_width: 320,
-            detail: "high".into(),
+            fps: 10.0,
+            frame_width: 1920,
+            detail: "original".into(),
             workers: 1,
             translate_enabled: false,
             smart_accuracy: true,
@@ -2240,7 +2235,7 @@ mod tests {
             &video,
             0.0,
             Some(1.0),
-            2.0,
+            cfg.fps as f64,
             WINDOW_SECONDS,
             OVERLAP_SECONDS,
             Some(&track),
@@ -2253,9 +2248,10 @@ mod tests {
         let cache = output.join("cache/vision").join(fingerprint);
         atomic_write_json(&cache.join("config.json"), &config).unwrap();
         let flagship = flagship_model_for(cfg.provider);
+        let review_width = review_frame_width(cfg.frame_width);
         let obsolete = cache.join(format!("escalated_{flagship}_{ESCALATE_FRAME_WIDTH}"));
         let current = cache.join(format!(
-            "escalated_{flagship}_{ESCALATE_FRAME_WIDTH}_{ESCALATE_REVIEW_POLICY}"
+            "escalated_{flagship}_{review_width}_{ESCALATE_REVIEW_POLICY}"
         ));
         let mut review_records = Vec::new();
         for window in &plan.windows {

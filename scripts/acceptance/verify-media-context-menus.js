@@ -203,6 +203,7 @@ if (require.main === module) (async () => {
       'heading',
       'reveal_source',
       'seek_clip_start',
+      'screen_text_recognition',
       'separator',
       'split_at_playhead',
       'edit_duration',
@@ -230,7 +231,7 @@ if (require.main === module) (async () => {
     await delay(150);
     const lockedVideoMenu = await openMenu(client, '.clip-block');
     assert.deepEqual(ids(lockedVideoMenu), [
-      'heading', 'locked_status', 'reveal_source', 'seek_clip_start',
+      'heading', 'locked_status', 'reveal_source', 'seek_clip_start', 'screen_text_recognition',
     ]);
     assert.equal(lockedVideoMenu.find(item => item.id === 'locked_status')?.role, 'status');
 

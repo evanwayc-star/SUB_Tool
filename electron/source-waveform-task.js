@@ -33,15 +33,15 @@ parentPort.on('message', message => {
   else entry.resolve(message.value);
 });
 async function run() {
-  const { request, allowSidecarCache, cacheAuthority, sourceOnly = false } = workerData;
+  const { request, allowSidecarCache, cacheAuthority, waveformRecoveryRoot, sourceOnly = false } = workerData;
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'subtool-wave-task-'));
   // Source-only operations must not even register/stat a legacy central root.
   const cacheRoot = sourceOnly ? tempRoot : workerData.cacheRoot;
   const tempAuthority = captureOutputDirectory(tempRoot);
-  const fileAuthority = new FileAuthority({ internalDirectories: [tempRoot, cacheRoot] });
+  const fileAuthority = new FileAuthority({ internalDirectories: [tempRoot, cacheRoot, waveformRecoveryRoot].filter(Boolean) });
   if (request.src) fileAuthority.grantTrustedFile(request.src);
   if (cacheAuthority && !sourceOnly) captureOutputAuthority(path.join(cacheRoot, '.wave-worker-check'), cacheAuthority);
-  const runtime = createMediaIntakeRuntime({ tempRoot, tempRootAuthority: tempAuthority, cacheRoot, allowSidecarCache, fileAuthority,
+  const runtime = createMediaIntakeRuntime({ tempRoot, tempRootAuthority: tempAuthority, cacheRoot, waveformRecoveryRoot, allowSidecarCache, fileAuthority,
     cleanupState: workerData.cleanupState,
     onCacheDirectoryRemoved: result => send({ type: 'cacheRemoved', result }),
     describeAudio: () => call('describe'),

@@ -37,8 +37,8 @@ async function main() {
   try {
     console.log(JSON.stringify({ output, source, start, end: start + seconds }));
     const result = await runtime.recognize(owner, { requestId: 'native-smoke', path: path.resolve(source), start,
-      end: start + seconds, provider: 'openai', model: 'gpt-5.4-mini', sourceLang: 'auto',
-      samplesPerSecond: 2, frameWidth: 1280, smartAccuracy: true });
+      end: start + seconds, provider: 'openai', model: 'gpt-5.4', sourceLang: 'auto',
+      samplesPerSecond: 10, frameWidth: 1920, smartAccuracy: true });
     fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ output, result }));
   } finally {

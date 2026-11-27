@@ -21,6 +21,12 @@ beforeEach(() => {
 });
 afterEach(() => { unsubscribe?.(); unsubscribe = null; invalidate?.(); });
 
+it.each([['openai','gpt-5.4'],['gemini','gemini-2.5-pro']])('缺省工作採 %s 的旗艦與最高品質，明確選項仍可覆寫', (provider, model) => {
+  const job = startScreenTextSession(clip, { provider });
+  expect(job).toMatchObject({ provider, model, sampleFps:10, frameWidth:1920, smartAccuracy:true });
+  expect(recognizeClipText.mock.lastCall[1]).toMatchObject({ provider, model, sampleFps:10, frameWidth:1920, smartAccuracy:true });
+});
+
 it('輸出點只在開始時決定，背景工作與進度顯示共用當時的設定', async () => {
   const plan = { range: { start: 3, end: 8 }, windows: [{}, {}], fps: 29.97, dropFrame: true };
   getScreenTextPlan.mockReturnValueOnce(plan);

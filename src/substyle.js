@@ -540,6 +540,7 @@ let _fonts = null; // [{name:資料夾名（UI／CSS 用）, file, family:檔案
 let _fontsLoading = null;
 let _fontFaces = new Map(); // 只持有本 module 註冊的 face，不能清除其他字型擁有者。
 let _fontMetrics = new Map();
+export let subtitleFontRevision = 0;
 export function getFonts(){ return _fonts || []; }
 
 /* libass 以 OS/2 Win ascent+descent 作 REAL_DIM 字級，CSS 字級則是 em。
@@ -692,6 +693,10 @@ async function _loadFontFaces(){
     _fontFaces = nextFaces;
     _fontMetrics = nextMetrics;
     _fonts = acceptedFonts;
+    // 同名重匯也會改變字形、度量或 ASS family；等整批發布後才重畫目前字幕。
+    subtitleFontRevision++;
+    emit('render:videoSub');
+    emit('mpv:refreshSubs');
   }catch(e){ console.warn('[fonts] load', e); }
   // 掃描失敗保留既有清單；首次失敗保持未載入，下一次可重試。
   return getFonts();

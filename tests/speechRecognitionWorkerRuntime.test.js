@@ -5,11 +5,47 @@ import {
   buildBuiltinGenerationOptions,
   countBuiltinInferenceChunks,
   createBuiltinChunkProgressStreamer,
+  detectBuiltinSpeechLanguage,
+  hasCompleteBuiltinWordTimes,
   normalizeBuiltinAsrSegments,
   resolveBuiltinExecutionPlan
 } from '../src/speech-recognition-worker-runtime.js';
 
 describe('本機 ASR Worker runtime 規則', () => {
+  it('在同一個 Whisper 上取第一個 decoder token 的語言分數，忽略更高的非語言 token 並釋放張量', async () => {
+    const feature = { dispose: vi.fn() };
+    const logits = { data: Float32Array.of(8, -3, 2, 5, 1), dispose: vi.fn() };
+    const kv = { dispose: vi.fn() };
+    const model = vi.fn(async () => ({ logits, 'present.0.encoder.key': kv }));
+    model.generation_config = { decoder_start_token_id: 50258, lang_to_id: { '<|en|>': 1, '<|zh|>': 2, '<|ko|>': 3, '<|ja|>': 4 } };
+    const processor = vi.fn(async () => ({ input_features: feature }));
+    class Tensor {
+      constructor(type, data, dims) { Object.assign(this, { type, data, dims }); }
+      dispose = vi.fn();
+    }
+    const samples = new Float32Array(40 * 16000);
+    samples[16000] = 0.4;
+    await expect(detectBuiltinSpeechLanguage({ processor, model }, samples, Tensor)).resolves.toBe('ko');
+    expect(processor.mock.calls[0][0]).toHaveLength(30 * 16000);
+    expect(processor.mock.calls[0][0][0]).toBeCloseTo(.4);
+    const inputs = model.mock.calls[0][0];
+    expect(inputs.input_features).toBe(feature);
+    expect(inputs.decoder_input_ids).toMatchObject({ type: 'int64', data: BigInt64Array.of(50258n), dims: [1, 1] });
+    for (const tensor of [feature, logits, kv, inputs.decoder_input_ids]) expect(tensor.dispose).toHaveBeenCalledOnce();
+    await expect(detectBuiltinSpeechLanguage({ processor, model }, new Float32Array(1), Tensor)).resolves.toBe(null);
+    expect(model).toHaveBeenCalledOnce();
+  });
+
+  it('完整逐詞輸出才能作為文本匹配的逐詞證據', () => {
+    const word = timestamp => ({ text: '電視', timestamp });
+    expect(hasCompleteBuiltinWordTimes({ chunks: [word([.3, .6])] }, 1)).toBe(true);
+    for (const timestamp of [[null, .3], [.3, null], [.3, .3], [-.2, .3], [1, 2]]) {
+      expect(hasCompleteBuiltinWordTimes({ chunks: [word(timestamp)] }, 1)).toBe(false);
+    }
+    expect(hasCompleteBuiltinWordTimes({ text: '電視' }, 1)).toBe(false);
+    expect(hasCompleteBuiltinWordTimes({ text: '' }, 1)).toBe(true);
+  });
+
   it('2 分 31 秒音訊依 29 秒 window／5 秒 stride 計為 8 個真實推論段', () => {
     expect(countBuiltinInferenceChunks(151 * 16000)).toBe(8);
     expect(countBuiltinInferenceChunks(29 * 16000)).toBe(1);
@@ -137,6 +173,16 @@ describe('本機 ASR Worker runtime 規則', () => {
         ]
       }
     ]);
+  });
+
+  it('完整 Large v3 的原生句級時間逐句輸出',()=>{
+    const chunks=[{timestamp:[.25,1.5],text:' 第一段'},{timestamp:[1.7,3.1],text:' 第二段。'}];
+    expect(normalizeBuiltinAsrSegments({chunks},3,true)).toEqual([
+      {start:.25,end:1.5,text:'第一段'},{start:1.7,end:3,text:'第二段。'}
+    ]);
+    expect(normalizeBuiltinAsrSegments({text:'',chunks:[]},3,true)).toEqual([]);
+    expect(()=>normalizeBuiltinAsrSegments({text:'無時間'},3,true)).toThrow('時間碼');
+    expect(()=>normalizeBuiltinAsrSegments({chunks:[{text:'不完整',timestamp:[1,null]}]},3,true)).toThrow('起訖時間');
   });
 
   it('修補 Whisper 的零長度 word timestamp 並維持時間單調', () => {

@@ -158,21 +158,27 @@ export function mergeImportedKeymap(defaults, imported) {
     }
   }
   if (!applied) throw new Error('檔案裡沒有可用的快捷鍵綁定');
-  migrateTimelineDefaultBindings(defaults,source,merged,inherited);
+  migrateDefaultBindings(defaults, source, merged, inherited);
   return { keymap: merged, applied };
 }
 
 // A saved new action (including []) marks an already-upgraded map. Without it,
 // only the exact old defaults move; custom alternatives and disabled actions
 // stay owned by the user. Loading and importing share this one migration.
-function migrateTimelineDefaultBindings(defaults,source,merged,inherited){
-  const actions=['toggle_mixer','toggle_sub_mode','scroll_playhead'];
-  if(actions.some(action=>!Array.isArray(defaults[action])))return;
-  if(!Object.hasOwn(source,'scroll_playhead')){
-    for(const [action,key] of [['toggle_mixer','u'],['toggle_sub_mode','y']]){
-      if(!inherited.has(action)&&merged[action].length===1&&sameBind(merged[action][0],{key})){
-        merged[action]=structuredClone(defaults[action]);inherited.add(action);
-      }
+function migrateDefaultBindings(defaults, source, merged, inherited) {
+  const actions = new Set();
+  for (const [newAction, action, oldBind] of [
+    ['scroll_playhead', 'toggle_mixer', {key:'u'}],
+    ['scroll_playhead', 'toggle_sub_mode', {key:'y'}],
+    ['toggle_timecode_watermark', 'toggle_safe_frame', {key:'g', ctrl:true}],
+  ]) {
+    if (!Array.isArray(defaults[newAction]) || !Array.isArray(defaults[action])) continue;
+    actions.add(newAction);
+    actions.add(action);
+    if (!Object.hasOwn(source, newAction) && !inherited.has(action)
+        && merged[action].length === 1 && sameBind(merged[action][0], oldBind)) {
+      merged[action] = structuredClone(defaults[action]);
+      inherited.add(action);
     }
   }
   const custom=Object.fromEntries(Object.entries(merged).filter(([action])=>!inherited.has(action)));

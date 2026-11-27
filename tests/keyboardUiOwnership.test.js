@@ -23,6 +23,12 @@ beforeAll(async () => {
   UI = await import('../src/ui.js');
   Menus = await import('../src/menus.js');
   await import('../src/keyboard.js');
+  const { createCommands } = await import('../src/commands.js');
+  const { on } = await import('../src/events.js');
+  const commands = createCommands();
+  on('action', action => {
+    if (action === 'safe-frame' || action === 'timecode-watermark') commands.run(action);
+  });
   vi.spyOn(Media, 'play').mockResolvedValue(true);
   vi.spyOn(Media, 'pause').mockImplementation(() => {});
 });
@@ -48,6 +54,25 @@ it('其他區域的聚焦按鈕保留 Enter 原生啟用', async () => {
   expect(Media.play).not.toHaveBeenCalled();
   // jsdom 不執行瀏覽器的原生鍵盤 click；確認它沒有被 keydown 取消後再模擬。
   button.click(); expect(click).toHaveBeenCalledOnce();
+});
+
+it.each([
+  ['h', 'safeFrame', 'safeFrameBtn'],
+  ['g', 'timecodeWatermark', 'timecodeWatermarkBtn'],
+])('Ctrl+%s 與工具列顯示同一個預覽疊層，按住不會閃爍', (letter, overlay, button) => {
+  State[overlay] = false;
+  const input = document.getElementById('searchInput');
+  expect(key(input, letter, {ctrlKey:true}).defaultPrevented).toBe(false);
+  expect(State[overlay]).toBe(false);
+  expect(key(document.body, letter, {ctrlKey:true}).defaultPrevented).toBe(true);
+  expect(State[overlay]).toBe(true);
+  expect(document.getElementById(overlay).classList.contains('on')).toBe(true);
+  expect(document.getElementById(button).classList.contains('active')).toBe(true);
+  key(document.body, letter, {ctrlKey:true, repeat:true});
+  expect(State[overlay]).toBe(true);
+  key(document.body, letter, {metaKey:true});
+  expect(document.getElementById(overlay).classList.contains('on')).toBe(false);
+  expect(document.getElementById(button).classList.contains('active')).toBe(false);
 });
 
 it.each(['#playBtn', '[data-act="mixer-zero-faders"]'])('聚焦工作區按鈕 %s 時，Space 播放而不啟用該按鈕', async selector => {

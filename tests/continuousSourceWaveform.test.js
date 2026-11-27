@@ -61,6 +61,39 @@ it('單次解碼在整片完成前發布已保存的5秒peak，正式wave逐samp
   expect(f.execute).toHaveBeenCalledOnce();expect(reopened.cleanupGeneratedFile(result.wave)).toBe(false);
 });
 
+it('共享目錄暫時回報舊長度時仍交付波形、保存峰值並於重開時直接使用',async()=>{
+  const f=fixture(), lstat=fs.lstatSync.bind(fs);
+  vi.spyOn(fs,'lstatSync').mockImplementation((file,options)=>{
+    const stat=lstat(file,options);
+    if(options?.bigint && stat.isFile() && String(file).includes('continuous-waveforms')){
+      stat.size=0n; stat.mtimeNs-=1000000000n;
+    }
+    return stat;
+  });
+  const request={...f.request,displayPeaks:true}, first=f.create();
+  const built=await first.waveform(request);
+  expect(built.waveEvidence.size).toBe(BigInt(f.pcm.length+44));
+  expect(fs.existsSync(built.wave+'.peaks-v1')).toBe(true);
+  await first.close();
+  const hit=await f.create().waveform(request);
+  expect(hit.cached).toBe(true);
+  expect(hit.wave).toBe(built.wave);
+  expect(hit.displayPeaks).toEqual(built.displayPeaks);
+  expect(f.execute).toHaveBeenCalledOnce();
+  const fileStat=fs.statSync.bind(fs);
+  vi.spyOn(fs,'statSync').mockImplementation((file,...args)=>{
+    const stat=fileStat(file,...args);
+    if(file===built.wave && !args[0]?.bigint) stat.size=0;
+    return stat;
+  });
+  const proxyRequest={...f.request,needsProxy:true};
+  const producer=f.create();
+  await producer.waveform(request);
+  expect((await producer.ingest(proxyRequest)).wave).toBe(built.wave);
+  expect(await f.create().ingest(proxyRequest)).toMatchObject({wave:built.wave,cached:true});
+  expect(f.execute).toHaveBeenCalledTimes(2);
+});
+
 it.each([undefined,{sourceStream:0,sourceChannel:0}])('重開 %j 直接讀取已保存的每一桶顯示峰值，舊 WAV 只補建一次',async channel=>{
   const f=fixture(),old=f.create(),request={...f.request,channel};
   const legacy=await old.waveform(request);

@@ -246,7 +246,7 @@ contextBridge.exposeInMainWorld('subtool', {
     // 由主程序再次白名單驗證，preload 僅作受限 IPC 入口。
     setTimecodeWatermark: (data) => ipcRenderer.invoke('mpv:setTimecodeWatermark', data),
     clearTimecodeWatermark: () => ipcRenderer.invoke('mpv:clearTimecodeWatermark'),
-    subSet:    (ass)   => ipcRenderer.invoke('mpv:subSet', ass),
+    subSet:    (ass, sourceSessionId) => ipcRenderer.invoke('mpv:subSet', ass, sourceSessionId),
     subVisible:(v)     => ipcRenderer.invoke('mpv:subVisible', v),
     quit:      ()      => ipcRenderer.invoke('mpv:quit'),
     onEvent:   (cb)    => { ipcRenderer.removeAllListeners('mpv:event'); ipcRenderer.on('mpv:event', (_, d) => cb(d)); },

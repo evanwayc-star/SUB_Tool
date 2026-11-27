@@ -120,6 +120,41 @@ it('底部 Proxy 就緒依已登記產物，讀取失敗和明確重試後跟著
   }finally{f.dispose();}
 });
 
+it('Proxy 編碼失敗後，只有按該來源的 Proxy 預覽才在背景重試，原片持續可用',async()=>{
+  const f=await fixture({mode:'smooth'}),retry=vi.fn(),otherRetry=vi.fn(),gate=deferred();
+  const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
+  f.desktop.ingest=vi.fn().mockRejectedValue(new Error('encode failure'));
+  const register=(path,callback)=>jobs.registerRecovery({path,owns:()=>true,retry:callback});
+  try{
+    const other=f.Seq.add({...f.clip,id:'other',primary:false,path:'C:/other.mov',offset:12});
+    f.State.duration=24;
+    await f.Media.seek(3);
+    register(other.path,otherRetry).fail(new Error('waveform failure'));
+    const entry=register(f.clip.path,retry.mockReturnValue(gate.promise));
+    await expect(jobs.ingest({path:f.clip.path,needsProxy:true})).rejects.toThrow('encode failure');
+    entry.fail(new Error('encode failure'));
+    expect(f.Media.previewState()).toMatchObject({phase:'paused',sourceKind:'original',proxyFailed:true,canRetryProxy:true});
+    expect(f.Media.proxyStatus().state).toBe('failed');
+    expect(retry).not.toHaveBeenCalled();
+    await f.Media.setPreviewMode('original');
+    expect(retry).not.toHaveBeenCalled();
+    await f.Media.seek(15);
+    expect(f.Media.activeClipId).toBe(other.id);
+    expect(f.Media.previewState()).toMatchObject({proxyFailed:false,canRetryProxy:false});
+    await f.Media.setPreviewMode('smooth');
+    expect(otherRetry).not.toHaveBeenCalled();
+    expect(retry).not.toHaveBeenCalled();
+    await f.Media.seek(3);
+    expect(f.Media.activeClipId).toBe(f.clip.id);
+    await f.Media.setPreviewMode('smooth');
+    expect(retry).toHaveBeenCalledOnce();
+    expect(f.Media.previewState()).toMatchObject({sourceKind:'original',proxyPreparation:'preparing',canRetryProxy:false});
+    await f.Media.setPreviewMode('smooth');
+    expect(retry).toHaveBeenCalledOnce();
+    expect(f.adapter.ownsNativeSourcePath(f.clip.path)).toBe(true);
+  }finally{gate.resolve();await flush();f.dispose();}
+});
+
 it('目前母片載入失敗只記錄一個含原因的錯誤，普通 toast 不再重複記錄',async()=>{
   const f=await fixture();
   const {setStatus,showToast}=await import('../src/ui.js');

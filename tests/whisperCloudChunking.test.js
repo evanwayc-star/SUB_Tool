@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { callWhisperApi, transcribeAudioStream } from '../src/speech-recognition-engine.js';
+import { resolveRecognitionAlignment } from '../src/transcript-alignment.js';
 
 function createQuietAudioBuffer(durationSeconds) {
   const sampleRate = 1;
@@ -33,6 +34,49 @@ describe('Whisper 雲端長音訊分段', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     Object.defineProperty(window, 'subtool', { configurable: true, value: undefined });
+  });
+
+  it.each(['align','transcribe'])('Groq %s 用無損 WAV、完整多語模型、明示語言及真正逐字起訖', async taskMode => {
+    const compressSpeechAudio = vi.fn();
+    Object.defineProperty(window, 'subtool', { configurable: true, value: { compressSpeechAudio } });
+    global.fetch = vi.fn().mockResolvedValue(whisperResponse([{ text: '반갑습니다!', start: 0.12, end: 0.8 }]));
+    const result = await transcribeAudioStream({ audioBuffer: createQuietAudioBuffer(1), taskMode,
+      provider: 'groq', apiKey: 'test', language: 'ko', prompt: 'old', temperature: 0.7 });
+    const form = fetch.mock.calls[0][1].body;
+    expect(form.get('model')).toBe('whisper-large-v3');
+    expect(form.get('temperature')).toBe('0');
+    expect(form.get('language')).toBe('ko');
+    expect(form.get('response_format')).toBe('verbose_json');
+    expect(form.getAll('timestamp_granularities[]')).toEqual(['word', 'segment']);
+    expect(form.has('prompt')).toBe(false);
+    expect(form.get('file').type).toBe('audio/wav');
+    expect(compressSpeechAudio).not.toHaveBeenCalled();
+    expect(result).toEqual([{ start: 0.12, end: 0.8, text: '반갑습니다!', words: [{ start: 0.12, end: 0.8, text: '반갑습니다!' }] }]);
+  });
+
+  it.each(['groq','openai'])('%s 自動字幕拒用缺少時間的文字，靜音則回傳空結果', async provider => {
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({
+      text: 'Unanchored', segments: [{start: null,end: 2,text: 'Unanchored'}]
+    }) }).mockResolvedValueOnce({ ok: true, json: async () => ({ text: '', segments: [] }) });
+    const request = { audioBuffer: createQuietAudioBuffer(1), provider, apiKey: 'test', taskMode: 'transcribe' };
+    await expect(transcribeAudioStream(request)).rejects.toThrow('時間');
+    await expect(transcribeAudioStream(request)).resolves.toEqual([]);
+  });
+
+  it('OpenAI 文本匹配使用逐字模型、零溫度、自動語言及原生逐字時間', async () => {
+    global.fetch = vi.fn().mockResolvedValue(whisperResponse([{ text: 'Hello', start: 0.01, end: 0.3 }]));
+    const segments = await transcribeAudioStream({ audioBuffer: createQuietAudioBuffer(1), taskMode: 'align', provider: 'openai',
+      apiKey: 'test', prompt: 'old setting', temperature: 0.2 });
+    const form = fetch.mock.calls[0][1].body;
+    expect(form.get('model')).toBe('whisper-1');
+    expect(form.getAll('timestamp_granularities[]')).toEqual(['word', 'segment']);
+    expect(form.has('prompt')).toBe(false);
+    expect(form.get('temperature')).toBe('0');
+    expect(form.has('language')).toBe(false);
+    expect(segments[0].words).toEqual([{start:0.01,end:0.3,text:'Hello'}]);
+    const matched = resolveRecognitionAlignment({taskMode:'align', transcript:'Hello!', evidenceSegments:segments});
+    expect(matched.segments[0]).toMatchObject({text:'Hello!', start:0.01, end:0.3,
+      alignment:{status:'matched', timingEvidence:'word'}});
   });
 
   it.each([
@@ -157,6 +201,28 @@ describe('Whisper 雲端長音訊分段', () => {
 
     expect(segments.map(segment => segment.text)).toEqual(['left', 'right']);
     expect(segments.flatMap(segment => segment.words.map(word => word.text))).toEqual(['left', 'right']);
+  });
+
+  it.each([
+    ['en', 'Hello, “ready?!”', ['hello', 'ready'], ['Hello,', '“ready?!”']],
+    ['en', 'READY, ready!', ['ready', 'ready'], ['READY,', 'ready!']],
+    ['ko', '정말 좋아! 안 그래요?', ['정말', '좋아', '안', '그래요'], ['정말 좋아!', '안 그래요?']],
+  ])('%s 的重疊區間保留對應原句的標點、大小寫和詞界', async (language, text, tokens, expected) => {
+    const response = offset => ({
+      ok: true,
+      json: async () => ({
+        text, segments: [{ start: 593 - offset, end: 600 - offset, text }],
+        words: tokens.map((word, i) => {
+          const start = (i < tokens.length / 2 ? 593 : 597) + i / 4 - offset;
+          return { word, start, end: start + 0.2 };
+        })
+      })
+    });
+    global.fetch = vi.fn().mockResolvedValueOnce(response(0)).mockResolvedValueOnce(response(590));
+    const segments = await transcribeAudioStream({ audioBuffer: createQuietAudioBuffer(601), inT: 0, outT: 601,
+      taskMode: 'align', provider: 'groq', language, apiKey: 'test' });
+    expect(segments.map(segment => segment.text)).toEqual(expected);
+    expect(segments.flatMap(segment => segment.words.map(word => word.text))).toEqual(tokens);
   });
 
   it('同一個 overlap word 的時間碼抖動跨過 core 邊界時仍只保留一份', async () => {

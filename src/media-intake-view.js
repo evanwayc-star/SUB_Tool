@@ -124,7 +124,7 @@ export function handleMediaIntakeProgress(data){
     starts.delete(owned?data.requestId:data.jobId);
     const succeeded=data.outcome==='success';
     // 這只是來源的一段波形完成；整體進度由外層工作持有，也不是 Proxy ingest 完成事件。
-    if(data.stage==='source-channel-waveform'||(succeeded&&data.stage==='source-waveform')) return true;
+    if(data.stage==='source-channel-waveform'||data.stage==='source-waveform') return true;
     const pureProxy=data.outputs?.proxy===true&&data.outputs.audio===false;
     if(!succeeded||!pureProxy){
       const label=data.outputs?.proxy&&data.outputs.audio?'音軌快取':data.label||'轉檔';

@@ -4,11 +4,12 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
 const { validateScreenTextOptions } = require('./screen-text-settings');
+const { SCREEN_TEXT_DEFAULTS } = require('../shared/screen-text-options.cjs');
 
 const MAX_LINE_LENGTH = 32 * 1024 * 1024;
 
 function validateScreenTextRequest(input) {
-  const { path: source, start, end, samplesPerSecond = 2, requestId } = input || {};
+  const { path: source, start, end, samplesPerSecond = SCREEN_TEXT_DEFAULTS.sampleFps, requestId } = input || {};
   if (typeof source !== 'string' || !path.isAbsolute(source) || source.includes('\0')) throw new Error('缺少影片來源路徑');
   if (!Number.isFinite(start) || start < 0 || !Number.isFinite(end) || end <= start) throw new Error('辨識範圍無效');
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(requestId)) throw new Error('無效的辨識工作編號');

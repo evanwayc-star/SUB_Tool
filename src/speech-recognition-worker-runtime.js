@@ -16,6 +16,53 @@ export function resolveBuiltinExecutionPlan({
     : { device: 'wasm', dtype: wasmDtype };
 }
 
+// Transformers.js 3.3.3 substitutes English when language is omitted. Follow
+// Whisper's detect_language: decode just <|startoftranscript|> and compare
+// only the language token logits from this multilingual model.
+export async function detectBuiltinSpeechLanguage(transcriber, samples, Tensor) {
+  const start = samples.findIndex(sample => sample !== 0);
+  if (start < 0) return null;
+  const config = transcriber.model.generation_config;
+  const startToken = config?.decoder_start_token_id;
+  if (!Number.isInteger(startToken) || !config.lang_to_id) {
+    throw new Error('本機模型缺少自動偵測語言所需的設定。');
+  }
+  const features = await transcriber.processor(samples.subarray(start, start + SAMPLE_RATE * 30));
+  const decoderStart = new Tensor('int64', BigInt64Array.of(BigInt(startToken)), [1, 1]);
+  let outputs;
+  try {
+    outputs = await transcriber.model({ input_features: features.input_features, decoder_input_ids: decoderStart });
+    const scores = outputs.logits.data;
+    let maxScore = -Infinity;
+    let language;
+    for (const [token, id] of Object.entries(config.lang_to_id)) {
+      const score = scores[id];
+      if (Number.isFinite(score) && score > maxScore) {
+        maxScore = score;
+        language = token.slice(2, -2);
+      }
+    }
+    if (!language) throw new Error('本機模型未能偵測音訊語言，請指定語言後重試。');
+    return language;
+  } finally {
+    for (const tensor of Object.values(outputs || {})) tensor.dispose();
+    decoderStart.dispose();
+    for (const tensor of Object.values(features)) tensor.dispose();
+  }
+}
+
+export function hasCompleteBuiltinWordTimes(output, audioDuration) {
+  const chunks = (output?.chunks || []).filter(chunk => chunk?.text?.trim());
+  if (!chunks.length) return !output?.text?.trim();
+  let previousEnd = 0;
+  return chunks.every(chunk => {
+    const [start, end] = chunk.timestamp || [];
+    const valid = Number.isFinite(start) && Number.isFinite(end) && start >= previousEnd && start < audioDuration && end > start;
+    previousEnd = end;
+    return valid;
+  });
+}
+
 export function buildBuiltinGenerationOptions({ language, prompt, temperature = 0, streamer, returnTimestamps = 'word' } = {}) {
   const value=Number(temperature);
   const samplingTemperature=Number.isFinite(value)?Math.min(1,Math.max(0,value)):0;
@@ -85,7 +132,22 @@ export function createBuiltinChunkProgressStreamer({
   };
 }
 
-export function normalizeBuiltinAsrSegments(output, audioDuration) {
+export function normalizeBuiltinAsrSegments(output, audioDuration, timestamps = 'word') {
+  if (timestamps === true) {
+    const chunks = Array.isArray(output?.chunks) ? output.chunks : [];
+    const segments = [];
+    for (const chunk of chunks) {
+      const text = typeof chunk?.text === 'string' ? chunk.text.trim() : '';
+      if (!text) continue;
+      const [start, end] = Array.isArray(chunk.timestamp) ? chunk.timestamp : [];
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || start >= audioDuration) {
+        throw new Error('本機模型沒有回傳完整的字幕起訖時間，請縮小辨識範圍後重試。');
+      }
+      segments.push({ start, end: Math.min(end, audioDuration), text });
+    }
+    if (!segments.length && output?.text?.trim()) throw new Error('本機模型沒有回傳字幕時間碼。');
+    return segments;
+  }
   if (!Array.isArray(output?.chunks) || output.chunks.length === 0) {
     return typeof output?.text === 'string' && output.text.trim()
       ? [{ start: 0, end: audioDuration, text: output.text.trim() }]

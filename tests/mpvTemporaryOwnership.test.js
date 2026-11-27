@@ -14,8 +14,9 @@ const { createMpvHost } = require('../electron/mpv-host.js');
 const { captureOutputDirectory } = require('../electron/export-lease.js');
 const { parse } = require('acorn');
 
-function setup(dir, { autoClose = true, rootAuthority } = {}) {
+function setup(dir, { autoClose = true, rootAuthority, describeSource, subtitleReply } = {}) {
   const commands = [];
+  const tracks = [];
   const children = [];
   const documents = [];
   class Window {
@@ -30,8 +31,14 @@ function setup(dir, { autoClose = true, rootAuthority } = {}) {
   socket.write = raw => {
     const { command, request_id: id } = JSON.parse(raw);
     commands.push(command);
-    if (command[0] === 'loadfile') queueMicrotask(() => socket.emit('data', Buffer.from('{"event":"start-file","playlist_entry_id":1}\n{"event":"file-loaded"}\n{"event":"playback-restart"}\n')));
-    if (id) queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({ request_id:id, error:'success', data:command[0] === 'loadfile' ? { playlist_entry_id:1 } : command[1] === 'path' ? 'movie.mp4' : 1 })+'\n')));
+    const reply = (data, error='success') => queueMicrotask(() => socket.emit('data', Buffer.from(JSON.stringify({request_id:id, error, data})+'\n')));
+    if (subtitleReply?.(command, reply, tracks)) return;
+    if (command[0] === 'loadfile') {
+      tracks.length = 0;
+      queueMicrotask(() => socket.emit('data', Buffer.from('{"event":"start-file","playlist_entry_id":1}\n{"event":"file-loaded"}\n{"event":"playback-restart"}\n')));
+    }
+    if (command[0] === 'sub-add') tracks.push({type:'sub', external:true, 'external-filename':command[1], id:tracks.length+1, selected:true});
+    if (id) reply(command[1] === 'track-list' ? tracks : command[0] === 'loadfile' ? { playlist_entry_id:1 } : command[1] === 'path' ? 'movie.mp4' : 1);
   };
   const host = createMpvHost({ BrowserWindow: Window, spawn: () => {
     const child = Object.assign(new EventEmitter(), { stderr:new PassThrough(), kill() { if (autoClose) queueMicrotask(() => child.emit('close', 0)); } });
@@ -39,12 +46,99 @@ function setup(dir, { autoClose = true, rootAuthority } = {}) {
   },
     createConnection: () => { queueMicrotask(() => socket.emit('connect')); return socket; }, fs, path, url,
     getMainWindow: () => ({ isDestroyed: () => false, getContentBounds: () => ({ x:0, y:0 }) }),
-    supported: () => true, findExecutable: () => 'mpv', ensureTmp: () => {}, tmpDir:dir,
+    supported: () => true, findExecutable: () => 'mpv', ensureTmp: () => {}, tmpDir:dir, describeSource,
     tempFiles:new Set(), tempRootAuthority:rootAuthority, guideHtml:'guide content', now:() => 123, setTimer:() => 0, clearTimer:() => {} });
-  return { host, commands, children, documents };
+  return { host, commands, tracks, children, documents };
 }
 
 describe('mpv 暫存檔所有權', () => {
+  it('同一畫格快速改樣式等待 mpv 讀完 ASS，再將最後一次修改套至專案字幕軌', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mpv-subtitle-edit-'));
+    let finishAdd;
+    const { host, commands, tracks } = setup(dir, { subtitleReply(command, reply, currentTracks) {
+      if (command[0] === 'sub-reload') {
+        const track = currentTracks.find(t => t.id === command[1]);
+        for (const t of currentTracks) t.selected = t === track;
+        track.id = 6; // 另一條字幕還在時，mpv 會給重載的專案字幕新 ID 並選取。
+        reply(null);
+        return true;
+      }
+      if (command[0] !== 'sub-add' || finishAdd) return false;
+      finishAdd = () => {
+        currentTracks.push({ type:'sub', external:true, 'external-filename':command[1], id:4, selected:false });
+        currentTracks.push({ type:'sub', external:false, id:5, selected:true });
+        reply(null);
+      };
+      return true;
+    } });
+    try {
+      const {sourceSessionId} = await host.launch({src:'movie.mp4'});
+      const first = host.setSubtitles('white', sourceSessionId);
+      await vi.waitFor(() => expect(finishAdd).toBeTypeOf('function'));
+      const file = commands.find(c => c[0] === 'sub-add')[1];
+      const second = host.setSubtitles('blue', sourceSessionId);
+      const latest = host.setSubtitles('green', sourceSessionId);
+      expect(fs.readFileSync(file, 'utf8')).toBe('white');
+      finishAdd();
+      expect(await first).toBe(false);
+      expect(await second).toBe(false);
+      expect(await latest).toBe(true);
+      expect(fs.readFileSync(file, 'utf8')).toBe('green');
+      expect(tracks).toHaveLength(2);
+      expect(tracks.filter(t => t.selected)).toEqual([expect.objectContaining({id:6,'external-filename':file})]);
+      expect(commands.filter(c => c[0] === 'sub-reload')).toEqual([['sub-reload',4]]);
+      expect(commands.filter(c => c[0] === 'set_property' && c[1] === 'sid')).toEqual([]);
+    } finally { await host.disposeAndWait(); fs.rmSync(dir,{recursive:true,force:true}); }
+  });
+  it('mpv 拒絕重載但軌仍存在時重查 ID 再試；連續失敗不誤報成功或重複加軌', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mpv-subtitle-retry-'));
+    let failures = 1;
+    const {host, commands, tracks} = setup(dir, {subtitleReply(command,reply,sourceTracks) {
+      if (command[0] !== 'sub-reload' || failures <= 0) return false;
+      failures--;
+      sourceTracks[0].id++;
+      reply(null,'error running command');
+      return true;
+    }});
+    try {
+      const {sourceSessionId} = await host.launch({src:'movie.mp4'});
+      expect(await host.setSubtitles('initial',sourceSessionId)).toBe(true);
+      expect(await host.setSubtitles('revised',sourceSessionId)).toBe(true);
+      expect(commands.filter(c => c[0] === 'sub-reload')).toEqual([['sub-reload',1],['sub-reload',2]]);
+      failures = 2;
+      expect(await host.setSubtitles('later',sourceSessionId)).toBe(false);
+      expect(await host.setSubtitles('recovered',sourceSessionId)).toBe(true);
+      expect(tracks).toHaveLength(1);
+      expect(commands.filter(c => c[0] === 'sub-add')).toHaveLength(1);
+      expect(fs.readFileSync(tracks[0]['external-filename'],'utf8')).toBe('recovered');
+    } finally { await host.disposeAndWait(); fs.rmSync(dir,{recursive:true,force:true}); }
+  });
+  it('換片期間和前一個來源的延遲樣式無法覆蓋新片；加入失敗後以最新內容重試', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mpv-subtitle-source-'));
+    let resumeProbe, failAdd = true;
+    const {host, commands} = setup(dir, {describeSource:() => resumeProbe === null
+      ? new Promise(resolve => { resumeProbe = resolve; }) : undefined, subtitleReply(command,reply) {
+      if (command[0] !== 'sub-add' || !failAdd) return false;
+      failAdd = false;
+      reply(null,'error running command');
+      return true;
+    }});
+    try {
+      const first = await host.launch({src:'movie.mp4'});
+      resumeProbe = null;
+      const loading = host.loadFile('movie.mp4');
+      expect(await host.setSubtitles('stale while loading',first.sourceSessionId)).toBe(false);
+      resumeProbe();
+      const next = await loading;
+      expect(await host.setSubtitles('stale after load',first.sourceSessionId)).toBe(false);
+      expect(commands.some(c => c[0] === 'sub-add')).toBe(false);
+      expect(await host.setSubtitles('new style',next.sourceSessionId)).toBe(true);
+      const adds = commands.filter(c => c[0] === 'sub-add');
+      expect(adds).toHaveLength(2);
+      expect(fs.readFileSync(adds[1][1],'utf8')).toBe('new style');
+      expect(commands.some(c => c[0] === 'sub-reload')).toBe(false);
+    } finally { await host.disposeAndWait(); fs.rmSync(dir,{recursive:true,force:true}); }
+  });
   it('真 main 組裝把建立時 TMP authority 交給 host', () => {
     const source = fs.readFileSync(path.join(process.cwd(),'electron/main.js'),'utf8');
     const tree = parse(source,{ecmaVersion:'latest',sourceType:'script'});

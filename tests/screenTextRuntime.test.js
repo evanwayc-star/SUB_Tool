@@ -30,6 +30,18 @@ function fixture() {
 }
 
 describe('畫面文字辨識 Rust/VLM 原生工作', () => {
+  it('跨程序缺省請求使用旗艦1920及每秒10張，私有遷移記號不傳入原生程式', async () => {
+    const { runtime, child, message } = fixture();
+    const pending = runtime.recognize(sender(), { path:request().path, start:2, end:6, requestId:'defaults', qualityDefaultsVersion:1 });
+    await Promise.resolve();
+    const input = JSON.parse(child.stdin.read().toString());
+    expect(input).toMatchObject({ provider:'openai', model:'gpt-5.4', frameWidth:1920, samplesPerSecond:10, smartAccuracy:true });
+    expect(input).not.toHaveProperty('qualityDefaultsVersion');
+    message({ type:'result', cues:[], processedEnd:6 });
+    child.emit('close', 0);
+    await expect(pending).resolves.toEqual({ cues:[], processedEnd:6 });
+  });
+
   it('NTSC 輸出範圍的結果不得因跨行程一個 ULP 差異被當成程序清理失敗', async () => {
     const { runtime, child, message, terminateChild } = fixture();
     const start = 314 / (30000 / 1001), end = 1410 / (30000 / 1001);
@@ -69,10 +81,10 @@ describe('畫面文字辨識 Rust/VLM 原生工作', () => {
   it('可信任工具與金鑰只走 stdin，分段 UTF-8 與兩種重疊字幕均保留', async () => {
     const { runtime, child, spawnChild, onProgress, executable } = fixture();
     const owner = sender(), input = request();
-    const pending = runtime.recognize(owner, { ...input, apiKey: 'foreign', ffmpegPath: 'foreign', cacheDir: 'foreign' });
+    const pending = runtime.recognize(owner, { ...input, apiKey: 'foreign', ffmpegPath: 'foreign', cacheDir: 'foreign', qualityDefaultsVersion: 1 });
     await Promise.resolve();
     expect(spawnChild).toHaveBeenCalledWith(executable, [], expect.objectContaining({ windowsHide: true }));
-    expect(JSON.parse(child.stdin.read().toString())).toEqual({ ...input, samplesPerSecond: 2,
+    expect(JSON.parse(child.stdin.read().toString())).toEqual({ ...input, samplesPerSecond: 10,
       apiKey: 'private-test-key', cacheDir: 'private-cache', ffmpegPath: 'private-ffmpeg', ffprobePath: 'private-ffprobe' });
     child.stdout.write('{"type":"progr');
     child.stdout.write('ess","progress":0.5,"message":"正在複檢"}\n');

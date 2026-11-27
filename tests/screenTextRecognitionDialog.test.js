@@ -14,8 +14,8 @@ vi.mock('../src/screen-text-recognition.js', () => ({ getScreenTextPlan:vi.fn(),
 const clip = { name:'<節目>.mov' };
 const otherClip = { name:'另一段.mov' };
 const element = id => document.getElementById(id);
-const settings = { provider:'openai', model:'gpt-5.4-mini', sourceLang:'auto', sampleFps:2,
-  frameWidth:1280, smartAccuracy:true, hasApiKey:{openai:true,gemini:true} };
+const settings = { provider:'openai', model:'gpt-5.4', sourceLang:'auto', sampleFps:10,
+  frameWidth:1920, smartAccuracy:true, hasApiKey:{openai:true,gemini:true} };
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 async function openDialog(...args) {
   openScreenTextRecognitionDialog(...args);
@@ -37,7 +37,19 @@ afterEach(() => {
   Project.onWorkspaceInvalidated.mockClear();
 });
 
-it('starts once with cloud vision settings at two samples per second and reports the generated cue count', async () => {
+it('重新開啟時保留已存的 mini、低取樣與較小畫面設定', async () => {
+  window.subtool.getScreenTextSettings.mockResolvedValue({ ...settings, model:'gpt-5.4-mini', sampleFps:2, frameWidth:960, smartAccuracy:false });
+  recognizeClipText.mockReturnValue(new Promise(() => {}));
+  await openDialog(clip, () => true);
+  expect(element('ocrModel').value).toBe('gpt-5.4-mini');
+  expect(element('ocrSampleFps').value).toBe('2');
+  expect(element('ocrFrameWidth').value).toBe('960');
+  expect(element('ocrSmartAccuracy').checked).toBe(false);
+  element('ocrStart').click(); await tick();
+  expect(recognizeClipText.mock.lastCall[1]).toMatchObject({ model:'gpt-5.4-mini', sampleFps:2, frameWidth:960, smartAccuracy:false });
+});
+
+it('starts once with flagship cloud vision settings at ten samples per second and reports the generated cue count', async () => {
   let finish;
   recognizeClipText.mockReturnValue(new Promise(resolve => { finish = resolve; }));
   await openDialog(clip, () => true);
@@ -51,7 +63,7 @@ it('starts once with cloud vision settings at two samples per second and reports
   expect(recognizeClipText).toHaveBeenCalledTimes(1);
   const [target, options] = recognizeClipText.mock.lastCall;
   expect(target).toBe(clip);
-  expect(options).toMatchObject({ provider:'openai', model:'gpt-5.4-mini', sourceLang:'auto', sampleFps:2, frameWidth:1280, smartAccuracy:true });
+  expect(options).toMatchObject({ provider:'openai', model:'gpt-5.4', sourceLang:'auto', sampleFps:10, frameWidth:1920, smartAccuracy:true });
   const currentBar = element('ocrProgressBar');
   openScreenTextMonitorDialog();
   expect(element('ocrProgressBar')).toBe(currentBar);
@@ -297,13 +309,13 @@ it('switches providers without carrying a typed key and stores only nonsecret jo
   element('ocrProvider').value = 'gemini';
   element('ocrProvider').dispatchEvent(new Event('change'));
   expect(element('ocrApiKey').value).toBe('');
-  expect(element('ocrModel').value).toBe('gemini-2.5-flash');
+  expect(element('ocrModel').value).toBe('gemini-2.5-pro');
   element('ocrApiKey').value = 'gemini-private';
   element('ocrFrameWidth').value = '960';
   element('ocrSmartAccuracy').checked = false;
   element('ocrStart').click(); await tick();
   expect(window.subtool.saveScreenTextSettings).toHaveBeenCalledWith({
-    provider:'gemini', model:'gemini-2.5-flash', sourceLang:'auto', sampleFps:2,
+    provider:'gemini', model:'gemini-2.5-pro', sourceLang:'auto', sampleFps:10,
     frameWidth:960, smartAccuracy:false, apiKey:'gemini-private',
   });
   expect(getScreenTextSession()).toMatchObject({provider:'gemini', frameWidth:960, smartAccuracy:false});

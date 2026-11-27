@@ -77,6 +77,7 @@ function publicClip(clip = {}, run = null) {
 function privateClip(clip = {}) {
   const copy = {
     ...clip,
+    ...(clip.recognitionSelection ? { recognitionSelection:deepFreeze(clonePlain(clip.recognitionSelection)) } : {}),
     ...(clip.web ? { web: { ...clip.web } } : {}),
     ...(Array.isArray(clip.recognitionTracks)
       ? { recognitionTracks: clip.recognitionTracks.map(track => ({ ...track })) }
@@ -89,9 +90,11 @@ function freezeWorkSpec(initData = {}) {
   const clips = Object.freeze((Array.isArray(initData.clips) ? initData.clips : []).map(privateClip));
   return Object.freeze({
     taskMode: initData.taskMode === 'align' ? 'align' : 'transcribe',
+    rangeMode: initData.rangeMode || 'clip',
+    range: initData.range ? Object.freeze({ start:initData.range.start, end:initData.range.end }) : null,
     provider: initData.provider || 'builtin',
     builtinModel: initData.builtinModel || '',
-    language: initData.language || 'zh',
+    language: initData.language || 'auto',
     timelineFps: Number(initData.timelineFps) || 24,
     timelineDropFrame: !!initData.timelineDropFrame,
     apiKey: typeof initData.apiKey === 'string' ? initData.apiKey : '',
@@ -122,6 +125,8 @@ function makeSnapshot(run) {
   return deepFreeze({
     id: run.id,
     taskMode: run.spec.taskMode,
+    rangeMode: run.spec.rangeMode,
+    range: run.spec.range,
     provider: run.spec.provider,
     builtinModel: run.spec.builtinModel,
     language: run.spec.language,
@@ -347,11 +352,12 @@ async function executeAsrWork(run, adapters) {
       throwIfInactive(run);
       const audioBuffer = await adapters.extractAudio(clip, {
         signal: run.controller.signal,
-        recognitionSelection: run.spec.recognitionSelection
+        recognitionSelection: clip.recognitionSelection || run.spec.recognitionSelection
       });
       let evidenceSegments;
       try {
         throwIfInactive(run);
+        if (!audioBuffer && run.spec.rangeMode !== 'clip' && run.spec.taskMode === 'transcribe') continue;
         const inT = Number(clip.in) || 0;
         const outT = (clip.out && clip.out > inT)
           ? clip.out

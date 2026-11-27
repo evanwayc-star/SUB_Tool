@@ -163,7 +163,7 @@ fn execute(req: Request) -> Result<(), String> {
         Ok(())
     };
     let identity = json!({
-        "version": "subtool-card-vision-1", "path": std::fs::canonicalize(&req.path).map_err(|_| "無法解析影片路徑。")?,
+        "version": pipeline::VISION_ENGINE_VERSION, "path": std::fs::canonicalize(&req.path).map_err(|_| "無法解析影片路徑。")?,
         "size": metadata.len(), "modified": metadata.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|t| t.as_nanos().to_string()),
         "start": req.start, "end": req.end, "fps": req.samples_per_second,
         "language": req.source_lang, "provider": req.provider.as_str(), "model": req.model,
@@ -172,6 +172,7 @@ fn execute(req: Request) -> Result<(), String> {
     let output = cache_identity_path(&req.cache_dir, &identity);
     credentials::set_api_key(req.api_key)?;
     video::configure_tools(req.ffmpeg_path, req.ffprobe_path)?;
+    let detail = llm::vision_detail(req.provider, &req.model).into();
     let cfg = RunConfig {
         video_path: req.path,
         output_dir: output.clone(),
@@ -182,7 +183,7 @@ fn execute(req: Request) -> Result<(), String> {
         translate_model: req.model,
         fps: req.samples_per_second,
         frame_width: req.frame_width,
-        detail: "high".into(),
+        detail,
         workers: 2,
         translate_enabled: false,
         smart_accuracy: req.smart_accuracy,
@@ -341,6 +342,7 @@ mod tests {
         std::fs::create_dir(&old).unwrap();
         assert_eq!(cache_identity_path(&root, &identity), old);
         for (key, value) in [
+            ("version", json!(pipeline::VISION_ENGINE_VERSION)),
             ("path", json!("other.mp4")),
             ("size", json!(124)),
             ("modified", json!("457")),

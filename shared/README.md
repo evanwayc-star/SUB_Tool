@@ -26,6 +26,7 @@
 | 桌面預覽 Proxy 的高度上限與編碼碼率，供轉檔及容量估算共用 | `preview-proxy.cjs` |
 | 播放器與來源時間的原點、裁切內的微秒目標 | `media-source-clock.cjs` |
 | 專案畫布寬高及像素額度 | `project-canvas.cjs` |
+| 畫面文字辨識品質預設、內建模型及畫面寬度 | `screen-text-options.cjs` |
 | UTF-16LE BOM 編碼、UTF-8／UTF-16LE／UTF-16BE 解碼 | `text-encoding.cjs` |
 
 ## 保留在各層的責任

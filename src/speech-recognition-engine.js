@@ -14,8 +14,14 @@ import OpenCC from 'opencc-js/cn2t';
 const WHISPER_CLOUD_CHUNK_SECONDS = 600;
 const WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS = 10;
 const WHISPER_CLOUD_MAX_WAV_BYTES = 20_000_000;
+// Gemini inline requests include base64 expansion: 300 seconds of lossless
+// 16 kHz mono WAV is about 12.8 MB in JSON, within a conservative 20 MB budget
+// compatible with the inline-audio guide as well as newer, larger API limits.
+const GEMINI_INLINE_CHUNK_SECONDS = 300;
 const WHISPER_OVERLAP_WORD_MATCH_TOLERANCE_SECONDS = 1.25;
 let whisperCompressionRequestSequence = 0;
+
+const isEditorSpeechTask = taskMode => taskMode === 'transcribe' || taskMode === 'align';
 
 function throwIfRecognitionAborted(signal) {
   if (!signal?.aborted) return;
@@ -61,19 +67,19 @@ export const BUILTIN_MODELS = {
   'onnx-community/whisper-large-v3-turbo': {
     id: 'onnx-community/whisper-large-v3-turbo_timestamped',
     name: 'Large v3 Turbo q4 逐字時間版',
-    size: '約 800MB',
+    size: 'CPU 約 1.09 GB／GPU 約 760 MB',
     webgpuDtype: 'q4',
     wasmDtype: 'q8',
-    desc: '大型模型的相容性量化版，速度優先；精準成品仍建議比較 Small 或雲端 Speech-to-Text。'
+    desc: '多語言模型，提供文本匹配所需的逐詞時間碼。'
   },
   'onnx-community/whisper-large-v3': {
     id: 'onnx-community/whisper-large-v3-ONNX',
     name: 'Large v3 旗艦多語言版',
-    size: '約 1.5GB',
+    size: 'CPU 約 1.83 GB／GPU 約 1.22 GB',
     webgpuDtype: 'q4',
     wasmDtype: 'q8',
     returnTimestamps: true,
-    desc: '完整 Large v3 多語言旗艦版，詞彙庫最完整、精準度最高；首次使用需下載較多資料。'
+    desc: '完整 Large v3 多語言模型，提供原生句級時間碼。'
   }
 };
 
@@ -81,18 +87,18 @@ const simplifiedToTaiwanTraditional = OpenCC.Converter({ from: 'cn', to: 'twp' }
 
 /**
  * 正規化字幕空白間距：
- * 消除 CJK（中/日/韓）字元之間的不必要空白與標點前贅空，同時保持中英/數字混排自然空格。
+ * 消除中日文斷詞空白，保留韓語詞界以及中英／數字混排的空格。
  */
 export function normalizeSubtitleSpacing(text, locale = 'zh') {
   if (typeof text !== 'string' || !text) return '';
   let result = text.trim();
   const compact = azureUsesCompactSpacing(locale, result);
   if (compact) {
-    // 1. 去除中/日/韓 CJK 字符之間的任何空白（包括全形空格、不斷行空格）
-    result = result.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[\s\u3000\u00A0]+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])/gu, '');
+    // 韓文詞與詞之間的空白承載詞義，即使出現在中文或日文字幕中也要保留。
+    result = result.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])\s+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])/gu, '');
     // 2. 去除 CJK 與中文/通用標點符號之間的空白
     result = result.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[\s\u3000\u00A0]+(?=[，。！？、；：”’」』）】》〉!?,.:;])/gu, '');
-    result = result.replace(/(?<=[“‘「『（【《〈!?,.:;])[\s\u3000\u00A0]+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])/gu, '');
+    result = result.replace(/(?<=[“‘「『（【《〈!?,.:;])[\s\u3000\u00A0]+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])/gu, '');
   }
   // 3. 多重空白收斂為單一空格
   result = result.replace(/[\s\u3000\u00A0]+/gu, ' ').trim();
@@ -139,10 +145,11 @@ function downmixAndResampleMono16k(audioBuffer, startSec = 0, endSec = null) {
   const srcSampleRate = audioBuffer.sampleRate;
   const numChannels = audioBuffer.numberOfChannels;
   const startSample = Math.max(0, Math.floor(startSec * srcSampleRate));
-  const endSample = Math.min(
-    audioBuffer.length,
-    Math.floor((endSec != null ? endSec : audioBuffer.duration) * srcSampleRate)
-  );
+  // A complete range-reader buffer already has an exact sample count. Avoid
+  // losing its final sample when duration * sampleRate rounds just below it.
+  const endSample = endSec == null || endSec >= audioBuffer.duration
+    ? audioBuffer.length
+    : Math.min(audioBuffer.length, Math.floor(endSec * srcSampleRate));
   const srcLength = Math.max(0, endSample - startSample);
   if (srcLength <= 0) return null;
 
@@ -389,8 +396,9 @@ async function compressWhisperUploadForDesktop(wavBlob, signal) {
  */
 export async function transcribeWithBuiltinModel({
   audioFloat32,
+  taskMode,
   modelId = 'onnx-community/whisper-base',
-  language = 'zh',
+  language = taskMode === 'transcribe' || taskMode === 'align' ? 'auto' : 'zh',
   prompt = '',
   temperature = 0,
   onProgress = null,
@@ -400,17 +408,21 @@ export async function transcribeWithBuiltinModel({
     throw new Error('音訊長度為 0，無法進行辨識');
   }
   throwIfRecognitionAborted(signal);
+  const automatic = isEditorSpeechTask(taskMode);
+  if (taskMode === 'transcribe') modelId = 'onnx-community/whisper-large-v3';
+  if (taskMode === 'align') modelId = 'onnx-community/whisper-large-v3-turbo';
   const modelMeta = BUILTIN_MODELS[modelId] || BUILTIN_MODELS['onnx-community/whisper-base'];
   return transcribeBuiltinAudioInWorker({
     audioFloat32,
+    taskMode,
     modelId: modelMeta.id,
     modelName: modelMeta.name,
     webgpuDtype: modelMeta.webgpuDtype,
     wasmDtype: modelMeta.wasmDtype,
     returnTimestamps: modelMeta.returnTimestamps || 'word',
     language,
-    prompt,
-    temperature,
+    prompt: automatic ? '' : prompt,
+    temperature: automatic ? 0 : temperature,
     onProgress,
     signal
   });
@@ -430,7 +442,7 @@ async function geminiResponseError(response, signal) {
   return new Error(json?.error?.message || `Google API 回傳錯誤 HTTP ${response.status}`);
 }
 
-async function* geminiModelCandidates(apiKey, signal) {
+async function* geminiModelCandidates(apiKey, signal, preferredModels = GEMINI_AUDIO_MODELS) {
   let admitted = false;
   for (const version of ['v1', 'v1beta']) {
     const models = new Set();
@@ -460,7 +472,7 @@ async function* geminiModelCandidates(apiKey, signal) {
       if (pageToken && (seenTokens.has(pageToken) || seenTokens.size >= 100)) throw new Error('Google Gemini 模型列表分頁無效');
       if (pageToken) seenTokens.add(pageToken);
     } while (pageToken);
-    for (const model of GEMINI_AUDIO_MODELS) {
+    for (const model of preferredModels) {
       if (!models.has(model)) continue;
       admitted = true;
       yield { version, model };
@@ -474,13 +486,84 @@ export async function resolveGeminiModel(apiKey, signal = null) {
   for await (const candidate of geminiModelCandidates(apiKey, signal)) return candidate;
 }
 
+const GEMINI_TRANSCRIBE_LANGUAGES = { en: 'en-US', zh: 'cmn-Hans-CN', ja: 'ja-JP', ko: 'ko-KR' };
+
+// Interactions returns word offsets in protobuf Duration format. Build each
+// subtitle from the corresponding range of the formatted transcript so that
+// punctuation and inter-word spacing survive speaker and sentence boundaries.
+function geminiWordSegments(content, language) {
+  const text = String(content.text || '').trim();
+  if (!text) return [];
+  const seconds = value => /^\d+(?:\.\d+)?s$/.test(value) ? Number(value.slice(0,-1)) : NaN;
+  const words = (content.annotations || []).filter(item => item.type === 'word_info').map(item => ({
+    text: String(item.text || '').trim(), start: seconds(item.start_offset), end: seconds(item.end_offset),
+    speaker: item.speaker
+  }));
+  if (!words.length || words.some(word => !word.text || !(word.end > word.start) || !Number.isFinite(word.end))) {
+    throw new Error('Google 語音辨識回傳的逐字時間不完整，無法建立字幕。');
+  }
+  const ranges = locateTimedWordsInText(text, words);
+  if (ranges) {
+    // Some responses include punctuation only in the formatted text.
+    for (let i = 0; i < words.length; i++) {
+      const suffix = text.slice(ranges[i].end, ranges[i+1]?.start ?? text.length).trimEnd();
+      if (suffix && /^[\p{P}\p{S}\s]+$/u.test(suffix)) words[i].text += suffix;
+    }
+  }
+  const segments = [];
+  let first = 0;
+  for (let i = 1; i <= words.length; i++) {
+    if (i < words.length && words[i].speaker === words[first].speaker) continue;
+    const group = words.slice(first, i);
+    const phrase = first === 0 && i === words.length ? text : ranges
+      ? text.slice(first === 0 ? 0 : ranges[first].start, ranges[i]?.start ?? text.length).trim()
+      : joinTimedWordTexts(group, language);
+    segments.push(...splitAzurePhraseForSubtitles({
+      start: group[0].start, end: group.at(-1).end, text: phrase,
+      words: group, locale: language === 'auto' ? '' : language,
+      ...(group[0].speaker ? { speaker: group[0].speaker } : {})
+    }));
+    first = i;
+  }
+  return segments;
+}
+
+async function geminiSpeechToText(base64Audio, key, language, signal) {
+  const locale = GEMINI_TRANSCRIBE_LANGUAGES[language];
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    body: JSON.stringify({
+      model: 'models/gemini-3.5-transcribe', store: false,
+      input: [{type:'audio', mime_type:'audio/wav', data:base64Audio}],
+      generation_config: { transcription_config: {
+        ...(locale ? {language_codes:[locale]} : {}),
+        mode: {type:'verbatim', timestamp_granularities:['word'], diarization_mode:'speaker'}
+      } }
+    })
+  });
+  throwIfRecognitionAborted(signal);
+  if (response.status === 404) {
+    throw new Error('Google 暫無可用的專用語音辨識模型，請稍後重試或改選其他辨識引擎。');
+  }
+  if (!response.ok) throw await geminiResponseError(response, signal);
+  const data = await response.json();
+  throwIfRecognitionAborted(signal);
+  if (data.status !== 'completed' || !Array.isArray(data.steps)) throw new Error('Google 語音辨識未完成。');
+  const segments = data.steps.filter(step => step.type === 'model_output')
+    .flatMap(step => step.content || []).filter(item => item.type === 'text')
+    .flatMap(item => geminiWordSegments(item, language));
+  return {segments};
+}
+
 /**
  * 呼叫 Google Gemini API 進行語音理解與時間戳標註
  */
 export async function callGeminiAudioTranscription({
   audioBlob,
   apiKey,
-  language = 'zh',
+  taskMode,
+  language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh',
   prompt = '',
   signal = null
 }) {
@@ -491,7 +574,11 @@ export async function callGeminiAudioTranscription({
   throwIfRecognitionAborted(signal);
   const base64Audio = await blobToBase64(audioBlob);
   throwIfRecognitionAborted(signal);
-  const langText = language === 'zh' ? '繁體中文 (Traditional Chinese)' : (language === 'en' ? '英文 (English)' : (language === 'ja' ? '日文' : '原文語言'));
+  const timedTranscript = isEditorSpeechTask(taskMode);
+  if (timedTranscript) {
+    return geminiSpeechToText(base64Audio, apiKey.trim(), language, signal);
+  }
+  const langText = {zh:'繁體中文 (Traditional Chinese)', en:'英文 (English)', ja:'日文', ko:'韓文'}[language] || '原文語言';
 
   const systemInstruction = `你是一位專業的頂級影視對白字幕聽打專家。請聆聽所附音訊，依據人聲起迄時間精準生成字幕片段。
 必須遵循以下規則：
@@ -503,7 +590,7 @@ export async function callGeminiAudioTranscription({
   { "start": 3.1, "end": 5.4, "text": "第二句對話內容。" }
 ]
 4. start 與 end 均為秒數（可包含小數點，例如 1.25）。
-${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
+${!timedTranscript && prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
 
   const payload = {
     contents: [
@@ -598,6 +685,36 @@ ${prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
 
 export const DEFAULT_AZURE_SPEECH_REGION = 'japaneast';
 
+// Only an official public Speech region may become part of the credential-bearing host.
+// https://learn.microsoft.com/azure/ai-services/speech-service/regions#regions
+const AZURE_SPEECH_REGIONS = new Set([
+  'australiaeast', 'brazilsouth', 'canadacentral', 'canadaeast', 'centralindia', 'centralus',
+  'eastasia', 'eastus', 'eastus2', 'francecentral', 'germanywestcentral', 'italynorth',
+  'japaneast', 'japanwest', 'koreacentral', 'northcentralus', 'northeurope', 'norwayeast',
+  'qatarcentral', 'southafricanorth', 'southcentralus', 'southeastasia', 'swedencentral',
+  'switzerlandnorth', 'switzerlandwest', 'uaenorth', 'uksouth', 'ukwest', 'westcentralus',
+  'westeurope', 'westus', 'westus2', 'westus3'
+]);
+
+export function isAzureSpeechRegion(value) {
+  return typeof value === 'string' && AZURE_SPEECH_REGIONS.has(value.trim().toLowerCase());
+}
+
+export function parseAzureSpeechCredential(value, region = DEFAULT_AZURE_SPEECH_REGION) {
+  const input = typeof value === 'string' ? value.trim() : '';
+  if (!input) throw new Error('請輸入 Azure Speech API Key');
+  const separator = input.indexOf(':');
+  const regionValue = separator < 0 ? region : input.slice(0, separator);
+  if (!isAzureSpeechRegion(regionValue)) {
+    throw new Error('請使用 Azure Speech 資源的區域代碼，金鑰欄可填「區域:金鑰」，例如 eastus:金鑰。');
+  }
+  const apiKey = separator < 0 ? input : input.slice(separator + 1).trim();
+  if (!/^[!-~]+$/.test(apiKey) || apiKey.includes(':')) {
+    throw new Error('請輸入完整的 Azure Speech API Key，或在金鑰前加上「區域:」。');
+  }
+  return { apiKey, region: regionValue.trim().toLowerCase() };
+}
+
 const AZURE_SUBTITLE_MAX_DURATION_SECONDS = 6;
 const AZURE_SUBTITLE_MAX_CJK_CHARS = 24;
 const AZURE_SUBTITLE_MAX_LATIN_WORDS = 14;
@@ -617,8 +734,8 @@ function endsAzureSentence(text) {
 
 function azureUsesCompactSpacing(locale, text = '') {
   const normalizedLocale = String(locale || '').trim();
-  if (normalizedLocale) return /^(?:zh|ja|ko)(?:-|$)/i.test(normalizedLocale);
-  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(String(text || ''));
+  if (normalizedLocale && !/^(?:auto|und)$/i.test(normalizedLocale)) return /^(?:zh|zho|cmn|ja|jpn)(?:-|$)/i.test(normalizedLocale);
+  return !/\p{Script=Hangul}/u.test(text) && /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text);
 }
 
 function isAzurePunctuationOnly(text) {
@@ -646,7 +763,9 @@ function azureSubtitleFits(text, duration, locale) {
   if (!Number.isFinite(duration) || duration <= 0 || duration > AZURE_SUBTITLE_MAX_DURATION_SECONDS) return false;
   const normalized = String(text || '').trim();
   if (!normalized) return false;
-  if (azureUsesCompactSpacing(locale, normalized)) {
+  // Korean uses spaces but keeps the same on-screen character budget as Japanese and Chinese.
+  if (azureUsesCompactSpacing(locale, normalized) || /^(?:ko|kor)(?:-|$)/i.test(locale)
+      || (!locale && /\p{Script=Hangul}/u.test(normalized))) {
     return Array.from(normalized.replace(/\s/gu, '')).length <= AZURE_SUBTITLE_MAX_CJK_CHARS;
   }
   const wordCount = normalized.split(/\s+/u).filter(Boolean).length;
@@ -654,15 +773,17 @@ function azureSubtitleFits(text, duration, locale) {
     Array.from(normalized).length <= AZURE_SUBTITLE_MAX_LATIN_CHARS;
 }
 
-function locateAzureWordsInPhrase(text, words) {
+function locateTimedWordsInText(text, words) {
   const source = String(text || '');
   const sourceLower = source.toLocaleLowerCase();
   let cursor = 0;
   const ranges = [];
   for (const word of words) {
     const token = String(word?.text || '');
-    let index = source.indexOf(token, cursor);
-    if (index < 0) index = sourceLower.indexOf(token.toLocaleLowerCase(), cursor);
+    const lower = token.toLocaleLowerCase();
+    const index = sourceLower.length === source.length && lower.length === token.length
+      ? sourceLower.indexOf(lower, cursor)
+      : source.indexOf(token, cursor);
     if (index < 0) return null;
     ranges.push({ start: index, end: index + token.length });
     cursor = index + token.length;
@@ -682,7 +803,7 @@ function joinTimedWordTexts(words, locale) {
       openingQuotePending = isAzureOpeningQuoteOnly(token);
       continue;
     }
-    if (startsAzureClosingPunctuation(token)) {
+    if (startsAzureClosingPunctuation(token) || /^(?:n['’]t|'(?:s|t|m|ve|ll|re|d))$/iu.test(token)) {
       result += token;
       continue;
     }
@@ -705,7 +826,7 @@ function joinTimedWordTexts(words, locale) {
       result += compact ? token : ` ${token}`;
       continue;
     }
-    if (!compact) {
+    if (!compact || /\p{Script=Hangul}$/u.test(result) || /^\p{Script=Hangul}/u.test(token)) {
       result += ` ${token}`;
       continue;
     }
@@ -728,6 +849,30 @@ function azureWordSliceText(segment, wordRanges, firstIndex, lastIndex) {
   return joinTimedWordTexts(segment.words.slice(firstIndex, lastIndex + 1), segment.locale);
 }
 
+// Whisper word timings can omit casing and punctuation present in the segment.
+// Keep the provider's display text for each surviving run of adjacent words.
+function retainedTimedWordText(segment, keptWords) {
+  const { words, text, locale } = segment;
+  const ranges = locateTimedWordsInText(text, words);
+  if (!ranges || ranges.some((range, i) => i > 0 && /[\p{L}\p{M}\p{N}]/u.test(text.slice(ranges[i - 1].end, range.start)))) {
+    return joinTimedWordTexts([...keptWords], locale);
+  }
+  const runs = [];
+  for (let first = 0; first < words.length; first++) {
+    if (!keptWords.has(words[first])) continue;
+    let last = first;
+    while (last + 1 < words.length && keptWords.has(words[last + 1])) last++;
+    const start = ranges[first].start, end = ranges[last].end;
+    const before = text.slice(ranges[first - 1]?.end ?? 0, start);
+    const after = text.slice(end, ranges[last + 1]?.start ?? text.length);
+    const opening = before.match(/[\p{Ps}\p{Pi}"']+$/u)?.[0] || '';
+    const closing = after.match(/^[\p{Pe}\p{Pf},.!?:;，。！？、；：…"'’]+/u)?.[0] || '';
+    runs.push({ text: opening + text.slice(start, end) + closing });
+    first = last;
+  }
+  return joinTimedWordTexts(runs, locale);
+}
+
 function createAzureWordSegment(segment, wordRanges, firstIndex, lastIndex) {
   const words = segment.words.slice(firstIndex, lastIndex + 1);
   return {
@@ -741,7 +886,7 @@ function createAzureWordSegment(segment, wordRanges, firstIndex, lastIndex) {
 
 function splitAzurePhraseForSubtitles(segment) {
   if (!Array.isArray(segment?.words) || segment.words.length < 2) return [segment];
-  const wordRanges = locateAzureWordsInPhrase(segment.text, segment.words);
+  const wordRanges = locateTimedWordsInText(segment.text, segment.words);
   const chunks = [];
   let firstIndex = 0;
 
@@ -923,15 +1068,9 @@ export async function callAzureSpeechTranscription({
   profanityFilterMode = 'Raw',
   signal = null
 }) {
-  const key = typeof apiKey === 'string' ? apiKey.trim() : '';
-  if (!key) throw new Error('請輸入 Azure Speech API Key');
+  const { apiKey: key, region: normalizedRegion } = parseAzureSpeechCredential(apiKey, region);
   if (!(audioBlob instanceof Blob) || audioBlob.size === 0) {
     throw new Error('未提供可供 Azure Speech 辨識的音訊');
-  }
-
-  const normalizedRegion = typeof region === 'string' ? region.trim().toLowerCase() : '';
-  if (!/^[a-z][a-z0-9-]{1,62}$/.test(normalizedRegion)) {
-    throw new Error(`Azure Speech Region 格式不正確，例如 ${DEFAULT_AZURE_SPEECH_REGION}`);
   }
 
   const normalizedProfanity = (profanityFilterMode === 'Raw' || profanityFilterMode === 'None')
@@ -958,12 +1097,16 @@ export async function callAzureSpeechTranscription({
   const endpoint = `https://${normalizedRegion}.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe?api-version=2025-10-15`;
   const response = await fetch(endpoint, {
     method: 'POST',
+    redirect: 'error',
     headers: { 'Ocp-Apim-Subscription-Key': key },
     body: formData,
     signal
   });
 
   if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(`Azure Speech 拒絕存取（HTTP ${response.status}）。請在 Azure 入口網站確認資源的金鑰與區域，並在金鑰欄輸入「區域:金鑰」，例如 eastus:金鑰。`);
+    }
     const body = await response.json().catch(() => null);
     const detail = body?.error?.message || body?.error?.details?.[0]?.message || body?.message || response.statusText || '';
     const safeDetail = detail ? String(detail).split(key).join('[已隱藏]') : (body ? JSON.stringify(body).split(key).join('[已隱藏]') : '');
@@ -1004,8 +1147,8 @@ export function parseElevenLabsTranscriptionResponse(data, audioDuration = Infin
   for (const item of rawWords) {
     if (item?.type === 'spacing' || item?.type === 'audio_event') continue;
     const text = typeof item?.text === 'string' ? item.text.trim() : '';
-    const start = Number(item?.start);
-    const end = Number(item?.end);
+    const start = item?.start == null ? NaN : Number(item.start);
+    const end = item?.end == null ? NaN : Number(item.end);
     if (!text || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) continue;
     const wordStart = Math.min(audioEnd, start);
     const wordEnd = Math.min(audioEnd, end);
@@ -1020,7 +1163,7 @@ export function parseElevenLabsTranscriptionResponse(data, audioDuration = Infin
     });
   }
 
-  const locale = typeof data?.language_code === 'string' ? data.language_code : 'zh';
+  const locale = String(data?.language_code || 'auto');
 
   if (words.length === 0) {
     const rawFallback = typeof data?.text === 'string' ? data.text.trim() : '';
@@ -1112,15 +1255,17 @@ export function parseElevenLabsTranscriptionResponse(data, audioDuration = Infin
 }
 
 /**
- * 呼叫 ElevenLabs Scribe v2 語音辨識 API
+ * 呼叫 ElevenLabs Scribe 語音辨識 API
  */
 export async function callElevenLabsSpeechTranscription({
   audioBlob,
   apiKey,
-  language = 'zh',
+  taskMode,
+  language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh',
   keyterms = [],
   numSpeakers = null,
   tagAudioEvents = false,
+  audioDuration = Infinity,
   signal = null
 }) {
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
@@ -1131,11 +1276,13 @@ export async function callElevenLabsSpeechTranscription({
 
   const formData = new FormData();
   formData.append('file', audioBlob, 'audio.wav');
-  formData.append('model_id', 'scribe_v2');
+  const automatic = isEditorSpeechTask(taskMode);
+  formData.append('model_id', automatic ? 'scribe_v3' : 'scribe_v2');
+  formData.append('timestamps_granularity', 'word');
   formData.append('diarize', 'true');
-  formData.append('tag_audio_events', tagAudioEvents ? 'true' : 'false');
+  formData.append('tag_audio_events', !automatic && tagAudioEvents ? 'true' : 'false');
   const numSpk = Number(numSpeakers);
-  if (Number.isInteger(numSpk) && numSpk > 0) {
+  if (!automatic && Number.isInteger(numSpk) && numSpk > 0) {
     formData.append('num_speakers', String(numSpk));
   }
 
@@ -1143,7 +1290,7 @@ export async function callElevenLabsSpeechTranscription({
     formData.append('language_code', language);
   }
 
-  const cleanKeyterms = (Array.isArray(keyterms) ? keyterms : [])
+  const cleanKeyterms = (!automatic && Array.isArray(keyterms) ? keyterms : [])
     .map(term => typeof term === 'string' ? term.trim() : '')
     .filter((term, index, list) => term && list.indexOf(term) === index)
     .slice(0, 100);
@@ -1167,7 +1314,11 @@ export async function callElevenLabsSpeechTranscription({
     throw new Error(`ElevenLabs 語音辨識失敗 (HTTP ${response.status})${safeDetail ? `：${safeDetail}` : ''}`);
   }
 
-  return parseElevenLabsTranscriptionResponse(await response.json());
+  const result = parseElevenLabsTranscriptionResponse(await response.json(), audioDuration);
+  if (automatic && result.text && !result.segments.some(segment => segment.words.length)) {
+    throw new Error('ElevenLabs 未回傳有效的逐字時間');
+  }
+  return result;
 }
 
 /**
@@ -1189,7 +1340,9 @@ export async function callWhisperApi({
   provider = 'groq',
   apiKey,
   localEndpoint = 'http://127.0.0.1:8080/v1/audio/transcriptions',
-  language = 'zh',
+  taskMode,
+  language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh',
+  audioDuration = Infinity,
   prompt = '',
   temperature = 0,
   signal = null
@@ -1201,10 +1354,12 @@ export async function callWhisperApi({
 
   let endpoint = 'https://api.groq.com/openai/v1/audio/transcriptions';
   let model = 'whisper-large-v3';
+  const diarized = provider === 'openai' && taskMode === 'transcribe';
+  const automatic = !isLocal && isEditorSpeechTask(taskMode);
 
   if (provider === 'openai') {
     endpoint = 'https://api.openai.com/v1/audio/transcriptions';
-    model = 'whisper-1';
+    model = diarized ? 'gpt-4o-transcribe-diarize' : 'whisper-1';
   } else if (isLocal) {
     endpoint = (localEndpoint && localEndpoint.trim()) || 'http://127.0.0.1:8080/v1/audio/transcriptions';
     model = 'whisper-1';
@@ -1214,15 +1369,20 @@ export async function callWhisperApi({
   const uploadName = audioBlob?.type === 'audio/mpeg' ? 'audio.mp3' : 'audio.wav';
   formData.append('file', audioBlob, uploadName);
   formData.append('model', model);
-  formData.append('response_format', 'verbose_json');
-  formData.append('temperature', String(temperature ?? 0));
-  formData.append('timestamp_granularities[]', 'word');
-  formData.append('timestamp_granularities[]', 'segment');
+  if (diarized) {
+    formData.append('response_format', 'diarized_json');
+    formData.append('chunking_strategy', 'auto');
+  } else {
+    formData.append('response_format', 'verbose_json');
+    formData.append('temperature', automatic ? '0' : String(temperature ?? 0));
+    formData.append('timestamp_granularities[]', 'word');
+    formData.append('timestamp_granularities[]', 'segment');
+  }
 
   if (language && language !== 'auto') {
     formData.append('language', language);
   }
-  if (prompt && prompt.trim()) {
+  if (!automatic && prompt && prompt.trim()) {
     formData.append('prompt', prompt.trim());
   }
 
@@ -1244,14 +1404,24 @@ export async function callWhisperApi({
   }
 
   const data = await resp.json();
+  if (diarized) {
+    const segments = (Array.isArray(data?.segments) ? data.segments : []).flatMap(segment => {
+      const text = typeof segment?.text === 'string' ? segment.text.trim() : '';
+      const start = segment?.start, end = Math.min(segment?.end, audioDuration);
+      if (!text || !Number.isFinite(start) || !Number.isFinite(segment?.end) || start < 0 || end <= start) return [];
+      return [{ start, end, text, ...(typeof segment.speaker === 'string' ? { speaker: segment.speaker } : {}) }];
+    });
+    if (!segments.length && (data?.text?.trim() || data?.segments?.length)) throw new Error('OpenAI 未回傳有效的字幕起訖時間');
+    return { text: data?.text || '', segments, words: [] };
+  }
   const words = Array.isArray(data?.words)
     ? data.words.flatMap(word => {
       const text = typeof word?.word === 'string'
         ? word.word.trim()
         : (typeof word?.text === 'string' ? word.text.trim() : '');
-      const start = Number(word?.start);
-      const end = Number(word?.end);
-      return text && Number.isFinite(start) && Number.isFinite(end) && end > start
+      const start = word?.start == null ? NaN : Number(word.start);
+      const end = word?.end == null ? NaN : Math.min(Number(word.end), audioDuration);
+      return text && Number.isFinite(start) && start >= 0 && Number.isFinite(end) && end > start
         ? [{ start, end, text }]
         : [];
     })
@@ -1262,8 +1432,9 @@ export async function callWhisperApi({
     const claimedWordIndexes = new Set();
     for (const [segmentIndex, s] of data.segments.entries()) {
       if (s && s.text && s.text.trim()) {
+        if (automatic && (!Number.isFinite(s.start) || !Number.isFinite(s.end) || s.start < 0 || Math.min(s.end, audioDuration) <= s.start)) continue;
         const start = Number(s.start) || 0;
-        const end = Number(s.end) || 0;
+        const end = Math.min(Number(s.end) || 0, audioDuration);
         const segmentWords = words.filter((word, wordIndex) => {
           if (claimedWordIndexes.has(wordIndex)) return false;
           const midpoint = (word.start + word.end) / 2;
@@ -1281,14 +1452,16 @@ export async function callWhisperApi({
         });
       }
     }
-  } else if (words.length) {
+  }
+  if (!segments.length && words.length) {
     segments.push({
       start: words[0].start,
       end: words.at(-1).end,
       text: typeof data?.text === 'string' ? data.text.trim() : words.map(word => word.text).join(' '),
       words
     });
-  } else if (data && data.text && data.text.trim()) {
+  } else if (!segments.length && data?.text?.trim()) {
+    if (automatic) throw new Error('語音辨識服務未回傳有效的字幕時間');
     segments.push({
       start: 0,
       end: 0,
@@ -1341,7 +1514,13 @@ export function findSilenceSplitPoint(audioBuffer, searchStartSec, searchEndSec)
   return bestSplitSample / sampleRate;
 }
 
-export function planWhisperCloudChunks(start, end, audioBuffer = null) {
+function transcriptionChunkOverlap(provider, taskMode) {
+  // A speaker turn has no word times to reconcile between two uploads.
+  // Split once at the quiet boundary so audio belongs to exactly one request.
+  return provider === 'openai' && taskMode === 'transcribe' ? 0 : WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS;
+}
+
+export function planWhisperCloudChunks(start, end, audioBuffer = null, overlap = WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS) {
   const windows = [];
   for (let chunkStart = start; chunkStart < end;) {
     const rawTargetEnd = chunkStart + WHISPER_CLOUD_CHUNK_SECONDS;
@@ -1358,7 +1537,7 @@ export function planWhisperCloudChunks(start, end, audioBuffer = null) {
 
     windows.push({ start: chunkStart, end: chunkEnd });
     if (chunkEnd >= end) break;
-    chunkStart = Math.max(chunkStart + 1, chunkEnd - WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS);
+    chunkStart = Math.max(chunkStart + 1, chunkEnd - overlap);
   }
   return windows;
 }
@@ -1381,6 +1560,7 @@ function offsetWhisperSegments(
     const start = Math.max(0, Math.min(totalDuration, (Number.isFinite(sourceStart) ? sourceStart : 0) + offsetSeconds));
     const end = Math.max(0, Math.min(totalDuration, (Number.isFinite(sourceEnd) ? sourceEnd : 0) + offsetSeconds));
     const sourceWords = Array.isArray(segment.words) ? segment.words : [];
+    const keptWords = new Set();
     const words = sourceWords.flatMap(word => {
       const wordText = typeof word?.text === 'string' ? word.text.trim() : '';
       const sourceWordStart = Number(word?.start);
@@ -1391,12 +1571,14 @@ function offsetWhisperSegments(
       const midpoint = (wordStart + wordEnd) / 2;
       const insideCore = midpoint >= coreStart && (includeCoreEnd ? midpoint <= coreEnd : midpoint < coreEnd);
       const overlapRef = wordRefs?.get(word);
-      return wordEnd > wordStart && insideCore ? [{
+      if (wordEnd <= wordStart || !insideCore) return [];
+      keptWords.add(word);
+      return [{
         start: wordStart,
         end: wordEnd,
         text: wordText,
         ...(overlapRef ? { _whisperOverlapRef: overlapRef } : {})
-      }] : [];
+      }];
     });
     const midpoint = (start + end) / 2;
     const segmentInsideCore = midpoint >= coreStart && (includeCoreEnd ? midpoint <= coreEnd : midpoint < coreEnd);
@@ -1406,7 +1588,7 @@ function offsetWhisperSegments(
     const untimed = preserveProviderMetadata && !sourceWords.length && start === end;
     if ((sourceWords.length && !words.length) || (!sourceWords.length && !segmentInsideCore && !untimed)) return [];
     const retainedText = words.length && words.length < sourceWords.length
-      ? joinTimedWordTexts(words, '')
+      ? retainedTimedWordText(segment, keptWords)
       : text;
     return [{
       ...(preserveProviderMetadata ? segment : {}),
@@ -1495,7 +1677,7 @@ function deduplicateWhisperOverlapSegments(segments, chunkEvidence, chunks, sele
       ...segment,
       start: words[0].start,
       end: words.at(-1).end,
-      text: removedWord ? joinTimedWordTexts(words, '') : segment.text,
+      text: removedWord ? retainedTimedWordText(segment, new Set(retainedWords)) : segment.text,
       words
     }];
   });
@@ -1520,10 +1702,10 @@ async function readRecognitionRange(source, start, end, signal) {
   return buffer;
 }
 
-async function planRecognitionReaderChunks(source, start, end, signal) {
+async function planRecognitionReaderChunks(source, start, end, signal, overlap, chunkSeconds) {
   const chunks = [];
   for (let chunkStart = start; chunkStart < end;) {
-    const targetEnd = chunkStart + WHISPER_CLOUD_CHUNK_SECONDS;
+    const targetEnd = chunkStart + chunkSeconds;
     let chunkEnd = Math.min(end, targetEnd);
     if (chunkEnd < end) {
       const searchStart = Math.max(chunkStart + 60, targetEnd - 45);
@@ -1538,7 +1720,7 @@ async function planRecognitionReaderChunks(source, start, end, signal) {
     }
     chunks.push({ start: chunkStart, end: chunkEnd });
     if (chunkEnd >= end) break;
-    chunkStart = Math.max(chunkStart + 1, chunkEnd - WHISPER_CLOUD_CHUNK_OVERLAP_SECONDS);
+    chunkStart = Math.max(chunkStart + 1, chunkEnd - overlap);
   }
   return chunks;
 }
@@ -1555,7 +1737,9 @@ async function transcribeRecognitionReader(source, options) {
   }
   const end = Math.min(outT ?? source.duration, source.duration);
   const duration = end - inT;
-  const chunks = await planRecognitionReaderChunks(source, inT, end, signal);
+  const chunkSeconds = provider === 'google' ? GEMINI_INLINE_CHUNK_SECONDS : WHISPER_CLOUD_CHUNK_SECONDS;
+  const chunks = await planRecognitionReaderChunks(source, inT, end, signal,
+    transcriptionChunkOverlap(provider, options.taskMode), chunkSeconds);
   const allSegments = [];
   const chunkEvidence = [];
   const totalWork = chunks.reduce((sum, chunk) => sum + chunk.end - chunk.start, 0);
@@ -1603,6 +1787,7 @@ export async function transcribeAudioStream({
   inT = 0,
   outT = null,
   provider = 'google',
+  taskMode,
   builtinModel = 'onnx-community/whisper-large-v3-turbo',
   apiKey = '',
   azureRegion = DEFAULT_AZURE_SPEECH_REGION,
@@ -1611,7 +1796,7 @@ export async function transcribeAudioStream({
   keyterms = [],
   elevenlabsNumSpeakers = null,
   elevenlabsTagAudioEvents = false,
-  language = 'zh',
+  language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh',
   prompt = '',
   temperature = 0,
   vocalFilter = false,
@@ -1624,20 +1809,21 @@ export async function transcribeAudioStream({
   }
 
   if (typeof audioBuffer.readRange === 'function') {
-    return transcribeRecognitionReader(audioBuffer, { inT, outT, provider, builtinModel,
+    return transcribeRecognitionReader(audioBuffer, { inT, outT, provider, taskMode, builtinModel,
       apiKey, azureRegion, azurePhrases, azureProfanity, keyterms, elevenlabsNumSpeakers,
       elevenlabsTagAudioEvents, language, prompt, temperature, vocalFilter, onProgress, signal });
   }
 
-  const endT = (outT && outT > inT) ? outT : (inT + (audioBuffer.duration || 0));
+  const endT = Math.min(outT ?? audioBuffer.duration, audioBuffer.duration);
 
   if (provider === 'builtin') {
-    const audioFloat32 = extractClipFloat32Mono16k(audioBuffer, inT, endT, { vocalFilter });
+    const audioFloat32 = extractClipFloat32Mono16k(audioBuffer, inT, endT, { vocalFilter: isEditorSpeechTask(taskMode) ? false : vocalFilter });
     if (!audioFloat32 || audioFloat32.length === 0) {
       throw new Error('音訊長度為 0');
     }
     const res = await transcribeWithBuiltinModel({
       audioFloat32,
+      taskMode,
       modelId: builtinModel,
       language,
       prompt: prompt || '',
@@ -1648,12 +1834,12 @@ export async function transcribeAudioStream({
     throwIfRecognitionAborted(signal);
     return convertAsrSegmentsToTraditionalChinese(
       Array.isArray(res?.segments) ? res.segments : [],
-      language
+      res?.language || language
     );
   }
 
   if (provider === 'openai' || provider === 'groq') {
-    const chunks = planWhisperCloudChunks(inT, endT, audioBuffer);
+    const chunks = planWhisperCloudChunks(inT, endT, audioBuffer, transcriptionChunkOverlap(provider, taskMode));
     const duration = endT - inT;
     const providerLabel = provider === 'openai' ? 'OpenAI' : 'Groq';
     const allSegments = [];
@@ -1669,16 +1855,18 @@ export async function transcribeAudioStream({
         percent: Math.round(completedWorkSeconds / totalWorkSeconds * 100),
         message: `${providerLabel} 正在辨識第 ${index + 1}/${chunks.length} 段音訊…`
       });
-      const wavBlob = encodeWav16kMono(audioBuffer, chunk.start, chunk.end, { vocalFilter });
+      const wavBlob = encodeWav16kMono(audioBuffer, chunk.start, chunk.end, { vocalFilter: !isEditorSpeechTask(taskMode) && vocalFilter });
       if (!wavBlob) throw new Error('音訊長度為 0');
       if (wavBlob.size > WHISPER_CLOUD_MAX_WAV_BYTES) {
         throw new Error(`雲端語音辨識分段仍超過安全上傳大小（${wavBlob.size} bytes）`);
       }
-      const chunkBlob = await compressWhisperUploadForDesktop(wavBlob, signal);
+      const chunkBlob = isEditorSpeechTask(taskMode) ? wavBlob : await compressWhisperUploadForDesktop(wavBlob, signal);
       const result = await callWhisperApi({
         audioBlob: chunkBlob,
         provider,
         apiKey,
+        taskMode,
+        audioDuration: chunk.end - chunk.start,
         language,
         prompt,
         temperature,
@@ -1711,7 +1899,8 @@ export async function transcribeAudioStream({
         coreStart,
         coreEnd,
         index === chunks.length - 1,
-        wordEvidence.refByWord
+        wordEvidence.refByWord,
+        provider === 'openai' && taskMode === 'transcribe'
       ));
       completedWorkSeconds += chunk.end - chunk.start;
       onProgress?.({
@@ -1727,15 +1916,33 @@ export async function transcribeAudioStream({
     );
   }
 
-  const wavBlob = encodeWav16kMono(audioBuffer, inT, endT, { vocalFilter });
+  // Desktop supplies a range reader. Browser-decoded long clips use the same
+  // bounded upload and subtitle stitching instead of encoding the complete film.
+  const automaticSettings = isEditorSpeechTask(taskMode);
+  const chunkSeconds = provider === 'google' ? GEMINI_INLINE_CHUNK_SECONDS : WHISPER_CLOUD_CHUNK_SECONDS;
+  if ((provider === 'google' || (automaticSettings && provider === 'elevenlabs')) && endT - inT > chunkSeconds) {
+    const source = {
+      duration: audioBuffer.duration,
+      readRange(start, end) {
+        const pcm = downmixAndResampleMono16k(audioBuffer, start, end);
+        if (!pcm?.length) throw new Error('辨識音訊範圍沒有可讀取的樣本');
+        return { sampleRate: 16000, numberOfChannels: 1, length: pcm.length,
+          duration: pcm.length / 16000, getChannelData: () => pcm };
+      }
+    };
+    return transcribeRecognitionReader(source, { provider, taskMode, apiKey, language, prompt, vocalFilter,
+      inT, outT: endT, onProgress, signal });
+  }
+  const wavBlob = encodeWav16kMono(audioBuffer, inT, endT, { vocalFilter: automaticSettings ? false : vocalFilter });
   if (!wavBlob) throw new Error('音訊長度為 0');
 
   if (provider === 'google') {
     const res = await callGeminiAudioTranscription({
       audioBlob: wavBlob,
       apiKey,
+      taskMode,
       language,
-      prompt,
+      prompt: automaticSettings ? '' : prompt,
       signal
     });
     throwIfRecognitionAborted(signal);
@@ -1751,8 +1958,7 @@ export async function transcribeAudioStream({
       apiKey,
       region: azureRegion,
       language,
-      phrases: azurePhrases,
-      profanityFilterMode: azureProfanity,
+      ...(isEditorSpeechTask(taskMode) ? {} : { phrases: azurePhrases, profanityFilterMode: azureProfanity }),
       signal
     });
     throwIfRecognitionAborted(signal);
@@ -1770,6 +1976,8 @@ export async function transcribeAudioStream({
       audioBlob: wavBlob,
       apiKey,
       language,
+      taskMode,
+      audioDuration: endT - inT,
       keyterms: effectiveKeyterms,
       numSpeakers: elevenlabsNumSpeakers,
       tagAudioEvents: elevenlabsTagAudioEvents,

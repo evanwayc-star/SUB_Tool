@@ -9,12 +9,25 @@ function setup(){
     streamIngest:vi.fn(()=>{const job=deferred();pending.push(job);return job.promise;}),
     prepareSourceWaveform:vi.fn(()=>{const job=deferred();pending.push(job);return job.promise;}),
     cleanupAudio:vi.fn(async()=>{}),
+    releaseStream:vi.fn(async()=>{}),
     cancelMediaIntake:vi.fn(async()=>1),
   };
   return {bridge,pending,changed,jobs:createMediaIntakeJobs({bridge,changed,id:()=>`id-${++serial}`})};
 }
 
 describe('renderer media intake ownership',()=>{
+  it('取消後才回覆的串流只釋放舊 session 的 lease',async()=>{
+    const {jobs,bridge,pending}=setup();
+    const old=jobs.streamIngest({path:'movie.mxf'});
+    const aborted=expect(old).rejects.toMatchObject({name:'AbortError'});
+    await jobs.reset();await aborted;
+    const current=jobs.streamIngest({path:'movie.mxf'});
+    pending[1].resolve({streamLeaseId:'current',cached:true});
+    expect((await current).streamLeaseId).toBe('current');
+    pending[0].resolve({streamLeaseId:'old',cached:true});
+    await vi.waitFor(()=>expect(bridge.releaseStream).toHaveBeenCalledExactlyOnceWith('old'));
+  });
+
   it('改選聲道只取消原本的聲道要求，同一素材的 MIX 繼續處理', async()=>{
     const {jobs,bridge,pending}=setup(),controller=new AbortController(),onProgress=vi.fn();
     const mix=jobs.prepareSourceWaveform({path:'eight.mov',duration:12,continuous:true});
@@ -63,6 +76,18 @@ describe('renderer media intake ownership',()=>{
     const failure=expect(retry).rejects.toThrow('disk full');f.pending[1].reject(new Error('disk full'));await failure;
     expect(f.jobs.proxyState('A.mov')).toMatchObject({state:'failed',pct:null});
     await f.jobs.reset();expect(f.jobs.proxyState('A.mov')).toBeNull();
+  });
+
+  it('要求 Proxy 但實際只處理聲道失敗時，原生錯誤回覆仍保留正確的 Proxy 狀態',async()=>{
+    const f=setup();
+    f.jobs.registerRecovery({path:'A.mov',owns:()=>true,retry:vi.fn()});
+    const work=f.jobs.ingest({path:'A.mov',needsProxy:true});
+    const request=f.bridge.ingest.mock.calls[0][0];
+    f.jobs.progress({...request,done:true,outcome:'failed',outputs:{proxy:false,audio:true},errorMsg:'audio failed'});
+    f.pending[0].reject(new Error('audio failed'));
+    await expect(work).rejects.toThrow('audio failed');
+    expect(f.jobs.proxyState('A.mov')).toEqual({state:'original',pct:null});
+    expect(f.jobs.snapshot().recoveries[0].status).toBe('failed');
   });
   it('串流先送達失敗終態後才回早期 URL，不能把未完成 Proxy 誤標為就緒', async()=>{
     const f=setup(),work=f.jobs.streamIngest({path:'A.mov'}),request=f.bridge.streamIngest.mock.calls[0][0];

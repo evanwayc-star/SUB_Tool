@@ -188,7 +188,7 @@ function assertLayout(value) {
     const wide = await layout(client);
     assertLayout(wide);
     assert.deepEqual({provider:wide.provider,model:wide.model,sourceLang:wide.sourceLang,width:wide.width,rate:wide.rate,smart:wide.smart},
-      {provider:'openai',model:'gpt-5.4-mini',sourceLang:'auto',width:'1280',rate:'2',smart:true});
+      {provider:'openai',model:'gpt-5.4',sourceLang:'auto',width:'1920',rate:'10',smart:true});
     assert.equal(wide.keyType,'password');
     assert.equal(wide.modelTag,'SELECT');
     assert.deepEqual(wide.modelOptions,['gpt-5.4-mini','gpt-5.4','__custom__']);
@@ -211,7 +211,7 @@ function assertLayout(value) {
     await selectOption(client,'#ocrProvider','gemini');
     const gemini = await layout(client);
     assert.deepEqual(gemini.modelOptions,['gemini-2.5-flash','gemini-2.5-pro','__custom__']);
-    assert.equal(gemini.model,'gemini-2.5-flash');
+    assert.equal(gemini.model,'gemini-2.5-pro');
     assert.equal(await client.evaluate("document.getElementById('ocrApiKey').value"),'');
     await selectOption(client,'#ocrModel','gemini-2.5-pro');
     await selectOption(client,'#ocrModel','__custom__');

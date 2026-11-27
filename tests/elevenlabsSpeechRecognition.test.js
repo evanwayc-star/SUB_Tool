@@ -2,11 +2,30 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   callElevenLabsSpeechTranscription,
+  normalizeSubtitleSpacing,
   parseElevenLabsTranscriptionResponse,
   transcribeAudioStream
 } from '../src/speech-recognition-engine.js';
 
-describe('ElevenLabs Scribe v2 語音辨識', () => {
+describe('ElevenLabs Scribe 語音辨識', () => {
+  it.each(['align','transcribe'])('%s 使用 Scribe v3、逐字時間與自動語言，保留韓文語法空格', async taskMode => {
+    const pcm = new Float32Array(32000);
+    const request = { taskMode, provider: 'elevenlabs', apiKey: 'test',
+      audioBuffer: { sampleRate:16000, length:32000, duration:2, numberOfChannels:1, getChannelData:()=>pcm },
+      keyterms:['old'], elevenlabsNumSpeakers:5, elevenlabsTagAudioEvents:true };
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok:true, json:async()=>({ language_code:'kor', text:'오늘 날씨는!',
+      words:[{text:'오늘',type:'word',start:0.2,end:0.4},{text:' ',type:'spacing',start:0.4,end:0.5},{text:'날씨는!',type:'word',start:0.5,end:2.02}] }) })
+      .mockResolvedValueOnce({ ok:true, json:async()=>({ text:'無時間', audio_duration_secs:2 }) });
+    const [cue] = await transcribeAudioStream(request);
+    const form = global.fetch.mock.calls[0][1].body;
+    expect(form.get('model_id')).toBe('scribe_v3');
+    expect(form.get('timestamps_granularity')).toBe('word');
+    expect(form.get('tag_audio_events')).toBe('false');
+    expect(form.get('diarize')).toBe('true');
+    for(const field of ['language_code','keyterms','num_speakers']) expect(form.has(field)).toBe(false);
+    expect(cue).toEqual({start:0.2,end:2,text:'오늘 날씨는!',words:[{text:'오늘',start:0.2,end:0.4},{text:'날씨는!',start:0.5,end:2}]});
+    await expect(transcribeAudioStream(request)).rejects.toThrow('逐字時間');
+  });
   it('將逐字時間轉為相對音檔秒數，並依句末標點切出標準字幕與保留 words 錨點', () => {
     const result = parseElevenLabsTranscriptionResponse({
       language_code: 'zh',
@@ -159,6 +178,21 @@ describe('ElevenLabs Scribe v2 語音辨識', () => {
         text: '小人真的是冤枉的啊！'
       })
     ]);
+  });
+
+  it.each([
+    ['ko-KR', ['지금', '정말 좋아요', '!'], '지금 정말 좋아요!'],
+    ['jpn', ['今日', 'は', '晴れ', '。'], '今日は晴れ。'],
+    ['zho', ['今天', '天氣', '很好', '。'], '今天天氣很好。'],
+    ['en', ['I', "'m", 'ready', '!'], "I'm ready!"],
+  ])('%s 逐詞組句保留原語詞界與標點', (locale, tokens, expected) => {
+    const words = tokens.map((text, i) => ({ text, start: i / 5, end: (i + 1) / 5, type: 'word' }));
+    expect(parseElevenLabsTranscriptionResponse({ language_code: locale, words }).segments[0].text).toBe(expected);
+  });
+
+  it('自動語言及中文句中的韓文保留原詞間空格', () => {
+    expect(normalizeSubtitleSpacing('오늘 날씨가 정말 좋아요!', 'auto')).toBe('오늘 날씨가 정말 좋아요!');
+    expect(normalizeSubtitleSpacing('他 說「정말 좋아요!」', 'zh')).toBe('他說「정말 좋아요!」');
   });
 
   it('英文單字之間能自動保留空格，標點符號不留多餘空格', () => {

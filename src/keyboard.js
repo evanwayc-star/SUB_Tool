@@ -161,7 +161,14 @@ if (typeof window !== 'undefined') {
       if (sd) emit('action', sd.style.display === 'none' || !sd.style.display ? 'search-open' : 'search-close');
       break;
     case 'toggle_sub_mode': e.preventDefault(); emit('action', 'sub-mode'); break;
-    case 'toggle_safe_frame': e.preventDefault(); emit('action', 'safe-frame'); break;
+    case 'toggle_safe_frame':
+      e.preventDefault();
+      if (!e.repeat) emit('action', 'safe-frame');
+      break;
+    case 'toggle_timecode_watermark':
+      e.preventDefault();
+      if (!e.repeat) emit('action', 'timecode-watermark');
+      break;
     case 'screenshot': e.preventDefault(); emit('action', 'screenshot'); break;
     case 'screenshot_tc': e.preventDefault(); emit('action', 'screenshot_tc'); break;
     case 'toggle_mixer': e.preventDefault(); emit('action', 'mixer'); break;

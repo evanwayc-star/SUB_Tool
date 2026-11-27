@@ -18,18 +18,26 @@ export function sourceDisplayPeaks(result,duration,resolution,channel=null){
 }
 
 /* Only contiguous, persisted source samples may become visible waveform buckets. */
-export function createSourceWaveformProgress({duration,resolution=100,owns=()=>true,publish=()=>{}}){
+export function createSourceWaveformProgress({duration,resolution=100,owns=()=>true,publish=()=>{},discard=()=>{}}){
   const totalSamples=Math.round(duration*4000),samplesPerBucket=4000/resolution;
   let combined=null,sourceKey=null,completedSamples=0;
   return {
     get sourceKey(){return sourceKey;},
     get complete(){return completedSamples===totalSamples;},
     accept(data){
-      if(!owns()||!data||!Number.isSafeInteger(totalSamples)||totalSamples<=0||totalSamples>2147483629
+      if(!owns()||!data||typeof data.sourceKey!=='string'||!/^[a-f0-9]{16}$/.test(data.sourceKey)
+        ||(sourceKey&&data.sourceKey!==sourceKey))return false;
+      if(data.reset===true){
+        sourceKey=data.sourceKey;
+        if(completedSamples){
+          completedSamples=0;combined=null;
+          discard();
+        }
+        return owns();
+      }
+      if(!Number.isSafeInteger(totalSamples)||totalSamples<=0||totalSamples>2147483629
         ||!Number.isInteger(samplesPerBucket)||samplesPerBucket<1
         ||data.sampleRate!==4000||data.resolution!==resolution||data.totalSamples!==totalSamples
-        ||typeof data.sourceKey!=='string'||!/^[a-f0-9]{16}$/.test(data.sourceKey)
-        ||(sourceKey&&data.sourceKey!==sourceKey)
         ||data.startSample!==completedSamples||data.startSample%samplesPerBucket!==0
         ||!Number.isSafeInteger(data.completedSamples)||data.completedSamples<=completedSamples
         ||data.completedSamples>totalSamples

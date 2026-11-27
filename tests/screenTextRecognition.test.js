@@ -302,7 +302,7 @@ describe('畫面文字辨識寫入時間軸', () => {
     const onProgress = vi.fn();
     const work = recognizeClipText(clip, { ...options, onProgress });
     const [request] = bridge.recognizeScreenText.mock.calls[0];
-    expect(request).toMatchObject({ path:'mother.mov', start:3, end:7, provider:'openai',model:'gpt-5.4-mini',sourceLang:'auto', samplesPerSecond:2 });
+    expect(request).toMatchObject({ path:'mother.mov', start:3, end:7, provider:'openai',model:'gpt-5.4-mini',sourceLang:'auto', samplesPerSecond:10, frameWidth:1920 });
     progress({ requestId:'another', progress:0.1 });
     progress({ requestId:request.requestId, progress:0.5 });
     expect(onProgress).toHaveBeenCalledTimes(1);

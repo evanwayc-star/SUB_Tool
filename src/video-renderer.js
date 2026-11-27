@@ -5,7 +5,7 @@ import { Media } from './media.js';
 import { Seq } from './sequence.js';
 import { emit, on } from './events.js';
 import { getExactFps, secToEncore } from './time.js';
-import { effStyle, styleToCss, ASS_PLAY_RES, anchorPct } from './substyle.js';
+import { effStyle, styleToCss, ASS_PLAY_RES, anchorPct, subtitleFontRevision } from './substyle.js';
 import { escapeHTML } from './util.js';
 import { getPlayerAdapter, getNativePreviewRuntime } from './media-player-adapter.js';
 import { toASSFromState } from './subio.js';
@@ -35,7 +35,7 @@ export function refreshMpvSubs(revealAfter=false, live=false){
   // 一般變更維持防抖；直接拖曳則節流到約 12fps，讓 mpv/libass 仍可即時預覽位置，
   // 又不會每個 pointermove 都重載一次 ASS。
   const delay=live ? Math.max(0,80-(performance.now()-_lastMpvSubSend)) : 150;
-  _mpvSubT=setTimeout(async()=>{
+  const timer=setTimeout(async()=>{
     try{
       _lastMpvSubSend=performance.now();
       // 序列：mpv/libass 以【來源時間】渲染字幕，而 cue 時碼為【時間軸時間】——
@@ -78,14 +78,15 @@ export function refreshMpvSubs(revealAfter=false, live=false){
         sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,540)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m 0 -1 l 1920 -1 l 1920 1 l 0 1`);
         assStr += '\n' + sf.join('\n') + '\n';
       }
-      await getPlayerAdapter().subSet(assStr);
+      const applied=await getPlayerAdapter().subSet(assStr);
       // 只在拖曳結束時才重新露出 mpv/libass 字幕，避免舊位置與 DOM 預覽重疊。
-      if(_revealMpvSubsAfterRefresh){
+      if(applied && _mpvSubT===timer && _revealMpvSubsAfterRefresh){
         _revealMpvSubsAfterRefresh=false;
         getPlayerAdapter().subVisible?.(true).catch(()=>{});
       }
-    }catch(e){}
+    }catch(error){ console.warn('[mpv] 無法更新字幕預覽',error); }
   },delay);
+  _mpvSubT=timer;
 }
 /* mpv 是 OS 層子視窗，HTML z-index 蓋不過它。把可見疊層交給
    host 局部裁切，保留未遮住的原生畫面，不切換 presenter 或播放時鐘。 */
@@ -292,7 +293,7 @@ export function renderVideoSub(fromPlayback=false){
   const stageH = (rect && rect.h) || _videoSub?.clientHeight || _lastStageH || ASS_PLAY_RES.y;
   if (stageH > 0) _lastStageH = stageH; // 記住有效的畫面高，避免開啟對話框時 _videoSub 失去高度導致 fallback 回原尺吋放大
   const ratio = stageH / ASS_PLAY_RES.y;
-  let html='', sig=(rect ? rect.w+'x'+rect.h : '')+';'; // 畫面區變動（換片/不同比例/視窗縮放）須重繪
+  let html='', sig=subtitleFontRevision+';'+(rect ? rect.w+'x'+rect.h : '')+';';
   try{
     let tks = [];
     for(let tk=0; tk<State.trackCount; tk++) if(trackVisible(tk)) tks.push(tk);

@@ -5,6 +5,7 @@ import {
   parseAzureTranscriptionResponse,
   transcribeAudioStream
 } from '../src/speech-recognition-engine.js';
+import { resolveRecognitionAlignment } from '../src/transcript-alignment.js';
 
 describe('Azure Speech Fast Transcription', () => {
   it('將逐句與逐字毫秒時間轉為相對音檔秒數', () => {
@@ -451,11 +452,11 @@ describe('Azure Speech Fast Transcription', () => {
     });
   });
 
-  it('Azure 認證失敗訊息不會洩漏 Speech Key', async () => {
+  it.each([401, 403])('Azure HTTP %i 說明單欄更正方式，至多呼叫一次且不顯示金鑰', async status => {
     const secret = 'azure-super-secret-key';
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
-      status: 401,
+      status,
       statusText: 'Unauthorized',
       json: async () => ({ error: { message: `Invalid subscription key: ${secret}` } })
     });
@@ -464,7 +465,7 @@ describe('Azure Speech Fast Transcription', () => {
     try {
       await callAzureSpeechTranscription({
         audioBlob: new Blob(['wav'], { type: 'audio/wav' }),
-        apiKey: secret,
+        apiKey: 'eastus:' + secret,
         region: 'southeastasia',
         language: 'en'
       });
@@ -473,9 +474,38 @@ describe('Azure Speech Fast Transcription', () => {
     }
 
     expect(caught).toBeInstanceOf(Error);
-    expect(caught.message).toContain('HTTP 401');
+    expect(caught.message).toContain('HTTP ' + status);
+    expect(caught.message).toContain('區域:金鑰');
     expect(caught.message).not.toContain(secret);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['malformed.example:mock-key', 'https://other.example/secret', 'eastus:a:b', 'eastus:', 'eastus:key\r\nheader'])(
+    '無效的單欄 Azure 憑證不會撥出請求 (%s)', async value => {
+      global.fetch = vi.fn();
+      await expect(callAzureSpeechTranscription({ apiKey: value, audioBlob: new Blob(['wav']) })).rejects.toThrow('Azure Speech');
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+  it.each([['auto', null], ['zh', 'zh-TW'], ['en', 'en-US'], ['ja', 'ja-JP'], ['ko', 'ko-KR']])(
+    '一般轉錄 %s 的語言、區域與認證會套到同一個 Azure 請求', async (language, locale) => {
+      global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ phrases: [] }) });
+      const samples = new Float32Array(16000);
+      await transcribeAudioStream({
+        audioBuffer: { duration: 1, length: samples.length, sampleRate: 16000, numberOfChannels: 1, getChannelData: () => samples },
+        provider: 'azure', taskMode: 'transcribe', apiKey: ' KoreaCentral:mock-key ', azureRegion: 'eastus',
+        azurePhrases: ['歷史草稿'], azureProfanity: 'Removed', language
+      });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      const [url, options] = global.fetch.mock.calls[0];
+      expect(new URL(url).host).toBe('koreacentral.api.cognitive.microsoft.com');
+      expect(options).toMatchObject({ redirect: 'error', headers: { 'Ocp-Apim-Subscription-Key': 'mock-key' } });
+      const definition = JSON.parse(options.body.get('definition'));
+      if (locale) expect(definition.locales).toEqual([locale]);
+      else expect(definition).not.toHaveProperty('locales');
+      expect(definition).not.toHaveProperty('phraseList');
+      expect(definition.profanityFilterMode).toBe('None');
+    });
 
   it('統一辨識入口會把 Azure 設定送到 Fast Transcription', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
@@ -524,5 +554,34 @@ describe('Azure Speech Fast Transcription', () => {
       locales: ['en-US'],
       phraseList: { phrases: ['Azure Speech'] }
     });
+  });
+
+  it('文本匹配預設自動語言，取回 Azure 的逐詞時間供每一行原稿對位', async () => {
+    const samples = new Float32Array(32000);
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+      durationMilliseconds: 2000,
+      phrases: [{ text: 'Good morning everyone.', offsetMilliseconds: 100, durationMilliseconds: 1780, locale: 'en-US', words: [
+        { text: 'Good', offsetMilliseconds: 175, durationMilliseconds: 225 },
+        { text: 'morning', offsetMilliseconds: 530, durationMilliseconds: 325 },
+        { text: 'everyone.', offsetMilliseconds: 1300, durationMilliseconds: 310 }
+      ] }]
+    }) });
+    const evidenceSegments = await transcribeAudioStream({
+      provider: 'azure', taskMode: 'align', apiKey: 'westus2:mock-key', azureRegion: 'japaneast',
+      azurePhrases: ['舊版名詞'], azureProfanity: 'Masked',
+      audioBuffer: { duration: 2, length: samples.length, sampleRate: 16000, numberOfChannels: 1, getChannelData: () => samples }
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(new URL(url).hostname).toBe('westus2.api.cognitive.microsoft.com');
+    expect(options.headers['Ocp-Apim-Subscription-Key']).toBe('mock-key');
+    expect(JSON.parse(options.body.get('definition'))).toEqual({
+      diarization: { enabled: true, maxSpeakers: 10 }, profanityFilterMode: 'None'
+    });
+    const { alignment, segments } = resolveRecognitionAlignment({ taskMode: 'align', transcript: 'Good morning\nEveryone!', evidenceSegments });
+    expect(alignment.summary.timingEvidence).toBe('word');
+    expect(segments.map(({ text, start, end }) => [text, start, end])).toEqual([
+      ['Good morning', 0.175, 0.855], ['Everyone!', 1.3, 1.61]
+    ]);
   });
 });

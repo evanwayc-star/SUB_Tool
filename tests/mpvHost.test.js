@@ -53,6 +53,7 @@ function socketThatReportsDuration(duration = 123.5, { loadEvents = true } = {})
     }
     if (typeof message.request_id !== 'number') return;
     const data = message.command?.[0] === 'loadfile' ? {playlist_entry_id:entryId}
+      : message.command?.[1] === 'track-list' ? []
       : message.command?.[1] === 'path' ? loadedPath
       : message.command?.[1] === 'time-pos' ? 0
       : message.command?.[0] === 'get_property' && message.command?.[1] === 'pause' ? socket.testPaused : duration;
@@ -2386,10 +2387,10 @@ describe('Windows mpv host lifecycle', () => {
   it('同一毫秒快速換片仍使用不同的 pipe 與字幕檔，避免連到尚未退出的舊 mpv', async () => {
     const { host, children, sockets } = make();
     await host.launch({ src: 'D:/media/a.mxf' });
-    host.setSubtitles('[Script Info]\nTitle: A');
+    expect(await host.setSubtitles('[Script Info]\nTitle: A')).toBe(true);
 
     await host.launch({ src: 'D:/media/b.mxf' });
-    host.setSubtitles('[Script Info]\nTitle: B');
+    expect(await host.setSubtitles('[Script Info]\nTitle: B')).toBe(true);
 
     const pipeOf = launch => launch.args.find(arg => arg.startsWith('--input-ipc-server='));
     const subtitleOf = socket => socket.write.mock.calls

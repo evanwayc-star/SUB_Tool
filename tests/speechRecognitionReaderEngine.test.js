@@ -41,6 +41,110 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+it('瀏覽器長音檔的 Gemini 文本匹配分批取逐字時間並還原到選定範圍', async () => {
+  const lengths = [];
+  fetch.mockImplementation(async (url, options) => {
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/interactions');
+    expect(Buffer.byteLength(options.body, 'utf8')).toBeLessThanOrEqual(20_000_000);
+    const body = JSON.parse(options.body);
+    expect(body.model).toBe('models/gemini-3.5-transcribe');
+    const wav = Buffer.from(body.input[0].data, 'base64');
+    lengths.push(wav.readUInt32LE(40) / 32000);
+    const text = `Part ${lengths.length}!`;
+    return { ok: true, json: async () => ({ status:'completed', steps:[{ type:'model_output',
+      content:[{type:'text', text, annotations:[{type:'word_info', text, start_offset:'11s', end_offset:'11.5s'}]}]
+    }] }) };
+  });
+  const duration = 603.5, inT = 1;
+  const segments = await transcribeAudioStream({ audioBuffer:pcm(duration), provider:'google', apiKey:'test',
+    taskMode:'align', inT, outT:duration });
+  expect(lengths.length).toBeGreaterThan(1);
+  expect(segments.map(segment=>segment.text)).toEqual(lengths.map((_, index)=>`Part ${index + 1}!`));
+  expect(segments[0].start).toBe(11);
+  let offset = 0;
+  for (let index = 0; index < lengths.length; index++) {
+    expect(segments[index].words[0].start).toBeCloseTo(offset + 11, 4);
+    offset += lengths[index] - (index < lengths.length - 1 ? 10 : 0);
+  }
+  expect(offset).toBeCloseTo(duration - inT, 4);
+});
+
+it('Google 長片每次上傳的實際 JSON 低於 20 MB，無損 PCM 與重疊來源連續且只加一次 IN 偏移', async () => {
+  const source = reader(), uploads = [];
+  const inT = 123.125, outT = 744.375;
+  let readSpan;
+  const sampleAt = index => ((index % 1024) - 512) / 512;
+  const encodedSample = value => Math.trunc(value * (value < 0 ? 32768 : 32767));
+  source.readRange.mockImplementation(async (start, end) => {
+    readSpan = { start, end };
+    const buffer = pcm(end - start);
+    const samples = buffer.getChannelData(0), firstSample = Math.round(start * 16000);
+    for (let index = 0; index < samples.length; index++) samples[index] = sampleAt(firstSample + index);
+    return buffer;
+  });
+  fetch.mockImplementation(async (url, options) => {
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/interactions');
+    expect(Buffer.byteLength(options.body, 'utf8')).toBeLessThanOrEqual(20_000_000);
+    const body = JSON.parse(options.body), wav = Buffer.from(body.input[0].data, 'base64');
+    expect(body.input[0].mime_type).toBe('audio/wav');
+    expect(wav.toString('ascii', 0, 4)).toBe('RIFF');
+    expect(wav.readUInt16LE(20)).toBe(1);
+    expect(wav.readUInt16LE(22)).toBe(1);
+    expect(wav.readUInt32LE(24)).toBe(16000);
+    expect(wav.readUInt16LE(34)).toBe(16);
+    const sampleCount = wav.readUInt32LE(40) / 2;
+    expect(sampleCount).toBe(Math.round((readSpan.end - readSpan.start) * 16000));
+    for (const index of [0, Math.floor(sampleCount / 2), sampleCount - 1]) {
+      expect(wav.readInt16LE(44 + index * 2)).toBe(encodedSample(sampleAt(Math.round(readSpan.start * 16000) + index)));
+    }
+    uploads.push({ ...readSpan, samples: sampleCount });
+    const text = `Part ${uploads.length}!`;
+    return { ok:true, json:async()=>({status:'completed',steps:[{type:'model_output',content:[{
+      type:'text',text,annotations:[{type:'word_info',text,start_offset:'11s',end_offset:'11.5s'}]
+    }]}]}) };
+  });
+  const segments = await transcribeAudioStream({audioBuffer:source,inT,outT,
+    provider:'google',apiKey:'test',taskMode:'transcribe',language:'en'});
+  expect(uploads.length).toBeGreaterThan(1);
+  expect(uploads[0].start).toBe(inT);
+  expect(uploads.at(-1).end).toBe(outT);
+  for (let index = 0; index < uploads.length; index++) {
+    if (index) expect(uploads[index].start).toBeCloseTo(uploads[index - 1].end - 10, 6);
+    expect(segments[index].words[0].start).toBeCloseTo(uploads[index].start - inT + 11, 6);
+    expect(segments[index].words[0].end).toBeCloseTo(uploads[index].start - inT + 11.5, 6);
+  }
+  expect(segments).toHaveLength(uploads.length);
+  expect(source.close).not.toHaveBeenCalled();
+});
+
+it('OpenAI 自動辨識依服務實際段落與說話者交接，長片靜音切點前後各上傳一次', async () => {
+  const source = reader(), forms = [];
+  const segmentsByChunk = [
+    [{ start: 549.5, end: 555.1, text: 'First sentence. Still the same speaker.', speaker: 'A' }],
+    [{ start: 0, end: 1.6, text: 'After the cut.', speaker: 'B' }, { start: 5, end: 6, text: 'Again.', speaker: 'B' }]
+  ];
+  fetch.mockImplementation(async (_url, { body }) => {
+    const segments = segmentsByChunk[forms.length];
+    forms.push(body);
+    return { ok: true, json: async () => ({ segments, text: segments.map(segment => segment.text).join(' ') }) };
+  });
+  const result = await transcribeAudioStream({ audioBuffer: source, inT: 123, outT: 724,
+    provider: 'openai', apiKey: 'test', taskMode: 'transcribe' });
+  expect(source.readRange.mock.calls.map(([start, end]) => [start, end])).toEqual([[678, 723], [123, 678.1], [678.1, 724]]);
+  for (const body of forms) {
+    expect(body.get('model')).toBe('gpt-4o-transcribe-diarize');
+    expect(body.get('response_format')).toBe('diarized_json');
+    expect(body.get('chunking_strategy')).toBe('auto');
+    for (const field of ['timestamp_granularities[]', 'language', 'prompt', 'temperature']) expect(body.has(field)).toBe(false);
+  }
+  expect(result.map(({text, speaker}) => [text,speaker])).toEqual([['First sentence. Still the same speaker.', 'A'], ['After the cut.', 'B'], ['Again.', 'B']]);
+  for (const [i, [start, end]] of [[549.5,555.1],[555.1,556.7],[560.1,561.1]].entries()) {
+    expect(result[i].start).toBeCloseTo(start, 6);
+    expect(result[i].end).toBeCloseTo(end, 6);
+    expect(result[i]).not.toHaveProperty('words');
+  }
+});
+
 describe('bounded recognition source reader', () => {
   it.each(['groq', 'openai'])('%s uploads only the nonzero IN/OUT PCM, with local zero timestamps', async provider => {
     const source = reader();
@@ -114,6 +218,7 @@ describe('bounded recognition source reader', () => {
         { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] }
       ] }) };
       if (provider === 'google') {
+        expect(Buffer.byteLength(options.body, 'utf8')).toBeLessThanOrEqual(20_000_000);
         const payload = JSON.parse(options.body);
         expect(payload.contents[0].parts[0].text).toContain('context');
         payloads.push(atob(payload.contents[0].parts[1].inlineData.data).length);
@@ -141,9 +246,16 @@ describe('bounded recognition source reader', () => {
       provider, apiKey: 'test', language: 'en', prompt: 'context', azureRegion: 'westus',
       azurePhrases: ['term'], azureProfanity: 'Removed', keyterms: ['term'],
       elevenlabsNumSpeakers: 3, elevenlabsTagAudioEvents: true });
-    expect(payloads).toEqual([17_763_244, 1_788_844]);
-    expect(result).toHaveLength(2);
-    expect(result[1].start).toBeCloseTo(560.1, 6);
+    if (provider === 'google') {
+      expect(payloads).toEqual([8_163_244, 8_163_244, 3_545_644]);
+      expect(result).toHaveLength(3);
+      expect(result[1].start).toBeCloseTo(260.1, 6);
+      expect(result[2].start).toBeCloseTo(505.2, 6);
+    } else {
+      expect(payloads).toEqual([17_763_244, 1_788_844]);
+      expect(result).toHaveLength(2);
+      expect(result[1].start).toBeCloseTo(560.1, 6);
+    }
     if (provider === 'azure') expect(result[1]).toMatchObject({ speaker: 2, locale: 'en-US', confidence: 0.9 });
     if (provider === 'elevenlabs') expect(result[1].speaker).toBe('speaker_2');
   });

@@ -71,6 +71,7 @@ const actionCategories = [
       'toggle_check_panel': '打開/關閉字幕檢查視窗',
       'toggle_mixer': '打開/關閉音量表',
       'toggle_safe_frame': '打開/關閉安全框',
+      'toggle_timecode_watermark': '打開/關閉播放器 TC 時間碼',
       'add_note': '新增備註',
       'select_all': '全選當前軌道字幕',
       'copy_cues': '複製選取字幕',

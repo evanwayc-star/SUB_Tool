@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { sameSnapshot } = require('./file-content-evidence');
+const { sameOriginalFile, withCacheReader, fileSnapshot } = require('./waveform-file-evidence');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 
 const MAGIC = Buffer.from('SUBPEAK1');
@@ -68,17 +69,16 @@ function pcmData(fd, size, samples) {
 
 /** The caller owns the managed directory and verified WAV. The peak record can
  * only describe that exact output snapshot and recipe; it is never PCM proof. */
-function waveformDisplayCache(directory, wave, spec, verify) {
+function waveformDisplayCache(directory, wave, spec, verify, verifiedSnapshot) {
   const samples = spec.totalSamples;
   if (!fitsDisplayPeaks(samples)) return null;
   verify();
   const authority = captureOutputAuthority(wave, captureOutputDirectory(directory));
-  const snapshot = fs.lstatSync(wave, statOptions);
-  if (!snapshot.isFile() || snapshot.isSymbolicLink()) throw changed();
+  const snapshot = verifiedSnapshot || fileSnapshot(wave);
   const check = () => {
     verify();
     assertOutputAuthority(authority, wave);
-    if (!sameSnapshot(snapshot, fs.lstatSync(wave, statOptions))) throw changed();
+    if (!sameSnapshot(snapshot, fileSnapshot(wave, named => sameSnapshot(snapshot, named)))) throw changed();
   };
   const identity = ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs', 'ctimeNs'].map(field => String(snapshot[field]));
   // Portable continuous caches accept a moved WAV only after checking its PCM digest. Its
@@ -86,27 +86,24 @@ function waveformDisplayCache(directory, wave, spec, verify) {
   const key = digest(JSON.stringify(spec.version >= 2 && spec.pcmSHA256 ? [spec] : [spec, ...identity]));
   const file = wave + '.peaks-v1', count = peakCount(samples);
   function read() {
-    let fd;
     try {
       check();
-      const before = fs.lstatSync(file, statOptions);
-      if (!before.isFile() || before.size !== BigInt(HEADER + count * 4)) return null;
-      fd = fs.openSync(file, 'r');
-      if (!sameSnapshot(before, fs.fstatSync(fd, statOptions))) return null;
-      const head = Buffer.alloc(HEADER);
-      readAt(fd, head, 0);
-      if (!head.subarray(0, MAGIC.length).equals(MAGIC) || !head.subarray(MAGIC.length, MAGIC.length + 32).equals(key)) return null;
-      const peaks = new Float32Array(count), bytes = Buffer.from(peaks.buffer);
-      readAt(fd, bytes, HEADER);
-      if (!digest(bytes).equals(head.subarray(HEADER - 32)) || !sameSnapshot(before, fs.fstatSync(fd, statOptions))
-        || !sameSnapshot(before, fs.lstatSync(file, statOptions))) return null;
-      for (let i = 0; i < count; i += 2) {
-        if (!(peaks[i] >= -1 && peaks[i] <= 0 && peaks[i + 1] >= 0 && peaks[i + 1] <= 1)) return null;
-      }
+      const result = withCacheReader(file, (fd, stat) => {
+        if (stat.size !== BigInt(HEADER + count * 4)) return null;
+        const head = Buffer.alloc(HEADER);
+        readAt(fd, head, 0);
+        if (!head.subarray(0, MAGIC.length).equals(MAGIC) || !head.subarray(MAGIC.length, MAGIC.length + 32).equals(key)) return null;
+        const peaks = new Float32Array(count), bytes = Buffer.from(peaks.buffer);
+        readAt(fd, bytes, HEADER);
+        if (!digest(bytes).equals(head.subarray(HEADER - 32))) return null;
+        for (let i = 0; i < count; i += 2) {
+          if (!(peaks[i] >= -1 && peaks[i] <= 0 && peaks[i + 1] >= 0 && peaks[i + 1] <= 1)) return null;
+        }
+        return peaks;
+      });
       check();
-      return peaks;
+      return result;
     } catch (_) { check(); return null; }
-    finally { if (fd !== undefined) fs.closeSync(fd); }
   }
   function fromWave() {
     check();
@@ -143,8 +140,9 @@ function waveformDisplayCache(directory, wave, spec, verify) {
       fs.closeSync(fd);
       fd = undefined;
       check();
-      const current = fs.lstatSync(tmp, statOptions);
-      if (!current.isFile() || current.dev !== owner.dev || current.ino !== owner.ino || current.size !== BigInt(HEADER + bytes.length)) throw changed();
+      const expectedSize = BigInt(HEADER + bytes.length);
+      const current = fileSnapshot(tmp, named => named.size === expectedSize);
+      if (!sameOriginalFile(current, owner) || current.size !== expectedSize) throw changed();
       fs.renameSync(tmp, file);
     } catch (_) { check(); /* The verified WAV also works on a read-only share. */ }
     finally {

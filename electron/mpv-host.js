@@ -24,6 +24,8 @@ const { validProjectCanvas } = require('../shared/project-canvas.cjs');
 const { buildMpvAudioMix } = require('./mpv-audio-mix');
 const { normaliseMpvRect, normaliseMpvViewport, mpvWindowRegion } = require('./mpv-window-region');
 
+const canonicalMpvPath = value => typeof value === 'string' ? value.replace(/\\/g, '/').toLowerCase() : null;
+
 function createMpvTemporaryFiles(fs, path, tmpDir, ensureTmp, rootAuthority) {
   const records = new Set();
   let root = rootAuthority || null;
@@ -152,10 +154,9 @@ function createMpvHost(deps) {
   let imagesHtml = '';
   let timecodeWatermark = '';
   let timecodeWatermarkRect = null;
-  let subFile = null;
   let subOwner = null;
+  let subtitleWork = null;
   let guideOwner = null;
-  let subAdded = false;
   const liveChildren = new Set();
   const liveLogs = new Set();
   const retiredFiles = new Set();
@@ -548,10 +549,9 @@ function createMpvHost(deps) {
     waiter.reading = true;
     // path 是查詢當下的來源，不能替排隊的舊 file-loaded 作證。先以 loadfile
     // ACK 的 entry ID 配對 start-file 後的事件，再核對路徑；同路徑重載也分開。
-    const canonical = value => typeof value === 'string' ? value.replace(/\\/g, '/').toLowerCase() : null;
     void send(['get_property', 'path'], true, { requireSuccess: true }).then(async loadedPath => {
       if (!owns()) return;
-      if (canonical(loadedPath) !== canonical(waiter.session.path)) {
+      if (canonicalMpvPath(loadedPath) !== canonicalMpvPath(waiter.session.path)) {
         waiter.reading = false;
         return;
       }
@@ -661,8 +661,6 @@ function createMpvHost(deps) {
     hostShown = false;
     guide = null;
     imagesHtml = '';
-    subFile = null;
-    subAdded = false;
   }
 
   function stopProcess() {
@@ -778,7 +776,7 @@ function createMpvHost(deps) {
     });
   }
 
-  function ownsAudioMix(session) {
+  function ownsReadySource(session) {
     return !!session && session === fileLoadSession && session.client === client
       && session.generation === generation && !session.loading;
   }
@@ -802,17 +800,17 @@ function createMpvHost(deps) {
   }
 
   function pumpAudioMix(session, mix) {
-    if (mix.active || !mix.pending || mix.suspended || mix.canceled || !ownsAudioMix(session)) return;
+    if (mix.active || !mix.pending || mix.suspended || mix.canceled || !ownsReadySource(session)) return;
     const job = mix.pending;
     mix.pending = null;
     mix.active = job;
     const epoch = mix.epoch;
     void send(['set_property', 'lavfi-complex', job.graph], true, { requireSuccess: true }).then(() => {
-      const current = !mix.canceled && ownsAudioMix(session) && epoch === mix.epoch;
+      const current = !mix.canceled && ownsReadySource(session) && epoch === mix.epoch;
       if (current) mix.confirmed = job.graph;
       job.resolve(current && mix.desired === job.graph && !mix.suspended);
     }, error => {
-      if (!mix.canceled && ownsAudioMix(session) && epoch === mix.epoch && mix.desired === job.graph) job.reject(error);
+      if (!mix.canceled && ownsReadySource(session) && epoch === mix.epoch && mix.desired === job.graph) job.reject(error);
       else job.resolve(false);
     }).finally(() => {
       mix.active = null;
@@ -838,7 +836,7 @@ function createMpvHost(deps) {
 
   async function audioMix(request) {
     const session = fileLoadSession;
-    if (!ownsAudioMix(session) || request?.sourceSessionId !== session.sourceSessionId) return false;
+    if (!ownsReadySource(session) || request?.sourceSessionId !== session.sourceSessionId) return false;
     return requestAudioGraph(session, buildMpvAudioMix(session.audio, request.channels));
   }
 
@@ -1474,36 +1472,67 @@ function createMpvHost(deps) {
     return true;
   }
 
-  function setSubtitles(assText) {
-    if (!client) return null;
+  function writeSubtitleFile(assText) {
     if (subOwner) {
-      try { temporaryFiles.write(subOwner, assText || ''); }
+      try { temporaryFiles.write(subOwner, assText || ''); return subOwner.file; }
       catch (error) {
         // A replaced or unavailable file must never be reopened for writing.
         // Give mpv a fresh track instead of losing future live updates.
         retiredFiles.add(subOwner);
         subOwner = null;
-        subFile = null;
-        subAdded = false;
       }
     }
     try {
-      if (!subFile) {
-        subOwner = temporaryFiles.create('ass');
-        subFile = subOwner.file;
-        temporaryFiles.write(subOwner, assText || '');
-      }
+      subOwner = temporaryFiles.create('ass');
+      temporaryFiles.write(subOwner, assText || '');
+      return subOwner.file;
     } catch (error) {
       temporaryFiles.remove(subOwner);
       subOwner = null;
-      subFile = null;
-      return null;
+      throw error;
     }
-    if (!subAdded) {
-      subAdded = true;
-      return send(['sub-add', subFile, 'select']);
+  }
+
+  async function applySubtitles(assText, current) {
+    const file = writeSubtitleFile(assText);
+    for (let attempt = 0; ; attempt++) {
+      // sub-add 的 ACK 不帶字幕軌 ID。以此來源真正載入的外部檔辨認自己的軌，
+      // 才能在 sid 已切換、失敗重試或同一個 mpv 換片後，仍更新正確的字幕。
+      const tracks = await send(['get_property', 'track-list'], true, { requireSuccess: true });
+      if (!current()) return false;
+      const track = tracks.find(t => t.type === 'sub' && t.external
+        && canonicalMpvPath(t['external-filename']) === canonicalMpvPath(file));
+      try {
+        if (track) {
+          // mpv 會選取重新載入的軌；若另有字幕，重載後的 ID 也可能改變。
+          await send(['sub-reload', track.id], true, { requireSuccess: true });
+        } else {
+          await send(['sub-add', file, 'select'], true, { requireSuccess: true });
+        }
+        return current();
+      } catch (error) {
+        if (!current()) return false;
+        if (attempt || error.code !== 'MPV_COMMAND_REJECTED') throw error;
+      }
     }
-    return send(['sub-reload']);
+  }
+
+  async function setSubtitles(assText, sourceSessionId = fileLoadSession?.sourceSessionId) {
+    const session = fileLoadSession;
+    if (!ownsReadySource(session) || sourceSessionId !== session.sourceSessionId) return false;
+    const request = Symbol();
+    session.subtitleRequest = request;
+    const current = () => ownsReadySource(session) && session.subtitleRequest === request;
+    // ASS 暫存檔直到上一筆 ACK 才能覆寫；等待期間只提交最新一次面板輸入。
+    if (subtitleWork) await subtitleWork;
+    if (!current()) return false;
+    const work = applySubtitles(assText, current).catch(error => {
+      if (current()) log('[mpv] 字幕更新失敗：', error.message);
+      return false;
+    });
+    subtitleWork = work;
+    try { return await work; }
+    finally { if (subtitleWork === work) subtitleWork = null; }
   }
 
   async function loadFile(filePath) {
@@ -1522,7 +1551,6 @@ function createMpvHost(deps) {
     // 同一個 mpv process 會沿用 pipe，但舊來源的呈現請求絕不可由新來源的
     // time-pos／playback-restart 完成。
     cancelPresent();
-    subAdded = false;
     let info;
     try {
       info = describeSource ? await describeSource(filePath) : null;

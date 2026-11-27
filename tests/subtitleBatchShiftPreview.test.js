@@ -29,6 +29,8 @@ beforeAll(async () => {
   const { resetPlayerAdapter } = await import('../src/media-player-adapter.js');
   await resetPlayerAdapter(window.subtool).enterMpv({ src: 'fixture.mov' });
   const { on } = await import('../src/events.js');
+  on('render:videoSub', Renderer.renderVideoSub);
+  on('mpv:refreshSubs', Renderer.refreshMpvSubs);
   // Real app render:all composition; no import of the bootstrap or native app.
   unsubscribe = on('render:all', () => {
     Subtitles.renderSubList(); Timeline.renderCueBlocks(); Renderer.renderVideoSub(); Subtitles.updateTlSel(); Renderer.refreshMpvSubs();
@@ -46,6 +48,62 @@ beforeEach(() => {
   History.reset();
 });
 afterAll(() => { unsubscribe?.(); vi.clearAllTimers(); vi.useRealTimers(); });
+
+it('refreshes the paused subtitle, its measured background and mpv ASS when a font is registered or replaced under the same name', async () => {
+  const { loadFonts, assFontName } = await import('../src/substyle.js');
+  const { measureSubtitleBackgroundLayouts } = await import('../src/subtitle-background-layout.js');
+  const alias = 'Imported Font';
+  State.tracks[0].font = alias;
+  State.tracks[0].bgBox = true;
+  State.playing = false;
+  State.cues = [{ id: 'font-preview', start: 0, end: 5, text: 'WWW\niiiii', track: 0 }];
+  History.reset();
+
+  const source = { name: alias, file: 'imported.ttf', family: 'First Family' };
+  window.subtool.fontsList = async () => ({ fonts: [{ ...source }] });
+  window.subtool.fileURL = async () => 'font-url';
+  const fontsProperty = Object.getOwnPropertyDescriptor(document, 'fonts');
+  Object.defineProperty(document, 'fonts', { configurable: true, value: new Set() });
+  vi.stubGlobal('FontFace', class { async load() { return this; } });
+  vi.stubGlobal('fetch', async () => ({ arrayBuffer: async () => new ArrayBuffer(1) }));
+
+  const bounds = HTMLElement.prototype.getBoundingClientRect;
+  const measured = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+    if (!this.parentElement?.hasAttribute('data-subtitle-background-measure')) return bounds.call(this);
+    // Changing the face reverses which line owns the background despite identical text and CSS.
+    const wideW = assFontName(alias) === 'First Family';
+    return { width: (this.textContent === 'WWW') === wideW ? 100 : 50, height: 20 };
+  });
+  const currentLine = () => document.querySelector('#videoSub .line');
+  const widest = () => measureSubtitleBackgroundLayouts(State.cues, State.tracks)['font-preview'].lineIndex;
+  try {
+    Renderer.renderVideoSub();
+    const fallback = currentLine();
+    expect(fallback?.textContent).toBe('WWWiiiii');
+    expect(widest()).toBe(1);
+    await loadFonts();
+    await vi.advanceTimersByTimeAsync(160);
+    const first = currentLine();
+    expect(first).not.toBe(fallback);
+    expect(widest()).toBe(0);
+    expect(bridge.subSet.mock.lastCall[0]).toContain('Style: Track0,First Family,');
+
+    source.family = 'Replacement Family';
+    await loadFonts(true);
+    await vi.advanceTimersByTimeAsync(160);
+    expect(currentLine()).not.toBe(first);
+    expect(widest()).toBe(1);
+    expect(bridge.subSet.mock.lastCall[0]).toContain('Style: Track0,Replacement Family,');
+    expect(History.stack).toHaveLength(1);
+  } finally {
+    measured.mockRestore();
+    vi.unstubAllGlobals();
+    if (fontsProperty) Object.defineProperty(document, 'fonts', fontsProperty);
+    else delete document.fonts;
+    delete window.subtool.fontsList;
+    delete window.subtool.fileURL;
+  }
+});
 
 describe('batch subtitle shifts and preview work', () => {
   it('shifts all cues, refreshes actual ASS once, and leaves transport and playback intent unchanged', async () => {

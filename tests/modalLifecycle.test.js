@@ -152,17 +152,23 @@ describe('modal lifecycle ownership', () => {
     expect(document.getElementById('cacheActionError').hidden).toBe(true);
     expect(document.getElementById('cacheActionStatus').textContent).toContain('已清除快取');
   });
-  it('快取視窗只列目前素材同資料夾的保存進度，舊中央回覆不進畫面',async()=>{
+  it('快取視窗顯示目前素材旁和本機重建的波形，舊中央回覆不進畫面',async()=>{
     const {State}=await import('../src/state.js');State.mediaPath='C:/NAS/movie.mov';
-    window.subtool={cacheInfo:vi.fn(async()=>({root:'C:/local',folders:0,bytes:0,source:{path:State.mediaPath,locations:[{
+    window.subtool={cacheInfo:vi.fn(async()=>({root:'C:/local',folders:0,bytes:0,source:{path:State.mediaPath,incomplete:true,locations:[{
       directory:'C:/NAS/.subtool_Cache/abc',kind:'sidecar',waveform:{state:'partial',completedSamples:20000,totalSamples:40000,verified:false},proxy:false,channels:0,
-    },{directory:'C:/local/old-central',kind:'central',waveform:{state:'complete'},proxy:true,channels:8}]}}))};
+    },{directory:'C:/profile/waveform-recovery/abc',kind:'waveform-recovery',waveform:{state:'complete',bytes:80044,hasSourceChannels:true}},
+    {directory:'C:/local/old-central',kind:'central',waveform:{state:'complete'},proxy:true,channels:8}]}}))};
     await ui.openCacheDialog();
     expect(window.subtool.cacheInfo).toHaveBeenCalledWith('C:/NAS/movie.mov');
     const text=document.getElementById('modalBody').textContent;
     expect(text).toContain('同資料夾快取');expect(text).toContain('5.0 / 10.0 秒');
     expect(text).toContain('使用前重新驗證');expect(text).toContain('C:/NAS/.subtool_Cache/abc');
     expect(text).not.toContain('C:/local');expect(text).not.toContain('中央快取');
+    const local=[...document.querySelectorAll('.cache-source-location')].find(el=>el.querySelector('h4').textContent==='本機波形快取');
+    expect(local.textContent).toContain('C:/profile/waveform-recovery/abc');
+    expect(local.textContent).toContain('紀錄已完成');expect(local.textContent).not.toContain('Proxy');
+    expect(local.textContent).toContain('原音聲道波形');
+    expect(text).toContain('部分快取位置目前無法確認');
   });
   it('查詢期間換來源時不顯示舊素材快取或提供清除資格',async()=>{
     const {State}=await import('../src/state.js');State.mediaPath='C:/old.mov';

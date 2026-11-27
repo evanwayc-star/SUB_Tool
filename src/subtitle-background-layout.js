@@ -3,6 +3,7 @@ import {
   effStyle,
   styleToCss,
   subtitleBackgroundCssMetrics,
+  subtitleFontRevision,
 } from './substyle.js';
 
 function trackOf(cue, tracks){
@@ -100,11 +101,16 @@ function measurerFor(documentRef){
   let entry = documentMeasurers.get(documentRef);
   if(entry) return entry;
   const cache = new Map();
+  let fontRevision = subtitleFontRevision;
   const root = documentRef.createElement('div');
   root.dataset.subtitleBackgroundMeasure = 'true';
   root.style.cssText = 'position:fixed;left:-100000px;top:0;visibility:hidden;pointer-events:none;width:max-content;height:max-content;contain:layout style paint;';
   documentRef.body.appendChild(root);
   entry = (line, st) => {
+    if(fontRevision !== subtitleFontRevision){
+      cache.clear();
+      fontRevision = subtitleFontRevision;
+    }
     const measurementCss = styleToCss({
       ...st,
       bgBox: false,

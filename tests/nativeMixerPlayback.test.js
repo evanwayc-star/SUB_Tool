@@ -170,7 +170,7 @@ it.skipIf(!canRun)('真實 mpv 與快取播放輸出遵守混音器 solo、mute�
       // Keep the mother audio carrier available for the PCM silence checks
       // after cached handoff; smooth preview can switch to a video-only proxy.
       SUB.State.previewMode='original';
-      window.mixerCacheHold={wave:m._prepareSourceWaveform,ingest:m._bgAudioIngest,args:null};
+      window.mixerCacheHold={wave:m._prepareSourceWaveform,ingest:m._bgAudioIngest,clipIngest:m._clipIngest,args:null};
       m._prepareSourceWaveform=async()=>null;
       m._bgAudioIngest=async(...args)=>{mixerCacheHold.args=args;return null;};
       const input=document.createElement('input');input.type='file';input.id='mixerFixture';input.hidden=true;document.body.append(input);
@@ -261,7 +261,8 @@ it.skipIf(!canRun)('真實 mpv 與快取播放輸出遵守混音器 solo、mute�
 
     // A real source switch must rebuild both the stream and channel coordinates.
     // Keep the native host alive and leave only the new source's cache pending.
-    await client.evaluate('SUB.Media.pause();SUB.Media._prepareSourceWaveform=async()=>null;true');
+    // Hold ingestion directly: waveform preparation may recover and continue.
+    await client.evaluate('SUB.Media.pause();SUB.Media._clipIngest=async()=>null;true');
     const stereo = path.join(directory, 'one-stereo-stream.mov');
     const labelled = path.join(directory, 'eight-speaker-streams.mov');
     const layouts = ['DL', 'DR', 'FL', 'FR', 'FC', 'LFE', 'BL', 'BR'];
@@ -291,25 +292,32 @@ it.skipIf(!canRun)('真實 mpv 與快取播放輸出遵守混音器 solo、mute�
         const clip=await SUB.Media.addClipDesktop(source,{offset:${offset},vtrack:0});
         if(!clip)throw new Error('新增驗收素材失敗');
         await SUB.Media.seek(${offset + .4});SUB.Media.play();
-        return {id:clip.id,routes:SUB.State.audioProject.sourceMaps[clip.audioSourceId].channels.map(c=>({
+        return {id:clip.id,audioSource:clip.audioSrc,routes:SUB.State.audioProject.sourceMaps[clip.audioSourceId].channels.map(c=>({
           stream:c.sourceStream,channel:c.sourceChannel,buses:c.busIds}))};
       })()`);
       expect(source.routes.map(route => [route.stream, route.channel])).toEqual(coordinates);
       expect(source.routes.every(route => route.buses.length === 1)).toBe(true);
+      expect(source.audioSource).toBeTruthy();
       return source;
     }
     async function observeSourceSolo(source, channel, frequencies, amplitude) {
       await reset();
       const bus = source.routes[channel].buses[0];
       await click(`#mixerStrips .mx-strip[data-bus-id="${bus}"] .mx-solo`);
+      const previousFrames = nativeOutput(pcmFile).frames;
       await delay(850);
+      await waitFor(() => nativeOutput(pcmFile).frames > previousFrames, '換源後 mpv PCM 輸出繼續前進', 1500);
       const state = await client.evaluate(`(()=>({active:SUB.Media.activeClip()?.id,mpv:SUB.Media.mpvMode,
+        elementTracks:SUB.Media.tracks.filter(t=>t.kind==='element'&&t.source===${JSON.stringify(source.audioSource)})
+          .map(t=>({id:t.id,source:t.source})),
         playing:SUB.Media.playing,masters:mixerOutputProbe.nodes.map(n=>{const data=new Float32Array(n.analyser.fftSize);
           n.analyser.getFloatTimeDomainData(data);return (${amplitudes.toString()})(data,n.analyser.context.sampleRate,${JSON.stringify(frequencies)});})}))()`);
       const output = nativeOutput(pcmFile, frequencies), detail = JSON.stringify({ source, channel, state, output });
       evidence.samples.push({ mode: 'loadFile', source, channel, frequencies, state, output });
       expect.soft(state.active, detail).toBe(source.id);
       expect.soft(state.mpv && state.playing, detail).toBe(true);
+      expect.soft(state.elementTracks, detail).toEqual([]);
+      expect.soft(output.frames, detail).toBeGreaterThan(previousFrames);
       expect.soft(JSON.parse(readFileSync(spawnLog, 'utf8')).launches, detail).toBe(hostLaunches);
       for (let index = 0; index < frequencies.length; index++) {
         const expected = index === channel ? amplitude : 0;
@@ -342,7 +350,7 @@ it.skipIf(!canRun)('真實 mpv 與快取播放輸出遵守混音器 solo、mute�
     try {
       if (client) await client.evaluate(`(()=>{
         const media=window.SUB?.Media;media?.pause();const held=window.mixerCacheHold;
-        if(held&&media){media._prepareSourceWaveform=held.wave;media._bgAudioIngest=held.ingest;}
+        if(held&&media){media._prepareSourceWaveform=held.wave;media._bgAudioIngest=held.ingest;media._clipIngest=held.clipIngest;}
         const probe=window.mixerOutputProbe;
         if(probe){AudioNode.prototype.connect=probe.original;for(const n of probe.nodes)n.node.disconnect(n.analyser);}
         media?.reset();delete window.mixerCacheHold;delete window.mixerOutputProbe;return true;

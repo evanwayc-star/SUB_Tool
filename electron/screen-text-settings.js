@@ -3,18 +3,20 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { createSettingsFile } = require('./settings-file');
+const { SCREEN_TEXT_MODELS, SCREEN_TEXT_DEFAULT_MODELS: DEFAULT_MODELS,
+  SCREEN_TEXT_DEFAULTS: DEFAULTS } = require('../shared/screen-text-options.cjs');
 
-const DEFAULT_MODELS = Object.freeze({ openai: 'gpt-5.4-mini', gemini: 'gemini-2.5-flash' });
+const QUALITY_DEFAULTS_VERSION = 1;
 
 function validateScreenTextOptions(input = {}) {
-  const { provider = 'openai', sourceLang = 'auto', sampleFps = 2, frameWidth = 1280,
-    smartAccuracy = true } = input;
+  const { provider = DEFAULTS.provider, sourceLang = DEFAULTS.sourceLang, sampleFps = DEFAULTS.sampleFps,
+    frameWidth = DEFAULTS.frameWidth, smartAccuracy = DEFAULTS.smartAccuracy } = input;
   if (!Object.hasOwn(DEFAULT_MODELS, provider)) throw new Error('請選擇 OpenAI 或 Google Gemini');
   const model = input.model ?? DEFAULT_MODELS[provider];
   if (typeof model !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(model)) throw new Error('請輸入有效的視覺模型名稱');
   if (!['auto', 'ko', 'ja', 'zh', 'en'].includes(sourceLang)) throw new Error('請選擇有效的來源語言');
   if (!Number.isFinite(sampleFps) || sampleFps < 0.1 || sampleFps > 10) throw new Error('每秒取樣數必須介於 0.1 與 10');
-  if (![960, 1024, 1280].includes(frameWidth)) throw new Error('請選擇有效的畫面寬度');
+  if (![960, 1024, 1280, 1440, 1920].includes(frameWidth)) throw new Error('請選擇有效的畫面寬度');
   if (typeof smartAccuracy !== 'boolean') throw new Error('智慧精準強化設定無效');
   return { provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy };
 }
@@ -37,7 +39,22 @@ function createScreenTextSettings({ configDir, safeStorage, env = process.env })
     return typeof envKey(provider) === 'string' ? envKey(provider).trim() : '';
   }
 
-  function publicSettings(data = file.read()) {
+  function readSettings() {
+    const data = file.read();
+    if (data.qualityDefaultsVersion === QUALITY_DEFAULTS_VERSION) return data;
+    fs.mkdirSync(directory(), { recursive: true });
+    return file.update(current => {
+      if (current.qualityDefaultsVersion === QUALITY_DEFAULTS_VERSION) return current;
+      const provider = current.provider ?? DEFAULTS.provider;
+      const builtIn = Object.values(SCREEN_TEXT_MODELS).some(models => models.includes(current.model));
+      const options = validateScreenTextOptions({ ...current,
+        model: current.model == null || builtIn ? DEFAULT_MODELS[provider] : current.model,
+        sampleFps: DEFAULTS.sampleFps, frameWidth: DEFAULTS.frameWidth, smartAccuracy: DEFAULTS.smartAccuracy });
+      return { ...options, qualityDefaultsVersion: QUALITY_DEFAULTS_VERSION, encryptedKeys: { ...current.encryptedKeys } };
+    });
+  }
+
+  function publicSettings(data = readSettings()) {
     const hasApiKey = {};
     for (const provider of Object.keys(DEFAULT_MODELS)) {
       try { hasApiKey[provider] = !!apiKey(provider, data); }
@@ -55,7 +72,7 @@ function createScreenTextSettings({ configDir, safeStorage, env = process.env })
       encrypted = safeStorage.encryptString(input.apiKey.trim()).toString('base64');
     }
     fs.mkdirSync(directory(), { recursive: true });
-    const saved = file.update(current => ({ ...options, encryptedKeys: {
+    const saved = file.update(current => ({ ...options, qualityDefaultsVersion: QUALITY_DEFAULTS_VERSION, encryptedKeys: {
       ...current.encryptedKeys, ...(encrypted ? { [options.provider]: encrypted } : {}),
     } }));
     return publicSettings(saved);

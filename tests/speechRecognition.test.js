@@ -29,8 +29,6 @@ import {
 import { startAsrWork, clearAsrSession } from '../src/speech-recognition-session.js';
 import {
   CLOUD_PROVIDER_META,
-  getAsrGuidanceMeta,
-  resolveAsrGuidance,
   insertAsrSubtitles,
   getAsrConfig,
   saveAsrConfig,
@@ -71,8 +69,7 @@ describe('語音辨識與字幕生成模組', () => {
     const [, html] = openModal.mock.calls[0];
     expect(html).toContain('dialogue.wav');
     expect(html).toContain('value="azure"');
-    expect(html).toContain('id="asrAzureRegion"');
-    expect(html).toContain('placeholder="例如 japaneast"');
+    expect(html).not.toContain('id="asrAzureRegion"');
   });
 
   it('單一素材只顯示該素材時長，多素材才另外顯示總時長', () => {
@@ -370,124 +367,19 @@ describe('語音辨識與字幕生成模組', () => {
       'ElevenLabs'
     ]);
     expect(options.every(option => !/[()（）]/u.test(option.textContent))).toBe(true);
-    expect(document.getElementById('asrProviderHint').textContent).toContain('語意');
+    expect(document.getElementById('asrProviderHint').textContent).toContain('Gemini 3.5 Transcribe');
   });
 
-  it('內建模型選單只顯示模型名稱並維持原本 model id', () => {
-    State.clips = [];
-    State.externalAudioState = [];
-    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin' });
-
-    openSpeechRecognitionDialog({
-      id: 'builtin-model-labels',
-      name: 'builtin-model-labels.wav',
-      in: 0,
-      out: 1,
-      duration: 1,
-      audioBuffer: {}
-    });
-
-    const [, html] = openModal.mock.calls[0];
-    document.body.innerHTML = html;
-    const options = [...document.getElementById('asrBuiltinModel').options];
-
-    expect(options.map(option => option.value)).toEqual([
-      'onnx-community/whisper-tiny',
-      'onnx-community/whisper-base',
-      'onnx-community/whisper-small',
-      'onnx-community/whisper-large-v3-turbo',
-      'onnx-community/whisper-large-v3'
-    ]);
-    expect(options.map(option => option.textContent.trim())).toEqual([
-      'Whisper Tiny 逐字時間版',
-      'Whisper Base 逐字時間版',
-      'Whisper Small 逐字時間版',
-      'Whisper Large v3 Turbo q4 逐字時間版',
-      'Whisper Large v3 旗艦多語言版'
-    ]);
-    expect(options.every(option => !/[()（）]/u.test(option.textContent))).toBe(true);
-    expect(document.getElementById('asrBuiltinRow').textContent).toContain('首次使用會下載並快取模型');
-  });
-
-  it('替包含本機 Whisper 在內之支援服務提供提示詞或專有名詞欄位', () => {
-    expect(getAsrGuidanceMeta('builtin')).toMatchObject({ kind: 'prompt' });
-    expect(getAsrGuidanceMeta('google')).toMatchObject({ kind: 'prompt' });
-    expect(getAsrGuidanceMeta('groq')).toMatchObject({ kind: 'prompt' });
-    expect(getAsrGuidanceMeta('openai')).toMatchObject({ kind: 'prompt' });
-    expect(getAsrGuidanceMeta('azure')).toMatchObject({ kind: 'phrases' });
-    expect(resolveAsrGuidance('builtin', '繁體中文與專有名詞')).toEqual({ prompt: '繁體中文與專有名詞' });
-    expect(resolveAsrGuidance('google', '逐字轉錄')).toEqual({ prompt: '逐字轉錄' });
-    expect(resolveAsrGuidance('azure', 'SUB Tool， Evan; MXF\n字幕')).toEqual({
-      azurePhraseList: 'SUB Tool， Evan; MXF\n字幕',
-      azurePhrases: ['SUB Tool', 'Evan', 'MXF', '字幕']
-    });
-  });
-
-  it('本機辨識與雲端 Whisper 皆支援提示詞欄位以導引專有名詞與繁體中文', () => {
-    State.clips = [];
-    State.externalAudioState = [];
-    saveAsrConfig({ ...getAsrConfig(), provider: 'builtin', prompt: '繁體中文與專有名詞導引' });
-
-    openSpeechRecognitionDialog({
-      id: 'local-dialogue',
-      name: 'local-dialogue.wav',
-      in: 0,
-      out: 1,
-      duration: 1,
-      audioBuffer: {}
-    });
-
-    const [, html] = openModal.mock.calls[0];
-    document.body.innerHTML = html;
-    expect(getComputedStyle(document.getElementById('asrPromptRow')).display).not.toBe('none');
-    expect(resolveAsrGuidance('builtin', '繁體中文與專有名詞導引')).toEqual({ prompt: '繁體中文與專有名詞導引' });
-  });
-
-  it('切換辨識服務時依能力更新提示欄位', async () => {
-    State.clips = [];
-    State.externalAudioState = [];
-    saveAsrConfig({
-      ...getAsrConfig(),
-      provider: 'azure',
-      prompt: '保留給雲端的提示詞',
-      azurePhraseList: 'SUB Tool, Evan'
-    });
-    openModal.mockImplementation((title, html) => {
-      document.body.innerHTML = html;
-    });
-
-    openSpeechRecognitionDialog({
-      id: 'switch-dialogue',
-      name: 'switch-dialogue.wav',
-      in: 0,
-      out: 1,
-      duration: 1,
-      audioBuffer: {}
-    });
+  it.each(['align', 'transcribe'])('%s 的引擎表單僅建立引擎、API Key 和語言欄位', async taskMode => {
+    saveAsrConfig({provider:'azure', taskMode});
+    openModal.mockImplementation((_title, html) => { document.body.innerHTML = html; });
+    openSpeechRecognitionDialog({id:'simple', name:'simple.wav', in:0, out:1, audioBuffer:{}});
     await new Promise(resolve => setTimeout(resolve, 0));
-
-    const providerEl = document.getElementById('asrProvider');
-    const promptRow = document.getElementById('asrPromptRow');
-    const promptLabel = document.getElementById('asrPromptLabel');
-    const promptEl = document.getElementById('asrPrompt');
-
-    providerEl.value = 'google';
-    providerEl.onchange();
-    expect(getComputedStyle(promptRow).display).toBe('flex');
-    expect(promptLabel.textContent).toBe('提示詞（Prompt）：');
-    expect(promptEl.value).toBe('保留給雲端的提示詞');
-
-    providerEl.value = 'azure';
-    providerEl.onchange();
-    expect(getComputedStyle(promptRow).display).toBe('flex');
-    expect(promptLabel.textContent).toContain('Phrase List');
-    expect(promptEl.value).toBe('SUB Tool, Evan');
-
-    providerEl.value = 'builtin';
-    providerEl.onchange();
-    expect(getComputedStyle(promptRow).display).toBe('flex');
-    expect(promptLabel.textContent).toContain('Prompt');
-    expect(promptEl.value).toBe('保留給雲端的提示詞');
+    const card = document.querySelector('.asr-engine-card');
+    const controls = [...card.querySelectorAll('input, select, textarea')].map(element => element.id);
+    expect(controls).toEqual(['asrProvider', 'asrApiKey', 'asrLanguage']);
+    expect(document.getElementById('asrProviderHint').textContent).toContain('區域:金鑰');
+    expect(document.getElementById('asrLanguage').value).toBe('auto');
   });
 
   it('能從桌面核發的素材 URL 載入右鍵指定音訊', async () => {
@@ -726,9 +618,8 @@ describe('語音辨識與字幕生成模組', () => {
       const conf = getAsrConfig();
       expect(conf.taskMode).toBe('transcribe');
       expect(conf.provider).toBe('google');
-      expect(conf.builtinModel).toBe('onnx-community/whisper-large-v3-turbo');
-      expect(conf.language).toBe('zh');
-      expect(conf.prompt).toContain('繁體中文');
+      expect(conf.alignmentLanguage).toBe('auto');
+      expect(conf.speechLanguage).toBe('auto');
       expect(conf.azureRegion).toBe('japaneast');
     });
 
@@ -753,47 +644,15 @@ describe('語音辨識與字幕生成模組', () => {
       expect(Object.values(BUILTIN_MODELS).every(model => !/[()（）]/u.test(model.name))).toBe(true);
     });
 
-    it('能夠儲存並讀回自訂的 ASR 設定', () => {
-      saveAsrConfig({
-        taskMode: 'align',
-        provider: 'builtin',
-        builtinModel: 'onnx-community/whisper-small',
-        openaiApiKey: 'sk-test-key-1234',
-        groqApiKey: 'gsk-groq-key-5678',
-        language: 'en',
-        prompt: 'Testing prompt'
-      });
-      const conf = getAsrConfig();
-      expect(conf.taskMode).toBe('align');
-      expect(conf.provider).toBe('builtin');
-      expect(conf.builtinModel).toBe('onnx-community/whisper-small');
-      expect(conf.openaiApiKey).toBe('sk-test-key-1234');
-      expect(conf.groqApiKey).toBe('gsk-groq-key-5678');
-      expect(conf.language).toBe('en');
-    });
-
-    it('支援將可選 Prompt 清空，不會重新塞回預設文字', () => {
-      saveAsrConfig({ ...getAsrConfig(), prompt: '' });
-      expect(getAsrConfig().prompt).toBe('');
-    });
-
-    it('能夠儲存並讀回 Azure Speech 的 Key、Region 與專有名詞', () => {
-      saveAsrConfig({
-        provider: 'azure',
-        azureApiKey: 'azure-key',
-        azureRegion: 'southeastasia',
-        azurePhraseList: 'SUB Tool, Evan',
-        language: 'zh'
-      });
-
-      const conf = getAsrConfig();
-      expect(conf).toMatchObject({
-        provider: 'azure',
-        azureApiKey: 'azure-key',
-        azureRegion: 'southeastasia',
-        azurePhraseList: 'SUB Tool, Evan',
-        language: 'zh'
-      });
+    it('只讀取目前的語言與驗證設定，忽略舊品質偏好', () => {
+      saveAsrConfig({taskMode:'align', provider:'azure', azureApiKey:'azure-key', azureRegion:'southeastasia',
+        language:'en', builtinModel:'old', azurePhraseList:'old', prompt:'old', temperature:.8});
+      const config = getAsrConfig();
+      expect(config).toMatchObject({taskMode:'align', provider:'azure', azureApiKey:'azure-key',
+        azureRegion:'southeastasia', alignmentLanguage:'en', speechLanguage:'auto'});
+      for (const option of ['builtinModel', 'azurePhraseList', 'prompt', 'temperature']) {
+        expect(config).not.toHaveProperty(option);
+      }
     });
   });
 
@@ -1248,6 +1107,60 @@ describe('語音辨識與字幕生成模組', () => {
     const request = options => callGeminiAudioTranscription({ audioBlob: new Blob(['wav']), apiKey: 'test-google-key', ...options });
     const validSegments = [{ start: 0, end: 1, text: '有效聲音證據' }];
 
+    it.each([['auto',undefined],['ko','ko-KR'],['zh','cmn-Hans-CN'],['en','en-US'],['ja','ja-JP']])(
+      '語音模式使用專用模型與正確的語言提示 %s，保留字幕標點與講者時間',async(language,locale)=>{
+        const mockFetch=vi.spyOn(globalThis,'fetch').mockResolvedValue(jsonResponse({status:'completed',steps:[{
+          type:'model_output',content:[{type:'text',text:'안녕, 여러분! 반가워요.',annotations:[
+            {type:'word_info',text:'안녕',speaker:'spk_1',start_offset:'0.125s',end_offset:'0.35s'},
+            {type:'word_info',text:'여러분',speaker:'spk_1',start_offset:'0.42s',end_offset:'0.85s'},
+            {type:'word_info',text:'반가워요',speaker:'spk_2',start_offset:'1.1s',end_offset:'1.85s'}
+          ]}]
+        }]}));
+        const result=await request({taskMode:'transcribe',language,prompt:'old alignment prompt'});
+        const [url,options]=mockFetch.mock.calls[0],body=JSON.parse(options.body);
+        expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/interactions');
+        expect(body.model).toBe('models/gemini-3.5-transcribe');
+        expect(body.generation_config.transcription_config.language_codes).toEqual(locale?[locale]:undefined);
+        expect(body.generation_config.transcription_config.mode.timestamp_granularities).toEqual(['word']);
+        expect(options.body).not.toContain('old alignment prompt');
+        expect(result.segments.map(({start,end,text})=>({start,end,text}))).toEqual([
+          {start:.125,end:.85,text:'안녕, 여러분!'},{start:1.1,end:1.85,text:'반가워요.'}
+        ]);
+      });
+
+    it.each(['transcribe', 'align'])('專用 Gemini 模型不可用時 %s 不改用通用模型推估字幕時間',async taskMode=>{
+      const mock=vi.spyOn(globalThis,'fetch').mockResolvedValue(apiError(404,'model unavailable'));
+      await expect(request({taskMode,language:'ko'})).rejects.toThrow(/專用語音辨識模型.*改選/);
+      expect(mock).toHaveBeenCalledOnce();
+      expect(mock.mock.calls[0][0]).toBe('https://generativelanguage.googleapis.com/v1beta/interactions');
+    });
+
+    it('文本匹配使用自動語言及原生逐詞時間，無需舊提示',async()=>{
+      const mock=vi.spyOn(globalThis,'fetch').mockResolvedValueOnce(jsonResponse({status:'completed',steps:[{
+        type:'model_output',content:[{type:'text',text:'Hello, there!',annotations:[
+          {type:'word_info',text:'Hello',start_offset:'0.2s',end_offset:'0.4s'},
+          {type:'word_info',text:'there',start_offset:'0.51s',end_offset:'0.88s'}
+        ]}]
+      }]}));
+      const {segments}=await request({taskMode:'align',prompt:'unused old prompt'});
+      const body=JSON.parse(mock.mock.calls[0][1].body);
+      expect(body.generation_config.transcription_config.language_codes).toBeUndefined();
+      expect(body.model).toBe('models/gemini-3.5-transcribe');
+      expect(mock.mock.calls[0][1].body).not.toContain('unused old prompt');
+      expect(segments[0].words).toMatchObject([{start:.2,end:.4},{start:.51,end:.88}]);
+      expect(segments[0].text).toBe('Hello, there!');
+    });
+
+    it('Gemini 金鑰或時碼異常不重送音訊或猜測字幕時間',async()=>{
+      const mock=vi.spyOn(globalThis,'fetch').mockResolvedValueOnce(apiError(403,'denied'))
+        .mockResolvedValueOnce(jsonResponse({status:'completed',steps:[{type:'model_output',content:[
+          {type:'text',text:'No timing',annotations:[]}
+        ]}]}));
+      await expect(request({taskMode:'transcribe'})).rejects.toThrow('denied');
+      await expect(request({taskMode:'transcribe'})).rejects.toThrow('逐字時間不完整');
+      expect(mock).toHaveBeenCalledTimes(2);
+    });
+
     it('保留 resolver 介面，分頁略過 image、embedding 與未宣告 generateContent 的候選', async () => {
       const mockFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async url => {
         const parsed = new URL(url);
@@ -1498,41 +1411,6 @@ describe('語音辨識與字幕生成模組', () => {
       })).rejects.toThrow(/未提供有效的音訊來源/);
     });
 
-    it('支援 ElevenLabs 設定存取與 UI 導引切換', async () => {
-      saveAsrConfig({
-        ...getAsrConfig(),
-        provider: 'elevenlabs',
-        elevenlabsApiKey: 'xi_test_key_123',
-        elevenlabsKeyterms: 'SUB Tool, Evan'
-      });
-
-      const conf = getAsrConfig();
-      expect(conf.provider).toBe('elevenlabs');
-      expect(conf.elevenlabsApiKey).toBe('xi_test_key_123');
-      expect(conf.elevenlabsKeyterms).toBe('SUB Tool, Evan');
-
-      const meta = getAsrGuidanceMeta('elevenlabs');
-      expect(meta.kind).toBe('keyterms');
-      expect(meta.label).toContain('Keyterms');
-
-      const resolved = resolveAsrGuidance('elevenlabs', 'SUB Tool, Evan');
-      expect(resolved.keyterms).toEqual(['SUB Tool', 'Evan']);
-      expect(resolved.elevenlabsKeytermsText).toBe('SUB Tool, Evan');
-
-      openSpeechRecognitionDialog({
-        id: 'elevenlabs-dialogue',
-        name: 'elevenlabs-test.wav',
-        in: 0,
-        out: 1,
-        duration: 1,
-        audioBuffer: {}
-      });
-
-      const [, html] = openModal.mock.calls[0];
-      expect(html).toContain('value="elevenlabs"');
-      expect(html).toContain('>ElevenLabs</option>');
-      expect(html).not.toContain('ElevenLabs (Scribe v2');
-    });
   });
 
   describe('人聲增強濾波器與高精度 Whisper 參數', () => {
@@ -1589,82 +1467,6 @@ describe('語音辨識與字幕生成模組', () => {
       const rms = arr => Math.sqrt(arr.reduce((s, v) => s + v * v, 0) / arr.length);
       // 1000Hz 弱音仍保持大於 70% 振幅，絕不被噪音門強行截斷
       expect(rms(filtered)).toBeGreaterThan(rms(tinyVoice) * 0.7);
-    });
-
-    it('支援儲存與讀取 ElevenLabs 與 Azure 進階設定', () => {
-      saveAsrConfig({
-        ...getAsrConfig(),
-        vocalFilter: false,
-        temperature: 0.2,
-        elevenlabsNumSpeakers: 2,
-        elevenlabsTagAudioEvents: true,
-        azureProfanity: 'None'
-      });
-      const conf = getAsrConfig();
-      expect(conf.vocalFilter).toBe(false);
-      expect(conf.temperature).toBe(0.2);
-      expect(conf.elevenlabsNumSpeakers).toBe(2);
-      expect(conf.elevenlabsTagAudioEvents).toBe(true);
-      expect(conf.azureProfanity).toBe('None');
-
-      // 復原
-      saveAsrConfig({
-        ...getAsrConfig(),
-        vocalFilter: false,
-        temperature: 0,
-        elevenlabsNumSpeakers: '',
-        elevenlabsTagAudioEvents: false,
-        azureProfanity: 'None'
-      });
-      const restored = getAsrConfig();
-      expect(restored.vocalFilter).toBe(false);
-      expect(restored.temperature).toBe(0);
-    });
-
-    it('彈窗介面動態呈現不同服務專屬欄位（Whisper 溫度、ElevenLabs 說話者、Azure 不雅字）', async () => {
-      State.clips = [{ id: 'video-clip-1', name: 'main_video.mp4', in: 0, out: 10 }];
-      State.externalAudioState = [{ id: 'vocal-clip-1', name: 'vocals.wav', in: 0, out: 10 }];
-      openModal.mockImplementation((title, html) => {
-        document.body.innerHTML = html;
-      });
-
-      openSpeechRecognitionDialog(State.clips[0]);
-      await new Promise(resolve => setTimeout(resolve, 0));
-
-      const providerEl = document.getElementById('asrProvider');
-      const tempRow = document.getElementById('asrTemperatureRow');
-      const azureProfanityRow = document.getElementById('asrAzureProfanityRow');
-      const elevenLabsSpeakersRow = document.getElementById('asrElevenLabsSpeakersRow');
-      const elevenLabsAudioEventsRow = document.getElementById('asrElevenLabsAudioEventsRow');
-
-      // 預設切到 Google：Whisper 溫度、ElevenLabs 說話者、Azure 不雅字應全部隱藏
-      providerEl.value = 'google';
-      providerEl.onchange();
-      expect(getComputedStyle(tempRow).display).toBe('none');
-      expect(getComputedStyle(azureProfanityRow).display).toBe('none');
-      expect(getComputedStyle(elevenLabsSpeakersRow).display).toBe('none');
-
-      // 切到 Groq：只有 Whisper 溫度顯示
-      providerEl.value = 'groq';
-      providerEl.onchange();
-      expect(getComputedStyle(tempRow).display).toBe('flex');
-      expect(getComputedStyle(azureProfanityRow).display).toBe('none');
-      expect(getComputedStyle(elevenLabsSpeakersRow).display).toBe('none');
-
-      // 切到 ElevenLabs：只有 ElevenLabs 相關顯示，Whisper 溫度應隱藏
-      providerEl.value = 'elevenlabs';
-      providerEl.onchange();
-      expect(getComputedStyle(tempRow).display).toBe('none');
-      expect(getComputedStyle(azureProfanityRow).display).toBe('none');
-      expect(getComputedStyle(elevenLabsSpeakersRow).display).toBe('flex');
-      expect(getComputedStyle(elevenLabsAudioEventsRow).display).toBe('flex');
-
-      // 切到 Azure：只有 Azure 不雅字顯示，Whisper 溫度應隱藏
-      providerEl.value = 'azure';
-      providerEl.onchange();
-      expect(getComputedStyle(tempRow).display).toBe('none');
-      expect(getComputedStyle(azureProfanityRow).display).toBe('flex');
-      expect(getComputedStyle(elevenLabsSpeakersRow).display).toBe('none');
     });
 
     it('ElevenLabs API 呼叫支援 num_speakers 與 tag_audio_events', async () => {

@@ -782,7 +782,7 @@ async function init(){
     }
     sel.innerHTML = html + '<option value="__custom">匯入自訂字型...</option>';
     if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
-    renderVideoSub(); StylePanelController.renderTrackStyle();
+    StylePanelController.renderTrackStyle();
   }).catch(()=>{});
   History.reset();
   Project.establishCleanBaseline();
@@ -882,7 +882,7 @@ async function initDesktop(){
     }
   }
 
-  bindMediaIntakeView(()=>Media.cancelProxyJobs(),proxyStatusView.update);
+  bindMediaIntakeView(()=>Media.cancelProxyJobs(),updatePreviewViews);
   DESK.onProgress(d=>{
     if (d.jobId && String(d.jobId).startsWith('export-')) {
       if (!d.error && !d.stopped && !d.done) _visibleExportJobId = d.jobId;

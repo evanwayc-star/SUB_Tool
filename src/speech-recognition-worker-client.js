@@ -39,6 +39,7 @@ export class BuiltinAsrWorkerClient {
 
   transcribe({
     audioFloat32,
+    taskMode,
     modelId = 'onnx-community/whisper-base',
     modelName = 'Whisper Base',
     webgpuDtype = 'fp32',
@@ -85,6 +86,7 @@ export class BuiltinAsrWorkerClient {
           type: 'transcribe',
           jobId,
           audioFloat32,
+          taskMode,
           modelId,
           modelName,
           webgpuDtype,
@@ -111,7 +113,10 @@ export class BuiltinAsrWorkerClient {
       return;
     }
     if (message.type === 'result') {
-      this.finishJob(job, { value: { segments: Array.isArray(message.segments) ? message.segments : [] } });
+      this.finishJob(job, { value: {
+        segments: Array.isArray(message.segments) ? message.segments : [],
+        ...(message.language ? { language: message.language } : {})
+      } });
       return;
     }
     if (message.type === 'error') {

@@ -33,3 +33,21 @@ it('a synchronous publication that revokes ownership cannot report success',()=>
   let current=true;const progress=createSourceWaveformProgress({duration:.2,owns:()=>current,publish:()=>{current=false;}});
   expect(progress.accept(batch())).toBe(false);
 });
+
+it('a local rebuild withdraws only this source’s checkpoints and accepts fresh samples from zero',()=>{
+  const publish=vi.fn(),discard=vi.fn();
+  let current=true;
+  const progress=createSourceWaveformProgress({duration:.2,publish,discard,owns:()=>current});
+  expect(progress.accept(batch(0,800))).toBe(true);
+  expect(progress.accept({reset:true,sourceKey:'b'.repeat(16)})).toBe(false);
+  expect(progress.complete).toBe(true);
+  expect(progress.accept({reset:true,sourceKey:key})).toBe(true);
+  expect(progress.complete).toBe(false);
+  expect(progress.accept(batch(400,800))).toBe(false);
+  const fresh=batch(0,800);fresh.peaks.fill(0);
+  expect(progress.accept(fresh)).toBe(true);
+  expect(publish.mock.lastCall[0]).toEqual(fresh.peaks);
+  current=false;
+  expect(progress.accept({reset:true,sourceKey:key})).toBe(false);
+  expect(discard).toHaveBeenCalledOnce();
+});

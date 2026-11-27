@@ -480,7 +480,7 @@ async function openCacheDialog() {
   if(!ownsSource()){loading.close();showToast('目前影片已變更，請重新開啟快取管理');return;}
   
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const locations=info?.source?.path===displayedSource?(info.source.locations||[]).filter(location=>location.kind==='sidecar'):[];
+  const locations=info?.source?.path===displayedSource?(info.source.locations||[]).filter(location=>location.kind==='sidecar'||location.kind==='waveform-recovery'):[];
   const nasNote=info?.source?.path===displayedSource&&info.source.nas?'<p class="cache-note">已辨識 NAS 共享素材，其他工作站可從同一資料夾讀取已完成的快取。</p>':'';
   const sourceSummary=!displayedSource?'<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-note">請先開啟素材，再查看或清除同資料夾的波形、Proxy 與聲道快取。</p></section>':`<section class="cache-source-summary"><h3>目前素材</h3><p class="cache-path">${esc(displayedSource)}</p>`+nasNote+
     (!info?.source||info.source.path!==displayedSource||info.source.unavailable?'<p class="cache-unavailable">無法確認目前素材的快取紀錄，請檢查來源與目錄權限後重新整理。</p>':locations.length?locations.map(location=>{
@@ -488,17 +488,21 @@ async function openCacheDialog() {
       const progress=Number.isSafeInteger(wave.completedSamples)&&Number.isSafeInteger(wave.totalSamples)
         ?` ${ (wave.completedSamples/4000).toFixed(1)} / ${(wave.totalSamples/4000).toFixed(1)} 秒`:'';
       const waveText=wave.state==='complete'?'紀錄已完成':wave.state==='partial'?'部分保存紀錄'+progress:wave.state==='unknown'?'無法確認':'未找到完成紀錄';
-      return '<div class="cache-source-location"><h4>同資料夾快取</h4>'+
-        `<p class="cache-path">${esc(location.directory)}</p><dl class="cache-records"><dt>波形</dt><dd>${esc(waveText)}</dd>`+
+      const localWave=location.kind==='waveform-recovery';
+      return `<div class="cache-source-location"><h4>${localWave?'本機波形快取':'同資料夾快取'}</h4>`+
+        `<p class="cache-path">${esc(location.directory)}</p><dl class="cache-records"><dt>${wave.hasSourceChannels?'混音波形':'波形'}</dt><dd>${esc(waveText)}</dd>`+
         (Number.isSafeInteger(wave.bytes)?`<dt>波形檔大小</dt><dd>${_fmtBytes(wave.bytes)}</dd>`:'')+
-        `<dt>Proxy</dt><dd>${location.proxy?'已有完整紀錄':'未找到完整紀錄'}</dd><dt>聲道</dt><dd>${Number(location.channels)||0} 條</dd>`+
+        (wave.hasSourceChannels?'<dt>原音聲道波形</dt><dd>有保存紀錄</dd>':'')+
+        (localWave?'':`<dt>Proxy</dt><dd>${location.proxy?'已有完整紀錄':'未找到完整紀錄'}</dd><dt>聲道</dt><dd>${Number(location.channels)||0} 條</dd>`)+
         (location.audioEffects?'<dt>預聽與人聲分析</dt><dd>有快取目錄</dd>':'')+'</dl></div>';
-    }).join(''):'<p class="cache-note">尚未找到屬於目前素材的保存紀錄。</p>')+
+    }).join(''):info.source.incomplete?'':'<p class="cache-note">尚未找到屬於目前素材的保存紀錄。</p>')+
+    (info?.source?.path===displayedSource&&info.source.incomplete&&!info.source.unavailable?'<p class="cache-unavailable">部分快取位置目前無法確認，請稍後重新整理。</p>':'')+
     '<p class="cache-note">此處只查保存紀錄與檔案大小；使用前重新驗證來源與內容，不代表已完成內容查核。</p></section>';
+  const clearScope='目前素材的 Proxy、聲道、原音波形（含本機重建的波形），以及同一來源目錄內的平衡預聽與人聲分析結果';
   const html =
     `<div class="cache-dialog-content">` +
     sourceSummary+
-    `<details class="cache-help"><summary>保存位置與清除範圍</summary><p>Proxy、聲道與波形只保存在素材同資料夾的 <code>.subtool_Cache</code>，無法寫入時會提示原因。多台電腦使用 NAS 時，直接開啟同一共享資料夾的母素材，即可核對並沿用已完成的快取。移至其他儲存裝置時，請連同整個快取資料夾一起複製。中斷的波形可從有效檢查點續算，快取不因放置天數過期。</p><p>新建 Proxy 最高 720p，目標 4 Mb/s，每小時約 1.8 GB。每小時另計每條播放聲道約 58 MB、每份原音波形 WAV 約 29 MB。</p><p>清除範圍包含目前素材的 Proxy、聲道、原音波形，以及同一來源目錄內的平衡預聽與人聲分析結果。</p></details>` +
+    `<details class="cache-help"><summary>保存位置與清除範圍</summary><p>Proxy、聲道與波形預設保存在素材同資料夾的 <code>.subtool_Cache</code>。若連續波形快取在作業中失效，程式會重新核對原片，改在本機重建波形。多台電腦使用 NAS 時，直接開啟同一共享資料夾的母素材，即可核對並沿用已完成的共享快取。移至其他儲存裝置時，請連同整個快取資料夾一起複製。中斷的波形可從有效檢查點續算，快取不因放置天數過期。</p><p>新建 Proxy 最高 720p，目標 4 Mb/s，每小時約 1.8 GB。每小時另計每條播放聲道約 58 MB、每份原音波形 WAV 約 29 MB。</p><p>清除範圍包含${clearScope}。</p></details>` +
     '<p id="cacheActionStatus" role="status" hidden></p>'+
     '<p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p>'+
     `</div>`;
@@ -532,7 +536,7 @@ async function openCacheDialog() {
         if(!ownsSource()){session.close();showToast('目前影片已變更，請重新開啟快取管理並確認');return;}
         let clearing = false;
         const sourceLabel = `<p class="cache-path">${esc(displayedSource)}</p>`;
-        const confirmation = openModal('清除快取？', '<div class="cache-dialog-content"><p>將清除目前素材的 Proxy、聲道、原音波形，以及同一來源目錄內的平衡預聽與人聲分析結果。</p>' + sourceLabel + '<p class="cache-note">若此素材位於 NAS，其他工作站也會失去已清除的快取，下次開啟時可能需要重新轉檔。</p><p id="cacheActionStatus" role="status" hidden></p><p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p></div>', [
+        const confirmation = openModal('清除快取？', `<div class="cache-dialog-content"><p>將清除${clearScope}。</p>` + sourceLabel + '<p class="cache-note">若此素材位於 NAS，其他工作站也會失去已清除的共享快取，下次開啟時可能需要重新轉檔。</p><p id="cacheActionStatus" role="status" hidden></p><p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p></div>', [
           { label: '確定清除', primary: true, id:'cacheClearConfirm', act: async () => {
             if (!confirmation.isCurrent() || clearing || cacheClearOperations.has(displayedSource)) return;
             if (!ownsSource()) {

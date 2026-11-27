@@ -17,7 +17,8 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
   function begin({path,name,audio,duration,owns}){
     if(current)clear(current);
     const entry={path,name,duration,live:true,peaks:null,sourceKey:null,finished:null,complete:false};
-    entry.firstReady=new Promise(resolve=>{entry.resolveFirst=resolve;});
+    const waitForPeaks=()=>new Promise(resolve=>{entry.resolveFirst=resolve;});
+    entry.firstReady=waitForPeaks();
     entry.active=()=>current===entry&&entry.live&&owns();
     entry.cancel=()=>clear(entry);
     entry.handoff=async(streamKey,transfer)=>{
@@ -25,11 +26,13 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
         clear(entry);return false;
       }
       // 串流可比首段波形更早就緒；交接等待首段，但不阻塞呼叫端播放。
-      if(!entry.peaks) await entry.firstReady;
-      if(!entry.active()||!entry.peaks||entry.sourceKey!==streamKey){clear(entry);return false;}
-      let key;
-      try{key=await bridge.mediaSourceKey(path);}catch(_){clear(entry);return false;}
-      if(!entry.active()||key!==entry.sourceKey){clear(entry);return false;}
+      do{
+        if(!entry.peaks) await entry.firstReady;
+        if(!entry.active()||entry.sourceKey!==streamKey){clear(entry);return false;}
+        let key;
+        try{key=await bridge.mediaSourceKey(path);}catch(_){clear(entry);return false;}
+        if(!entry.active()||key!==entry.sourceKey){clear(entry);return false;}
+      }while(!entry.peaks);
       const peaks=entry.peaks;
       clear(entry);
       if(current||!owns())return false;
@@ -40,7 +43,9 @@ export function createProvisionalSourceWaveform({jobs,bridge,decode,read,changed
     entry.finished=Promise.resolve().then(()=>jobs.prepareWaveform(async({owns:ownsJob,report})=>{
       const active=()=>entry.active()&&ownsJob();
       if(bridge.sourceWaveformContinuous===true){
-        const progress=createSourceWaveformProgress({duration,resolution,owns:active,publish:peaks=>{
+        const progress=createSourceWaveformProgress({duration,resolution,owns:active,discard:()=>{
+          entry.peaks=null;entry.firstReady=waitForPeaks();changed();
+        },publish:peaks=>{
           entry.sourceKey=progress.sourceKey;entry.peaks=peaks;entry.resolveFirst(true);changed();
         }});
         let result;

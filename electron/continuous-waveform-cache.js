@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { captureOutputDirectory, captureOutputAuthority, assertOutputAuthority } = require('./export-lease');
 const { waveformDisplayCache } = require('./waveform-display-peaks');
+const { changed, sameOriginalFile, regular, withCacheReader, fileSnapshot } = require('./waveform-file-evidence');
 
 const NAMESPACE = 'continuous-waveforms';
 const BLOCK = 65536;
@@ -16,7 +17,6 @@ const CHECKPOINT_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const checkpointRetryWait = new Int32Array(new SharedArrayBuffer(4));
 const GENERATION = /^[a-f0-9]{64}-[a-f0-9]{24}$/;
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
-const changed = () => Object.assign(new Error('連續波形快取的來源、目錄或內容已變更'), { code: 'CONTINUOUS_WAVE_CACHE_CHANGED' });
 const sameFile = (a, b) => !!a && !!b && a.dev === b.dev && a.ino === b.ino && a.mode === b.mode;
 const sameSnapshot = (a, b) => sameFile(a, b) && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
 const token = () => crypto.randomBytes(12).toString('hex');
@@ -51,15 +51,9 @@ function wavHeader(samples) {
   return header;
 }
 
-function regular(file) {
-  const stat = fs.lstatSync(file, { bigint: true });
-  if (!stat.isFile() || stat.isSymbolicLink()) throw changed();
-  return stat;
-}
-
 function storeAt(directory, create = false) {
   const root = path.resolve(directory), stat = fs.lstatSync(root);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw changed();
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw changed('快取根目錄遭替換');
   const parent = captureOutputDirectory(path.dirname(root));
   const rootCheck = path.join(root, '.continuous-root-check');
   const rootAuthority = captureOutputAuthority(rootCheck, parent);
@@ -67,7 +61,7 @@ function storeAt(directory, create = false) {
   assertOutputAuthority(rootAuthority, rootCheck);
   if (create) { try { fs.mkdirSync(folder); } catch (error) { if (error.code !== 'EEXIST') throw error; } }
   const folderStat = fs.lstatSync(folder);
-  if (!folderStat.isDirectory() || folderStat.isSymbolicLink()) throw changed();
+  if (!folderStat.isDirectory() || folderStat.isSymbolicLink()) throw changed('連續波形目錄遭替換');
   const sentinel = path.join(folder, '.continuous-check'), authority = captureOutputAuthority(sentinel, parent);
   const verify = () => { assertOutputAuthority(rootAuthority, rootCheck); assertOutputAuthority(authority, sentinel); };
   verify();
@@ -75,14 +69,14 @@ function storeAt(directory, create = false) {
 }
 
 function generationAt(store, name) {
-  if (!GENERATION.test(name)) throw changed();
+  if (!GENERATION.test(name)) throw changed('波形工作目錄名稱無效');
   store.verify();
   const folder = path.join(store.folder, name), stat = fs.lstatSync(folder, { bigint: true });
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw changed();
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw changed('波形工作目錄遭替換');
   const sentinel = path.join(folder, 'checkpoint.json'), authority = captureOutputAuthority(sentinel, store.parent);
   const verify = () => {
     store.verify();
-    if (!sameFile(stat, fs.lstatSync(folder, { bigint: true }))) throw changed();
+    if (!sameFile(stat, fs.lstatSync(folder, { bigint: true }))) throw changed('波形工作目錄身分不符');
     assertOutputAuthority(authority, sentinel);
   };
   verify();
@@ -94,43 +88,52 @@ function readExact(fd, length, position) {
   let offset = 0;
   while (offset < length) {
     const count = fs.readSync(fd, bytes, offset, length - offset, position + offset);
-    if (!count) throw changed();
+    if (!count) throw changed('讀取尚未到達預期長度便已結束');
     offset += count;
   }
   return bytes;
 }
 
 function readRecord(file) {
-  const before = regular(file);
-  if (before.size < 2n || before.size > BigInt(MAX_RECORD_BYTES)) throw changed();
-  const fd = fs.openSync(file, 'r');
-  try {
-    if (!sameSnapshot(before, fs.fstatSync(fd, { bigint: true }))) throw changed();
-    const bytes = readExact(fd, Number(before.size), 0);
-    if (!sameSnapshot(before, fs.fstatSync(fd, { bigint: true })) || !sameSnapshot(before, regular(file))) throw changed();
-    return { raw: JSON.parse(bytes.toString('utf8')), bytes, stat: before };
-  } finally { fs.closeSync(fd); }
+  return withCacheReader(file, (fd, stat) => {
+    if (stat.size < 2n || stat.size > BigInt(MAX_RECORD_BYTES)) throw changed('進度記錄長度無效');
+    const bytes = readExact(fd, Number(stat.size), 0);
+    let raw;
+    try { raw = JSON.parse(bytes.toString('utf8')); }
+    catch (_) { throw changed('進度記錄已非有效 JSON'); }
+    return { raw, bytes, stat };
+  });
 }
 
 function assertRecord(file, proof) {
   const current = readRecord(file);
-  if (!sameSnapshot(current.stat, proof.stat) || !current.bytes.equals(proof.bytes)) throw changed();
+  // Metadata timestamps may change independently of the checkpoint. The open
+  // descriptor has already been rechecked and every byte is compared here.
+  if (!sameOriginalFile(current.stat, proof.stat) || !current.bytes.equals(proof.bytes)) throw changed('進度記錄的身分或內容不符');
 }
 
 function readPcmEvidence(file, spec, samples, sha256, complete) {
-  const before = regular(file), bytes = samples * 2;
-  if (before.size < BigInt(44 + bytes) || (complete && before.size !== BigInt(44 + spec.totalSamples * 2))) throw changed();
-  const fd = fs.openSync(file, 'r'), hash = crypto.createHash('sha256'), blocks = new Map();
-  try {
-    if (!sameSnapshot(before, fs.fstatSync(fd, { bigint: true })) || !readExact(fd, 44, 0).equals(wavHeader(spec.totalSamples))) throw changed();
+  const bytes = samples * 2;
+  return withCacheReader(file, (fd, stat) => {
+    if (stat.size < BigInt(44 + bytes) || (complete && stat.size !== BigInt(44 + spec.totalSamples * 2))) throw changed('WAV 的長度與已保存的取樣數不符');
+    if (!readExact(fd, 44, 0).equals(wavHeader(spec.totalSamples))) throw changed('WAV 標頭與來源規格不符');
+    const hash = crypto.createHash('sha256'), blocks = new Map();
     for (let offset = 0; offset < bytes; offset += BLOCK) {
       const chunk = readExact(fd, Math.min(BLOCK, bytes - offset), 44 + offset);
       hash.update(chunk); blocks.set(offset / BLOCK, digest(chunk));
     }
-    if (hash.digest('hex') !== sha256 || !sameSnapshot(before, fs.fstatSync(fd, { bigint: true }))
-      || !sameSnapshot(before, regular(file))) throw changed();
-    return { stat: before, blocks };
-  } finally { fs.closeSync(fd); }
+    if (hash.digest('hex') !== sha256) throw changed('PCM 內容的 SHA-256 與進度記錄不符');
+    return { stat, blocks };
+  });
+}
+
+// A timestamp update is not evidence that PCM changed. When identity and
+// size still match, require the previously certified bytes before continuing.
+function recheckPcm(file, previous, observed, spec, samples, sha256, complete) {
+  if (!sameOriginalFile(previous, observed) || observed.size !== previous.size) throw changed('重新核對的 WAV 身分或長度不符');
+  const verified = readPcmEvidence(file, spec, samples, sha256, complete);
+  if (!sameOriginalFile(previous, verified.stat) || verified.stat.size !== previous.size) throw changed('核對 PCM 期間 WAV 遭替換');
+  return verified.stat;
 }
 
 function readCandidate(store, name, expected, verify, metadataOnly = false) {
@@ -140,33 +143,80 @@ function readCandidate(store, name, expected, verify, metadataOnly = false) {
     || (expected && JSON.stringify(spec) !== JSON.stringify(expected))) return null;
   if (!Number.isSafeInteger(raw.completedSamples) || raw.completedSamples < 0 || raw.completedSamples > spec.totalSamples
     || typeof raw.complete !== 'boolean' || (raw.complete && raw.completedSamples !== spec.totalSamples)
-    || !/^[a-f0-9]{64}$/.test(raw.sha256) || typeof raw.owner?.ino !== 'string' || typeof raw.owner?.birthtimeNs !== 'string') throw changed();
+    || !/^[a-f0-9]{64}$/.test(raw.sha256) || typeof raw.owner?.ino !== 'string' || typeof raw.owner?.birthtimeNs !== 'string') throw changed('進度記錄的格式或取樣數無效');
   let file = path.join(generation.folder, raw.complete ? 'wave.wav' : 'partial.wav');
   // A crash between final rename and the completion receipt leaves the same
   // verified full prefix available for a new writer, without claiming complete.
   if (!raw.complete && !fs.existsSync(file)) file = path.join(generation.folder, 'wave.wav');
-  const stat = regular(file);
+  const validSize = stat => raw.complete ? stat.size === BigInt(44 + spec.totalSamples * 2) : stat.size >= BigInt(44 + raw.completedSamples * 2);
+  const recordedTimes = stat => ['mtimeNs','ctimeNs'].every(field => String(stat[field]) === raw.owner[field]);
+  const stat = fileSnapshot(file, named => validSize(named) && recordedTimes(named));
   const originalOwner = String(stat.ino) === raw.owner.ino && String(stat.birthtimeNs) === raw.owner.birthtimeNs;
   const portable = raw.complete && spec.version >= 2;
-  if (!originalOwner && !portable) throw changed();
+  if (!originalOwner && !portable) throw changed('舊版或未完成的 WAV 身分與進度記錄不符');
   // A drive letter and a UNC mount can report different client-local device
   // IDs for the very same server file. The v3 recipe already binds the share.
   const originalSnapshot = originalOwner && (spec.version === 3 || String(stat.dev) === raw.owner.dev)
-    && ['mtimeNs','ctimeNs'].every(field => String(stat[field]) === raw.owner[field]);
+    && recordedTimes(stat);
   // Copied, replaced or modified portable WAVs must pass the original PCM digest
   // before their saved peaks or playback path can be handed to another process.
   const evidence = metadataOnly && (metadataOnly === 'describe' || !portable || originalSnapshot) ? { stat }
     : readPcmEvidence(file, spec, raw.completedSamples, raw.sha256, raw.complete);
-  if (evidence.stat.size < BigInt(44 + raw.completedSamples * 2)
-    || (raw.complete && evidence.stat.size !== BigInt(44 + spec.totalSamples * 2))) throw changed();
-  if (!sameSnapshot(stat, evidence.stat)) throw changed();
+  if (!validSize(evidence.stat)) throw changed('WAV 長度與進度記錄不符');
+  if (!sameSnapshot(stat, evidence.stat)
+    && (!sameOriginalFile(stat, evidence.stat) || !sameSnapshot(evidence.stat, fileSnapshot(file))))
+    throw changed('核對進度記錄期間 WAV 遭替換或修改');
+  const verifyLocation = () => { verify(); generation.verify(); };
   const check = () => {
-    verify(); generation.verify(); assertRecord(recordFile, proof);
-    if (!sameSnapshot(evidence.stat, regular(file))) throw changed();
+    verifyLocation(); assertRecord(recordFile, proof);
+    const observed = fileSnapshot(file, named => sameSnapshot(evidence.stat, named));
+    if (!sameSnapshot(evidence.stat, observed)) {
+      evidence.stat = recheckPcm(file, evidence.stat, observed, spec, raw.completedSamples, raw.sha256, raw.complete);
+    }
   };
   check();
   return { spec, file, samples: raw.completedSamples, complete: raw.complete, sha256: raw.sha256,
-    blocks: evidence.blocks, stat: evidence.stat, verify: check };
+    blocks: evidence.blocks, stat: evidence.stat, verify: check, verifyLocation };
+}
+
+// Another worker can append, publish a new checkpoint, or finish the WAV while
+// we resume. Only copy the prefix certified by the checkpoint selected by scan.
+// The destination has no checkpoint until this digest and its directory pass.
+function copyCheckpointPrefix(candidate, append) {
+  const final = path.join(path.dirname(candidate.file), 'wave.wav');
+  function verifyPath() {
+    candidate.verifyLocation();
+    let file = candidate.file;
+    let observed;
+    try { observed = regular(file); }
+    catch (error) {
+      if (error.code !== 'ENOENT' || file === final) throw error;
+      file = final;
+      observed = regular(file);
+    }
+    if (!sameOriginalFile(candidate.stat, observed)) throw changed('準備續算時來源 WAV 遭替換');
+    return file;
+  }
+  const file = verifyPath();
+  let fd;
+  try {
+    try { fd = fs.openSync(file, 'r'); }
+    catch (error) {
+      if (error.code !== 'ENOENT' || file === final) throw error;
+      fd = fs.openSync(verifyPath(), 'r');
+    }
+    const opened = fs.fstatSync(fd, { bigint: true });
+    if (!sameOriginalFile(candidate.stat, opened) || opened.size < BigInt(44 + candidate.samples * 2)
+      || !readExact(fd, 44, 0).equals(wavHeader(candidate.spec.totalSamples))) throw changed('續算來源的 WAV 身分、長度或標頭不符');
+    const hash = crypto.createHash('sha256'), length = candidate.samples * 2;
+    for (let offset = 0; offset < length; offset += MAX_TRANSFER_BYTES) {
+      verifyPath();
+      const bytes = readExact(fd, Math.min(MAX_TRANSFER_BYTES, length - offset), 44 + offset);
+      hash.update(bytes); append(bytes);
+    }
+    verifyPath();
+    if (hash.digest('hex') !== candidate.sha256) throw changed('續算的 PCM 與已保存的 SHA-256 不符');
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
 function scan(directory, expected, verify = () => {}, metadataOnly = false) {
@@ -208,14 +258,32 @@ function describeContinuousWaveformCache(directory, { sourceKey, sourceSHA256, v
   } catch (_) { return { state: 'unknown', verified: false }; }
 }
 
+// The private recovery bucket contains only v1 waves for one exact local source.
+// Cleanup supplies a frozen list of relative paths and verifies their bytes separately.
+function ownsWaveformRecoveryTree(directory, sourceKey, relativePaths, verify) {
+  const { candidates, uncertain } = scan(directory, null, verify, 'describe');
+  if (uncertain || !candidates.length) return false;
+  const allowed = new Set(['', NAMESPACE]);
+  for (const candidate of candidates) {
+    if (candidate.spec.version !== 1 || candidate.spec.sharedSourceKey !== sourceKey) return false;
+    const file = path.relative(directory, candidate.file).split(path.sep).join('/');
+    const folder = path.posix.dirname(file);
+    allowed.add(folder);
+    allowed.add(folder + '/checkpoint.json');
+    allowed.add(file);
+    if (candidate.complete) allowed.add(file + '.peaks-v1');
+  }
+  return relativePaths.every(relative => allowed.has(relative));
+}
+
 function inspectContinuousWaveformCache(directory, { spec, verify = () => {}, displayPeaks = false } = {}) {
   try {
     const result = scan(directory, spec ? recipe(spec) : null, verify, displayPeaks), best = result.candidates[0];
     const display = displayPeaks && best?.complete
-      ? waveformDisplayCache(directory, best.file, { ...best.spec, pcmSHA256: best.sha256 }, best.verify)?.read() : null;
+      ? waveformDisplayCache(directory, best.file, { ...best.spec, pcmSHA256: best.sha256 }, best.verify, best.stat)?.read() : null;
     return { retained: !!best, uncertain: result.uncertain, completedSamples: best?.samples || 0,
       isComplete: !!best?.complete, wavePath: best?.complete ? best.file : null,
-      ...(display ? { displayPeaks: display, verify: best.verify } : {}) };
+      ...(display ? { displayPeaks: display, verify: best.verify, waveSnapshot: best.stat } : {}) };
   } catch (_) { return { retained: false, uncertain: true, completedSamples: 0, isComplete: false, wavePath: null }; }
 }
 
@@ -232,18 +300,16 @@ function checkedRange(file, samples, blocks, startSample, count, verify) {
   verify();
   const result = Buffer.alloc(count * 2);
   if (!count) return result;
-  const start = startSample * 2, end = start + result.length, before = regular(file), fd = fs.openSync(file, 'r');
-  try {
-    if (!sameSnapshot(before, fs.fstatSync(fd, { bigint: true }))) throw changed();
+  const start = startSample * 2, end = start + result.length;
+  withCacheReader(file, fd => {
     for (let offset = Math.floor(start / BLOCK) * BLOCK; offset < end; offset += BLOCK) {
       const bytes = readExact(fd, Math.min(BLOCK, samples * 2 - offset), 44 + offset);
-      if (digest(bytes) !== blocks.get(offset / BLOCK)) throw changed();
+      if (digest(bytes) !== blocks.get(offset / BLOCK)) throw changed('已保存的 PCM 區塊校驗不符');
       const from = Math.max(start, offset), to = Math.min(end, offset + bytes.length);
       bytes.copy(result, from - start, from - offset, to - offset);
     }
-    if (!sameSnapshot(before, fs.fstatSync(fd, { bigint: true })) || !sameSnapshot(before, regular(file))) throw changed();
-    verify(); return result;
-  } finally { fs.closeSync(fd); }
+  });
+  verify(); return result;
 }
 
 function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignoreCached = false } = {}) {
@@ -264,19 +330,22 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
   const hash = crypto.createHash('sha256');
   const check = () => {
     verify(); generation.verify();
-    const actual = regular(current);
-    if (!sameFile(owner, actual) || !sameSnapshot(snapshot, actual)
-      || (fd !== undefined && !sameSnapshot(actual, fs.fstatSync(fd, { bigint: true })))) throw changed();
+    const actual = fd === undefined ? fileSnapshot(current, named => sameSnapshot(snapshot, named)) : fs.fstatSync(fd, { bigint: true });
+    if (!sameOriginalFile(actual, regular(current))) throw changed('寫入波形的檔案路徑遭替換');
+    if (!sameSnapshot(snapshot, actual)) {
+      snapshot = recheckPcm(current, snapshot, actual, normalized, written, hash.copy().digest('hex'), complete);
+    }
+    if (!sameFile(owner, snapshot)) throw changed('波形檔案的持有者身分不符');
   };
   const write = (bytes, position) => {
     let offset = 0;
-    while (offset < bytes.length) { const count = fs.writeSync(fd, bytes, offset, bytes.length - offset, position + offset); if (!count) throw changed(); offset += count; }
+    while (offset < bytes.length) { const count = fs.writeSync(fd, bytes, offset, bytes.length - offset, position + offset); if (!count) throw changed('WAV 寫入未達預期長度'); offset += count; }
   };
-  const refresh = () => { snapshot = fs.fstatSync(fd, { bigint: true }); if (!sameFile(owner, snapshot)) throw changed(); check(); };
+  const refresh = () => { snapshot = fs.fstatSync(fd, { bigint: true }); if (!sameFile(owner, snapshot)) throw changed('寫入 WAV 後檔案身分不符'); check(); };
   const writeCheckpoint = (done, sha256) => {
     check();
     if (recordProof) assertRecord(recordFile, recordProof);
-    else { try { fs.lstatSync(recordFile); throw changed(); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
+    else { try { fs.lstatSync(recordFile); throw changed('新工作已有其他進度記錄'); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
     const bytes = Buffer.from(JSON.stringify({ version: 1, spec: normalized, completedSamples: written, complete: done, sha256,
       owner: Object.fromEntries(['ino','birthtimeNs','dev','mtimeNs','ctimeNs'].map(field => [field, String(snapshot[field])])) }));
     const temporary = path.join(generation.folder, '.checkpoint-' + token() + '.tmp');
@@ -285,13 +354,13 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
       generation.verify(); metadataFd = fs.openSync(temporary, 'wx'); metadataOwner = fs.fstatSync(metadataFd, { bigint: true });
       fs.writeFileSync(metadataFd, bytes); fs.fsyncSync(metadataFd); fs.closeSync(metadataFd); metadataFd = undefined;
       const proof = readRecord(temporary);
-      if (!sameFile(metadataOwner, proof.stat) || !proof.bytes.equals(bytes)) throw changed();
+      if (!sameFile(metadataOwner, proof.stat) || !proof.bytes.equals(bytes)) throw changed('暫存進度記錄的身分或內容不符');
       for (let attempt = 0; ; attempt++) {
         if (closed) throw new Error('連續波形 writer 已關閉');
         check();
         if (attempt) assertRecord(temporary, proof);
         if (recordProof) assertRecord(recordFile, recordProof);
-        else { try { fs.lstatSync(recordFile); throw changed(); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
+        else { try { fs.lstatSync(recordFile); throw changed('發布時發現其他進度記錄'); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
         generation.verify();
         try { fs.renameSync(temporary, recordFile); break; }
         catch (error) {
@@ -303,7 +372,7 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
         }
       }
       const published = readRecord(recordFile);
-      if (!sameFile(metadataOwner, published.stat) || !published.bytes.equals(bytes)) throw changed();
+      if (!sameFile(metadataOwner, published.stat) || !published.bytes.equals(bytes)) throw changed('發布後的進度記錄身分或內容不符');
       generation.verify(); recordProof = published;
     } finally {
       if (metadataFd !== undefined) fs.closeSync(metadataFd);
@@ -350,12 +419,12 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
       fs.closeSync(fd); fd = undefined;
       generation.verify(); verify();
       const evidence = readPcmEvidence(partial, normalized, written, expected, true);
-      if (!sameFile(owner, evidence.stat) || evidence.stat.size !== beforeClose.size) throw changed();
+      if (!sameFile(owner, evidence.stat) || evidence.stat.size !== beforeClose.size) throw changed('完成寫入後 WAV 的身分或長度不符');
       snapshot = evidence.stat; check();
-      try { fs.lstatSync(final); throw changed(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      try { fs.lstatSync(final); throw changed('準備發布 WAV 時發現同名檔案'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       generation.verify(); fs.renameSync(partial, final); current = final;
       const published = readPcmEvidence(final, normalized, written, expected, true);
-      if (!sameFile(owner, published.stat)) throw changed();
+      if (!sameFile(owner, published.stat)) throw changed('發布完成後 WAV 的身分不符');
       snapshot = published.stat; check(); writeCheckpoint(true, expected);
       complete = true; closed = true; committedBlocks = published.blocks; return current;
     },
@@ -364,10 +433,7 @@ function openContinuousWaveformCache(directory, spec, { verify = () => {}, ignor
   };
   try {
     check(); write(wavHeader(normalized.totalSamples), 0); refresh();
-    if (best) {
-      for (let start = 0; start < best.samples; start += MAX_TRANSFER_BYTES / 2)
-        api.appendPCM(checkedRange(best.file, best.samples, best.blocks, start, Math.min(MAX_TRANSFER_BYTES / 2, best.samples - start), best.verify));
-    }
+    if (best) copyCheckpointPrefix(best, api.appendPCM);
     api.checkpoint(); return Object.freeze(api);
   } catch (error) { api.close(); throw error; }
 }
@@ -379,4 +445,4 @@ function isContinuousWaveformCachePath(file) {
 }
 
 module.exports = { openContinuousWaveformCache, readCompleteContinuousWaveformCache, inspectContinuousWaveformCache, describeContinuousWaveformCache,
-  isContinuousWaveformCachePath, MAX_TOTAL_SAMPLES, MAX_TRANSFER_BYTES };
+  ownsWaveformRecoveryTree, isContinuousWaveformCachePath, MAX_TOTAL_SAMPLES, MAX_TRANSFER_BYTES };

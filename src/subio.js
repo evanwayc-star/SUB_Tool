@@ -432,12 +432,13 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           ${preset ? '<span class="delivery-fixed-badge">固定規格</span>' : ''}
           <button type="button" class="ev-del delivery-btn-del" data-idx="${i}" aria-label="刪除輸出項目 ${i + 1}" title="刪除此輸出項目">刪除</button>
         </div>
-        <div class="delivery-spec-grid">
+        <div class="delivery-spec-grid${r.format === 'mp3' ? ' delivery-spec-grid--mp3' : ''}">
           <label class="delivery-field delivery-field--format"><span>交付格式</span>
             <select class="ev-format delivery-select" data-idx="${i}">
               ${DELIVERY_FORMAT_OPTIONS.map(option => `<option value="${option.format}" ${r.format===option.format?'selected':''} ${(isAudioDeliveryFormat(option.format) ? !hasProjectAudio : audioOnly) || (option.format === 'bd-iso' && availableBdVideoModes(data.fps).length === 0)?'disabled':''}>${option.label}</option>`).join('')}
             </select>
           </label>
+          ${r.format === 'mp3' ? `<label class="delivery-field"><span>MP3 音訊碼率（48 kHz）</span><select class="ev-mp3-kbps delivery-select" data-idx="${i}">${MP3_BITRATES.map(rate => `<option value="${rate}" ${rate === normalizeMp3Kbps(r.mp3Kbps) ? 'selected' : ''}>${rate} kbps</option>`).join('')}</select></label>` : ''}
           ${!audioDelivery ? `
             <div class="delivery-field"><label for="evRes${i}">畫面尺寸</label>
               <select id="evRes${i}" class="ev-res delivery-select" data-idx="${i}" ${preset?`disabled title="${escapeHTML(preset.label)} 此格率為 ${displayMode.width}×${displayMode.height}，${displayMode.scan === 'interlaced' ? '上場優先交錯掃描' : '循序掃描'}"`:''}>
@@ -480,7 +481,6 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
         </div>
         <div class="delivery-card-options">
           <div class="delivery-audio-line"><span class="delivery-options-label">音訊</span><span class="delivery-audio-info">${escapeHTML(audioDesc)}</span><button type="button" class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="獨立設定此輸出檔案的音軌與左右聲道">設定輸出音軌</button></div>
-          ${r.format === 'mp3' ? `<label class="delivery-field"><span>MP3 音訊碼率（48 kHz）</span><select class="ev-mp3-kbps delivery-input" data-idx="${i}">${MP3_BITRATES.map(rate => `<option value="${rate}" ${rate === normalizeMp3Kbps(r.mp3Kbps) ? 'selected' : ''}>${rate} kbps</option>`).join('')}</select></label>` : ''}
           ${!audioDelivery ? `<div class="delivery-visual-options"><span class="delivery-sub-chip" title="${escapeHTML(activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕')}">${activeSubs.length ? '字幕：'+escapeHTML(activeSubs.join(', ')) : '無字幕'}</span>
             <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 畫面燒入時間碼</label></div>` : ''}
           ${IS_DESKTOP && ['h264','prores'].includes(r.format) ? `<div class="delivery-visual-options" role="group" aria-label="影片書籤">

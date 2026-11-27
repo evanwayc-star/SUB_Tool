@@ -82,6 +82,78 @@ describe('單檔連續波形的持久進度與所有權', () => {
     expect(fs.readFileSync(secondWave).subarray(44)).toEqual(f.pcm);
   });
 
+  it.each(['advance', 'finish', 'corrupt'])('第二個工作建立期間第一個工作的 partial %s，只接續已驗證的 PCM', action => {
+    const f = fixture(120), first = f.open();
+    first.appendPCM(f.pcm.subarray(0, 80)); first.checkpoint();
+    const firstDir = f.generations()[0], partial = path.join(firstDir, 'partial.wav');
+    const mkdir = fs.mkdirSync.bind(fs);
+    const hook = vi.spyOn(fs, 'mkdirSync').mockImplementation((dir, ...args) => {
+      if (path.dirname(dir) === path.dirname(firstDir)) {
+        hook.mockRestore();
+        if (action === 'corrupt') {
+          const fd = fs.openSync(partial, 'r+');
+          try { fs.writeSync(fd, Buffer.from([f.pcm[4] ^ 1]), 0, 1, 48); } finally { fs.closeSync(fd); }
+        } else {
+          first.appendPCM(f.pcm.subarray(80));
+          if (action === 'advance') first.checkpoint(); else first.complete();
+        }
+      }
+      return mkdir(dir, ...args);
+    });
+    if (action === 'corrupt') {
+      expect(() => f.open()).toThrow('已變更');
+      const newDir = f.generations().find(dir => dir !== firstDir);
+      expect(fs.existsSync(path.join(newDir, 'checkpoint.json'))).toBe(false);
+      return;
+    }
+    const second = f.open();
+    expect(second.completedSamples).toBe(40);
+    expect(second.readPCM(0, 40)).toEqual(f.pcm.subarray(0, 80));
+    second.appendPCM(f.pcm.subarray(80));
+    expect(fs.readFileSync(second.complete()).subarray(44)).toEqual(f.pcm);
+  });
+
+  it('checkpoint 或 WAV 時間戳單獨更新仍可續存讀取，內容改變時拒用', () => {
+    const f = fixture(100), writer = f.open(), dir = f.generations()[0];
+    const touch = file => {
+      const stat = fs.statSync(file);
+      fs.utimesSync(file, stat.atime, new Date(stat.mtimeMs + 2000));
+    };
+    writer.appendPCM(f.pcm.subarray(0, 80)); writer.checkpoint();
+    touch(path.join(dir, 'checkpoint.json'));
+    touch(path.join(dir, 'partial.wav'));
+    writer.appendPCM(f.pcm.subarray(80));
+    const wave = writer.complete(), reader = f.open();
+    touch(wave);
+    expect(reader.readPCM(0, 100)).toEqual(f.pcm);
+    const bytes = fs.readFileSync(wave); bytes[44] ^= 0x20; fs.writeFileSync(wave, bytes);
+    expect(() => reader.readPCM(0, 100)).toThrow('已變更');
+  });
+
+  it('共享磁碟的目錄屬性落後開啟的檔案時，從同一 handle 驗證長度、內容及進度', () => {
+    const f = fixture(120), lstat = fs.lstatSync.bind(fs);
+    vi.spyOn(fs, 'lstatSync').mockImplementation((file, options) => {
+      const stat = lstat(file, options);
+      if (options?.bigint && stat.isFile() && /(?:\.wav|\.json|\.tmp)$/.test(String(file))) {
+        stat.size = 0n;
+        stat.mtimeNs -= 1000000000n;
+      }
+      return stat;
+    });
+    const writer = f.open();
+    writer.appendPCM(f.pcm.subarray(0, 80)); writer.checkpoint(); writer.close();
+    const resumed = f.open();
+    expect(resumed.completedSamples).toBe(40);
+    resumed.appendPCM(f.pcm.subarray(80));
+    const wave = resumed.complete();
+    const warm = f.open();
+    expect(warm.isComplete).toBe(true);
+    expect(warm.readPCM(0, 120)).toEqual(f.pcm);
+    const size = fs.readFileSync(wave).length;
+    fs.truncateSync(wave, size - 2);
+    expect(() => warm.readPCM(0, 120)).toThrow('已變更');
+  });
+
   it('完整產物優先於更晚 partial，warm 讀取不建立新 generation 並保持唯讀', () => {
     const f = fixture(), first = f.open(), second = f.open();
     first.appendPCM(f.pcm); const wave = first.complete();
@@ -306,11 +378,12 @@ describe('單檔連續波形的持久進度與所有權', () => {
     expect(fs.readFileSync(resumed.complete()).subarray(44)).toEqual(f.pcm);
   });
 
-  it('外部替換 checkpoint 後不覆寫其內容', () => {
+  it.each([['{"foreign":true}', '進度記錄的身分或內容不符'], ['{"invalid"', '進度記錄已非有效 JSON']])('外部變更 checkpoint 為 %s 後保留內容並交付錯誤碼', (foreign, reason) => {
     const f = fixture(), writer = f.open(), record = path.join(f.generations()[0], 'checkpoint.json');
-    fs.writeFileSync(record, '{"foreign":true}'); writer.appendPCM(f.pcm.subarray(0, 20000));
-    expect(() => writer.checkpoint()).toThrow(); writer.close();
-    expect(fs.readFileSync(record, 'utf8')).toBe('{"foreign":true}');
+    fs.writeFileSync(record, foreign); writer.appendPCM(f.pcm.subarray(0, 20000));
+    expect(() => writer.checkpoint()).toThrow(expect.objectContaining({ code: 'CONTINUOUS_WAVE_CACHE_CHANGED', message: expect.stringContaining(reason) }));
+    writer.close();
+    expect(fs.readFileSync(record, 'utf8')).toBe(foreign);
   });
 
   it('只讀查詢不建立任何目錄，長片上限使用 RIFF 界線並限制單次 buffer', () => {

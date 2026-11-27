@@ -1,4 +1,5 @@
 import { audioMotherPath } from '../shared/audio-loudness.cjs';
+import { SCREEN_TEXT_DEFAULTS as DEFAULTS, SCREEN_TEXT_DEFAULT_MODELS } from '../shared/screen-text-options.cjs';
 import { Media } from './media.js';
 import { Project } from './project.js';
 import { getRecognitionClipRange, resolveRecognitionRange, sliceRecognitionClip } from './recognition-range.js';
@@ -138,8 +139,9 @@ function appendWindowCues(results, cues, window, previousWindow, processedEnd = 
 }
 
 export async function recognizeClipText(clip, {
-  provider = 'openai', model = 'gpt-5.4-mini', sourceLang = 'auto', sampleFps = 2,
-  frameWidth = 1280, smartAccuracy = true, signal, onProgress, preserveSelection = () => false,
+  provider = DEFAULTS.provider, model = SCREEN_TEXT_DEFAULT_MODELS[provider], sourceLang = DEFAULTS.sourceLang,
+  sampleFps = DEFAULTS.sampleFps, frameWidth = DEFAULTS.frameWidth, smartAccuracy = DEFAULTS.smartAccuracy,
+  signal, onProgress, preserveSelection = () => false,
   scope = 'clip', plan:acceptedPlan,
 } = {}) {
   const bridge = window.subtool;

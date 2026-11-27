@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -11,15 +12,17 @@ const { createMediaIntakeRuntime, cacheKeyFor } = require(runtimeId);
 const { FileAuthority } = require('../electron/file-authority');
 const workerModule = require('../electron/source-waveform-worker');
 const { sharedSourceFingerprintSync } = require('../electron/mother-source-evidence');
+const { openContinuousWaveformCache } = require('../electron/continuous-waveform-cache');
 const roots = [], runtimes = [];
-function fixture({ factory = createMediaIntakeRuntime, central = true, ...options } = {}) {
+function fixture({ factory = createMediaIntakeRuntime, central = true, localWaveforms = false, ...options } = {}) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-source-cleanup-')); roots.push(root);
   const source = path.join(root, 'mother.mov'), cacheRoot = path.join(root, 'central'), tempRoot = path.join(root, 'temp');
   fs.writeFileSync(source, 'mother source'); fs.mkdirSync(tempRoot); if (central) fs.mkdirSync(cacheRoot);
-  const fileAuthority = new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }); fileAuthority.grantTrustedFile(source);
-  const runtime = factory({ cacheRoot, tempRoot, fileAuthority, allowSidecarCache: true,
+  const waveformRecoveryRoot = localWaveforms ? path.join(root, 'waveform-recovery') : undefined;
+  const fileAuthority = new FileAuthority({ internalDirectories: [cacheRoot, tempRoot, waveformRecoveryRoot].filter(Boolean) }); fileAuthority.grantTrustedFile(source);
+  const runtime = factory({ cacheRoot, tempRoot, waveformRecoveryRoot, fileAuthority, allowSidecarCache: true,
     ffmpegExecution: { execute: vi.fn() }, ...options }); runtimes.push(runtime);
-  return { root, source, cacheRoot, tempRoot, runtime, fileAuthority };
+  return { root, source, cacheRoot, tempRoot, waveformRecoveryRoot, runtime, fileAuthority };
 }
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -76,6 +79,75 @@ it('sourceOnly 資訊不列舉中央，也不回傳中央統計', async () => {
   const info = await f.runtime.cacheInfo(f.source, { sourceOnly: true });
   expect(centralRead).not.toHaveBeenCalled();
   expect(info).toEqual({ source: { path: f.source, locations: [] } });
+});
+
+it.each(['complete','partial','foreign-record','unknown-file','busy','empty','unlistable-sidecar'])('只檢查並清理目前母片的本機復原波形：%s',async mode=>{
+  const f=fixture({localWaveforms:true,backgroundWaveforms:mode!=='unlistable-sidecar'}),key=cacheKeyFor(f.source);
+  const dir=path.join(f.waveformRecoveryRoot,key),other=path.join(f.waveformRecoveryRoot,'b'.repeat(16));
+  const legacy=path.join(f.cacheRoot,'keep-sentinel');
+  fs.writeFileSync(legacy,'legacy cache');
+  const sourceKey=createHash('sha256').update('strict-source-wave-v1\0'+key).digest('hex');
+  const save=(bucket,witness,complete=true)=>{
+    fs.mkdirSync(bucket,{recursive:true});
+    const writer=openContinuousWaveformCache(bucket,{version:1,sharedSourceKey:witness,totalSamples:8000,audio:[{channels:1}]});
+    try{
+      writer.appendPCM(Buffer.alloc(complete?16000:8000,7));
+      if(complete)writer.complete();else writer.checkpoint();
+    }finally{writer.close();}
+  };
+  if(mode!=='empty'){
+    save(dir,sourceKey,mode!=='partial');
+    save(other,'f'.repeat(64));
+    if(mode==='foreign-record')save(dir,'f'.repeat(64));
+    if(mode==='unknown-file')fs.writeFileSync(path.join(dir,'keep.txt'),'unrelated');
+  }
+  let open;
+  if(mode==='unlistable-sidecar'){
+    const sidecar=path.join(f.root,'.subtool_Cache'),opendir=fs.opendirSync;
+    fs.mkdirSync(sidecar);
+    open=vi.spyOn(fs,'opendirSync').mockImplementation((dir,...rest)=>{
+      if(path.resolve(dir)===sidecar)throw Object.assign(new Error('sidecar unavailable'),{code:'EACCES'});
+      return opendir(dir,...rest);
+    });
+  }
+  const info=await f.runtime.cacheInfo(f.source,{sourceOnly:true});
+  open?.mockRestore();
+  if(mode==='unlistable-sidecar')expect(info.source.incomplete).toBe(true);
+  if(mode==='empty'){
+    expect(info.source.locations).toEqual([]);
+    expect((await f.runtime.clearSource(f.source)).bytes).toBe(0);
+    expect(fs.existsSync(f.waveformRecoveryRoot)).toBe(false);
+  }else{
+    expect(info.source.locations).toEqual([expect.objectContaining({directory:dir,kind:'waveform-recovery',proxy:false,channels:0,
+      waveform:expect.objectContaining({state:mode==='partial'?'partial':'complete',completedSamples:mode==='partial'?4000:8000})})]);
+    let release;
+    if(mode==='busy'){
+      release=await f.runtime.withAudioEffectCache(f.source,async({retain})=>retain());
+      try{expect(await f.runtime.clearSource(f.source)).toMatchObject({bytes:0,incomplete:true,reason:'busy'});}
+      finally{release();}
+      expect(fs.existsSync(dir)).toBe(true);
+    }
+    const result=await f.runtime.clearSource(f.source);
+    if(mode==='foreign-record'||mode==='unknown-file'){
+      expect(result).toMatchObject({bytes:0,incomplete:true});expect(fs.existsSync(dir)).toBe(true);
+    }else{
+      expect(result.incomplete).toBe(false);expect(result.bytes).toBeGreaterThan(8000);
+      expect(fs.existsSync(dir)).toBe(false);
+    }
+    expect(fs.readdirSync(path.join(other,'continuous-waveforms'))).toHaveLength(1);
+  }
+  expect(fs.readFileSync(legacy,'utf8')).toBe('legacy cache');
+});
+
+it('已登記的本機復原根被替換時，清理不採信同路徑新檔',async()=>{
+  const f=fixture({localWaveforms:true}),dir=path.join(f.waveformRecoveryRoot,cacheKeyFor(f.source));
+  fs.mkdirSync(dir,{recursive:true});
+  f.runtime.cacheInfo(f.source,{sourceOnly:true});
+  fs.renameSync(f.waveformRecoveryRoot,f.waveformRecoveryRoot+'-previous');
+  fs.mkdirSync(dir,{recursive:true});
+  const replacement=path.join(dir,'keep.txt');fs.writeFileSync(replacement,'new directory');
+  expect(await f.runtime.clearSource(f.source)).toMatchObject({bytes:0,incomplete:true});
+  expect(fs.readFileSync(replacement,'utf8')).toBe('new directory');
 });
 
 it('音訊平衡存於來源快取，讀寫時清理會等待使用者重試，釋放後可清除',async()=>{

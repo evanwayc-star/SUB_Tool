@@ -591,7 +591,8 @@ State.defaultKeymap = {
   'select_current': [{key:'g'}],
   'add_note': [{key:'v'}, {key:'m'}],
   'split_clip': [{key:'k', ctrl:true}], // 在播放點切割影片段（影片序列）
-  'toggle_safe_frame': [{key:'g', ctrl:true}],
+  'toggle_safe_frame': [{key:'h', ctrl:true}],
+  'toggle_timecode_watermark': [{key:'g', ctrl:true}],
   'toggle_mixer': [{key:'y'}],
   'scroll_playhead': [{key:'u'}],
   'screenshot': [{key:'t'}],

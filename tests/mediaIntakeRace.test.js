@@ -98,6 +98,60 @@ let stepFrame;
 let jklReset;
 
 describe('desktop mother-source intake ownership', () => {
+  it.each(['ingest-wave','fresh-segments','unreadable','changed-during-rebuild','changed-source'])('連續波形快取遭拒後修復同一母片的 Proxy 與波形：%s',async mode=>{
+    const {Seq}=await import('../src/sequence.js');
+    const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
+    const path='C:/media/episode.mp4',key='a'.repeat(16),wave=deferred();
+    Media._registerPrimary({name:'主影片',path:'C:/media/main.mp4',dur:2});
+    const clip=Seq.add({name:'測試影片',path,dur:7,in:1,out:6,offset:4});
+    window.subtool.sourceWaveformContinuous=true;
+    window.subtool.mediaSourceKey=vi.fn(async()=>key);
+    window.subtool.prepareSourceWaveform=vi.fn(async request=>{
+      if(request.continuous)return wave.promise;
+      if(mode==='unreadable')throw new Error('母素材音訊未能解碼');
+      return {sourceKey:mode==='changed-during-rebuild'?'b'.repeat(16):key,wave:'fresh-'+request.start,temporary:true,start:request.start,duration:request.length};
+    });
+    const read=vi.spyOn(globalThis,'fetch').mockImplementation(async url=>{
+      if(mode==='fresh-segments'&&String(url).endsWith('mix.wav'))return {arrayBuffer:async()=>sourceWave(.25)};
+      const length=String(url).endsWith('fresh-0')?5:String(url).endsWith('fresh-5')?2:7;
+      return {arrayBuffer:async()=>sourceWave(length)};
+    });
+    const work=Media._clipIngest(clip,{audio:[{channels:1}]});
+    try{
+      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      if(mode==='changed-source')window.subtool.mediaSourceKey.mockResolvedValue('b'.repeat(16));
+      wave.reject(new Error('連續波形快取的來源、目錄或內容已變更'));
+      if(mode!=='changed-source'){
+        await vi.waitFor(()=>expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({path,needsProxy:true})));
+        // A rejected sidecar is recoverable; a queued Proxy is still working.
+        expect(jobs.snapshot().recoveries).toEqual([]);
+        pending.get(path).resolve({proxy:'C:/cache/verified.mp4',wave:['ingest-wave','fresh-segments'].includes(mode)?'mix.wav':null,channels:[]});
+        expect(await work).toBe(true);
+        expect(clip.proxyUrl).toBe('file:///C:/cache/verified.mp4');
+        if(mode==='unreadable'||mode==='changed-during-rebuild'){
+          expect(clip.peaks).toBeFalsy();
+          expect(jobs.snapshot().recoveries[0].message).toContain('無法讀取母素材的完整波形');
+        }else{
+          expect(clip.peaks).toHaveLength(1400);
+          expect(Math.min(...clip.peaks)).toBeCloseTo(-.5,3);
+          expect(Math.max(...clip.peaks)).toBeCloseTo(.5,3);
+          expect(jobs.snapshot().recoveries).toEqual([]);
+        }
+        if(mode==='fresh-segments'){
+          expect(window.subtool.prepareSourceWaveform.mock.calls.slice(1).map(([r])=>[r.start,r.length,r.ignoreCached])).toEqual([[0,5,true],[5,2,true]]);
+          expect(deskMock.ingest).toHaveBeenCalledOnce();
+        }
+      }else{
+        await expect(work).rejects.toThrow('母素材已變更');
+        expect(deskMock.ingest).not.toHaveBeenCalled();
+        expect(jobs.snapshot().recoveries[0]?.message).toContain('請重新連結');
+      }
+      expect(clip).toMatchObject({path,in:1,out:6,offset:4});
+    }finally{
+      Media.reset();wave.resolve(null);pending.get(path)?.resolve(null);await work.catch(()=>{});read.mockRestore();
+      delete window.subtool.sourceWaveformContinuous;delete window.subtool.mediaSourceKey;delete window.subtool.prepareSourceWaveform;
+    }
+  });
   it('外部音訊停止後可續做原聲道工作，保留既有 asset 與 placement',async()=>{
     const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
     const path='C:/audio/external.wav',asset={id:'external',path,audioSrc:'ext-external',name:'external',dur:12,in:2,out:9,offset:4};
@@ -112,6 +166,36 @@ describe('desktop mother-source intake ownership', () => {
       expect(Media.externalAudioSources).toContain(asset);expect(asset).toMatchObject({in:2,out:9,offset:4});
       expect(jobs.snapshot().recoveries).toEqual([]);
     }finally{Media.reset();for(const gate of pending.values())gate.resolve(null);await work;await retry;delete window.subtool.mediaSourceKey;}
+  });
+  it('共享波形重新從本機計算時，撤回分割片段舊波形並接受新來源進度',async()=>{
+    const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');
+    const path='C:/media/restored.mp4',sourceKey='a'.repeat(16),gate=deferred();
+    const clip=Media._registerPrimary({name:'主影片',path,dur:2,audioSourceId:'restored'});
+    // A restored project can already hold a displayed waveform when intake resumes.
+    clip.peaks=new Float32Array([-.1,.1]);Wave.setSourceMixPeaks(clip,clip.peaks);
+    window.subtool.sourceWaveformContinuous=true;
+    window.subtool.prepareSourceWaveform=vi.fn(()=>gate.promise);
+    const work=Media._prepareSourceWaveform(clip,path,[{channels:1}],2);
+    try{
+      await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
+      const request=window.subtool.prepareSourceWaveform.mock.calls[0][0];
+      const progress=waveform=>jobs.progress({...request,stage:'source-waveform',waveform});
+      const batch=(end,value)=>({sourceKey,startSample:0,completedSamples:end,totalSamples:8000,sampleRate:4000,resolution:100,
+        peaks:Float32Array.from({length:end/20},(_,i)=>i%2?value:-value)});
+      progress(batch(4000,.25));
+      const shared=clip.peaks,cut={...clip,id:'cut'},other={...clip,id:'other',audioSourceId:'different'};
+      State.clips.push(cut,other);
+      progress({reset:true,sourceKey});
+      expect(clip.peaks).toBeNull();expect(cut.peaks).toBeNull();
+      expect(Wave.getSourceMixPeaks(clip)).toBeNull();
+      expect(other.peaks).toBe(shared);
+      progress(batch(8000,.75));
+      gate.resolve({wave:'local/wave.wav',sourceKey,start:0,duration:2,complete:true});
+      expect(await work).toBe(true);
+      expect(clip.peaks).toHaveLength(400);expect(clip.peaks.at(-1)).toBe(.75);
+      expect(Wave.getSourceMixPeaks(cut)).toBe(clip.peaks);
+      expect(other.peaks).toBe(shared);
+    }finally{Media.reset();gate.resolve(null);await work;delete window.subtool.prepareSourceWaveform;delete window.subtool.sourceWaveformContinuous;}
   });
   it.each(['waveform','ingest'])('追加片段停止在 %s 後重試會完成波形與 Proxy，不只重算波形',async stage=>{
     const {Seq}=await import('../src/sequence.js');
@@ -266,8 +350,9 @@ describe('desktop mother-source intake ownership', () => {
   });
 
   it.each(['native-six-channel','non-native-no-stream'].flatMap(branch=>['complete','save-failure'].map(outcome=>({branch,outcome}))))
-  ('B2 $branch 在持久波形完成前不啟動 ingest：$outcome',async({branch,outcome})=>{
+  ('$branch 的預覽能獨立於持久波形交接：$outcome',async({branch,outcome})=>{
     const native=branch==='native-six-channel',wave=deferred(),key='c'.repeat(16);
+    domMock.video.duration=2;
     deskMock.probe.mockResolvedValue({duration:2,video:{codec:native?'h264':'prores',fps:25,width:1920,height:1080},audio:[{channels:6}]});
     window.subtool.sourceWaveformContinuous=true;
     window.subtool.prepareSourceWaveform=vi.fn(()=>wave.promise);
@@ -284,23 +369,37 @@ describe('desktop mother-source intake ownership', () => {
       const data={sourceKey:key,startSample:0,completedSamples:4000,totalSamples:8000,sampleRate:4000,resolution:100,
         peaks:Float32Array.from({length:200},(_,index)=>index%2?.5:-.25)};
       MediaIntakeJobs.progress({...request,stage:'source-waveform',waveform:data,pct:50});
-      expect(getProvisionalSourceWaveform()?.peaks).toEqual(data.peaks);
-      expect(deskMock.ingest).not.toHaveBeenCalled();expect(State.clips).toEqual([]);
+      const waveformPeaks=()=>native?State.clips[0].peaks:getProvisionalSourceWaveform()?.peaks;
+      expect(waveformPeaks()).toEqual(data.peaks);
+      if(native){
+        await loading;
+        expect(State.clips[0]).toMatchObject({path:'C:/media/B2.mov',web:{url:'file:///C:/media/B2.mov'}});
+        expect(deskMock.ingest).not.toHaveBeenCalled();
+      }else{
+        expect(deskMock.ingest).toHaveBeenCalledOnce();
+        expect(State.clips).toEqual([]);
+      }
       if(outcome==='save-failure'){
-        wave.reject(new Error('checkpoint save failed'));await loading;
-        expect(deskMock.ingest).not.toHaveBeenCalled();expect(getProvisionalSourceWaveform()).toBeNull();
-        expect(setMediaProcessingStatus).toHaveBeenCalledWith(expect.stringContaining('波形尚未完成'),'err');
-        expect(setStatus).not.toHaveBeenCalledWith(expect.stringContaining('波形'),'err');
+        wave.reject(new Error('checkpoint save failed'));
+        if(native){
+          await vi.waitFor(()=>expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({path:'C:/media/B2.mov',needsProxy:false})));
+          expect(State.clips[0].web.url).toBe(domMock.video.src);
+        }else{
+          pending.get('C:/media/B2.mov').resolve({proxy:'C:/cache/proxy.mp4',channels:[]});
+          await loading;
+        }
+        expect(State.clips[0].path).toBe('C:/media/B2.mov');
+        await vi.waitFor(()=>expect(getProvisionalSourceWaveform()).toBeNull());
       }else{
         MediaIntakeJobs.progress({...request,stage:'source-waveform',waveform:{...data,startSample:4000,completedSamples:8000},pct:100});
-        const savedPeaks=getProvisionalSourceWaveform().peaks;
-        expect(deskMock.ingest).not.toHaveBeenCalled();
+        const savedPeaks=waveformPeaks();
         wave.resolve({wave:'shared/wave.wav',sourceKey:key,start:0,duration:2,complete:true,temporary:false});
         await vi.waitFor(()=>expect(deskMock.ingest).toHaveBeenCalledOnce());
         expect(deskMock.ingest.mock.calls[0][0]).toMatchObject({path:'C:/media/B2.mov',needsProxy:!native});
-        // 真 ingest 回覆不含 sourceKey；正式 metadata 就緒後重新核對來源再交接。
-        pending.get('C:/media/B2.mov').resolve({channels:[],wave:'shared/wave.wav'});
+        // 舊 bridge 的 batch 回覆不含 sourceKey；metadata 就緒後重新核對波形來源。
+        pending.get('C:/media/B2.mov').resolve({proxy:native?null:'C:/cache/proxy.mp4',channels:[],wave:'shared/wave.wav'});
         await loading;
+        await vi.waitFor(()=>expect(getProvisionalSourceWaveform()).toBeNull());
         expect(State.clips).toHaveLength(1);
         expect(State.clips[0].peaks).toBe(savedPeaks);
         expect(Wave.getSourceMixPeaks(State.clips[0])).toBe(savedPeaks);
@@ -560,7 +659,7 @@ describe('desktop mother-source intake ownership', () => {
     try{
       const loading=Media.loadDesktopMedia('C:/media/A.mov');
       await vi.waitFor(()=>expect(window.subtool.prepareSourceWaveform).toHaveBeenCalledOnce());
-      expect(window.subtool.streamIngest).not.toHaveBeenCalled();
+      expect(window.subtool.streamIngest).toHaveBeenCalledOnce();
       wave.resolve({wave:'C:/cache/late-wave.wav',sourceKey:key,start:0,duration:1,temporary:true});
       await vi.waitFor(()=>expect(window.subtool.streamIngest).toHaveBeenCalledOnce());
       stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
@@ -592,7 +691,7 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
-  it('長片先顯示前五秒波形，補齊分鐘邊界與全片後才啟動 Proxy',async()=>{
+  it('長片串流先可編輯，完整波形在背景完成並交接同一母素材',async()=>{
     const {getProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
     const stream=deferred(),segments=[],key='a'.repeat(16),waves=new Map();
     deskMock.probe.mockResolvedValueOnce({duration:120,video:{codec:'prores',fps:25},audio:[{channels:1}]});
@@ -614,20 +713,21 @@ describe('desktop mother-source intake ownership', () => {
       finish(0,16384);
       await vi.waitFor(()=>expect(getProvisionalSourceWaveform()?.peaks).toHaveLength(1000));
       expect(getProvisionalSourceWaveform().peaks[1]).toBeCloseTo(.5,3);
-      expect(window.subtool.streamIngest).not.toHaveBeenCalled();
+      expect(window.subtool.streamIngest).toHaveBeenCalledOnce();
+      stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
+      await loading;
+      const clip=State.clips[0];
+      expect(clip.path).toBe('C:/media/long.mov');
+      clip.in=3;
       await vi.waitFor(()=>expect(segments).toHaveLength(2));
       expect(segments[1].options).toMatchObject({start:5,length:55,duration:120});
       finish(1,8192);
       await vi.waitFor(()=>expect(segments).toHaveLength(3));
       expect(segments[2].options).toMatchObject({start:60,length:60,duration:120});
-      expect(window.subtool.streamIngest).not.toHaveBeenCalled();
       finish(2,24576);
-      await vi.waitFor(()=>expect(window.subtool.streamIngest).toHaveBeenCalledOnce());
-      expect(getProvisionalSourceWaveform().peaks).toHaveLength(24000);
-      expect(State.clips).toEqual([]);
-      stream.resolve({streamUrl:'http://127.0.0.1:8080/stream',streamLeaseId:'lease',sourceKey:key,cached:true,channels:[]});
-      await loading;
       await vi.waitFor(()=>expect(State.clips[0]?.peaks).toHaveLength(24000));
+      expect(State.clips[0]).toBe(clip);
+      expect(clip.in).toBe(3);
       const peaks=State.clips[0].peaks;
       expect(peaks[999]).toBeCloseTo(.5,3);expect(peaks[1001]).toBeCloseTo(.25,3);expect(peaks[12001]).toBeCloseTo(.75,3);
       expect(segments).toHaveLength(3);
@@ -669,7 +769,7 @@ describe('desktop mother-source intake ownership', () => {
     }
   });
 
-  it('長片完整波形整理時仍可取消，取消後不發布峰值也不啟動 Proxy',async()=>{
+  it('長片波形與串流並行時仍可取消，取消後不發布峰值或素材',async()=>{
     const {getProvisionalSourceWaveform}=await import('../src/provisional-source-waveform.js');
     const duration=7200,key='a'.repeat(16),bytes=sourceWave(duration);
     deskMock.probe.mockResolvedValueOnce({duration,video:{codec:'prores',fps:25},audio:[{channels:1}]});
@@ -690,7 +790,7 @@ describe('desktop mother-source intake ownership', () => {
       await cancelled;
       expect(peaksAtCancel===undefined).toBe(true);
       expect(getProvisionalSourceWaveform()).toBeNull();
-      expect(window.subtool.streamIngest).not.toHaveBeenCalled();
+      expect(window.subtool.streamIngest).toHaveBeenCalledOnce();
       expect(State.clips).toEqual([]);
       await vi.waitFor(()=>expect(deskMock.cleanupAudio).toHaveBeenCalledWith('complete.wav'));
     }finally{
@@ -803,7 +903,7 @@ describe('desktop mother-source intake ownership', () => {
     try {
       await Media.loadDesktopMedia('C:/media/audio-error.webm');
       expect(State.clips[0].path).toBe('C:/media/audio-error.webm');
-      expect(showToast).toHaveBeenCalledWith(expect.stringContaining('metadata 讀取失敗'));
+      await vi.waitFor(()=>expect(showToast).toHaveBeenCalledWith(expect.stringContaining('metadata 讀取失敗')));
       expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗', 'err',false,'metadata 讀取失敗');
       expect(showToast.mock.calls.filter(([,kind])=>kind==='error')).toHaveLength(0);
     } finally {
@@ -1515,6 +1615,78 @@ describe('desktop mother-source intake ownership', () => {
       delete window.subtool.mpv;
       resetPlayerAdapter(window.subtool);
     }
+  });
+
+  it.each(['detect','launch'])('MXF 在 mpv %s 失敗後可以從串流編輯，不必等 Proxy 完成',async failure=>{
+    const path='C:/media/fallback.mxf',streamUrl='http://127.0.0.1:8080/growing';
+    window.subtool.mpv={
+      detect:vi.fn(async()=>{if(failure==='detect')throw new Error('mpv unavailable');return {available:true};}),
+      launch:vi.fn(async()=>{throw new Error('mpv pipe failed');}),
+      quit:vi.fn(async()=>{}),
+    };
+    window.subtool.streamIngest=vi.fn(async()=>({ingestJobId:'growing',streamUrl,cached:false,channels:[]}));
+    resetPlayerAdapter(window.subtool);
+    deskMock.probe.mockResolvedValueOnce({duration:12,video:{codec:'prores',fps:25},audio:[]});
+    try{
+      await Media.loadDesktopMedia(path);
+      expect(State.clips[0]).toMatchObject({path,dur:12,web:{url:streamUrl}});
+      expect(domMock.video.src).toBe(streamUrl);
+      expect(Media.mpvMode).toBe(false);
+      expect(window.subtool.streamIngest).toHaveBeenCalledOnce();
+      expect(deskMock.ingest).not.toHaveBeenCalled();
+    }finally{Media.reset();delete window.subtool.mpv;delete window.subtool.streamIngest;resetPlayerAdapter(window.subtool);}
+  });
+
+  it('原片編碼看似相容但 Chromium 讀不到 metadata 時仍可開啟串流預覽',async()=>{
+    const path='C:/media/episode.mp4',streamUrl='http://127.0.0.1:8080/compatible';
+    deskMock.probe.mockResolvedValueOnce({duration:75,video:{codec:'hevc',fps:25},audio:[{channels:6}]});
+    domMock.video.readyState=0;
+    window.subtool.streamIngest=vi.fn(async()=>{
+      domMock.video.readyState=1;
+      return {streamUrl,ingestJobId:'compatible',cached:false,channels:[]};
+    });
+    const loading=Media.loadDesktopMedia(path);
+    try{
+      await vi.waitFor(()=>expect(domMock.video.onerror).toBeTypeOf('function'));
+      domMock.video.onerror();
+      await loading;
+      expect(State.clips[0]).toMatchObject({path,dur:75,web:{url:streamUrl}});
+      expect(domMock.video.src).toBe(streamUrl);
+    }finally{Media.reset();domMock.video.readyState=1;await loading;}
+  });
+
+  it('邊轉邊播的串流無法定位時，完成後用可定位的 Proxy 呈現最新播放點',async()=>{
+    const {getPlayerAdapter}=await import('../src/media-player-adapter.js');
+    const path='C:/media/show.mxf',streamUrl='http://127.0.0.1:8080/live';
+    const urlGate=deferred(),originalPresentation=deferred();
+    const proxy='C:/cache/show.mp4',finalUrl='file:///C:/cache/show.mp4';
+    window.subtool.streamIngest=vi.fn(async()=>({streamUrl,streamLeaseId:'show-lease',ingestJobId:'show-job',cached:false,proxy,channels:[]}));
+    deskMock.probe.mockResolvedValueOnce({duration:75,video:{codec:'mpeg2video',fps:25},audio:[]});
+    domMock.video.duration=2.2;
+    const present=vi.spyOn(getPlayerAdapter(),'present').mockImplementation(async (time,{signal})=>{
+      if(domMock.video.src===streamUrl)await Promise.race([originalPresentation.promise,new Promise(resolve=>signal.addEventListener('abort',resolve,{once:true}))]);
+      return {backend:'html5',presentedSourceTime:time};
+    });
+    try{
+      await Media.loadDesktopMedia(path);
+      const clip=State.clips[0];
+      expect(clip.dur).toBe(75);
+      clip.in=1;clip.out=71;clip.offset=2;
+      const first=Media.seek(4);
+      await vi.waitFor(()=>expect(present).toHaveBeenCalled());
+      deskMock.fileURL.mockImplementationOnce(()=>urlGate.promise);
+      window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:{jobId:'show-job'}}));
+      await vi.waitFor(()=>expect(deskMock.fileURL).toHaveBeenCalledWith(proxy));
+      const next=Media.seek(9);
+      urlGate.resolve(finalUrl);
+      await vi.waitFor(()=>expect(deskMock.releaseStream).toHaveBeenCalledWith('show-lease'));
+      await Promise.all([first,next]);
+      expect(State.clips[0]).toBe(clip);
+      expect(clip).toMatchObject({path,in:1,out:71,offset:2,web:{url:finalUrl}});
+      expect(domMock.video.src).toBe(finalUrl);
+      expect(Media.presentedTime()).toBe(9);
+      expect(present.mock.lastCall[0]).toBe(8);
+    }finally{originalPresentation.resolve();urlGate.resolve(finalUrl);present.mockRestore();Media.reset();}
   });
 
   it('專案重連的 mpv 啟動等待期間失權，回覆後關閉 native 且不交接主片段',async()=>{

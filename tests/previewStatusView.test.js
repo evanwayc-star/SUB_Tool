@@ -31,7 +31,7 @@ beforeEach(()=>{
   document.head.innerHTML=`<style>${readFileSync('src/styles.css','utf8')}</style>`;
   document.body.innerHTML=readFileSync('index.html','utf8');
   root=document.getElementById('previewStatus');
-  state={mode:'smooth',sourceKind:'original',network:true,available:true,proxyAvailable:false,
+  state={mode:'smooth',sourceKind:'original',network:true,available:true,proxyAvailable:false,proxyPreparation:'preparing',
     phase:'paused',localPreparation:'idle',localProgress:null,position:4,sourceTime:4};
   setMode=vi.fn(async mode=>{state={...state,mode,phase:'paused'};return true;});
   view=bindPreviewStatusView({root,readState:()=>state,setMode});
@@ -65,6 +65,18 @@ it('等待未滿250ms不閃提示，跨定位/影片/聲道階段沿用連續等
   expect(status.textContent).toBe('等待聲道…');
   state={...state,phase:'video'};view.update();expect(status.textContent).toBe('等待影片…');
   state={...state,phase:'playing'};view.update();expect(getComputedStyle(status).display).toBe('none');
+});
+
+it('背景 Proxy 失敗及停止時顯示原片與實際可重試狀態，無工作時不顯示準備中',()=>{
+  const detail=root.querySelector('[data-preview-preparation]');
+  state={...state,proxyPreparation:'failed',proxyFailed:true,canRetryProxy:true};view.update();
+  expect(detail.textContent).toContain('Proxy 產生失敗，暫用原片。按「Proxy 預覽」可重試');
+  state={...state,canRetryProxy:false};view.update();
+  expect(detail.textContent).not.toContain('可重試');
+  state={...state,proxyPreparation:'stopped',proxyFailed:false};view.update();
+  expect(detail.textContent).toContain('已停止');
+  state={...state,proxyPreparation:null};view.update();
+  expect(detail.hidden).toBe(true);
 });
 
 it('短等待結束與dispose都撤銷延後提示，晚到timer不改新畫面',()=>{

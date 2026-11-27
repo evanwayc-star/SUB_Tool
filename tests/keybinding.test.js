@@ -354,6 +354,38 @@ describe('音量表與播放點視野的預設鍵遷移',()=>{
   });
 });
 
+describe('安全框及播放器 TC 預設鍵遷移', () => {
+  const safe = 'toggle_safe_frame', tc = 'toggle_timecode_watermark';
+  const oldSafe = {key:'g', ctrl:true}, newSafe = {key:'h', ctrl:true};
+  it('現有設定與舊匯出檔使用新預設；重新載入仍相同', () => {
+    const legacy = structuredClone(State.defaultKeymap);
+    delete legacy[tc];
+    legacy[safe] = [oldSafe];
+    const { keymap } = mergeImportedKeymap(State.defaultKeymap, {keymap:legacy});
+    expect(keymap[safe]).toEqual([newSafe]);
+    expect(keymap[tc]).toEqual([oldSafe]);
+    expect(mergeImportedKeymap(State.defaultKeymap, keymap).keymap).toEqual(keymap);
+    expect(legacy[safe]).toEqual([oldSafe]);
+  });
+  it('新預設會避開已指派給其它動作的 Ctrl+H、Ctrl+G', () => {
+    const custom = {pause:[{code:'KeyH', ctrl:true}], rewind:[oldSafe]};
+    const { keymap } = mergeImportedKeymap(State.defaultKeymap, custom);
+    expect(keymap[safe]).toEqual([]);
+    expect(keymap[tc]).toEqual([]);
+    expect(matchAction(keymap, ev('h', {ctrl:true, code:'KeyH'}))).toBe('pause');
+    expect(matchAction(keymap, ev('g', {ctrl:true, code:'KeyG'}))).toBe('rewind');
+  });
+  it('舊版自訂的多組按鍵與更新後刻意清空的 TC 都保留', () => {
+    const extra = {key:'f8'};
+    const custom = mergeImportedKeymap(State.defaultKeymap, {[safe]:[oldSafe, extra]}).keymap;
+    expect(custom[safe]).toEqual([oldSafe, extra]);
+    expect(custom[tc]).toEqual([]);
+    const disabled = mergeImportedKeymap(State.defaultKeymap, {[safe]:[oldSafe], [tc]:[]}).keymap;
+    expect(disabled[safe]).toEqual([oldSafe]);
+    expect(disabled[tc]).toEqual([]);
+  });
+});
+
 describe('存檔前清空位', () => {
   it('濾掉 null 但保留其餘順序', () => {
     const km = { a: [{ key: 'x' }, null, { key: 'y' }], b: [null] };

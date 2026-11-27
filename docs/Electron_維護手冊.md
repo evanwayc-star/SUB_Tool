@@ -57,6 +57,8 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 
 畫面文字辨識的供應商、模型及取樣設定另存 `getConfigDir()/screen-text-settings.json`；其中 `encryptedKeys` 只保存 Electron `safeStorage` 密文，renderer 讀回金鑰就緒狀態。沒有已存金鑰時，才使用對應的 `OPENAI_API_KEY` 或 `GEMINI_API_KEY`／`GOOGLE_API_KEY` 環境變數。明文只隨本次工作經 stdin 傳入核心，不放在程序 argv、專案或快取。辨識快取位於同設定目錄的 `card-vision-cache`。
 
+`qualityDefaultsVersion` 僅存於上述私有設定，標記已完成一次品質預設遷移，不傳至 renderer 或原生辨識請求。遷移與儲存沿用設定檔交易，保留加密金鑰、來源語言與自訂模型；完成遷移後保留使用者的新選擇。[目前品質預設](使用說明.md#辨識畫面文字)
+
 ## 3. Preload／IPC 介面
 
 需要完整簽名、欄位、通道或事件名時，直接讀對應 preload。一般操作使用 `invoke`／Promise。`send` 無回覆，事件另有 listener 生命週期。新增入口須同步驗 sender、main 准入、preload 與回歸測試。事件包裝不把 Electron event 交給頁面。

@@ -38,7 +38,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     const waveStage=channel?'source-channel-waveform':local?'waveform':'source-waveform';
     const job={owner,requestId,path:options.path||null,duration:options.duration,recoveryId:channel?null:recoveries.get(options.path)?.id,proxy:!sourceWave&&(method==='streamIngest'||!!options.needsProxy),local,abort,terminal:false,onWaveform,onProgress,
       progress:local?{stage:waveStage,label:channel?'讀取聲道波形':'準備波形',pct:null}:sourceWave?{stage:waveStage,label:channel?'檢查聲道波形快取':'等候優先產生波形',pct:null,queued:true}:null};
-    if(job.proxy&&job.path)proxyStates.set(job.path,{requestId,state:'preparing',pct:null});
+    if(job.proxy&&job.path)proxyStates.set(job.path,{requestId,recoveryId:job.recoveryId,state:'preparing',pct:null});
     if(!local) owner.used=true;
     pending.set(requestId,job);awaitingReply.add(job);publish();
     // A synchronous observer may already have replaced the session in publish().
@@ -62,7 +62,13 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     catch(error){native=Promise.reject(error);}
     let delivered,discarded=false;
     const discard=result=>{
-      if(!sourceWave||discarded||!result?.temporary||!result.wave) return;
+      if(discarded||!result) return;
+      if(method==='streamIngest'&&result.streamLeaseId){
+        discarded=true;
+        Promise.resolve().then(()=>bridge.releaseStream?.(result.streamLeaseId)).catch(error=>console.warn('過期預覽串流清理失敗:',error));
+        return;
+      }
+      if(!sourceWave||!result.temporary||!result.wave) return;
       discarded=true;
       Promise.resolve().then(()=>bridge.cleanupAudio(result.wave)).catch(error=>console.warn('過期暫存波形清理失敗:',error));
     };
@@ -84,7 +90,9 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       return result;
     },error=>{
       signal?.removeEventListener('abort',cancelRequest);
-      awaitingReply.delete(job);if(owner!==session) discard(delivered);updateProxy(job,'failed');finish(job);throw error;
+      awaitingReply.delete(job);if(owner!==session) discard(delivered);
+      if(!job.terminal)updateProxy(job,job.progress?.outputs?.proxy===false?'original':'failed');
+      finish(job);throw error;
     });
   }
   return {
@@ -123,7 +131,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       if(!entry||!entry.owns()||entry.status==='working')return false;
       const owner=session;
       const owns=()=>owner===session&&recoveries.get(entry.path)===entry&&entry.owns();
-      entry.status='working';publish();
+      entry.status='working';entry.retrying=true;publish();
       try{if(!owns())return false;await entry.retry(owns);if(owns()&&entry.status==='working'){recoveries.delete(entry.path);publish();}return entry.status!=='failed';}
       catch(error){if(owns()){entry.status='failed';entry.message=error?.message||String(error);publish();}return false;}
     },
@@ -132,7 +140,19 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       return {ingest:options=>run('ingest',options,owner)};
     },
     snapshot,
-    proxyState(path){const entry=proxyStates.get(path);return entry?{state:entry.state,pct:entry.pct}:null;},
+    proxyState(path){
+      const entry=proxyStates.get(path);
+      if(!entry)return null;
+      const state={state:entry.state,pct:entry.pct};
+      if(entry.state==='failed'){
+        const recovery=recoveries.get(path);
+        if(recovery&&recovery.id===entry.recoveryId&&recovery.owns()){
+          if(recovery.status==='failed')state.retryId=recovery.id;
+          else if(recovery.status==='working'&&recovery.retrying)state.state='preparing';
+        }
+      }
+      return state;
+    },
     progress(payload){
       if(!payload||payload.sessionId!==session.id) return false;
       const job=pending.get(payload.requestId);
@@ -145,12 +165,14 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       }
       if(job.owner!==session||pending.get(payload.requestId)!==job) return false;
       if(payload.proxyReady===true)updateProxy(job,'ready');
-      else if(payload.done&&payload.outcome==='failed')updateProxy(job,'failed');
+      else if(payload.done&&payload.outcome==='failed')updateProxy(job,payload.outputs?.proxy===false?'original':'failed');
       else if(!payload.done&&payload.stage==='transcoding'&&payload.outputs?.proxy===true)
         updateProxy(job,'encoding',payload.pct);
       if(payload.done){
         const recovery=recoveries.get(job.path);
-        if(payload.outcome==='failed'&&recovery&&recovery.id===job.recoveryId&&recovery.owns()){
+        // The source-waveform owner reports its own failure after removing any
+        // unverified peaks. A later ingest can still finish this source.
+        if(payload.outcome==='failed'&&payload.stage!=='source-waveform'&&recovery&&recovery.id===job.recoveryId&&recovery.owns()){
           recovery.status='failed';recovery.message=payload.errorMsg||`${payload.label||'背景處理'}失敗`;
         }
         job.terminal=true;job.outcome=payload.outcome;finish(job);

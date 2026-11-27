@@ -83,7 +83,7 @@ let _mainHiddenForQueue = false;
 let _quitReady = false;
 let _quitSequenceStarted = false;
 const directoryOutput = createDirectoryOutputRuntime({ coordinator:fileCommitCoordinator });
-let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null;
+let FFMPEG = null, FFPROBE = null, VENC = null, CACHE = null, WAVEFORM_RECOVERY = null;
 let FFMPEG_DETECTION = null, FFPROBE_DETECTION = null;
 let mediaProbe = null;
 let projectOpenReady = false;
@@ -330,6 +330,9 @@ if (!gotTheLock) {
     VENC = detectVideoEncoder();
     CACHE = path.join(app.getPath('userData'), 'mediacache');
     fileAuthority.grantInternalDirectory(CACHE);
+    WAVEFORM_RECOVERY = path.join(app.getPath('userData'), 'waveform-recovery');
+    fileAuthority.grantInternalDirectory(WAVEFORM_RECOVERY);
+    if (fs.existsSync(WAVEFORM_RECOVERY)) mediaIntakeRuntime.registerCleanupRoot(WAVEFORM_RECOVERY);
     EXPORT_QUEUE_DIR = path.join(app.getPath('userData'), 'export-queue');
     try { SHARED_OUTPUT_LOCK = prepareApplicationSharedLeaseRoot(); }
     catch (error) { SHARED_OUTPUT_LOCK = null; console.error('[Export watchdog] 無法建立共用輸出鎖目錄', error); }
@@ -900,6 +903,7 @@ const mediaIntakeRuntime = createMediaIntakeRuntime({
   backgroundWaveforms: true,
   clipCacheRoots: () => ['clip-frames', 'clip-audio'].map(name => path.join(app.getPath('userData'), name)),
   cacheRoot: () => CACHE,
+  waveformRecoveryRoot: () => WAVEFORM_RECOVERY,
   tempRoot: TMP,
   tempRootAuthority: TMP_OWNER,
   // 真機驗收必須維持母素材唯讀；所有衍生檔只進隔離 profile 的中央 cache。
@@ -2233,7 +2237,7 @@ ipcMain.handle('mpv:clearTimecodeWatermark', event => {
   return mpvHost.clearTimecodeWatermark();
 });
 
-ipcMain.handle('mpv:subSet', (event, assText) => mpvHost.setSubtitles(assText));
+ipcMain.handle('mpv:subSet', (event, assText, sourceSessionId) => mpvHost.setSubtitles(assText, sourceSessionId));
 ipcMain.handle('mpv:subVisible', (event, value) => mpvHost.setSubVisible(value));
 ipcMain.handle('mpv:loadfile', async (event, filePath) => {
   if (!fileAuthority.canRead(filePath)) { console.warn('[sec] mpv loadfile blocked:', filePath); return null; }

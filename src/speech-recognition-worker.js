@@ -9,6 +9,8 @@ import {
   buildBuiltinGenerationOptions,
   countBuiltinInferenceChunks,
   createBuiltinChunkProgressStreamer,
+  detectBuiltinSpeechLanguage,
+  hasCompleteBuiltinWordTimes,
   normalizeBuiltinAsrSegments,
   resolveBuiltinExecutionPlan
 } from './speech-recognition-worker-runtime.js';
@@ -46,8 +48,8 @@ async function getTransformersModule() {
 
 async function loadTranscriber({ jobId, modelId, modelName, webgpuDtype, wasmDtype }) {
   const { pipeline } = await getTransformersModule();
-  const preferredPlan = resolveBuiltinExecutionPlan({
-    hasWebGpu: Boolean(self.navigator?.gpu),
+  const gpuPlan = resolveBuiltinExecutionPlan({
+    hasWebGpu: true,
     webgpuDtype,
     wasmDtype
   });
@@ -58,7 +60,7 @@ async function loadTranscriber({ jobId, modelId, modelName, webgpuDtype, wasmDty
   });
   const keyFor = plan => JSON.stringify({ modelId, ...plan });
   if (cachedTranscriber && (
-    cachedPipelineKey === keyFor(preferredPlan) || cachedPipelineKey === keyFor(fallbackPlan)
+    cachedPipelineKey === keyFor(gpuPlan) || cachedPipelineKey === keyFor(fallbackPlan)
   )) {
     return { transcriber: cachedTranscriber, executionPlan: cachedExecutionPlan };
   }
@@ -72,6 +74,10 @@ async function loadTranscriber({ jobId, modelId, modelName, webgpuDtype, wasmDty
   cachedTranscriber = null;
   cachedPipelineKey = null;
   cachedExecutionPlan = null;
+  // Chromium can expose navigator.gpu even when this worker has no usable adapter.
+  let adapter;
+  try { adapter = await self.navigator?.gpu?.requestAdapter(); } catch { /* Use WASM. */ }
+  const preferredPlan = adapter ? gpuPlan : fallbackPlan;
   let executionPlan = preferredPlan;
   try {
     cachedTranscriber = await pipeline('automatic-speech-recognition', modelId, {
@@ -108,6 +114,7 @@ async function loadTranscriber({ jobId, modelId, modelName, webgpuDtype, wasmDty
 async function transcribe({
   jobId,
   audioFloat32,
+  taskMode,
   modelId,
   modelName,
   webgpuDtype,
@@ -139,7 +146,7 @@ async function transcribe({
     message: `本機 AI（${backendLabel}）正在準備第 1/${totalChunks} 段音訊…`
   });
 
-  const streamer = createBuiltinChunkProgressStreamer({
+  const newStreamer = () => createBuiltinChunkProgressStreamer({
     totalChunks,
     onProgress: progress => {
       let message;
@@ -162,46 +169,53 @@ async function transcribe({
       });
     }
   });
+  const editorTask = taskMode === 'transcribe' || taskMode === 'align';
+  if (editorTask && (!language || language === 'auto')) {
+    postProgress(jobId, { status: 'transcribing', indeterminate: true, message: '正在從音訊偵測語言…' });
+    language = await detectBuiltinSpeechLanguage(transcriber, audioFloat32, (await getTransformersModule()).Tensor);
+    if (!language) {
+      postProgress(jobId, { status: 'done', percent: 100, message: '所選音訊為靜音。' });
+      return { segments: [] };
+    }
+  }
   const generateKwargs = buildBuiltinGenerationOptions({
     language,
     prompt,
     temperature,
-    streamer,
+    streamer: newStreamer(),
     returnTimestamps
   });
 
   const audioDuration = audioFloat32.length / BUILTIN_ASR_RUNTIME.sampleRate;
   let output;
+  let timestamps = generateKwargs.return_timestamps;
   try {
     output = await transcriber(audioFloat32, generateKwargs);
   } catch (error) {
     const isAttnError = typeof error?.message === 'string' &&
       (error.message.includes('cross attentions') || error.message.includes('output_attentions'));
-    if (isAttnError && generateKwargs.return_timestamps === 'word') {
-      postProgress(jobId, {
-        status: 'transcribing',
-        device: executionPlan.device,
-        message: '模型無 cross attention 逐字對齊層，自動切換為句級原生時間碼…'
-      });
-      const fallbackKwargs = {
-        ...generateKwargs,
-        return_timestamps: true
-      };
-      output = await transcriber(audioFloat32, fallbackKwargs);
-    } else {
-      throw error;
-    }
+    if (!isAttnError || timestamps !== 'word') throw error;
   }
+  if (!output || (taskMode === 'align' && timestamps === 'word' && !hasCompleteBuiltinWordTimes(output, audioDuration))) {
+    postProgress(jobId, {
+      status: 'transcribing',
+      device: executionPlan.device,
+      message: '模型未提供完整的逐詞時間，正在取得原生句級時間碼…'
+    });
+    timestamps = true;
+    output = await transcriber(audioFloat32, { ...generateKwargs, return_timestamps: timestamps, streamer: newStreamer() });
+  }
+  const segments = normalizeBuiltinAsrSegments(output, audioDuration, editorTask ? timestamps : 'word');
   postProgress(jobId, { status: 'done', percent: 100, message: '本機辨識完成！' });
-  return normalizeBuiltinAsrSegments(output, audioDuration);
+  return { segments, language };
 }
 
 self.addEventListener('message', async event => {
   const request = event?.data || {};
   if (request.type !== 'transcribe') return;
   try {
-    const segments = await transcribe(request);
-    self.postMessage({ type: 'result', jobId: request.jobId, segments });
+    const result = await transcribe(request);
+    self.postMessage({ type: 'result', jobId: request.jobId, ...result });
   } catch (error) {
     self.postMessage({
       type: 'error',

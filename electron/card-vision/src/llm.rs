@@ -12,6 +12,13 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+pub fn vision_detail(provider: Provider, model: &str) -> &'static str {
+    match (provider, model) {
+        (Provider::OpenAI, "gpt-5.4" | "gpt-5.4-mini") => "original",
+        _ => "high",
+    }
+}
+
 pub fn build_vision_system_prompt(lang: SourceLang) -> String {
     let lang_hint = match lang {
         SourceLang::Auto => {
@@ -331,6 +338,15 @@ fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_detail_is_limited_to_supported_openai_models() {
+        assert_eq!(vision_detail(Provider::OpenAI, "gpt-5.4"), "original");
+        assert_eq!(vision_detail(Provider::OpenAI, "gpt-5.4-mini"), "original");
+        assert_eq!(vision_detail(Provider::OpenAI, "gpt-4.1"), "high");
+        assert_eq!(vision_detail(Provider::OpenAI, "custom-vision"), "high");
+        assert_eq!(vision_detail(Provider::Gemini, "gemini-2.5-pro"), "high");
+    }
 
     #[test]
     fn spending_limit_is_fatal_but_rate_limit_can_retry() {

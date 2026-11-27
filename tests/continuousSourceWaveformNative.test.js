@@ -189,3 +189,84 @@ it.skipIf(!fs.existsSync(ffmpeg)||!fs.existsSync(ffprobe))('連續波形完成�
     expect(channel.audio[0].channels).toBe(1);expect(channel.duration).toBeGreaterThanOrEqual(duration);
   }finally{await runtime?.close();await execution.cancelAllAndWait();await probe.cancelAllAndWait();}
 },30000);
+
+it.skipIf(!fs.existsSync(ffmpeg)||!fs.existsSync(ffprobe)).each(['recover', 'second-failure', 'source-changed', 'cancel'])(
+  '共享波形 checkpoint 被替換時，背景原生解碼只在原片仍有效時重試一次 (%s)', async mode => {
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-continuous-native-'));
+    roots.push(root);
+    const source = path.join(root, 'source.wav'), duration = 12;
+    writeSignal(source, 48000, 1, duration, 0x39a6a87e);
+    const legacy = path.join(root, 'legacy-cache'), recovery = path.join(root, 'waveform-recovery'), sidecar = path.join(root, '.subtool_Cache');
+    const probe = createMediaProbe({ executable: ffprobe });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => ffmpeg, getUserDataDir: () => root });
+    const calls = [], events = [];
+    let cancelled = false, controller;
+    const checkpointIn = directory => {
+      const file = fs.readdirSync(directory, { recursive: true }).find(file => path.basename(file) === 'checkpoint.json');
+      expect(file).toBeTruthy();
+      return path.join(directory, file);
+    };
+    const create = () => createMediaIntakeRuntime({
+      fileAuthority: new FileAuthority({ internalDirectories: [root] }), backgroundWaveforms: true,
+      tempRoot: root, cacheRoot: legacy, waveformRecoveryRoot: recovery, allowSidecarCache: true,
+      describeAudio: async file => (await probe.describe(file)).audio,
+      sendProgress: (_target, payload) => {
+        events.push(payload);
+        if (mode === 'cancel' && payload.waveform?.reset) {
+          cancelled = true;
+          controller.kill();
+        }
+      },
+      ffmpegExecution: { execute: (args, options) => {
+        calls.push(args);
+        if (calls.length === 1 || mode === 'second-failure' && calls.length === 2) {
+          // Race the real writer's checkpoint with an unrelated writer, on a fixture only.
+          fs.writeFileSync(checkpointIn(calls.length === 1 ? sidecar : recovery), '{"foreign":true}');
+          if (mode === 'source-changed') {
+            const time = new Date(Date.now() + 60000);
+            fs.utimesSync(source, time, time);
+          }
+        }
+        return execution.execute(args, options);
+      } },
+    });
+    let runtime = create();
+    try {
+      const audio = (await probe.describe(source)).audio, expected = fullReference(source, duration, audio);
+      const request = { src: source, duration, audio, continuous: true, displayPeaks: true };
+      if (mode === 'cancel') {
+        await expect(runtime.waveform(request, { isCancelled: () => cancelled, ownProcess: value => { controller = value; } }))
+          .rejects.toMatchObject({ code: 'INGEST_SUPERSEDED' });
+        expect(calls).toHaveLength(1);
+        expect(events.filter(event => event.waveform?.reset)).toHaveLength(1);
+        return;
+      }
+      if (mode === 'source-changed') {
+        await expect(runtime.waveform(request)).rejects.toThrow('母素材');
+        expect(calls).toHaveLength(1);
+        expect(fs.existsSync(recovery)).toBe(false);
+        expect(events.some(event => event.waveform?.reset)).toBe(false);
+        return;
+      }
+      if (mode === 'second-failure') {
+        await expect(runtime.waveform(request)).rejects.toMatchObject({ code: 'CONTINUOUS_WAVE_CACHE_CHANGED' });
+        expect(events.filter(event => event.done).map(event => event.outcome)).toEqual(['failed']);
+      } else {
+        const result = await runtime.waveform(request);
+        expect(result).toMatchObject({ cached: false, complete: true, resumedSamples: 0 });
+        expect(path.dirname(result.cacheDir)).toBe(recovery);
+        expect(readPcm(result.wave)).toEqual(expected);
+        expect(events.filter(event => event.done).map(event => event.outcome)).toEqual(['success']);
+        await runtime.close();
+        runtime = create();
+        const warm = await runtime.waveform(request);
+        expect(warm).toMatchObject({ cached: true, wave: result.wave, complete: true });
+        expect(warm.displayPeaks).toEqual(result.displayPeaks);
+      }
+      expect(calls).toHaveLength(2);
+      expect(calls.map(args => args[args.indexOf('-ss') + 1])).toEqual(['0', '0']);
+      expect(events.filter(event => event.waveform?.reset)).toHaveLength(1);
+      expect(fs.readFileSync(checkpointIn(sidecar), 'utf8')).toBe('{"foreign":true}');
+      expect(fs.existsSync(legacy)).toBe(false);
+    } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
+  }, 30000);

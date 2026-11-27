@@ -561,7 +561,7 @@ const Media = {
     emit('media:waveform',{controls:true});
     return true;
   },
-  async _loadOriginalWave(source,{wave,channels,sourceKey},owns,{decodeFallback=false,temporary=false,duration=0,transform=null,sourceWaveform=false}={}){
+  async _loadOriginalWave(source,{wave,channels,sourceKey},owns,{decodeFallback=false,temporary=false,sourceWaveform=false,duration=sourceWaveform?source.dur:0,transform=null}={}){
     if(!wave||!owns()) return false;
     try{
       if(!sourceWaveform&&!transform&&!temporary&&await this._reuseOriginalWave(source,{wave,channels,sourceKey},owns))return true;
@@ -579,7 +579,7 @@ const Media = {
         let peaks=await (sourceWaveform?Wave.calcSourceWaveformAsync(bytes,duration,{owns:current})
           :Wave.calcFromWavAsync(bytes,duration,{owns:current}));
         if(!current())return false;
-        if(!peaks&&decodeFallback){
+        if(!peaks&&decodeFallback&&!sourceWaveform){
           const buffer=await AudioEngine.decodeAudioData(bytes);
           if(!current()) return false;
           peaks=Wave.calcPeaks(buffer,-1);
@@ -602,20 +602,51 @@ const Media = {
   },
   _sourceWavePreparations:new Map(),
   _registerIntakeRecovery(path,retry,owns=()=>true){
-    if(typeof DESK?.mediaSourceKey!=='function')return {fail(){},complete(){}};
+    if(typeof DESK?.mediaSourceKey!=='function')return {fail(){},complete(){},confirmSource:()=>false};
     const operation=this._assetOperation(null,{kind:'intake-recovery',path});
     const current=()=>this._ownsAssetOperation(operation)&&owns();
     // Capture source evidence while the original work still owns the source.
     // A retry must not silently attach a replacement file to existing clips.
     const evidence=Promise.resolve().then(()=>current()?DESK.mediaSourceKey(path):null).catch(()=>null);
-    return MediaIntakeJobs.registerRecovery({path,owns:current,retry:async ownsRetry=>{
-      const previous=await evidence;if(!current()||!ownsRetry())return;
-      const next=await DESK.mediaSourceKey(path);if(!current()||!ownsRetry())return;
+    const confirmSource=async ownsRequest=>{
+      const previous=await evidence;if(!current()||!ownsRequest())return false;
+      const next=await DESK.mediaSourceKey(path);if(!current()||!ownsRequest())return false;
       if(!previous||previous!==next)throw new Error('母素材已變更或無法確認，請重新連結素材後再試。');
-      await retry();
+      return previous;
+    };
+    const recovery=MediaIntakeJobs.registerRecovery({path,owns:current,retry:async ownsRetry=>{
+      if(await confirmSource(ownsRetry))await retry();
     }});
+    return {...recovery,confirmSource};
   },
-  async _prepareSourceWaveform(source,path,audio,duration,owns=()=>true){
+  async _prepareWaveformForIngest(source,path,audio,duration,current,recovery){
+    if(!DESK?.prepareSourceWaveform||!audio?.length||!(duration>0)||!Number.isFinite(duration))return true;
+    const ready=await this._prepareSourceWaveform(source,path,audio,duration,current);
+    if(ready||DESK.sourceWaveformContinuous!==true)return true;
+    // A rejected waveform cache can be rebuilt by the normal ingest pass. The
+    // movie must still be the file we opened, and cancellation wins the race.
+    if(!current()||!await recovery.confirmSource(current))return false;
+    return 'rebuild';
+  },
+  async _finishIngestWave(source,audio,preparation,waveReady,owns,recovery){
+    const loaded=await waveReady;
+    if(!owns())return false;
+    if(preparation==='rebuild'&&!loaded){
+      // The ordinary ingest can also reuse an unreadable mix. Read fresh
+      // sample-aligned chunks from the same mother, without restarting Proxy.
+      const freshSourceKey=await recovery.confirmSource(owns);
+      if(!freshSourceKey)return false;
+      const repaired=await this._prepareSourceWaveform(source,source.path,audio,source.dur,owns,{freshSourceKey});
+      if(!owns())return false;
+      if(!repaired){
+        recovery.fail(new Error('無法讀取母素材的完整波形，請重試背景處理。'));
+        return false;
+      }
+    }
+    recovery.complete();
+    return true;
+  },
+  async _prepareSourceWaveform(source,path,audio,duration,owns=()=>true,{freshSourceKey=null}={}){
     if(!DESK?.prepareSourceWaveform||!audio?.length||!owns()||!Number.isFinite(duration)||duration<=0) return false;
     const live=this._liveClipForSource(source);
     if(!live) return false;
@@ -629,9 +660,23 @@ const Media = {
       &&(live.peaks?.length>=totalBuckets*2||Wave._sourceState(live,false)?.mix.peaks?.length>=totalBuckets*2)) return true;
     const version=this._bgVersion;
     const current=()=>this._bgVersion===version&&owns()&&clipSourceFingerprint(source)===key&&!!this._liveClipForSource(source);
-    const initialPeaks=live.peaks||null,initialMix=Wave.getSourceMixPeaks(live);
+    let initialPeaks=live.peaks||null,initialMix=Wave.getSourceMixPeaks(live);
     let published=null;
     const publishedViews=new Set();
+    const discard=()=>{
+      if(!current()||!publishedViews.size)return;
+      const sourceClip=this._liveClipForSource(source);
+      if(publishedViews.has(sourceClip.peaks)) initialPeaks=null;
+      // Split clips and History restores can retain any already shown prefix.
+      for(const clip of State.clips){
+        if(clipSourceFingerprint(clip)===key&&publishedViews.has(clip.peaks))clip.peaks=null;
+      }
+      const mix=Wave.getSourceMixPeaks(sourceClip);
+      if(publishedViews.has(mix)&&Wave.clearSourceMixPeaks(sourceClip,mix))initialMix=null;
+      if(publishedViews.has(this._effectOriginalPeaks.get(source.audioSourceId)))this._effectOriginalPeaks.delete(source.audioSourceId);
+      published=null;publishedViews.clear();
+      emit('media:waveform');
+    };
     const ownsWaveform=()=>{
       const clip=this._liveClipForSource(source);
       if(!clip)return false;
@@ -645,8 +690,8 @@ const Media = {
         return await MediaIntakeJobs.prepareWaveform(async({report,owns:ownsJob})=>{
           const active=()=>entry.owns()&&ownsJob();
           report({label:'優先產生波形',pct:null,overall:true,queued:true});
-          if(DESK.sourceWaveformContinuous===true){
-            const progress=createSourceWaveformProgress({duration,resolution:Wave.resolution,owns:active,publish:peaks=>{
+          if(DESK.sourceWaveformContinuous===true&&!freshSourceKey){
+            const progress=createSourceWaveformProgress({duration,resolution:Wave.resolution,owns:active,discard,publish:peaks=>{
               published=peaks;publishedViews.add(peaks);
               this._commitOriginalWave(this._liveClipForSource(source),peaks,{mixPath:null});
               emit('media:waveform');
@@ -675,7 +720,7 @@ const Media = {
               if(result?.temporary&&result.wave)try{await DESK.cleanupAudio(result.wave);}catch(_){}
             }
           }
-          let completed=0,sourceKey=null,combined=null,ignoreCached=false;
+          let completed=0,sourceKey=freshSourceKey,combined=null,ignoreCached=!!freshSourceKey;
           while(completed<duration&&active()){
             let result;
             try{
@@ -712,7 +757,7 @@ const Media = {
                 if(result.cached&&!ignoreCached){ignoreCached=true;continue;}
                 throw new Error('來源波形無法解碼或內容不足');
               }
-              ignoreCached=false;
+              ignoreCached=!!freshSourceKey;
               completed=end;
               report({label:'優先產生波形',pct:completed/duration*100,overall:true,queued:false});
             }finally{
@@ -725,20 +770,13 @@ const Media = {
         },{path});
       }catch(error){
         // 來源在段與段之間換檔或失敗時，撤回本次部分結果，不能與下一份來源混合。
-        if(current()&&published){
-          // 切片／History 可能複製較早的 subarray；同源每個存續片段都須撤回本次 view。
-          for(const clip of State.clips){
-            if(clipSourceFingerprint(clip)===key&&publishedViews.has(clip.peaks)) clip.peaks=null;
-          }
-          for(const peaks of publishedViews) Wave.clearSourceMixPeaks(source,peaks);
-          if(publishedViews.has(this._effectOriginalPeaks.get(source.audioSourceId))) this._effectOriginalPeaks.delete(source.audioSourceId);
-          emit('media:waveform');
-        }
+        discard();
         if(current()&&error?.name!=='AbortError'){
           console.warn('優先波形準備失敗:',error);
-          if(DESK.sourceWaveformContinuous===true){
-            MediaIntakeJobs.failRecovery(path,error);
-            setMediaProcessingStatus('波形尚未完成：'+(error?.message||String(error)),'err');
+          if(DESK.sourceWaveformContinuous===true&&recovery){
+            const message='波形尚未完成：'+(error?.message||String(error));
+            if(MediaIntakeJobs.hasRecovery(path))recovery.fail(message);
+            else setMediaProcessingStatus(message,'err');
           }
         }
         return false;
@@ -814,6 +852,7 @@ const Media = {
   },
   previewState(){
     const clip=this._previewClip(),record=clip?this._previewSources?.get(clipSourceFingerprint(clip)):null;
+    const preparation=clip?.path&&!record?MediaIntakeJobs.proxyState(clip.path):null;
     const path=this.mpvMode?this._mpvPath:clip?.path;
     const proxy=!!path&&path!==clip?.path;
     const position=this.displayTime();
@@ -830,7 +869,9 @@ const Media = {
         &&!clip.reverse&&!this._nativeReverse&&!this._reverseShuttleMuted,
       sourceKind:proxy?'proxy':'original',
       compositePreview,
-      network:isNetworkPreviewPath(path||clip?.path),phase,proxyAvailable:!!record&&!record.failed,proxyFailed:!!record?.failed,
+      network:isNetworkPreviewPath(path||clip?.path),phase,proxyAvailable:!!record&&!record.failed,
+      proxyFailed:!!record?.failed||preparation?.state==='failed',proxyPreparation:preparation?.state||null,
+      canRetryProxy:!!record?.failed||!!preparation?.retryId,
       position,sourceTime:this.vTime()};
   },
   _publishPreviewState(){
@@ -855,6 +896,15 @@ const Media = {
     this._publishPreviewState();
     if(version!==this._previewModeVersion||!ownsTarget())return false;
     if(!this.mpvMode||!clip?.path||Seq.isStill(clip)||clip.reverse)return true;
+    if(mode==='smooth'&&!this._previewSources?.get(clipSourceFingerprint(clip))){
+      const retryId=MediaIntakeJobs.proxyState(clip.path)?.retryId;
+      if(retryId){
+        // A failed encode has no proxy to reload. Retry in the background so
+        // the original remains usable while the source and its cache are checked.
+        void MediaIntakeJobs.retry(retryId);
+        if(version!==this._previewModeVersion||!ownsTarget())return false;
+      }
+    }
     const path=this._clipPreviewPath(clip);
     if(path===this._mpvPath&&!this._seqSwitching&&!this.presentationPending()
       &&getPlayerAdapter().ownsNativeSourcePath?.(path))return true;
@@ -1228,11 +1278,8 @@ const Media = {
     const current=()=>this._bgVersion===myVer&&sourceCurrent();
     const recovery=this._registerIntakeRecovery(path,()=>this.cacheNativeRoutingAudio(clip,path,duration,audio),sourceCurrent);
     try{
-      if(DESK.prepareSourceWaveform){
-        const ready=await this._prepareSourceWaveform(clip,path,audio,duration,current);
-        if(DESK.sourceWaveformContinuous===true&&Number.isFinite(duration)&&duration>0&&!ready)return;
-      }
-      if(!current()) return;
+      const preparation=DESK.prepareSourceWaveform?await this._prepareWaveformForIngest(clip,path,audio,duration,current,recovery):true;
+      if(!preparation||!current()) return;
       // 與解除影音／外部音檔共用 ingest 佇列，避免同一路徑同時寫入 cache。
       const res=await MediaIntakeJobs.ingest({path,duration,needsProxy:false,audio,queue:true});
       const liveClip=this._liveClipForSource(clip);
@@ -1259,10 +1306,9 @@ const Media = {
           Object.assign(track,AudioPipeline.sourceDescriptorFor(liveClip,entry.descriptor));
         }
       }
-      if(DESK.prepareSourceWaveform&&res?.wave) await this._loadOriginalWave(clip,res,current);
-      if(!current()) return;
+      const waveReady=DESK.prepareSourceWaveform&&res?.wave&&this._loadOriginalWave(clip,res,current,{sourceWaveform:preparation==='rebuild'});
+      if(!await this._finishIngestWave(clip,audio,preparation,waveReady,current,recovery)||!current())return;
       emit('media:waveform',{controls:true});
-      recovery.complete();
     }catch(e){ if(current())recovery.fail(e);console.warn('native audio cache:',e); }
   },
   /* 外部音檔初次以原檔快速播放；背景 ingest 完成後改用每條單聲道快取。
@@ -1767,6 +1813,29 @@ const Media = {
     this._deferredInitialAudioIngest=release;
     this._deferredInitialAudioTimer=setTimeout(watchdog,10_000);
   },
+  async _adoptCompletedStreamProxy(primary,url,owns){
+    if(!owns()||this.mpvMode)return false;
+    if(!url)throw new Error('無法讀取已完成的 Proxy，請重試背景處理');
+    const fingerprint=clipSourceFingerprint(primary),lease=this._activeStreamLeaseId;
+    const previousUrl=this._liveClipForSource(primary)?.web?.url;
+    getPlayerAdapter().registerSourceClock(url,null);
+    for(const clip of State.clips){
+      if(clipSourceFingerprint(clip)===fingerprint)clip.web={...clip.web,url};
+    }
+    const active=this._activeClip();
+    let refreshed=false;
+    if(active&&clipSourceFingerprint(active)===fingerprint){
+      // Growing responses have no seekable range. Re-open the finalized file
+      // through the presenter, including any seek requested before completion.
+      const position=this.displayTime();
+      if(video.src!==url)this.cancelPresentation('preview-source-changed');
+      refreshed=await this.refreshClipPlayback(active,{owns,position,resumePlayback:true});
+      if(!owns())return false;
+      if(!refreshed)throw new Error('Proxy 已完成，但預覽接手失敗；請重試背景處理');
+    }
+    if(lease&&this._activeStreamLeaseId===lease&&video.src!==previousUrl)this._setActiveStreamLease(null);
+    return refreshed;
+  },
   async _bgAudioIngest(p, audio, dur, primary=Seq.primary(), {needsProxy=true,restorePreview=false}={}){
     const myVer=this._bgVersion;
     // Background work belongs to the exact mother-source object that started
@@ -1783,11 +1852,8 @@ const Media = {
     // 解除影音也可能在背景抽取尚未完成時觸發；排入同一佇列可避免兩個 ffmpeg
     // 同時覆寫此來源的 cache（尤其是大型 MXF）。
     try{
-      if(DESK?.prepareSourceWaveform){
-        const ready=await this._prepareSourceWaveform(primary,p,audio,dur,current);
-        if(DESK.sourceWaveformContinuous===true&&audio?.length&&Number.isFinite(dur)&&dur>0&&!ready)return;
-      }
-      if(!current()) return;
+      const preparation=DESK?.prepareSourceWaveform?await this._prepareWaveformForIngest(primary,p,audio,dur,current,recovery):true;
+      if(!preparation||!current()) return;
       res=await MediaIntakeJobs.ingest({path:p,duration:dur,needsProxy,audio,queue:true});
       if(!current()) return; // 使用者已換另一個檔，丟棄結果
       if(res.proxy){
@@ -1811,7 +1877,7 @@ const Media = {
       const descriptors=AudioPipeline.registerSource(livePrimary,chs,chs.length);
       // 已完成的低取樣率波形獨立讀取，不等待最慢聲道的播放 metadata。
       // 發布仍經同一來源／效果 owner，較新的素材與效果不受晚到原音覆蓋。
-      const waveReady=this._loadOriginalWave(primary,res,current,{decodeFallback:true});
+      const waveReady=this._loadOriginalWave(primary,res,current,{decodeFallback:true,sourceWaveform:preparation==='rebuild'});
       if(chs.length){
         // 並行載入所有聲道，大幅縮短多聲道（8ch MXF 等）的等待時間
         const els=await this._intakeSession.materializeAudioElements(chs,{
@@ -1832,29 +1898,14 @@ const Media = {
           this.attachMeter(tr,node); incoming.push(tr);
           if(this.pendingChannels[i]) this.pendingChannels[i].ready=true;
         }
-        this._commitOriginalAudioTracks(livePrimary,incoming);
+        this._commitOriginalAudioTracks(livePrimary,incoming,{replace:true});
         stagedElements=[];stagedTracks=[];
       }
       if(!current()) return;
       this.pendingChannels=[];
       this.usingWebAudio=true; this.syncMuteState();
-      let previewRefreshed=false;
-      if(restorePreview&&res.proxy&&!this.mpvMode){
-        const fingerprint=clipSourceFingerprint(primary),url=this._wcProxyUrl,lease=this._activeStreamLeaseId,previousUrl=livePrimary.web?.url;
-        getPlayerAdapter().registerSourceClock(url,null);
-        for(const clip of State.clips)if(clipSourceFingerprint(clip)===fingerprint)clip.web={...clip.web,url};
-        const active=this._activeClip();
-        if(active&&clipSourceFingerprint(active)===fingerprint){
-          // Reuse the presentation owner: keep edits and the latest timeline
-          // target, and let a newer seek / pause revoke this presentation.
-          const restored=await this.refreshClipPlayback(active,{owns:current,position:this.displayTime()});
-          if(!current())return;
-          if(!restored)throw new Error('Proxy 已完成，但預覽接手失敗；請重試背景處理');
-          previewRefreshed=true;
-        }
-        if(current()&&lease&&this._activeStreamLeaseId===lease&&video.src!==previousUrl)
-          this._setActiveStreamLease(null);
-      }
+      const previewRefreshed=restorePreview&&res.proxy
+        &&await this._adoptCompletedStreamProxy(primary,this._wcProxyUrl,current);
       if(!current())return;
       if(!previewRefreshed&&this.playing&&!this.playbackTransitionPending()) void this._startPresenterPlayback({pauseBeforePrepare:true,
         started:(sourceTime,timelineTime,prepared)=>this._playback.startFollowers(sourceTime,timelineTime,prepared)});
@@ -1863,8 +1914,8 @@ const Media = {
       // Proxy has no embedded audio. Publish its selectable path only after
       // every original channel is committed; waveform display may finish later.
       if(current())this._publishPreviewAssets(primary,res,current);
-      await waveReady;
-      if(current()){recovery.complete();setMediaProcessingStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');}
+      if(await this._finishIngestWave(primary,audio,preparation,waveReady,current,recovery)&&current())
+        setMediaProcessingStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');
     }catch(error){
       for(const element of stagedElements) this._disposeMediaElement(element);
       for(const track of stagedTracks){try{track.gain?.disconnect();track.analyser?.disconnect?.();}catch(_){} }
@@ -3430,11 +3481,8 @@ const Media = {
     // needsProxy:true（v4.25）：加入的片段一律備短 GOP proxy——原檔可能非原生（ProRes/MXF）
     // 或過大（>600MB WebCodecs 讀不進來）；沒有 proxy 時預覽引擎解不了它 →【無法參與疊層合成】
     // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
-    if(DESK?.prepareSourceWaveform){
-      const ready=await this._prepareSourceWaveform(c,c.path,info?.audio||[],c.dur,owns);
-      if(DESK.sourceWaveformContinuous===true&&info?.audio?.length&&Number.isFinite(c.dur)&&c.dur>0&&!ready)return;
-    }
-    if(!owns()) return;
+    const preparation=DESK?.prepareSourceWaveform?await this._prepareWaveformForIngest(c,c.path,info?.audio,c.dur,owns,recovery):true;
+    if(!preparation||!owns()) return;
     let res; try{ res = await MediaIntakeJobs.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
     catch(e){ if(owns()){recovery.fail(e);setMediaProcessingStatus('影片音訊抽取失敗：' + (e?.message||e), 'err');} return; }
     if(!res || !owns()) return;
@@ -3452,7 +3500,7 @@ const Media = {
     let sourceClip=this._liveClipForSource(c);
     if(!sourceClip) return;
     const descriptors=AudioPipeline.registerSource(sourceClip,chs,chs.length);
-    const waveReady=this._loadOriginalWave(c,res,owns);
+    const waveReady=this._loadOriginalWave(c,res,owns,{sourceWaveform:preparation==='rebuild'});
     if(chs.length){
       const els=await this._intakeSession.materializeAudioElements(chs,{
         owns,
@@ -3481,10 +3529,10 @@ const Media = {
     }
     // Keep mother audio available until the cached playback channels can take over.
     if(owns())this._publishPreviewAssets(c,res,owns);
-    await waveReady;
-    if(!owns()) return;
-    notifyAudioTracks(); setMediaProcessingStatus(`影音預覽已就緒：${this._liveClipForSource(c)?.name||c.name}`, 'ok');
-    recovery.complete();
+    notifyAudioTracks();
+    if(await this._finishIngestWave(c,info?.audio,preparation,waveReady,owns,recovery)&&owns())
+      setMediaProcessingStatus(`影音預覽已就緒：${this._liveClipForSource(c)?.name||c.name}`, 'ok');
+    if(!owns())return;
     return true;
     }catch(error){if(owns())recovery.fail(error);throw error;}
   },
@@ -4760,7 +4808,7 @@ const Media = {
       return false;
     }
   },
-  async refreshClipPlayback(c,{owns=()=>true,signal,position=null,playbackOwner=null}={}){
+  async refreshClipPlayback(c,{owns=()=>true,signal,position=null,playbackOwner=null,resumePlayback=false}={}){
     const ownsTarget=this.capturePlaybackTargetOwnership(playbackOwner);
     let requestedVersion=null;
     const cancel=()=>{
@@ -4790,7 +4838,7 @@ const Media = {
       if(!owns()) return false;
       if(position==null) return true;
       if(ownsTarget()){
-        const pending=this.seek(position,{playbackOwner});
+        const pending=this.seek(position,{playbackOwner,resumePlayback});
         requestedVersion=this._seekIntentVersion;
         const result=await pending;
         if(requestedVersion===this._seekIntentVersion) return owns()&&(result===true||result?.status==='presented');

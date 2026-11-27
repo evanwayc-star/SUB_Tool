@@ -37,30 +37,244 @@ beforeEach(()=>{
 afterEach(()=>{clearAsrSession();vi.unstubAllGlobals();});
 
 describe('辨識設定草稿由同一 live dialog 保留',()=>{
-  it('往返供應商保留各自 key 與導引，開始使用保留的 Azure 草稿',async()=>{
-    const target=source('draft',{audioBuffer:pcm(.4)});State.clips=[target];await open(target);
-    element('asrApiKey').value='draft-google';element('asrPrompt').value='Google 草稿';
-    switchProvider('azure');element('asrApiKey').value='draft-azure';element('asrPrompt').value='專名甲，專名乙';
-    element('asrAzureRegion').value='eastasia';element('asrAzureProfanity').value='Masked';
-    switchProvider('elevenlabs');element('asrApiKey').value='draft-elevenlabs';element('asrPrompt').value='Scribe 草稿';
-    element('asrElevenLabsSpeakers').value='3';element('asrElevenLabsAudioEvents').checked=true;
-    switchProvider('google');expect(element('asrApiKey').value).toBe('draft-google');expect(element('asrPrompt').value).toBe('Google 草稿');
-    switchProvider('elevenlabs');expect(element('asrApiKey').value).toBe('draft-elevenlabs');expect(element('asrPrompt').value).toBe('Scribe 草稿');
-    expect(element('asrElevenLabsSpeakers').value).toBe('3');expect(element('asrElevenLabsAudioEvents').checked).toBe(true);
-    switchProvider('azure');expect(element('asrApiKey').value).toBe('draft-azure');expect(element('asrPrompt').value).toBe('專名甲，專名乙');
-    expect(element('asrAzureRegion').value).toBe('eastasia');expect(element('asrAzureProfanity').value).toBe('Masked');
-    await start();expect(mocks.transcribe).toHaveBeenCalledWith(expect.objectContaining({provider:'azure',apiKey:'draft-azure',
-      azureRegion:'eastasia',azurePhrases:['專名甲','專名乙'],azureProfanity:'Masked'}));
+  it('往返引擎與模式保留各自的 API Key，開始時使用目前引擎的金鑰', async () => {
+    const target = source('draft', {audioBuffer:pcm(.4)});
+    State.clips = [target];
+    await open(target);
+    element('asrApiKey').value = 'draft-google';
+    switchProvider('azure');
+    element('asrApiKey').value = 'eastasia:draft-azure';
+    element('asrModeAlign').click();
+    element('asrTranscript').value = '原稿';
+    switchProvider('builtin');
+    switchProvider('google');
+    expect(element('asrApiKey').value).toBe('draft-google');
+    switchProvider('azure');
+    expect(element('asrApiKey').value).toBe('eastasia:draft-azure');
+    await start();
+    expect(mocks.transcribe.mock.calls[0][0]).toMatchObject({provider:'azure', taskMode:'align',
+      apiKey:'draft-azure', azureRegion:'eastasia'});
   });
 
   it.each(['cancel','replacement'])('%s 放棄本次草稿，不污染已保存設定或重開視窗',async reason=>{
     const target=source('cancel',{audioBuffer:pcm(.4)});State.clips=[target];const before=getAsrConfig();
-    const call=await open(target);element('asrApiKey').value='private-unsaved';element('asrPrompt').value='尚未確認';
+    const call=await open(target);element('asrApiKey').value='private-unsaved';
+    element('asrLanguage').value='ja';
     switchProvider('azure');element('asrApiKey').value='private-azure';switchProvider('google');
     if(reason==='cancel')call[2][0].act();else call[3].onReplaced();
     expect(getAsrConfig()).toEqual(before);await open(target);
-    expect(element('asrApiKey').value).toBe('saved-google');expect(element('asrPrompt').value).toBe('已保存提示');
+    expect(element('asrApiKey').value).toBe('saved-google');
+    expect(element('asrLanguage').value).toBe('auto');
     expect(mocks.transcribe).not.toHaveBeenCalled();
+  });
+});
+
+describe('語音辨識與文本匹配的引擎設定', () => {
+  const legacy = {
+    vocalFilter:true, elevenlabsKeyterms:'舊專名甲，舊專名乙', elevenlabsNumSpeakers:'3',
+    elevenlabsTagAudioEvents:true, azurePhraseList:'限 Azure', elevenlabsApiKey:'saved-eleven',
+    builtinModel:'onnx-community/whisper-tiny', prompt:'僅文本匹配', azureProfanity:'Masked', temperature:.8
+  };
+  beforeEach(() => {
+    saveAsrConfig({...getAsrConfig(), ...legacy, provider:'elevenlabs', taskMode:'align'});
+  });
+
+  const providers = ['builtin', 'groq', 'openai', 'azure', 'google', 'elevenlabs'];
+  it.each(providers.flatMap(provider => ['align', 'transcribe'].map(mode => [provider, mode])))('%s 的 %s 只送出必要參數', async (provider, taskMode) => {
+    const target = source('original', {audioBuffer:pcm(.4)});
+    State.clips = [target];
+    await open(target);
+    switchProvider(provider);
+    if (provider !== 'builtin') element('asrApiKey').value = 'saved-key';
+    element(taskMode === 'align' ? 'asrModeAlign' : 'asrModeTranscribe').click();
+    element('asrTranscript').value = '原稿';
+    const visibleControls = [...document.querySelectorAll('.asr-engine-card .asr-field')]
+      .filter(row => getComputedStyle(row).display !== 'none').map(row => row.querySelector('input, select')?.id);
+    expect(visibleControls).toEqual(provider === 'builtin' ? ['asrProvider', 'asrLanguage']
+      : ['asrProvider', 'asrApiKey', 'asrLanguage']);
+    await start();
+    expect(mocks.transcribe).toHaveBeenCalledOnce();
+    const [request] = mocks.transcribe.mock.calls[0];
+    expect(request).toMatchObject({provider, taskMode, language:'auto'});
+    for (const key of ['builtinModel', 'azureProfanity', 'azurePhrases', 'prompt', 'keyterms',
+      'elevenlabsNumSpeakers', 'elevenlabsTagAudioEvents', 'vocalFilter', 'temperature']) {
+      expect(request).not.toHaveProperty(key);
+    }
+    if (provider === 'builtin') expect(request).not.toHaveProperty('apiKey');
+    expect(getAsrConfig()).not.toHaveProperty('elevenlabsKeyterms');
+  });
+
+  it.each([
+    ['transcribe', 'zh', 'auto', 'auto'], ['transcribe', 'ko', 'ko', 'auto'],
+    ['align', 'ja', 'auto', 'ja'], ['align', 'zh', 'auto', 'auto'], ['align', 'unsupported', 'auto', 'auto']
+  ])('舊 %s 偏好 %s 遷移後語音與匹配各自記住合法語言', async (oldMode, oldLanguage, speechLanguage, alignmentLanguage) => {
+    saveAsrConfig({provider:'google', googleApiKey:'test', taskMode:oldMode, language:oldLanguage});
+    const target = source('language', {audioBuffer:pcm(.4)});
+    State.clips = [target];
+    await open(target);
+    element('asrModeTranscribe').click();
+    expect(element('asrLanguage').value).toBe(speechLanguage);
+    element('asrLanguage').value = 'zh';
+    switchProvider('builtin');
+    expect(element('asrLanguage').value).toBe('zh');
+    element('asrModeAlign').click();
+    expect(element('asrLanguage').value).toBe(alignmentLanguage);
+    element('asrModeTranscribe').click();
+    await start();
+    expect(mocks.transcribe.mock.calls[0][0].language).toBe('zh');
+    expect(getAsrConfig()).toMatchObject({speechLanguage:'zh', alignmentLanguage});
+    clearAsrSession();
+    await open(target);
+    expect(element('asrLanguage').value).toBe('zh');
+  });
+
+  it.each([
+    ['known-key', 'eastasia', 'known-key', 'eastasia'], ['changed-key', 'eastasia', 'changed-key', 'japaneast'],
+    ['westus:new-key', 'eastasia', 'new-key', 'westus'], ['known-key', 'invalid-region', 'known-key', 'japaneast']
+  ])('Azure 語音用單一欄位 %s 獲得正確金鑰與區域', async (entered, savedRegion, key, region) => {
+    saveAsrConfig({...getAsrConfig(), taskMode:'transcribe', provider:'azure', azureApiKey:'known-key', azureRegion:savedRegion});
+    const target = source('azure', {audioBuffer:pcm(.4)});
+    State.clips = [target];
+    await open(target);
+    expect(element('asrAzureRegion')).toBeNull();
+    element('asrApiKey').value = entered;
+    await start();
+    expect(mocks.transcribe.mock.calls[0][0]).toMatchObject({provider:'azure', apiKey:key, azureRegion:region});
+    expect(getAsrConfig()).toMatchObject({azureApiKey:key, azureRegion:region});
+  });
+
+  it('兩種模式的 ElevenLabs API 表單皆使用自動設定並保留字幕時間', async () => {
+    const engine = await vi.importActual('../src/speech-recognition-engine.js');
+    mocks.transcribe.mockImplementation(engine.transcribeAudioStream);
+    const fetch = vi.fn().mockResolvedValue({ok:true, json:async () => ({
+      text:'原稿', words:[{type:'word', text:'原稿', start:.25, end:.75, speaker_id:'speaker_0'}]
+    })});
+    vi.stubGlobal('fetch', fetch);
+    const target = source('modes', {out:1, duration:1, audioBuffer:{
+      duration:1, numberOfChannels:1, length:16000, sampleRate:16000, getChannelData:() => new Float32Array(16000).fill(.4)
+    }});
+    State.fps = 24;
+    State.clips = [target];
+    await open(target);
+    element('asrTranscript').value = '原稿';
+    await start();
+    expect(fetch).toHaveBeenCalledOnce();
+    const matched = fetch.mock.calls[0][1].body;
+    expect(matched.get('model_id')).toBe('scribe_v3');
+    expect(matched.getAll('keyterms')).toEqual([]);
+    expect(matched.has('num_speakers')).toBe(false);
+    expect(matched.get('tag_audio_events')).toBe('false');
+    expect(mocks.transcribe.mock.calls[0][0]).not.toHaveProperty('vocalFilter');
+    expect(State.cues.at(-1)).toMatchObject({text:'原稿', start:.25, end:.75});
+
+    clearAsrSession();
+    await open(target);
+    element('asrModeTranscribe').click();
+    await start();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const speech = fetch.mock.calls[1][1].body;
+    expect(speech.get('model_id')).toBe('scribe_v3');
+    expect(speech.get('diarize')).toBe('true');
+    expect(speech.getAll('keyterms')).toEqual([]);
+    expect(speech.has('num_speakers')).toBe(false);
+    expect(speech.get('tag_audio_events')).toBe('false');
+    expect(State.cues.at(-1)).toMatchObject({text:'原稿', start:.25, end:.75});
+  });
+});
+
+describe('語音辨識的全片與輸出 In／Out 範圍', () => {
+  const chooseRange = mode => {
+    const select = element('asrRecognitionRange');
+    select.value = mode;
+    select.dispatchEvent(new Event('change'));
+  };
+  beforeEach(() => {
+    State.fps = 25; State.exportIn = null; State.exportOut = null;
+    saveAsrConfig({...getAsrConfig(), provider:'builtin'});
+  });
+  it.each(['all', 'export'])('%s 擷取影片與反向外音的母素材秒數，凍結來源與每條可聽聲道', async mode => {
+    const video = source('video', { in:2, out:8, offset:4, duration:12, speed:2 });
+    const audio = source('external', { in:2, out:10, offset:9, duration:12, speed:2, reverse:true });
+    State.clips = [video, {...video, id:'still', type:'image'}, {...video, id:'freeze', freezeTime:2},
+      {...video, id:'detached', audioDetached:true}];
+    State.externalAudioState = [audio, {...audio, id:'off', audioSourceId:'off', enabled:false}];
+    State.exportIn = 5; State.exportOut = 11.02;
+    const input = value => ({ ...pcm(value), duration:12, length:192000,
+      getChannelData:() => new Float32Array(192000).fill(value) });
+    mocks.media.tracks = [
+      {audioSourceId:video.audioSourceId, sourceStream:0, sourceChannel:0, buffer:input(.1), muted:true},
+      {audioSourceId:video.audioSourceId, sourceStream:0, sourceChannel:1, buffer:input(.2)},
+      {audioSourceId:audio.audioSourceId, sourceStream:0, sourceChannel:0, buffer:input(.7)}
+    ];
+    let finishFirst;
+    mocks.transcribe.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }))
+      .mockResolvedValueOnce([{start:-9,end:30,text:'外音'}, {start:20,end:25,text:'範圍外'}]);
+    await open(video); chooseRange(mode);
+    expect(element('asrSourceTitle').textContent).toContain('2 個');
+    const pending = start();
+    await vi.waitFor(() => expect(finishFirst).toBeTypeOf('function'));
+    State.exportOut = 6; audio.offset = 100; audio.reverse = false; State.fps = 24;
+    mocks.media.tracks = [];
+    finishFirst([{start:0,end:2,text:'影片'}]); await pending;
+    const [first, second] = mocks.transcribe.mock.calls.map(([options]) => options);
+    expect(first.inT).toBe(mode === 'all' ? 2 : 4); expect(first.outT).toBe(8);
+    expect(first.audioBuffer.getChannelData(0)[0]).toBeCloseTo(.2);
+    expect(second.inT).toBeCloseTo(mode === 'all' ? 2 : 5.96); expect(second.outT).toBe(10);
+    expect(second.audioBuffer.getChannelData(0)[0]).toBeCloseTo(.7);
+    const startTime = mode === 'all' ? 4 : 5;
+    expect(State.cues.map(({start,end,text}) => [start,end,text])).toEqual([
+      [startTime, startTime + 1, '影片'], [9, mode === 'all' ? 13 : 11, '外音']
+    ]);
+  });
+  it('範圍無交集時保留表單，未建立推論工作', async () => {
+    const clip = source('outside', { in:0, out:2, offset:10 });
+    State.clips = [clip]; State.exportIn = 4; State.exportOut = 6;
+    await open(clip); chooseRange('export'); await start();
+    expect(element('asrStatus').textContent).toMatch(/沒有可辨識的音訊/);
+    expect(mocks.transcribe).not.toHaveBeenCalled();
+  });
+  it('全片只辨識專案 Solo 聲道，並遵守其 bus 開關', async () => {
+    const saved = State.audioProject;
+    const video = source('video', {preferCache:true}), other = source('other', {audioBuffer:pcm(.1)});
+    State.clips = [video,other];
+    State.audioProject = { buses:[{id:'active'}, {id:'muted', muted:true}], sourceMaps:{
+      [video.audioSourceId]:{ channels:[
+        {sourceStream:0,sourceChannel:0,busIds:['active']},
+        {sourceStream:0,sourceChannel:1,busIds:['muted']}
+      ] }
+    } };
+    mocks.media.tracks = [
+      {audioSourceId:video.audioSourceId, sourceStream:0, sourceChannel:0, solo:true, buffer:pcm(.8)},
+      {audioSourceId:video.audioSourceId, sourceStream:0, sourceChannel:1, solo:true, buffer:pcm(.2)}
+    ];
+    try {
+      await open(other); chooseRange('all'); await start();
+      expect(mocks.transcribe).toHaveBeenCalledTimes(1);
+      expect(mocks.transcribe.mock.calls[0][0].audioBuffer.getChannelData(0)[0]).toBeCloseTo(.8);
+    } finally { State.audioProject = saved; }
+  });
+  it('用母檔探測及讀取原音，跳過沒有音訊串流的影片', async () => {
+    const video = source('spoken', { path:'C:/proxy.mkv', _originalPath:'C:/master.mov', duration:2, in:.25, out:.5 });
+    const silent = source('silent', { path:'C:/silent.mov', duration:.5, in:0, out:.5 });
+    State.clips = [silent,video];
+    const probe = vi.fn(async path => ({ audio:path === video._originalPath ? [{channels:2},{channels:1}] : [] }));
+    const speechAudioRead = vi.fn(async ({sourceStream,duration}) => {
+      const samples = new Float32Array(Math.round(duration * 16000)).fill(sourceStream ? .7 : .1);
+      return {frames:samples.length, sampleRate:16000, numberOfChannels:1, pcm:samples.buffer};
+    });
+    window.subtool = { probe, speechAudioRead, speechAudioCancel:vi.fn() };
+    try {
+      let observed;
+      mocks.transcribe.mockImplementation(async ({audioBuffer,inT,outT}) => {
+        observed = await audioBuffer.readRange(inT,outT); return [];
+      });
+      await open(video); chooseRange('all'); await start();
+      expect(probe.mock.calls.map(([path])=>path)).toEqual([silent.path,video._originalPath]);
+      expect(mocks.transcribe).toHaveBeenCalledTimes(1);
+      expect(speechAudioRead.mock.calls.map(([request])=>[request.path,request.start,request.duration,request.sourceStream]))
+        .toEqual([[video._originalPath,.25,.25,0],[video._originalPath,.25,.25,1]]);
+      expect(observed.getChannelData(0)[0]).toBeCloseTo(.3);
+    } finally { delete window.subtool; }
   });
 });
 

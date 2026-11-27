@@ -1,5 +1,6 @@
 import { Project } from './project.js';
 import { getScreenTextPlan, recognizeClipText } from './screen-text-recognition.js';
+import { SCREEN_TEXT_DEFAULTS as DEFAULTS, SCREEN_TEXT_DEFAULT_MODELS } from '../shared/screen-text-options.cjs';
 
 const listeners = new Set();
 let current = null;
@@ -68,8 +69,8 @@ async function execute(run, clip, plan) {
 }
 
 export function startScreenTextSession(clip, {
-  provider = 'openai', model = 'gpt-5.4-mini', sourceLang = 'auto', sampleFps = 2,
-  frameWidth = 1280, smartAccuracy = true, scope = 'clip',
+  provider = DEFAULTS.provider, model = SCREEN_TEXT_DEFAULT_MODELS[provider], sourceLang = DEFAULTS.sourceLang,
+  sampleFps = DEFAULTS.sampleFps, frameWidth = DEFAULTS.frameWidth, smartAccuracy = DEFAULTS.smartAccuracy, scope = 'clip',
 }) {
   if (current && (isPending(current.snapshot.status) || current.snapshot.status === 'partial')) return current.snapshot;
   const plan = getScreenTextPlan(clip, scope);

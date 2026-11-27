@@ -8,12 +8,11 @@ import {
   cancelScreenTextSession, clearScreenTextSession, getScreenTextSession, onScreenTextSessionChange,
   resolveScreenTextPartial, setScreenTextDialogOpen, startScreenTextSession,
 } from './screen-text-session.js';
+import { SCREEN_TEXT_MODELS as modelOptions, SCREEN_TEXT_DEFAULT_MODELS as defaultModels,
+  SCREEN_TEXT_DEFAULTS } from '../shared/screen-text-options.cjs';
 const languageNames = { auto:'自動判斷', ko:'韓文', ja:'日文', zh:'中文', en:'英文' };
-const modelOptions = { openai:['gpt-5.4-mini', 'gpt-5.4'], gemini:['gemini-2.5-flash', 'gemini-2.5-pro'] };
-const defaultModels = { openai:'gpt-5.4-mini', gemini:'gemini-2.5-flash' };
 const customModelOption = '__custom__';
-const defaults = { provider:'openai', model:defaultModels.openai, sourceLang:'auto', sampleFps:2,
-  frameWidth:1280, smartAccuracy:true, scope:'clip' };
+const defaults = { ...SCREEN_TEXT_DEFAULTS, scope:'clip' };
 
 function isActive(job) {
   return job?.status === 'running' || job?.status === 'cancelling';
@@ -59,7 +58,7 @@ function openSettings(source, settings, failure = '') {
   let loading = true, starting = false, hasApiKey = {};
 
   const session = openModal('辨識畫面文字', `
-    <div class="asr-workspace">
+    <div class="asr-workspace ocr-settings-layout">
       <div class="asr-field">
         <label for="ocrScope">辨識範圍</label>
         <select id="ocrScope" aria-describedby="ocrScopeSummary ocrScopeDefault ocrScopeError">
@@ -73,11 +72,11 @@ function openSettings(source, settings, failure = '') {
         <p id="ocrScopeDefault" class="asr-helper" hidden></p>
         <p id="ocrScopeError" class="asr-field-error" role="alert" hidden></p>
       </div>
-      <div class="asr-field">
+      <div class="asr-field ocr-setting-half">
         <label for="ocrSourceLang">畫面語言</label>
         <select id="ocrSourceLang">${Object.entries(languageNames).map(([code, name]) => `<option value="${code}">${name}</option>`).join('')}</select>
       </div>
-      <div class="asr-field">
+      <div class="asr-field ocr-setting-half">
         <label for="ocrProvider">雲端供應商</label>
         <select id="ocrProvider"><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option></select>
       </div>
@@ -94,13 +93,13 @@ function openSettings(source, settings, failure = '') {
         <input id="ocrApiKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="ocrKeyStatus">
         <p id="ocrKeyStatus" class="asr-helper" role="status">正在讀取設定…</p>
       </div>
-      <div class="asr-field">
+      <div class="asr-field ocr-setting-half">
         <label for="ocrSampleFps">每秒取樣張數</label>
         <input id="ocrSampleFps" type="number" min="0.1" max="10" step="any" required value="${settings.sampleFps}">
       </div>
-      <div class="asr-field">
+      <div class="asr-field ocr-setting-half">
         <label for="ocrFrameWidth">送出畫面寬度</label>
-        <select id="ocrFrameWidth"><option value="960">960 px</option><option value="1024">1024 px</option><option value="1280">1280 px</option></select>
+        <select id="ocrFrameWidth"><option value="960">960 px</option><option value="1024">1024 px</option><option value="1280">1280 px</option><option value="1440">1440 px</option><option value="1920">1920 px（最高，不放大原片）</option></select>
       </div>
       <label class="asr-checkbox-label"><input id="ocrSmartAccuracy" type="checkbox">智慧精準辨識：補查變化畫面與短字卡</label>
       <p id="ocrAccuracyHelp" class="asr-helper"></p>
@@ -110,7 +109,7 @@ function openSettings(source, settings, failure = '') {
     </div>`, [
     { label: '取消', id: 'ocrCancel', act: () => session.close() },
     { label: '開始辨識', id: 'ocrStart', primary: true, act: start },
-  ], { width: '480px', closeOnBackdrop: false,
+  ], { width: '640px', closeOnBackdrop: false,
     onDismiss:clearKey, onReplaced:clearKey });
 
   const rate = $('ocrSampleFps'), provider = $('ocrProvider'), model = $('ocrModel');
@@ -154,8 +153,8 @@ function openSettings(source, settings, failure = '') {
       ? '此供應商的金鑰已就緒。留空沿用，輸入新金鑰即可更新。'
       : '尚未儲存此供應商的金鑰，開始前請填入。';
     $('ocrAccuracyHelp').textContent = provider.value === 'openai'
-      ? '智慧精準辨識會以 gpt-5.4、最高 1440 px 寬複檢疑難畫面並校對原文，增加 API 用量。'
-      : '智慧精準辨識會以 gemini-2.5-pro、最高 1440 px 寬複檢疑難畫面並校對原文，增加 API 用量。';
+      ? '智慧精準辨識會補抽短字卡，以 gpt-5.4 複檢疑難畫面並校對原文；複檢不降低所選解析度，增加 API 用量。'
+      : '智慧精準辨識會補抽短字卡，以 gemini-2.5-pro 複檢疑難畫面並校對原文；複檢不降低所選解析度，增加 API 用量。';
   }
   provider.addEventListener('change', () => {
     modelDrafts[activeProvider] = { model:model.value, custom:customModel.value };

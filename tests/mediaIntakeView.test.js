@@ -19,6 +19,20 @@ beforeEach(async()=>{
   cancel=vi.fn(()=>jobs.reset());bindView(cancel);
 });
 
+it('來源波形驗證錯誤由波形工作回報一次，不顯示為轉檔失敗',async()=>{
+  const path='episode.mp4',reason='連續波形快取的來源、目錄或內容已變更';
+  let request,reject;
+  window.subtool.prepareSourceWaveform=vi.fn(options=>{request=options;return new Promise((_,fail)=>{reject=fail;});});
+  jobs.registerRecovery({path,owns:()=>true,retry:vi.fn()});
+  const work=jobs.prepareSourceWaveform({path,duration:12,continuous:true});
+  progress({...request,stage:'source-waveform',done:true,outcome:'failed',errorMsg:reason});
+  reject(new Error(reason));await expect(work).rejects.toThrow(reason);
+  jobs.failRecovery(path,'波形尚未完成：'+reason);
+  expect(document.getElementById('stErrorCount').textContent).toBe('1');
+  expect(document.getElementById('stIntakeMsg').textContent).toContain('波形尚未完成');
+  expect(document.getElementById('stIntakeMsg').textContent).not.toContain('轉檔失敗');
+});
+
 it.each([false,true])('實際 Proxy 轉檔和停止操作顯示於錯誤按鈕前，左欄獨立顯示操作訊息（含音軌=%s）',async audio=>{
   setStatus('專案已儲存','ok');
   const work=jobs.ingest({path:'demo.mxf',duration:3600,needsProxy:true});

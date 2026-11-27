@@ -653,7 +653,7 @@ fn snap_offset_in_range(
 }
 
 /// Event-driven keyframe sample planner:
-/// - Compresses motionless stretches (up to 1.25s spacing when screen is static, cutting API waste!)
+/// - Preserves the requested sampling grid, including motionless stretches.
 /// - Immediately injects settled keyframes on every sub-interval transient (even 3-frame / 0.1s pop-ins!)
 #[allow(clippy::too_many_arguments)]
 pub fn build_adaptive_sample_plan(
@@ -690,42 +690,18 @@ pub fn build_adaptive_sample_plan(
         .max(1);
 
     let mut chosen_set: HashSet<usize> = HashSet::new();
+    let base_count = (((clip_end - start) * sample_fps - 1e-7).ceil() as usize).max(1);
+    for idx in 0..base_count {
+        let f_idx = ((idx as f64 * track_fps / sample_fps).round() as usize).min(total_frames - 1);
+        chosen_set.insert(f_idx);
+    }
+    chosen_set.insert(total_frames - 1);
 
     if smart_accuracy && let Some(tr) = track {
-        // Adaptive heartbeat: sample every `base_step` (~0.5s) during visual activity,
-        // relaxing to `static_step` (~1.2s) when tiles are completely unchanged,
-        // PLUS injecting settled midpoints for every short visual pop-in (>= 2 frames)!
-        let base_step = ((track_fps / sample_fps).round() as usize).max(2);
-        let static_step = ((track_fps * 1.20).round() as usize).max(base_step);
-
-        let mut anchors: Vec<usize> = vec![0];
-        let mut cur = 0_usize;
-        while cur + base_step < total_frames {
-            let next_base = (cur + base_step).min(total_frames - 1);
-            let max_in_step = (cur + 1..=next_base)
-                .map(|k| tr.global_scores[k])
-                .fold(0.0_f32, f32::max);
-            let d_step = zone_profile_distance(tr.tile_slice(cur), tr.tile_slice(next_base), 4);
-            if max_in_step < tr.median_global * 1.15 && d_step < 1.4 {
-                // Screen is static — safely advance up to static_step unless a spike interrupts!
-                let limit = (cur + static_step).min(total_frames - 1);
-                let mut stop = limit;
-                for k in (next_base + 1)..=limit {
-                    if tr.global_scores[k] >= tr.global_threshold * 0.85 {
-                        stop = k.saturating_sub(1).max(next_base);
-                        break;
-                    }
-                }
-                cur = stop;
-            } else {
-                cur = next_base;
-            }
-            anchors.push(cur);
-        }
-        if anchors.last().copied().unwrap_or(0) < total_frames - 1 {
-            anchors.push(total_frames - 1);
-        }
-        chosen_set.extend(anchors.iter().copied());
+        // A low-resolution motion detector cannot prove that small text is absent.
+        // Keep all base samples; smart analysis may only add transient frames.
+        let mut anchors: Vec<usize> = chosen_set.iter().copied().collect();
+        anchors.sort_unstable();
 
         // Transient flash pop-in detector at native frame resolution (catches 0.10s / 3-frame pop-ins!)
         let mut transients: Vec<(f32, usize)> = Vec::new();
@@ -757,14 +733,6 @@ pub fn build_adaptive_sample_plan(
         for (_, m_idx) in transients {
             chosen_set.insert(m_idx);
         }
-    } else {
-        let base_count = (((clip_end - start) * sample_fps - 1e-7).ceil() as usize).max(1);
-        for idx in 0..base_count {
-            let raw_t = idx as f64 / sample_fps;
-            let f_idx = ((raw_t * track_fps).round() as usize).min(total_frames - 1);
-            chosen_set.insert(f_idx);
-        }
-        chosen_set.insert(total_frames - 1);
     }
 
     let mut track_indices: Vec<usize> = chosen_set.into_iter().collect();
@@ -959,10 +927,7 @@ where
         return Ok(());
     }
 
-    let out_w = frame_width.min(video.width).max(320) & !1;
-    let out_h =
-        (((video.height as f64) * (out_w as f64) / (video.width as f64) / 2.0).round() as u32 * 2)
-            .max(2);
+    let (out_w, out_h) = extraction_dimensions(video.width, video.height, frame_width)?;
     let frame_bytes = (out_w * out_h * 3) as usize;
     let vf =
         format!("fps={track_fps:.6},scale={out_w}:{out_h}:flags=lanczos,unsharp=3:3:0.35:3:3:0.0");
@@ -1109,9 +1074,108 @@ where
     Ok(())
 }
 
+fn extraction_dimensions(
+    width: u32,
+    height: u32,
+    requested_width: u32,
+) -> Result<(u32, u32), String> {
+    if width < 2 || height < 2 || requested_width < 2 {
+        return Err("影片解析度過小，無法擷取辨識畫面。".into());
+    }
+    let out_w = requested_width.min(width) & !1;
+    let out_h = ((height as f64 * out_w as f64 / width as f64 / 2.0).floor() as u32 * 2).max(2);
+    Ok((out_w, out_h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_preserves_native_pixels_without_upscaling_even_small_odd_sources() {
+        for (width, height, requested, expected) in [
+            (3840, 2160, 1920, (1920, 1080)),
+            (1920, 1080, 1920, (1920, 1080)),
+            (1280, 720, 1920, (1280, 720)),
+            (319, 181, 1920, (318, 180)),
+            (120, 67, 1920, (120, 66)),
+        ] {
+            let actual = extraction_dimensions(width, height, requested).unwrap();
+            assert_eq!(actual, expected);
+            assert!(actual.0 <= width && actual.1 <= height);
+        }
+        assert!(extraction_dimensions(1, 1, 1920).is_err());
+    }
+
+    #[test]
+    fn smart_sampling_never_throttles_the_requested_grid_on_static_ntsc_or_integer_sources() {
+        for fps in [24.0_f64, 25.0, 30000.0 / 1001.0, 30.0] {
+            let start = 10.4;
+            let duration = 12.0;
+            let frames = (fps * duration).ceil() as usize;
+            let track = FrameTrack {
+                track_fps: fps,
+                clip_start: start,
+                clip_end: start + duration,
+                global_scores: vec![0.0; frames],
+                zone_scores: vec![[0.0; NUM_ZONES]; frames],
+                flat_tiles: vec![0; frames * NUM_TILES],
+                median_global: 1.0,
+                zone_medians: [0.0; NUM_ZONES],
+                global_threshold: 10.0,
+            };
+            let video = VideoInfo {
+                path: PathBuf::from("static.mp4"),
+                duration: start + duration,
+                fps,
+                width: 1920,
+                height: 1080,
+                timestamp_offset: 5.5,
+            };
+            let plan = build_adaptive_sample_plan(
+                &video,
+                start,
+                Some(duration),
+                10.0,
+                8.0,
+                1.5,
+                Some(&track),
+                true,
+            )
+            .unwrap();
+            for sample in 0..120 {
+                let expected = ((sample as f64 * fps / 10.0).round() as usize).min(frames - 1);
+                assert!(
+                    plan.track_indices.contains(&expected),
+                    "missing base sample {sample} at {fps} FPS"
+                );
+            }
+            assert!(
+                plan.track_indices
+                    .windows(2)
+                    .all(|pair| pair[1] > pair[0]
+                        && pair[1] - pair[0] <= (fps / 10.0).ceil() as usize)
+            );
+            assert_eq!(plan.sample_times[0], start);
+            assert!(
+                plan.sample_times
+                    .iter()
+                    .all(|time| *time >= start && *time < start + duration)
+            );
+            assert!(
+                plan.windows
+                    .iter()
+                    .all(|window| window.track_indices.len() <= 20)
+            );
+            for index in 0..plan.track_indices.len() {
+                assert!(
+                    plan.windows
+                        .iter()
+                        .any(|window| window.global_start <= index && index <= window.global_end)
+                );
+            }
+        }
+    }
 
     #[test]
     fn adaptive_sampling_keeps_qualified_flashes_through_the_end_of_long_clips() {

@@ -597,11 +597,16 @@ describe('匯出交付清單', () => {
 
     if (formatName === 'mp3') {
       const rates = document.querySelector('.ev-mp3-kbps');
+      expect(rates.closest('.delivery-spec-grid')).toBe(document.querySelector('.ev-format').closest('.delivery-spec-grid'));
+      expect(document.querySelector('.delivery-card-options .ev-mp3-kbps')).toBeNull();
       expect([...rates.options].map(option => Number(option.value))).toEqual([96, 128, 160, 192, 224, 256, 320]);
       expect(rates.value).toBe('320');
       rates.value = '256';
       rates.dispatchEvent(new Event('change', { bubbles: true }));
       expect(document.querySelector('.ev-mp3-kbps').value).toBe('256');
+    } else {
+      expect(document.querySelector('.ev-mp3-kbps')).toBeNull();
+      expect(document.querySelector('.delivery-spec-grid').children).toHaveLength(1);
     }
     const audioButton = document.querySelector('.ev-audio-btn');
     expect(audioButton).not.toBeNull();
