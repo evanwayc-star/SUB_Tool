@@ -130,6 +130,8 @@ describe('匯出交付清單', () => {
     expect(document.querySelector('.ev-chapter-styled')).toBeNull();
     expect(document.querySelector('[aria-label="影片書籤"]').querySelectorAll('input')).toHaveLength(1);
     const checkbox = document.querySelector('.ev-chapter-notes'); checkbox.checked = true;
+    expect(document.getElementById(checkbox.getAttribute('aria-describedby')).textContent)
+      .toBe('寫入章節，供支援章節的播放器快速跳轉。');
     checkbox.dispatchEvent(new Event('change', { bubbles: true }));
     const dir = document.querySelector('.ev-outdir'); dir.value = 'D:/交付'; dir.dispatchEvent(new Event('input', { bubbles: true }));
     window.subtool.exportVideo.mockResolvedValue('notes-only');

@@ -30,6 +30,7 @@ function measureWorkspace() {
   const labelsVisible = [...document.querySelectorAll('.menubar button .lbl')]
     .filter(e => visible(e.closest('button'))).every(visible);
   const transport = {
+    playerWidth: rect(document.querySelector('.left')).width,
     playY: rect(document.getElementById('playBtn')).y,
     timecodeY: rect(document.querySelector('.tc')).y,
     seekY: rect(document.getElementById('seekBar')).y,
@@ -120,6 +121,7 @@ async function inspectOverlays(client, dir, press) {
     '較矮視窗的對話框僅捲動內容，標題、關閉與底部操作皆可達');
   await press('Escape', 'Escape', 27);
   await client.evaluate(`document.querySelector('[data-act="shift-tc"]').click()`);
+  await waitFor(() => client.evaluate(`document.activeElement===document.getElementById('shiftPanel')`), '浮動面板完成初始焦點定位');
   const focusRetained = await client.evaluate(`(async () => {
     const scope=document.getElementById('tcShiftSel');
     scope.focus();
@@ -165,12 +167,14 @@ async function inspect(client, dir) {
   }
   fs.writeFileSync(path.join(dir, 'workspace-layout.json'), JSON.stringify(results, null, 2));
   assert.deepEqual(results.flatMap(r => r.unreachable.map(control => ({ viewport: r.width, ...control }))), [], '工具列控制項必須完整可點擊');
-  assert(results.every(r => r.pixels.length === 4 && r.pixels.every(p => p.rgba.join(',') === '0,0,0,255')), '一般字幕列與空白時間軸必須純黑');
+  // 摘要完整換行後，較矮的列表可能只容納一列；仍須取到字幕與兩個時間軸底色。
+  assert(results.every(r => r.pixels.length >= 3 && r.pixels.some(p => p.name.startsWith('subtitle-'))
+    && r.pixels.every(p => p.rgba.join(',') === '0,0,0,255')), '一般字幕列與空白時間軸必須純黑');
   assert(results.every(r => r.labelsVisible), '窄視窗的工具列仍須保留操作文字');
   const compact = results.at(-1).transport;
   assert(Math.abs(compact.playY - compact.timecodeY) < 6
-    && Math.abs(compact.seekY - compact.toolsY) < 6
-    && compact.seekY > compact.playY + 20, '1024px 預覽區須保留兩列播放控制');
+    && (compact.playerWidth <= 480 ? compact.toolsY > compact.seekY + 16 : Math.abs(compact.seekY - compact.toolsY) < 6)
+    && compact.seekY > compact.playY + 20, '窄預覽區使用兩列播放控制，480px 以下的監看工具再換列');
   const menu = await client.evaluate(`(() => {
     document.querySelector('#recentMenu > button').click();
     const popup = document.querySelector('#recentMenu .items'), r = popup.getBoundingClientRect();
@@ -261,6 +265,43 @@ async function inspect(client, dir) {
   }
   fs.writeFileSync(path.join(dir, 'workspace-keyboard.json'), JSON.stringify({ menu, ...keyboard }, null, 2));
   await inspectOverlays(client, dir, press);
+  const sidebarLayouts = [];
+  for (const [width, height, sidebarWidth] of [[1600, 960, 700], [1024, 640, 570], [1024, 640, 260]]) {
+    await client.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    await client.evaluate(`document.getElementById('rightPanel').style.width='${sidebarWidth}px'; document.getElementById('timelinePanel').style.height='260px'`);
+    await delay(100);
+    const layout = await client.evaluate(`(() => {
+      const list=document.getElementById('sublist');
+      const style=document.getElementById('trackStyle');
+      list.scrollTop=0;
+      const row=list.querySelector('.sub-row');
+      const content=[...row.querySelectorAll('.times,.txt,.sub-sty,.sub-styname')];
+      const listRect=list.getBoundingClientRect();
+      const rhead=document.querySelector('.rhead');
+      return {
+        listHeight:listRect.height,
+        rowDisplay:getComputedStyle(row).display,
+        listFits:list.scrollWidth<=list.clientWidth,
+        headerFits:rhead.scrollWidth<=rhead.clientWidth,
+        styleFits:style.scrollWidth<=style.clientWidth,
+        textFits:content.every(e=>e.scrollWidth<=e.clientWidth+1),
+        styleScrollable:style.scrollHeight>style.clientHeight,
+      };
+    })()`);
+    assert(layout.listHeight >= 70 && layout.rowDisplay === 'grid' && layout.listFits
+      && layout.headerFits && layout.styleFits && layout.textFits,
+    '低視窗與窄側欄仍保留可讀字幕，工具與樣式無橫向裁切：' + JSON.stringify({ width, height, sidebarWidth, ...layout }));
+    const shot=await client.send('Page.captureScreenshot', { format:'png', captureBeyondViewport:false });
+    fs.writeFileSync(path.join(dir, `workspace-sidebar-${width}-${sidebarWidth}.png`), Buffer.from(shot.data,'base64'));
+    sidebarLayouts.push({ width, height, sidebarWidth, ...layout });
+  }
+  fs.writeFileSync(path.join(dir,'workspace-sidebar.json'),JSON.stringify(sidebarLayouts,null,2));
+  await client.send('Emulation.setEmulatedMedia', { features:[{ name:'prefers-reduced-motion', value:'reduce' }] });
+  const reducedMotion = await client.evaluate(`(() => {
+    const selectors=['#playBtn','.transport .tp-btn','#tsBold'];
+    return selectors.map(selector=>({selector,duration:getComputedStyle(document.querySelector(selector)).transitionDuration}));
+  })()`);
+  assert(reducedMotion.every(control=>control.duration==='0s'), '減少動態設定涵蓋播放與字幕樣式控制');
   console.log(JSON.stringify({ widths: results.map(r => r.width), reachable: true, blackSamples: results.reduce((n, r) => n + r.pixels.length, 0), menu, keyboard }));
 }
 

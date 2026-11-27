@@ -147,22 +147,29 @@
       <!-- 右：字幕列表 -->
       <div class="right" id="rightPanel">
         <div class="rhead">
-          <span class="title">字幕列表</span>
-          <!-- 軌道選單用黃色：它是「目前在看哪一軌」，是這一列裡要先讀到的資訊。
-               總句數改白色——它是那一軌的附屬數字，不該比軌道名更搶眼。 -->
-          <select id="listTrackSel" aria-label="字幕軌道" title="切換顯示的字幕軌道" style="margin-left:8px;max-width:160px;background:var(--panel2);color:#e4bd60;font-weight:600;font-size:15px;border:1px solid var(--border2);padding:2px 6px;border-radius:3px;"></select>
-          <span class="count" id="subCount" style="margin-left:8px; color:var(--text); font-weight:bold;">0 句</span>
-          <select id="subStyleFilter" title="篩選樣式" style="margin-left:8px;max-width:140px;background:var(--panel2);color:var(--text);font-size:13px;border:1px solid var(--border2);padding:2px 6px;border-radius:3px;display:none;"></select>
-          <button class="icon" data-act="add-cue-above" title="於選取字幕上方新增空白" style="margin-left:auto;"><span data-ui-icon="add-above" aria-hidden="true"></span></button>
-          <button class="icon" data-act="add-cue-below" title="於選取字幕下方新增空白"><span data-ui-icon="add-below" aria-hidden="true"></span></button>
-          <button class="icon" data-act="del-cue" title="刪除選取 (Del)"><span data-ui-icon="trash" aria-hidden="true"></span></button>
-          <div class="sep"></div>
-          <button class="icon" data-act="fps-convert" title="FPS 時間碼轉換"><span data-ui-icon="swap" aria-hidden="true"></span> FPS</button>
-          <button class="icon" data-act="shift-tc" title="時間碼位移 / 調整持續時間" aria-controls="shiftPanel" aria-expanded="false"><span data-ui-icon="shift" aria-hidden="true"></span> 調整</button>
-          <button class="icon" data-act="copy-track" title="複製字幕軌道至新軌道"><span data-ui-icon="copy" aria-hidden="true"></span> 複製</button>
-          <button class="icon" data-act="compare-track" title="比對字幕軌道"><span data-ui-icon="compare" aria-hidden="true"></span> 比對</button>
-          <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)"><span data-ui-icon="search" aria-hidden="true"></span></button>
-          <button class="icon" data-act="check-panel" id="checkPanelBtn" title="字幕檢查 (9)" aria-controls="checkPanel" aria-expanded="false"><span data-ui-icon="check" aria-hidden="true"></span> 檢查</button>
+          <div class="rhead-context">
+            <span class="title">字幕列表</span>
+            <select id="listTrackSel" aria-label="字幕軌道" title="切換顯示的字幕軌道"></select>
+            <span class="count" id="subCount">0 句</span>
+            <select id="subStyleFilter" aria-label="篩選樣式" title="篩選樣式" style="display:none;"></select>
+          </div>
+          <div class="rhead-actions" role="group" aria-label="字幕編輯工具">
+            <div class="rhead-action-group" role="group" aria-label="新增與刪除字幕">
+              <button class="icon" data-act="add-cue-above" title="於選取字幕上方新增空白"><span data-ui-icon="add-above" aria-hidden="true"></span></button>
+              <button class="icon" data-act="add-cue-below" title="於選取字幕下方新增空白"><span data-ui-icon="add-below" aria-hidden="true"></span></button>
+              <button class="icon" data-act="del-cue" title="刪除選取 (Del)"><span data-ui-icon="trash" aria-hidden="true"></span></button>
+            </div>
+            <div class="rhead-action-group" role="group" aria-label="時間與軌道工具">
+              <button class="icon" data-act="fps-convert" title="FPS 時間碼轉換"><span data-ui-icon="swap" aria-hidden="true"></span> FPS</button>
+              <button class="icon" data-act="shift-tc" title="時間碼位移 / 調整持續時間" aria-controls="shiftPanel" aria-expanded="false"><span data-ui-icon="shift" aria-hidden="true"></span> 調整</button>
+              <button class="icon" data-act="copy-track" title="複製字幕軌道至新軌道"><span data-ui-icon="copy" aria-hidden="true"></span> 複製</button>
+              <button class="icon" data-act="compare-track" title="比對字幕軌道"><span data-ui-icon="compare" aria-hidden="true"></span> 比對</button>
+            </div>
+            <div class="rhead-action-group" role="group" aria-label="搜尋與檢查">
+              <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)"><span data-ui-icon="search" aria-hidden="true"></span></button>
+              <button class="icon" data-act="check-panel" id="checkPanelBtn" title="字幕檢查 (9)" aria-controls="checkPanel" aria-expanded="false"><span data-ui-icon="check" aria-hidden="true"></span> 檢查</button>
+            </div>
+          </div>
         </div>
         <div class="sublist" id="sublist"></div>
         <div class="track-style" id="trackStyle">
@@ -333,9 +340,9 @@
         <span id="tlSel">未選取</span>
         <div class="sep"></div>
         <div class="zoom">
-          <span class="lbl">縮放</span> <button class="icon" data-act="zoom-out">－</button>
-          <input type="range" id="zoomBar" min="0.1" max="400" value="80" step="0.1" style="width:120px">
-          <button class="icon" data-act="zoom-in">＋</button>
+          <label class="lbl" for="zoomBar">縮放</label> <button class="icon" data-act="zoom-out" title="縮小時間軸" aria-label="縮小時間軸">－</button>
+          <input type="range" id="zoomBar" aria-label="時間軸縮放" min="0.1" max="400" value="80" step="0.1" style="width:120px">
+          <button class="icon" data-act="zoom-in" title="放大時間軸" aria-label="放大時間軸">＋</button>
           <button class="icon" data-act="zoom-fit" title="自適應縮放 (切換字幕範圍 / 影片全長, 快捷鍵 `)"><span class="lbl">自適應</span><span class="compact-icon" aria-hidden="true">↔</span></button>
         </div>
       </div>

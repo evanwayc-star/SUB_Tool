@@ -457,7 +457,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
               </div>`
               : ''}
             </div>
-            <label class="delivery-field"><span>影格率</span>
+            <label class="delivery-field delivery-field--fps"><span>影格率</span>
               <select class="ev-fps delivery-select" data-idx="${i}" title="輸出影格率；維持原本播放時長" ${preset && r.format !== 'bd-iso'?'disabled':''}>
                 ${r.format === 'bd-iso' ? availableBdVideoModes(data.fps).map(mode => `<option value="${mode.fps}" ${r.targetFps === mode.fps ? 'selected' : ''}>${mode.fps} FPS · ${mode.label}</option>`).join('') : preset ? `<option value="${preset.fps}" selected>${preset.fps} FPS（固定）</option>` : `
                 <option value="0" ${!r.targetFps?'selected':''}>依專案 (${normalizeDeliveryFrameRate(data.fps)} FPS)</option>
@@ -483,10 +483,10 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
           <div class="delivery-audio-line"><span class="delivery-options-label">音訊</span><span class="delivery-audio-info">${escapeHTML(audioDesc)}</span><button type="button" class="ev-audio-btn delivery-btn-audio" data-idx="${i}" title="獨立設定此輸出檔案的音軌與左右聲道">設定輸出音軌</button></div>
           ${!audioDelivery ? `<div class="delivery-visual-options"><span class="delivery-sub-chip" title="${escapeHTML(activeSubs.length ? '將燒入字幕軌：'+activeSubs.join(', ') : '無字幕')}">${activeSubs.length ? '字幕：'+escapeHTML(activeSubs.join(', ')) : '無字幕'}</span>
             <label class="ev-tc-wrap delivery-tc-label" title="在畫面上燒入交付用時間碼"><input type="checkbox" class="ev-tc" data-idx="${i}" ${r.burnTimecode?'checked':''}> 畫面燒入時間碼</label></div>` : ''}
-          ${IS_DESKTOP && ['h264','prores'].includes(r.format) ? `<div class="delivery-visual-options" role="group" aria-label="影片書籤">
+          ${IS_DESKTOP && ['h264','prores'].includes(r.format) ? `<div class="delivery-chapter-options" role="group" aria-label="影片書籤">
             <span class="delivery-options-label">影片書籤</span>
-            <label class="delivery-tc-label"><input type="checkbox" class="ev-chapter-notes" data-idx="${i}" ${r.chapterNotes?'checked':''}> 備註</label>
-            <span class="delivery-format-note">寫入章節，供支援章節的播放器快速跳轉。</span>
+            <label class="delivery-tc-label"><input type="checkbox" class="ev-chapter-notes" data-idx="${i}" aria-describedby="evChapterHelp${i}" ${r.chapterNotes?'checked':''}><span>備註</span></label>
+            <p id="evChapterHelp${i}" class="delivery-option-help">寫入章節，供支援章節的播放器快速跳轉。</p>
           </div>` : ''}
         </div>
         ${preset ? `<div class="delivery-preset-note">${preset.kind === 'disc' ? `最多 ${preset.maxAudioStreams} 條 Mono / Stereo / Lt/Rt / 5.1` : '單一 Stereo'} · ${escapeHTML(preset.audioLabel)} · ${preset.sampleRate / 1000} kHz / ${preset.audioKbps} kbps${preset.kind === 'disc' ? '／串流' : ''}</div>` : ''}
