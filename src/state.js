@@ -446,6 +446,7 @@ const State = {
   // 播放器監看用疊層。這是使用者偏好，不屬於專案／匯出資料，故只由 config 保存。
   timecodeWatermark: false,
   previewMode: 'smooth',
+  monitorPlaybackRate: 1, // 此次使用期間選定的監看倍率，獨立於片段變速及 JKL 穿梭。
   activeTrackKind: 'sub', // 目前焦點軌道類型：'sub' | 'video' | 'audio'
   activeSubTrack: 0,      // 目前選取的字幕軌道（用於上下鍵導航）
   clips: [],            // 影片序列（時間軸上的影片區塊，含 vtrack 視訊轨）：見 sequence.js

@@ -6,13 +6,15 @@
    1. 時間碼完整性與重疊碰撞檢測 (Timecode & Overlap Collision)
    2. 行數、字數長度與 CPS 字元速率檢查 (Line count, Length, CPS)
    3. 特殊標籤、字型樣式、空白與連續無縫相同句檢測 (Tags, Trimming, Duplicates)
-   4. 繁體字支援性與簡體字檢測 (Character Encoding & Variant Check)
+   4. 字庫字詞與其他字元檢查
    5. 匯出防呆驗證 (Pre-export Validation)
    ============================================================================== */
 
 import { State } from './state.js';
 import { secToEncore } from './time.js';
-import { inspectSubtitleCharacters } from './subtitle-text-check.js';
+import { createSubtitleDictionaryMatcher } from './subtitle-text-check.js';
+
+const matchDefaultDictionary = createSubtitleDictionaryMatcher();
 
 /**
  * 檢測字幕時間重疊集合
@@ -93,12 +95,14 @@ function consecutiveIdenticalRanges(cues,groups){
  * @param {Object} [options={}] - 分析選項
  * @param {number} [options.checkLenLimit=0] - 單行長度上限
  * @param {string[]} [options.checkContains=[]] - 包含關鍵字檢查清單
+ * @param {(text:string) => string[]} [options.dictionaryMatcher] - 本機字庫的單句比對函式
  * @returns {Object} 結構化品質診斷報告
  */
 export function auditSubtitles(cues = [], options = {}) {
   if (!Array.isArray(cues)) cues = [];
   const checkLenLimit = options.checkLenLimit || 0;
   const checkContains = options.checkContains || [];
+  const matchDictionary = options.dictionaryMatcher ?? matchDefaultDictionary;
   const identicalGroups=consecutiveIdenticalGroups(cues);
   const identicalRanges=consecutiveIdenticalRanges(cues,identicalGroups);
 
@@ -116,7 +120,7 @@ export function auditSubtitles(cues = [], options = {}) {
     trimNums: [],
     overLenNums: [],
     containsNums: [],
-    nonTraditionalIssues: [],
+    dictionaryIssues: [],
     noTimeNums: [],
     consecutiveIdenticalNums: identicalGroups.flat(),
     consecutiveIdenticalJoinedNums: identicalRanges.filter(([start,end])=>end>start)
@@ -159,10 +163,8 @@ export function auditSubtitles(cues = [], options = {}) {
       result.containsNums.push(num);
     }
 
-    const issue = inspectSubtitleCharacters(t);
-    if (issue.simplified.length || issue.unsupported.length) {
-      result.nonTraditionalIssues.push({ num, ...issue });
-    }
+    const matches = matchDictionary(t);
+    if (matches.length) result.dictionaryIssues.push({ num, matches });
   }
 
   return result;

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 
-let State, Media, UI, Menus, setSelection;
+let State, Media, UI, Menus, setSelection, commands;
 const key = (target, value, options = {}) => {
   const event = new KeyboardEvent('keydown', { key:value, bubbles:true, cancelable:true, ...options });
   target.dispatchEvent(event);
@@ -25,7 +25,7 @@ beforeAll(async () => {
   await import('../src/keyboard.js');
   const { createCommands } = await import('../src/commands.js');
   const { on } = await import('../src/events.js');
-  const commands = createCommands();
+  commands = createCommands();
   on('action', action => {
     if (action === 'safe-frame' || action === 'timecode-watermark') commands.run(action);
   });
@@ -44,6 +44,78 @@ beforeEach(() => {
   key(document.body, 'Tab');
 });
 afterAll(() => { Menus.hideCtx(); UI.closeModal(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+function selectPlayerSpeed(rate) {
+  document.getElementById('speedIndicator').dispatchEvent(new MouseEvent('contextmenu', { bubbles:true, cancelable:true }));
+  const entries = [...document.querySelectorAll('#ctxmenu [role="menuitem"]')];
+  const item = entries.find(entry => entry.querySelector('.c-text').textContent === rate + '×');
+  item.click();
+}
+
+it('選擇 0.5x 後，播放按鈕指令與空白鍵交替起播、暫停及續播都沿用該倍率', async () => {
+  const indicator = document.getElementById('speedIndicator');
+  const video = document.getElementById('video');
+  const ratesAtStart = [];
+  const play = () => { ratesAtStart.push(video.playbackRate); Media.playing = true; };
+  Media.play.mockImplementationOnce(play).mockImplementationOnce(play);
+  Media.pause.mockImplementationOnce(() => { Media.playing = false; });
+  try {
+    expect(video.playbackRate).toBe(1);
+    selectPlayerSpeed(0.5);
+    expect(indicator.textContent).toBe('0.5x');
+    commands.run(document.getElementById('playBtn').dataset.act);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ratesAtStart).toEqual([0.5]);
+    key(document.body, ' ');
+    expect(Media.playing).toBe(false);
+    expect(indicator.textContent).toBe('0.5x');
+    key(document.body, ' ');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ratesAtStart).toEqual([0.5, 0.5]);
+    expect(indicator.textContent).toBe('0.5x');
+  } finally {
+    Media.playing = false;
+    selectPlayerSpeed(1);
+  }
+});
+
+it('二倍速片段的手選倍率獨立顯示，JKL 穿梭停止後一般播放沿用手選倍率', async () => {
+  const video = document.getElementById('video');
+  const indicator = document.getElementById('speedIndicator');
+  const clip = {id:'fast', in:0, out:10, offset:0, speed:2, primary:true};
+  State.clips = [clip];
+  Media.activeClipId = clip.id;
+  Media.play.mockImplementationOnce(() => { Media.playing = true; });
+  Media.pause.mockImplementationOnce(() => { Media.playing = false; });
+  try {
+    selectPlayerSpeed(0.5);
+    expect(video.playbackRate).toBe(1);
+    expect(indicator.textContent).toBe('0.5x');
+    Menus.showPlayerMenu(0, 0);
+    expect(document.querySelector('#ctxmenu .chk').parentElement.querySelector('.c-text').textContent).toBe('0.5×');
+    const custom = [...document.querySelectorAll('#ctxmenu [role="menuitem"]')].find(item => item.textContent.includes('自訂速度'));
+    custom.click();
+    expect(document.getElementById('__promptInput').value).toBe('0.5');
+    UI.closeModal();
+    key(document.body, 'l');
+    await vi.advanceTimersByTimeAsync(0);
+    key(document.body, 'l');
+    expect(indicator.textContent).toBe('1.5x');
+    expect(video.playbackRate).toBe(3);
+    key(document.body, 'k');
+    expect(Media.playing).toBe(false);
+    expect(indicator.textContent).toBe('0.5x');
+    key(document.body, ' ');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Media.play).toHaveBeenCalledTimes(2);
+    expect(video.playbackRate).toBe(1);
+  } finally {
+    State.clips = [];
+    Media.activeClipId = null;
+    Media.playing = false;
+    selectPlayerSpeed(1);
+  }
+});
 
 it('其他區域的聚焦按鈕保留 Enter 原生啟用', async () => {
   const button = document.getElementById('playBtn');

@@ -167,6 +167,69 @@ describe('reset-scoped media ownership', () => {
     await Media.setPlaybackDirection('forward');expect(bridge.direction).toHaveBeenLastCalledWith('backward');
   });
 
+  it.each(['html5','mpv'])('%s 換載來源後沿用監看倍率並乘上新片段速度',async backend=>{
+    const video=domMock.video, load=deferred();
+    const previousSrc=Object.getOwnPropertyDescriptor(video,'src');
+    const next={id:'next-rate',path:'C:/next.mov',web:{url:'file:///next.mov'},dur:8,in:0,out:8,offset:0,vtrack:0,speed:0.5};
+    let nativeRate=1, src='';
+    const bridge={
+      launch:vi.fn(async()=>({ok:true,sourceSessionId:'old'})),
+      loadfile:vi.fn(async()=>{await load.promise; nativeRate=1; return {ok:true,sourceSessionId:'next'};}),
+      rate:vi.fn(async rate=>{nativeRate=rate;}),direction:vi.fn(async()=>true),seek:vi.fn(async()=>true)
+    };
+    const runtime=resetPlayerAdapter(backend==='mpv'?{mpv:bridge}:null,video);
+    if(backend==='mpv') await runtime.enterMpv({src:'C:/old.mov'});
+    else {
+      // HTML media resets to its default rate as soon as a new src is assigned.
+      Object.defineProperty(video,'src',{configurable:true,get:()=>src,set:url=>{src=url;video.playbackRate=1;}});
+    }
+    State.clips=[next];State.videoTracks=[{visible:true}];
+    Media.setRate(0.5);
+    const switching=Media._ensureClip(next,0,false);
+    try{
+      if(backend==='mpv'){
+        await vi.waitFor(()=>expect(bridge.loadfile).toHaveBeenCalledWith(next.path));
+        Media.setRate(0.75); // A later choice while the new native host is still loading.
+        load.resolve();
+      } else {
+        await vi.waitFor(()=>expect(video.src).toBe(next.web.url));
+        expect(video.playbackRate).toBe(1);
+        video.readyState=1;video.dispatch('loadedmetadata');
+      }
+      await switching;
+      const expected=(backend==='mpv'?0.75:0.5)*next.speed;
+      expect(video.playbackRate).toBe(expected);
+      if(backend==='mpv'){
+        expect(nativeRate).toBe(expected);
+        const mirror=Object.getOwnPropertyDescriptor(video,'playbackRate');
+        try{
+          Object.defineProperty(video,'playbackRate',{configurable:true,get:()=>expected,set:rate=>{
+            if(rate>16) throw new DOMException('unsupported HTML rate','NotSupportedError');
+          }});
+          next.speed=2;
+          Media.setRate(16);
+          expect(nativeRate).toBe(32);
+        }finally{Object.defineProperty(video,'playbackRate',mirror);}
+      }
+    }finally{
+      load.resolve();video.readyState=1;video.dispatch('loadedmetadata');await switching;
+      Object.defineProperty(video,'src',previousSrc);
+      runtime.stopBoundsFeeder();Media.reset();
+    }
+  });
+
+  it('重設媒體結束暫時的穿梭倍率，並以所選監看倍率登錄新片段',()=>{
+    const previous=State.monitorPlaybackRate;
+    try{
+      State.monitorPlaybackRate=0.5;
+      Media.setRate(3); Media.reset();
+      expect(domMock.video.playbackRate).toBe(0.5);
+      domMock.video.playbackRate=1;
+      Media._registerPrimary({name:'new.mov',path:'C:/new.mov',dur:10});
+      expect(domMock.video.playbackRate).toBe(0.5);
+    }finally{ State.monitorPlaybackRate=previous; Media.reset(); }
+  });
+
   it('切換來源期間的舊 duration 不能擴大新片段；loadfile 完成後採用新來源長度',async()=>{
     const {Seq}=await import('../src/sequence.js');
     const gate=deferred();

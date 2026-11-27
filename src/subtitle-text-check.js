@@ -69,6 +69,11 @@ const SHARED_SIMPLIFIED_VARIANT_CHARACTERS = (
 const UNAMBIGUOUS_SIMPLIFIED_SET = new Set(UNAMBIGUOUS_SIMPLIFIED_CHARACTERS);
 const SHARED_SIMPLIFIED_VARIANT_SET = new Set(SHARED_SIMPLIFIED_VARIANT_CHARACTERS);
 
+export const DEFAULT_SUBTITLE_DICTIONARY = Object.freeze({
+  entries: Object.freeze([...UNAMBIGUOUS_SIMPLIFIED_SET].filter(ch => !WHITELIST_SET.has(ch))),
+  includeUnsupported: true,
+});
+
 const HAN_CHARACTER_RE = /^\p{Script=Han}$/u;
 const ALLOWED_NON_HAN_CHARACTER_RE =
   /^(?:[A-Za-z\uFF21-\uFF3A\uFF41-\uFF5A]|\p{Number}|\p{Punctuation}|\p{Symbol}|\p{White_Space}|\p{Emoji_Component})$/u;
@@ -126,4 +131,35 @@ function inspectSubtitleCharacters(text){
 }
 
 export { inspectSubtitleCharacters };
+
+// Index once per saved dictionary. The default contains thousands of individual
+// characters, so each cue only visits candidates beginning at one of its characters.
+export function createSubtitleDictionaryMatcher({ entries, includeUnsupported } = DEFAULT_SUBTITLE_DICTIONARY) {
+  const byFirstCharacter = new Map();
+  for (const entry of new Set(entries)) {
+    if (!entry) continue;
+    const first = String.fromCodePoint(entry.codePointAt(0));
+    if (!byFirstCharacter.has(first)) byFirstCharacter.set(first, []);
+    byFirstCharacter.get(first).push(entry);
+  }
+
+  return text => {
+    const str = String(text ?? '');
+    const matches = new Set();
+    let offset = 0;
+    for (const character of str) {
+      const candidates = byFirstCharacter.get(character);
+      if (candidates) {
+        for (const entry of candidates) {
+          if (str.startsWith(entry, offset)) matches.add(entry);
+        }
+      }
+      offset += character.length;
+    }
+    if (includeUnsupported) {
+      for (const character of inspectSubtitleCharacters(str).unsupported) matches.add(character);
+    }
+    return [...matches];
+  };
+}
 

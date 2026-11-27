@@ -266,7 +266,7 @@ async function inspect(client, dir) {
   fs.writeFileSync(path.join(dir, 'workspace-keyboard.json'), JSON.stringify({ menu, ...keyboard }, null, 2));
   await inspectOverlays(client, dir, press);
   const sidebarLayouts = [];
-  for (const [width, height, sidebarWidth] of [[1600, 960, 700], [1024, 640, 570], [1024, 640, 260]]) {
+  for (const [width, height, sidebarWidth] of [[1920, 960, 1028], [1600, 960, 700], [1024, 640, 570], [1024, 640, 260]]) {
     await client.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
     await client.evaluate(`document.getElementById('rightPanel').style.width='${sidebarWidth}px'; document.getElementById('timelinePanel').style.height='260px'`);
     await delay(100);
@@ -278,19 +278,34 @@ async function inspect(client, dir) {
       const content=[...row.querySelectorAll('.times,.txt,.sub-sty,.sub-styname')];
       const listRect=list.getBoundingClientRect();
       const rhead=document.querySelector('.rhead');
+      const headerItems=[...rhead.querySelectorAll('.title,.count,button,select')].filter(e=>e.getClientRects().length);
+      const centers=headerItems.map(e=>{ const r=e.getBoundingClientRect(); return r.top+r.height/2; });
+      const headerControls=headerItems.filter(e=>e.matches('button,select')&&!e.disabled);
+      rhead.scrollLeft=0;
+      const headerUnreachable=headerControls.filter(e=>{
+        e.scrollIntoView({ inline:'nearest',block:'nearest',container:'nearest' });
+        const r=e.getBoundingClientRect();
+        return ![r.left+2,r.right-2,r.left+r.width/2].every(x=>e.contains(document.elementFromPoint(x,r.top+r.height/2)));
+      }).map(e=>e.id||e.dataset.act);
+      const headerScrollDistance=rhead.scrollLeft;
+      rhead.scrollLeft=0;
       return {
         listHeight:listRect.height,
         rowDisplay:getComputedStyle(row).display,
         listFits:list.scrollWidth<=list.clientWidth,
-        headerFits:rhead.scrollWidth<=rhead.clientWidth,
+        headerCenterSpread:Math.max(...centers)-Math.min(...centers),
+        headerScrollDistance,headerUnreachable,
         styleFits:style.scrollWidth<=style.clientWidth,
         textFits:content.every(e=>e.scrollWidth<=e.clientWidth+1),
         styleScrollable:style.scrollHeight>style.clientHeight,
       };
     })()`);
-    assert(layout.listHeight >= 70 && layout.rowDisplay === 'grid' && layout.listFits
-      && layout.headerFits && layout.styleFits && layout.textFits,
-    '低視窗與窄側欄仍保留可讀字幕，工具與樣式無橫向裁切：' + JSON.stringify({ width, height, sidebarWidth, ...layout }));
+    assert(layout.listHeight >= 70 && layout.rowDisplay === (sidebarWidth>900?'flex':'grid')
+      && layout.listFits && layout.styleFits && layout.textFits,
+    '不同寬度的側欄仍保留可讀字幕與樣式：' + JSON.stringify({ width, height, sidebarWidth, ...layout }));
+    assert(layout.headerCenterSpread<=1 && layout.headerUnreachable.length===0
+      && (sidebarWidth===260 ? layout.headerScrollDistance>0 : layout.headerScrollDistance===0),
+    '表頭項目須同列置中，每個控制都可點擊；最窄側欄可橫捲至最後一項：'+JSON.stringify({sidebarWidth,...layout}));
     const shot=await client.send('Page.captureScreenshot', { format:'png', captureBeyondViewport:false });
     fs.writeFileSync(path.join(dir, `workspace-sidebar-${width}-${sidebarWidth}.png`), Buffer.from(shot.data,'base64'));
     sidebarLayouts.push({ width, height, sidebarWidth, ...layout });

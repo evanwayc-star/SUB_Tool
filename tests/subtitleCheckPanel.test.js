@@ -23,7 +23,6 @@ vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
 vi.mock('../src/menus.js', () => ({ hideCtx: vi.fn(), showCueMenu: vi.fn() }));
 vi.mock('../src/keyboard.js', () => ({ jklReset: vi.fn(), nudge: vi.fn() }));
 vi.mock('../src/tcparse.js', () => ({ parseTimecodeInput: vi.fn(), setupTimecodeInput: vi.fn() }));
-vi.mock('../src/subtitle-text-check.js', () => ({ inspectSubtitleCharacters: () => ({ simplified: [], unsupported: [] }) }));
 vi.mock('../src/subtitle-model.js', () => ({
   detectOverlaps: () => new Set(), sweepContainedCues: vi.fn(), addCue: vi.fn(), addCueRelative: vi.fn(),
   deleteSelectedCues: vi.fn(), deleteCue: vi.fn(), clearSelectedCuesTime: vi.fn(), shiftTextsDown: vi.fn(),
@@ -178,6 +177,26 @@ it('空軌明確提示尚無字幕，已檢查而無命中顯示無', () => {
   expect(document.getElementById('checkSummary').textContent).toContain('中文字幕尚無字幕');
   expect(document.querySelector('#cpConsecutiveIdentical .cp-nums').textContent).toBe('無');
   expect(document.querySelectorAll('.cp-num')).toHaveLength(0);
+});
+
+it('字庫按目前字幕軌逐句計數，命中編號可定位，零寬字元在提示中可辨認', () => {
+  const row=document.createElement('div');
+  row.id='cpDictionary';row.innerHTML='<span class="cp-nums"></span>';
+  document.getElementById('checkPanel').append(row);
+  try {
+    Object.assign(state.State,{listTrack:0,tracks:[{name:'主字幕'},{name:'副字幕'}],cues:[
+      {id:'first',text:'繁體字',start:1,end:2,track:0},
+      {id:'second',text:'简简\u200b',start:2,end:3,track:0},
+      {id:'third',text:'繁體',start:3,end:4,track:0},
+      {id:'other',text:'简',start:1,end:2,track:1},
+    ]});
+    renderCheckPanel();
+    expect(row.querySelector('.cp-dictionary-count').textContent).toBe('1 句');
+    const buttons=row.querySelectorAll('button');
+    expect([...buttons].map(button=>button.textContent)).toEqual(['2']);
+    expect(buttons[0].title).toBe('简、U+200B');
+    buttons[0].click();expect(state.State.selectedId).toBe('second');
+  } finally { row.remove(); }
 });
 
 it('就地鎖軌可定位但不能修剪，解鎖及就地改文會重新核對結果', () => {

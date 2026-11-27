@@ -255,6 +255,30 @@ describe('JKL reverse shuttle time domain', () => {
     expect(mediaMock.setPlaybackDirection).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['j', 'ArrowRight', 'nudge_right_1f', 105 + 1 / 24],
+    ['l', 'd', 'nudge_right_1s', 106],
+  ])('%s 穿梭時以 %s 微調，停在目標並恢復手選播放速度', async (shuttle, step, action, target) => {
+    const { setManualPlaybackSpeed } = await import('../src/transport-controller.js');
+    State.fps = 24;
+    State.keymap = { rewind:[{ key:'j' }], forward:[{ key:'l' }], [action]:[{ key:step.toLowerCase() }] };
+    mediaMock.supportsNativeReverse.mockReturnValue(true);
+    mediaMock.play.mockImplementationOnce(() => { mediaMock.playing = true; });
+    mediaMock.pause.mockImplementation(() => { mediaMock.playing = false; });
+    setManualPlaybackSpeed(0.5);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key:shuttle }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.playing).toBe(true);
+    expect(mediaMock.setRate).toHaveBeenLastCalledWith(1);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key:step }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mediaMock.playing).toBe(false);
+    expect(getJklSpeed()).toBe(0);
+    expect(mediaMock.seek.mock.lastCall[0]).toBeCloseTo(target, 8);
+    expect(mediaMock.setRate).toHaveBeenLastCalledWith(0.5);
+    expect(document.getElementById('speedIndicator').textContent).toBe('0.5x');
+  });
+
   it('還原失敗後再按播放鍵，須等明確重試成功才起播', async () => {
     mediaMock.supportsNativeReverse.mockReturnValue(true);
     mediaMock.play.mockImplementation(() => { mediaMock.playing = true; });

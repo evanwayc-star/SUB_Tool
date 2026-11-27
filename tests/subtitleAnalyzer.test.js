@@ -2,11 +2,32 @@
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/subtitle-model.js', () => ({ detectOverlaps: () => new Set() }));
-vi.mock('../src/subtitle-text-check.js', () => ({
-  inspectSubtitleCharacters: () => ({ simplified: [], unsupported: [] }),
-}));
 
 import { analyzeSubtitles } from '../src/subtitle-audit.js';
+import { createSubtitleDictionaryMatcher } from '../src/subtitle-text-check.js';
+
+describe('字庫檢查', () => {
+  it('只列出含完整詞組的句號，同一句命中多詞或重複出現只列一次', () => {
+    const cues = ['你我', '我和他', '你我他又是你我他', '你我他 [A+B]', '[A+B]', 'AB', '简あ']
+      .map((text, i) => ({ id: String(i), text }));
+    const dictionaryMatcher = createSubtitleDictionaryMatcher({
+      entries: ['你我他', '[A+B]'], includeUnsupported: false,
+    });
+    expect(analyzeSubtitles(cues, { dictionaryMatcher }).dictionaryIssues).toEqual([
+      { num: 3, matches: ['你我他'] },
+      { num: 4, matches: ['你我他', '[A+B]'] },
+      { num: 5, matches: ['[A+B]'] },
+    ]);
+  });
+
+  it('未自訂字庫時仍提示原先的簡體字及其他字元', () => {
+    const cues = ['臺灣，峰群', '测量', '測試ああ', '你我他'].map(text => ({ text }));
+    expect(analyzeSubtitles(cues).dictionaryIssues).toEqual([
+      { num: 2, matches: ['测'] },
+      { num: 3, matches: ['あ'] },
+    ]);
+  });
+});
 
 describe('連續相同字幕診斷', () => {
   it('同一影格內仍有真實間隙時，不可把兩句視為頭尾相接', () => {

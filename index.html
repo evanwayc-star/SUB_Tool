@@ -160,14 +160,14 @@
               <button class="icon" data-act="del-cue" title="刪除選取 (Del)"><span data-ui-icon="trash" aria-hidden="true"></span></button>
             </div>
             <div class="rhead-action-group" role="group" aria-label="時間與軌道工具">
-              <button class="icon" data-act="fps-convert" title="FPS 時間碼轉換"><span data-ui-icon="swap" aria-hidden="true"></span> FPS</button>
-              <button class="icon" data-act="shift-tc" title="時間碼位移 / 調整持續時間" aria-controls="shiftPanel" aria-expanded="false"><span data-ui-icon="shift" aria-hidden="true"></span> 調整</button>
-              <button class="icon" data-act="copy-track" title="複製字幕軌道至新軌道"><span data-ui-icon="copy" aria-hidden="true"></span> 複製</button>
-              <button class="icon" data-act="compare-track" title="比對字幕軌道"><span data-ui-icon="compare" aria-hidden="true"></span> 比對</button>
+              <button class="icon has-label" data-act="fps-convert" title="FPS 時間碼轉換"><span data-ui-icon="swap" aria-hidden="true"></span> FPS</button>
+              <button class="icon has-label" data-act="shift-tc" title="時間碼位移 / 調整持續時間" aria-controls="shiftPanel" aria-expanded="false"><span data-ui-icon="shift" aria-hidden="true"></span> 調整</button>
+              <button class="icon has-label" data-act="copy-track" title="複製字幕軌道至新軌道"><span data-ui-icon="copy" aria-hidden="true"></span> 複製</button>
+              <button class="icon has-label" data-act="compare-track" title="比對字幕軌道"><span data-ui-icon="compare" aria-hidden="true"></span> 比對</button>
             </div>
             <div class="rhead-action-group" role="group" aria-label="搜尋與檢查">
               <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)"><span data-ui-icon="search" aria-hidden="true"></span></button>
-              <button class="icon" data-act="check-panel" id="checkPanelBtn" title="字幕檢查 (9)" aria-controls="checkPanel" aria-expanded="false"><span data-ui-icon="check" aria-hidden="true"></span> 檢查</button>
+              <button class="icon has-label" data-act="check-panel" id="checkPanelBtn" title="字幕檢查 (9)" aria-controls="checkPanel" aria-expanded="false"><span data-ui-icon="check" aria-hidden="true"></span> 檢查</button>
             </div>
           </div>
         </div>
@@ -451,8 +451,8 @@
       <div class="cp-row cp-issue cp-contains-row" id="cpContains"><span class="cp-label">包含文字</span><input
           id="cpContainsInput" type="text" value="  ||　　|| 　||　 " aria-label="檢查包含的文字"
           title="以 || 分隔多個關鍵字（OR 搜尋，不分大小寫）&#10;預設：連續兩個半形空白、兩個全形空白、半形+全形、全形+半形"><span class="cp-nums"></span></div>
-      <div class="cp-row cp-issue" id="cpNonTraditional"><span class="cp-label"
-          title="檢查常見簡體字，以及日文假名、韓文、俄文、零寬空白等非允許字元。繁簡共用字（如「后、干、台、里」）不會誤報。">含非繁中等字元</span><span class="cp-nums"></span></div>
+      <div class="cp-row cp-issue" id="cpDictionary"><span class="cp-label">含<button type="button" class="cp-edit-dictionary"
+          data-act="edit-subtitle-dictionary" aria-label="編輯字庫" aria-haspopup="dialog">字庫</button>文字</span><span class="cp-nums"></span></div>
       <div class="cp-sep" role="separator"></div>
       <div class="cp-row" id="cpBlank"><span class="cp-label">　空白字幕</span><span class="cp-nums"></span></div>
       <div class="cp-row" id="cpTwo"><span class="cp-label">　字幕２行</span><span class="cp-nums"></span></div>

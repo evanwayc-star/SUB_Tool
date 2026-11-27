@@ -656,17 +656,17 @@ describe('語音辨識與字幕生成模組', () => {
     });
   });
 
-  it('選擇中文時把各辨識服務的簡體輸出轉為台灣繁體，且保留時間碼資料', () => {
+  it('選擇中文時把辨識結果轉為繁體字，保留用詞與時間碼', () => {
     const original = [{
       start: 1.25,
       end: 3.5,
-      text: '我来不及了，还没回来。软件和鼠标。',
+      text: '我 来 不 及 了，还 没 回 来。软 件 和 鼠 标。',
       confidence: 0.9
     }];
     expect(convertAsrSegmentsToTraditionalChinese(original, 'zh')).toEqual([{
       start: 1.25,
       end: 3.5,
-      text: '我來不及了，還沒回來。軟體和滑鼠。',
+      text: '我來不及了，還沒回來。軟件和鼠標。',
       confidence: 0.9
     }]);
     expect(convertAsrSegmentsToTraditionalChinese(original, 'en')).toBe(original);

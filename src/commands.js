@@ -16,6 +16,7 @@ import { openSpeechRecognitionDialog } from './speech-recognition.js';
 import { openScreenTextMonitorDialog } from './screen-text-recognition-dialog.js';
 import { importSub, showExportDialog, showExportVideoDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
 import { renderCheckPanel, deleteSelected } from './subtitles.js';
+import { openSubtitleDictionaryDialog } from './subtitle-dictionary-dialog.js';
 import {
   addCueRelative,
   trimTrackSpaces,
@@ -205,6 +206,7 @@ function createCommands() {
     'close-check': () => {
       closePanel('checkPanel');
     },
+    'edit-subtitle-dictionary': openSubtitleDictionaryDialog,
     'search-open': () => {
       const sd = $('searchDialog');
       if (sd) {

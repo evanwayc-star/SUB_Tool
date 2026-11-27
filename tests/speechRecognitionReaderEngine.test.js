@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const worker = vi.hoisted(() => ({ transcribeBuiltinAudioInWorker: vi.fn() }));
 vi.mock('../src/speech-recognition-worker-client.js', () => worker);
 import { transcribeAudioStream } from '../src/speech-recognition-engine.js';
+import { resolveRecognitionAlignment } from '../src/transcript-alignment.js';
 
 function pcm(duration, value = 1) {
   const samples = new Float32Array(Math.round(duration * 16000)).fill(value);
@@ -40,6 +41,72 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response()));
 });
 afterEach(() => vi.unstubAllGlobals());
+
+it.each(['google', 'openai'])('%s 自動辨識回傳未標語言的華語時，轉為繁體並保留原詞', async provider => {
+  const text = '我 在 用 数 据 库 。';
+  const responseData = provider === 'google'
+    ? { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text,
+      annotations: text.split(' ').map((word, index) => ({ type: 'word_info', text: word,
+        start_offset: `${index + 1}s`, end_offset: `${index + 1}.5s` })) }] }] }
+    : { text, segments: [{ text, start: 1, end: 7.5, speaker: 'A' }] };
+  fetch.mockResolvedValue({ ok: true, json: async () => responseData });
+
+  const segments = await transcribeAudioStream({ audioBuffer: pcm(8), provider, apiKey: 'test',
+    taskMode: 'transcribe', language: 'auto' });
+
+  expect(segments).toMatchObject([{ start: 1, end: 7.5, text: '我在用數據庫。' }]);
+});
+
+it.each([
+  ['chinese', '国 立 学 校', '國立學校'],
+  ['japanese', '中国語：「謝謝」。', '中国語：「謝謝」。'],
+  [undefined, '中国語の「謝謝」', '中国語の「謝謝」'],
+  [undefined, '国立学校', '国立学校'],
+  ['korean', '오늘 날씨가 좋네요.', '오늘 날씨가 좋네요.'],
+  ['english', 'Adobe Premiere is ready.', 'Adobe Premiere is ready.']
+])('Groq 自動偵測語言 %s 時保留正確的文字和詞間空白', async (language, text, expected) => {
+  fetch.mockResolvedValue({ ok: true, json: async () => ({ language, text,
+    segments: [{ start: 0.25, end: 0.75, text }] }) });
+
+  const segments = await transcribeAudioStream({ audioBuffer: pcm(1), provider: 'groq', apiKey: 'test',
+    taskMode: 'transcribe', language: 'auto' });
+
+  expect(segments).toMatchObject([{ start: 0.25, end: 0.75, text: expected }]);
+});
+
+it.each([
+  ['azure', { durationMilliseconds: 1000, phrases: [{ locale: 'zh-CN',
+    text: '国 立 学 校', offsetMilliseconds: 250, durationMilliseconds: 500 }] }],
+  ['elevenlabs', { language_code: 'zho', text: '国 立 学 校', words: [
+    { type: 'word', text: '国立', start: 0.25, end: 0.5 },
+    { type: 'word', text: '学校', start: 0.5, end: 0.75 }
+  ] }]
+])('%s 自動辨識可依服務回傳的中文語言代碼整理字幕', async (provider, data) => {
+  fetch.mockResolvedValue({ ok: true, json: async () => data });
+
+  const segments = await transcribeAudioStream({ audioBuffer: pcm(1), provider, apiKey: 'test',
+    taskMode: 'transcribe', language: 'auto' });
+
+  expect(segments).toMatchObject([{ start: 0.25, end: 0.75, text: '國立學校' }]);
+});
+
+it.each([
+  ['zh', '軟體、滑鼠、資料庫。'],
+  ['auto', '軟件、鼠標、數據庫。']
+])('句級文本匹配保留 %s 原稿和時間', async (language, transcript) => {
+  const text = '软件、鼠标、数据库。';
+  fetch.mockResolvedValue({ ok: true, json: async () => ({ language: 'chinese', text,
+    segments: [{ start: 1, end: 3, text }] }) });
+
+  const evidenceSegments = await transcribeAudioStream({ audioBuffer: reader(8), inT: 2, outT: 6,
+    provider: 'groq', apiKey: 'test', taskMode: 'align', language });
+  const { alignment, segments } = resolveRecognitionAlignment({ taskMode: 'align', transcript, evidenceSegments });
+
+  expect(alignment.status).toBe('aligned');
+  expect(alignment.summary.coverage).toBe(1);
+  expect(segments).toMatchObject([{ start: 1, end: 3, text: transcript, timed: true,
+    alignment: { timingEvidence: 'segment' } }]);
+});
 
 it('瀏覽器長音檔的 Gemini 文本匹配分批取逐字時間並還原到選定範圍', async () => {
   const lengths = [];
@@ -190,6 +257,27 @@ describe('bounded recognition source reader', () => {
     expect(result[1].start).toBeCloseTo(560.1, 6);
     expect(result[1].end).toBeCloseTo(561.1, 6);
     expect(JSON.stringify(result)).not.toContain('_whisperOverlapRef');
+  });
+
+  it('桌面長片先依原始詞裁掉重疊段，再整理字幕文字、保留標點與英文詞界', async () => {
+    const source = reader();
+    const words = '我 在 用 数 据 库 和 Adobe Premiere'.split(' ').map((text, index) => ({
+      start: 549 + index / 16, end: 549 + index / 16 + 1 / 32, text
+    }));
+    const excluded = { start: 550.25, end: 550.5, text: '另 一 句' };
+    const text = `「${words.map(word => word.text).join(' ')}。」 ${excluded.text}`;
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ language: 'chinese', text,
+      segments: [{ start: words[0].start, end: excluded.end, text }],
+      words: [...words, excluded].map(({ text, ...timing }) => ({ ...timing, word: text }))
+    }) }).mockResolvedValueOnce(response([{ start: 15, end: 16, text: 'New line.' }]));
+
+    const result = await transcribeAudioStream({ audioBuffer: source, inT: 123, outT: 724,
+      provider: 'groq', apiKey: 'test', taskMode: 'transcribe', language: 'auto' });
+
+    expect(result.map(segment => segment.text)).toEqual(['「我在用數據庫和 Adobe Premiere。」', 'New line.']);
+    expect(result[0]).toMatchObject({ start: words[0].start, end: words.at(-1).end, words });
+    expect(result[1].start).toBeCloseTo(560.1, 6);
+    expect(result[1].end).toBeCloseTo(561.1, 6);
   });
 
   it('builtin inference also stays bounded and retains model options and source-relative word times', async () => {

@@ -1,7 +1,7 @@
 /* ==============================================================================
    SUB Tool — 右鍵選單與互動對話框 ("src/menus.js")
    ============================================================================== */
-import { $, video, tlScroll, tlLayer } from './dom.js';
+import { $, tlScroll, tlLayer } from './dom.js';
 import { escapeHTML } from './util.js';
 import { State, isSel, setSelection, deselect, IS_DESKTOP } from './state.js';
 import { Media, Wave } from './media.js';
@@ -152,7 +152,7 @@ async function setCustomPlayerSpeed(){
   const raw=await promptModal(
     '自訂播放速度',
     '輸入播放速度（0.1–16）',
-    String(video.playbackRate||1),
+    String(State.monitorPlaybackRate),
     { placeholder:'例如 0.75、1.25 或 2', okLabel:'套用' }
   );
   if(raw==null) return;
@@ -162,7 +162,7 @@ async function setCustomPlayerSpeed(){
 function showPlayerMenu(x,y){
   const items=[{heading:true,label:'播放速度'}];
   [0.25,0.5,0.75,1,1.25,1.5,2].forEach(r=>items.push({label:r+'×',
-    checked:Math.abs((video.playbackRate||1)-r)<0.001,act:()=>setPlayerSpeed(r)}));
+    checked:State.monitorPlaybackRate===r,act:()=>setPlayerSpeed(r)}));
   items.push({sep:true},{label:'自訂速度…',act:setCustomPlayerSpeed});
   showCtx(x,y,items);
 }

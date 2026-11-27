@@ -83,7 +83,33 @@ export const BUILTIN_MODELS = {
   }
 };
 
-const simplifiedToTaiwanTraditional = OpenCC.Converter({ from: 'cn', to: 'twp' });
+const simplifiedToTraditional = OpenCC.Converter({ from: 'cn', to: 't' });
+const normalizeChineseAlignmentEvidence = OpenCC.Converter({ from: 'cn', to: 'twp' });
+const asrLanguageEvidence = Symbol('asrLanguageEvidence');
+
+function knownAsrLanguage(language) {
+  const code = typeof language === 'string' ? language.trim().toLowerCase().replaceAll('_', '-') : '';
+  return code === 'auto' || code === 'und' ? '' : code;
+}
+
+function isChineseAsrLanguage(language) {
+  return /^(?:zh|zho|chi|cmn|chinese|mandarin)(?:-|$)/u.test(language);
+}
+
+function inferAsrLanguage(segments) {
+  const transcript = segments.map(segment => segment.text).join(' ');
+  // Japanese can contain only kanji, including forms such as 国, 学 and 会.
+  // Without a provider locale, require a stronger Mandarin cue than Han text alone.
+  if (/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(transcript)) return '';
+  return /[这们吗请谢软库标识认语华东听简汉]|你好|您好|謝謝|對不起|國語|普通話/u.test(normalizeSubtitleSpacing(transcript)) ? 'zh' : '';
+}
+
+function recordAsrLanguage(segments, requestedLanguage, detectedLanguage) {
+  if (knownAsrLanguage(requestedLanguage)) return segments;
+  const language = knownAsrLanguage(detectedLanguage) || inferAsrLanguage(segments);
+  if (!language) return segments;
+  return segments.map(segment => ({ ...segment, [asrLanguageEvidence]: language }));
+}
 
 /**
  * 正規化字幕空白間距：
@@ -97,26 +123,30 @@ export function normalizeSubtitleSpacing(text, locale = 'zh') {
     // 韓文詞與詞之間的空白承載詞義，即使出現在中文或日文字幕中也要保留。
     result = result.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])\s+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])/gu, '');
     // 2. 去除 CJK 與中文/通用標點符號之間的空白
-    result = result.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[\s\u3000\u00A0]+(?=[，。！？、；：”’」』）】》〉!?,.:;])/gu, '');
-    result = result.replace(/(?<=[“‘「『（【《〈!?,.:;])[\s\u3000\u00A0]+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])/gu, '');
+    result = result.replace(/(?<=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[\s\u3000\u00A0]+(?=[，。！？、；：“‘”’「」『』（）【】《》〈〉!?,.:;])/gu, '');
+    result = result.replace(/(?<=[，。！？、；：“‘」』）】》〉「『（【《〈!?,.:;])[\s\u3000\u00A0]+(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])/gu, '');
   }
   // 3. 多重空白收斂為單一空格
   result = result.replace(/[\s\u3000\u00A0]+/gu, ' ').trim();
   return result;
 }
 
-export function convertAsrSegmentsToTraditionalChinese(segments, language = 'zh') {
-  if (language !== 'zh' || !Array.isArray(segments)) return segments;
+export function convertAsrSegmentsToTraditionalChinese(segments, language = 'zh', { taskMode, provider } = {}) {
+  const requestedLanguage = knownAsrLanguage(language);
+  if (!Array.isArray(segments) || (requestedLanguage && !isChineseAsrLanguage(requestedLanguage))) return segments;
+  // Text matching uses a copy of the speech evidence; its subtitles use the supplied script.
+  const forAlignment = taskMode === 'align';
+  const convert = forAlignment ? normalizeChineseAlignmentEvidence : simplifiedToTraditional;
   return segments.map(segment => {
-    let text = segment?.text;
-    if (typeof text === 'string') {
-      text = simplifiedToTaiwanTraditional(text);
-      text = normalizeSubtitleSpacing(text, language);
+    const { [asrLanguageEvidence]: responseLanguage, ...result } = segment || {};
+    const detectedLanguage = !forAlignment || provider === 'builtin'
+      ? knownAsrLanguage(result.locale) || responseLanguage
+      : '';
+    const effectiveLanguage = requestedLanguage || detectedLanguage;
+    if (isChineseAsrLanguage(effectiveLanguage) && typeof result.text === 'string') {
+      result.text = convert(normalizeSubtitleSpacing(result.text, 'zh'));
     }
-    return {
-      ...segment,
-      text
-    };
+    return result;
   });
 }
 
@@ -582,7 +612,7 @@ export async function callGeminiAudioTranscription({
 
   const systemInstruction = `你是一位專業的頂級影視對白字幕聽打專家。請聆聽所附音訊，依據人聲起迄時間精準生成字幕片段。
 必須遵循以下規則：
-1. 語言請務必使用「${langText}」輸出，若為中文一律使用台灣繁體中文標準用字。
+1. 辨識語言為「${langText}」。請按實際發音記錄原話，中文使用繁體字，保留原本用詞。
 2. 包含標點符號，句子語意完整，單句長度適中（建議 15~25 字以內）。
 3. 嚴格輸出 JSON 格式陣列，不要加入額外的 Markdown 標籤或解釋，格式如下：
 [
@@ -1314,11 +1344,12 @@ export async function callElevenLabsSpeechTranscription({
     throw new Error(`ElevenLabs 語音辨識失敗 (HTTP ${response.status})${safeDetail ? `：${safeDetail}` : ''}`);
   }
 
-  const result = parseElevenLabsTranscriptionResponse(await response.json(), audioDuration);
+  const data = await response.json();
+  const result = parseElevenLabsTranscriptionResponse(data, audioDuration);
   if (automatic && result.text && !result.segments.some(segment => segment.words.length)) {
     throw new Error('ElevenLabs 未回傳有效的逐字時間');
   }
-  return result;
+  return typeof data?.language_code === 'string' ? { ...result, language: data.language_code } : result;
 }
 
 /**
@@ -1412,7 +1443,7 @@ export async function callWhisperApi({
       return [{ start, end, text, ...(typeof segment.speaker === 'string' ? { speaker: segment.speaker } : {}) }];
     });
     if (!segments.length && (data?.text?.trim() || data?.segments?.length)) throw new Error('OpenAI 未回傳有效的字幕起訖時間');
-    return { text: data?.text || '', segments, words: [] };
+    return { text: data?.text || '', segments, words: [], ...(typeof data?.language === 'string' ? { language: data.language } : {}) };
   }
   const words = Array.isArray(data?.words)
     ? data.words.flatMap(word => {
@@ -1472,7 +1503,8 @@ export async function callWhisperApi({
   return {
     text: data.text || '',
     segments,
-    words
+    words,
+    ...(typeof data?.language === 'string' ? { language: data.language } : {})
   };
 }
 
@@ -1592,6 +1624,7 @@ function offsetWhisperSegments(
       : text;
     return [{
       ...(preserveProviderMetadata ? segment : {}),
+      ...(segment[asrLanguageEvidence] ? { [asrLanguageEvidence]: segment[asrLanguageEvidence] } : {}),
       start: words.length ? words[0].start : start,
       end: words.length ? words.at(-1).end : end,
       text: retainedText,
@@ -1752,7 +1785,7 @@ async function transcribeRecognitionReader(source, options) {
     const buffer = await readRecognitionRange(source, chunk.start, chunk.end, signal);
     // Each provider receives the same bounded, source-aligned PCM with local
     // zero as its origin. The session owns close(); this engine owns no files.
-    const segments = await transcribeAudioStream({ ...options, audioBuffer: buffer,
+    const segments = await transcribeAudioSegments({ ...options, audioBuffer: buffer,
       inT: 0, outT: buffer.duration, onProgress: update => {
         if (signal?.aborted) return;
         const fraction = Math.max(0, Math.min(1, (Number(update?.percent) || 0) / 100));
@@ -1782,7 +1815,14 @@ async function transcribeRecognitionReader(source, options) {
 /**
  * 統一音訊串流辨識總入口（深層模組核心接縫）
  */
-export async function transcribeAudioStream({
+export async function transcribeAudioStream(options) {
+  const { taskMode, provider, language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh' } = options;
+  const segments = await transcribeAudioSegments({ ...options, language });
+  // Overlap stitching needs the original transcript and word spellings.
+  return convertAsrSegmentsToTraditionalChinese(segments, language, { taskMode, provider });
+}
+
+async function transcribeAudioSegments({
   audioBuffer,
   inT = 0,
   outT = null,
@@ -1796,7 +1836,7 @@ export async function transcribeAudioStream({
   keyterms = [],
   elevenlabsNumSpeakers = null,
   elevenlabsTagAudioEvents = false,
-  language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh',
+  language,
   prompt = '',
   temperature = 0,
   vocalFilter = false,
@@ -1832,9 +1872,9 @@ export async function transcribeAudioStream({
       signal
     });
     throwIfRecognitionAborted(signal);
-    return convertAsrSegmentsToTraditionalChinese(
+    return recordAsrLanguage(
       Array.isArray(res?.segments) ? res.segments : [],
-      res?.language || language
+      language, res?.language
     );
   }
 
@@ -1893,7 +1933,7 @@ export async function transcribeAudioStream({
         ? result.segments
         : (result?.text ? [{ start: 0, end: chunk.end - chunk.start, text: result.text }] : []);
       allSegments.push(...offsetWhisperSegments(
-        chunkSegments,
+        recordAsrLanguage(chunkSegments, language, result?.language),
         chunkOffset,
         duration,
         coreStart,
@@ -1910,10 +1950,7 @@ export async function transcribeAudioStream({
       });
     }
 
-    return convertAsrSegmentsToTraditionalChinese(
-      deduplicateWhisperOverlapSegments(allSegments, chunkEvidence, chunks, inT),
-      language
-    );
+    return deduplicateWhisperOverlapSegments(allSegments, chunkEvidence, chunks, inT);
   }
 
   // Desktop supplies a range reader. Browser-decoded long clips use the same
@@ -1946,10 +1983,7 @@ export async function transcribeAudioStream({
       signal
     });
     throwIfRecognitionAborted(signal);
-    return convertAsrSegmentsToTraditionalChinese(
-      Array.isArray(res?.segments) ? res.segments : [],
-      language
-    );
+    return recordAsrLanguage(Array.isArray(res?.segments) ? res.segments : [], language);
   }
 
   if (provider === 'azure') {
@@ -1962,10 +1996,7 @@ export async function transcribeAudioStream({
       signal
     });
     throwIfRecognitionAborted(signal);
-    return convertAsrSegmentsToTraditionalChinese(
-      Array.isArray(res?.segments) ? res.segments : [],
-      language
-    );
+    return recordAsrLanguage(Array.isArray(res?.segments) ? res.segments : [], language);
   }
 
   if (provider === 'elevenlabs') {
@@ -1984,10 +2015,7 @@ export async function transcribeAudioStream({
       signal
     });
     throwIfRecognitionAborted(signal);
-    return convertAsrSegmentsToTraditionalChinese(
-      Array.isArray(res?.segments) ? res.segments : [],
-      language
-    );
+    return recordAsrLanguage(Array.isArray(res?.segments) ? res.segments : [], language, res?.language);
   }
 
   throw new Error(`不支援的語音辨識供應商：${provider}`);

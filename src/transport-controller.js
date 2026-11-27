@@ -29,6 +29,7 @@ function createReverseShuttleSession({
   media,
   presentation,
   getExactFps,
+  getMonitorRate = () => 1,
   onPresented,
   onReachedStart,
   onRestoreFailed,
@@ -276,7 +277,7 @@ function createReverseShuttleSession({
     } else {
       rememberStop(pendingDirectionRestore || previousStop || true);
     }
-    media?.setRate?.(1);
+    media?.setRate?.(getMonitorRate());
     media?.setReverseShuttleMuted?.(false);
     mode = 'idle';
     return true;
@@ -303,7 +304,7 @@ let _pendingForwardPlay = null;
 function reportShuttleRestoreFailure() {
   _jklIntentVersion += 1;
   _jklSpeed = 0;
-  Media.setRate(1);
+  Media.setRate(State.monitorPlaybackRate);
   setStatus('無法還原正向播放，已暫停；請重新嘗試', 'err');
   updateSpeedIndicator();
 }
@@ -333,6 +334,7 @@ const _reverseSession = createReverseShuttleSession({
     presentedTime: () => Media.presentedTime(),
   },
   getExactFps: () => getExactFps(State.fps || 30),
+  getMonitorRate: () => State.monitorPlaybackRate,
   snapFrame: t => snapTimeToFrame(t, State.fps, State.dropFrame),
   onPresented() {
     updatePlayhead();
@@ -365,7 +367,7 @@ function updateSpeedIndicator() {
   const el = document.getElementById('speedIndicator');
   if (!el) return;
   if (_jklSpeed === 0 || _jklSpeed === 1) {
-    const rate = Math.round((video.playbackRate || 1) * 100) / 100;
+    const rate = _jklSpeed || State.monitorPlaybackRate;
     el.textContent = rate + 'x';
     el.style.color = Math.abs(rate - 1) < 0.001 ? 'var(--text-faint)' : 'var(--accent)';
   } else if (_jklSpeed < 0) {
@@ -388,9 +390,8 @@ function setJklSpeed(speed) {
 
 function resetPlaybackSpeed() {
   _jklIntentVersion += 1;
-  jklClear();
+  if (!jklClear()) Media.setRate(State.monitorPlaybackRate);
   _jklSpeed = 0;
-  Media.setRate(1);
   updateSpeedIndicator();
 }
 
@@ -421,18 +422,17 @@ on('transport:pointerSeekPause', pauseForPointerSeek);
 
 
 function setManualPlaybackSpeed(rate) {
-  _jklIntentVersion += 1;
-  jklClear();
-  _jklSpeed = 0;
-  Media.setRate(rate);
-  updateSpeedIndicator();
+  State.monitorPlaybackRate = rate;
+  resetPlaybackSpeed();
 }
 
 function jklApply() {
   _jklIntentVersion += 1;
   if (_jklSpeed === 0) {
-    if (!jklClear()) Media.pause();
-    Media.setRate(1);
+    if (!jklClear()) {
+      Media.pause();
+      Media.setRate(State.monitorPlaybackRate);
+    }
   } else if (_jklSpeed > 0) {
     jklClear();
     Media.setRate(_jklSpeed);
@@ -483,11 +483,8 @@ let _lastRepeatDir = 0;
 let _lastRepeatTime = 0;
 
 function stepFrame(dir, repeat = false) {
-  if (Media.playing || _jklSpeed !== 0) {
-    jklClear();
-    _jklSpeed = 0;
-    if (Media.playing) Media.pause({ seekOnPause: false });
-  }
+  if (_jklSpeed !== 0) resetPlaybackSpeed();
+  if (Media.playing) Media.pause({ seekOnPause: false });
 
   // 方向鍵長按 (repeat=true) 維持純粹的連續逐格步進，節流在 50ms（約 20fps），
   // 嚴禁切換成 JKL 倒帶/快轉穿梭，徹底消除誤轉倒播與放開按鍵時 loadfile 造成的劇烈抖動。
@@ -521,11 +518,8 @@ function stepFrame(dir, repeat = false) {
 
 /* ===== 播放頭微調 (Nudge) ================================================= */
 function nudge(d) {
-  if (Media.playing || _jklSpeed !== 0) {
-    jklClear();
-    _jklSpeed = 0;
-    if (Media.playing) Media.pause({ seekOnPause: false });
-  }
+  if (_jklSpeed !== 0) resetPlaybackSpeed();
+  if (Media.playing) Media.pause({ seekOnPause: false });
   // FPS-SYNC（詳見 FPS_時碼一致性.md）：以權威播放點為基準，並精確吸附至影格格網
   const exactFps = getExactFps(State.fps || 30);
   const currentT = Media.displayTime();

@@ -36,6 +36,7 @@ npm run electron
 | 工作 | 從這裡讀 |
 |---|---|
 | 操作與交付 | [使用說明](docs/使用說明.md) · [快捷鍵](docs/使用說明.md#11-常用快捷鍵) · [波形與 Proxy](docs/使用說明.md#proxy取消與換專案) |
+| 逐句聽打與校稿 | [播放倍率](docs/使用說明.md#播放倍率) · [國語語音辨識](docs/使用說明.md#語音辨識) · [字幕檢查與字庫](docs/使用說明.md#字幕檢查) |
 | 擷取影片畫面文字 | [辨識畫面文字及首次設定](docs/使用說明.md#辨識畫面文字) |
 | Agent 接手專案 | [AGENTS.md](AGENTS.md) · [Issue 工作流程](docs/agents/issue-tracker.md) · [分流標籤](docs/agents/triage-labels.md) · [領域文件設定](docs/agents/domain.md) |
 | 查指令、驗收、打包、發版 | [開發與驗證](docs/開發與驗證.md) |

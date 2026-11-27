@@ -9,7 +9,7 @@
 import { $, sublist } from './dom.js';
 import { State, isSel, trackVisible, cueSuffix, setSelection, deselect, pruneSelection } from './state.js';
 import { escapeHTML, escapeHTMLWithSpaces } from './util.js';
-import { inspectSubtitleCharacters } from './subtitle-text-check.js';
+import { getSubtitleDictionaryMatcher } from './subtitle-dictionary-dialog.js';
 import { secToEncore, snapTimeToFrame } from './time.js';
 import { Media } from './media.js';
 import { requestPointerSeek } from './timeline-interaction-engine.js';
@@ -344,8 +344,8 @@ function renderCheckPanel(){
   const previousContains=_checkContains;
   _checkContains=containsRaw.split('||').map(s=>s.trim()===''?s:s.replace(/^[ ]+|[ ]+$/g,'')).filter(s=>s.length>0);
 
-  const report = analyzeSubtitles(list, { checkLenLimit: _checkLenLimit, checkContains: _checkContains, fps: State.fps });
-  const { overlapNums, multiNums, twoNums, blankNums, bNums, iNums, uNums, fontNums, posNums, trimNums, overLenNums, containsNums, nonTraditionalIssues, noTimeNums, consecutiveIdenticalRanges=[] } = report;
+  const report = analyzeSubtitles(list, { checkLenLimit: _checkLenLimit, checkContains: _checkContains, dictionaryMatcher: getSubtitleDictionaryMatcher(), fps: State.fps });
+  const { overlapNums, multiNums, twoNums, blankNums, bNums, iNums, uNums, fontNums, posNums, trimNums, overLenNums, containsNums, dictionaryIssues, noTimeNums, consecutiveIdenticalRanges=[] } = report;
   
   const mkNums=nums=>nums.length?nums.map(n=>`<button type="button" class="cp-num" data-idx="${n}" aria-label="前往第 ${n} 句字幕">${n}</button>`).join(' '):'無';
   const identicalGroups=new Map();
@@ -358,12 +358,10 @@ function renderCheckPanel(){
     const action=joined?`選取第 ${start} 至 ${end} 句字幕，前往第 ${start} 句`:`前往第 ${start} 句字幕`;
     return `<button type="button" class="cp-num identical-group-${group.color}${joined?' cp-joined-identical':''}" data-idx="${start}" data-end-idx="${end}" data-identical-group="${group.number}" title="第 ${group.number} 組相同字幕${joined?'（頭尾相接）':''}" aria-label="${action}">${label}</button>`;
   }).join(' '):'無';
-  const mkCharacterIssueNums=issues=>issues.length?issues.map(({num,simplified,unsupported})=>{
-    const detail=[];
-    if(simplified.length) detail.push('常見簡體：'+simplified.join('、'));
-    if(unsupported.length) detail.push('非允許字元：'+unsupported.map(ch=>/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/u.test(ch)?`U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}`:ch).join('、'));
-    return `<button type="button" class="cp-num" data-idx="${num}" aria-label="前往第 ${num} 句字幕：${escapeHTML(detail.join('；'))}" title="${escapeHTML(detail.join('；'))}">${num}</button>`;
-  }).join(' '):'無';
+  const dictionaryNumbers=dictionaryIssues.map(({num,matches})=>{
+    const detail=escapeHTML(matches.join('、').replace(/[\p{Cf}\p{Cc}]/gu,ch=>`U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}`));
+    return `<button type="button" class="cp-num" data-idx="${num}" aria-label="前往第 ${num} 句字幕，含 ${detail}" title="${detail}">${num}</button>`;
+  }).join(' ');
   setCheckResult('cpNoTime',mkNums(noTimeNums));
   setCheckResult('cpOverlap',mkNums(overlapNums));
   setCheckResult('cpMulti',mkNums(multiNums));
@@ -378,7 +376,7 @@ function renderCheckPanel(){
   setCheckResult('cpSrtPos',mkNums(posNums));
   setCheckResult('cpOverLen',_checkLenLimit?mkNums(overLenNums):'未設定');
   setCheckResult('cpContains',_checkContains.length?mkNums(containsNums):'未設定');
-  setCheckResult('cpNonTraditional',mkCharacterIssueNums(nonTraditionalIssues));
+  setCheckResult('cpDictionary',`<span class="cp-dictionary-count">${dictionaryIssues.length} 句</span>${dictionaryNumbers ? ' '+dictionaryNumbers : ''}`);
   const limitChanged=previousLimit!==_checkLenLimit;
   const containsChanged=previousContains.length!==_checkContains.length || previousContains.some((word,i)=>word!==_checkContains[i]);
   if(limitChanged||containsChanged){

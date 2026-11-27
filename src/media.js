@@ -2928,7 +2928,6 @@ const Media = {
       if(!currentRequest())return;
       this.activeClipId = c.id;
       this._leaveGap();
-      this._applyClipRate(c);
       this.stopBufferSources(); // buffer 音軌隸屬 primary：換段先停，resume 時依 _srcHidden 決定是否重啟
       const _tl = Seq.toTimeline(localT, c);
       if(resume===true)this._transport.seek(_tl,{duration:State.duration,fps:State.fps,dropFrame:State.dropFrame});
@@ -2983,6 +2982,7 @@ const Media = {
           }
           this._reverseProxyActive=!!c.reverse;
           this._mpvTime = localT;
+          this._applyClipRate(c);
           const direction=await getPlayerAdapter().direction(c.reverse?'backward':'forward').catch(()=>false);
           if(!owns()) return;
           if(direction===false){retryIfSuperseded=false;rejectDirection();return;}
@@ -3017,6 +3017,9 @@ const Media = {
           if(video.duration) Seq.observeSourceDuration(c, maxKnownSourceDuration(c.dur,getPlayerAdapter().sourceDuration(video.duration,url)));
         }
         if(!owns()) return;
+        // Chromium resets playbackRate when src changes. Read the current rate
+        // after metadata so a choice made while loading also reaches this clip.
+        this._applyClipRate(c);
         const ownsSeek=()=>owns()&&(resume!==true||shouldResume());
         try{
           const pending=getPlayerAdapter().seekElement(video,localT,{signal:work.signal,owns:ownsSeek});
@@ -3126,6 +3129,7 @@ const Media = {
       Seq.restoreMetadata(c,{...c,...pri,in:c.in,out:c.out,offset:c.offset});
       Seq.sort(); Seq.recomputeDuration();
     }
+    this._applyClipRate(c);
     if(projectRestore&&restoreOwns()){
       projectRestore.materializeClip?.(pri,c);
       emit('media:projectClipRestored',{clips:[Seq.persistentMetadata(c)]});
@@ -4072,14 +4076,14 @@ const Media = {
     if(!this.mpvMode||this._nativeReverse||this.webCodecsTakeover()||this._gap||!clip?.reverse||Seq.isStill(clip)
       ||State.videoTracks[clip.vtrack]?.visible===false
       ||!this._reverseProxyActive||path!==this._reverseProxyPath||clip.path!==this._reverseProxySourcePath||!DESK?.fileURL) return;
-    const rate=video.playbackRate,ownsTarget=this.capturePlaybackTargetOwnership();
+    const rate=this._clipPlaybackRate(clip),ownsTarget=this.capturePlaybackTargetOwnership();
     if(!(rate>0)||!Number.isFinite(rate)||!Number.isFinite(sourceTime)||sourceTime<=clip.in) return;
     const range=[clip.in,clip.out,clip.speed,clip.offset,clip.vtrack],mother=clip.path;
     const work={clip,path,rate,sourceTime,phase:'index',retried:false};
     this._reverseStartup=work;
     work.owns=()=>this._reverseStartup===work&&this.playing&&ownsTarget()&&this.mpvMode
       &&getPlayerAdapter()===adapter&&this._activeClip()===clip&&clip.path===mother&&clip.reverse
-      &&clip.in===range[0]&&clip.out===range[1]&&clip.speed===range[2]&&video.playbackRate===rate
+      &&clip.in===range[0]&&clip.out===range[1]&&clip.speed===range[2]&&this._clipPlaybackRate(clip)===rate
       &&clip.offset===range[3]&&clip.vtrack===range[4]&&State.videoTracks[clip.vtrack]?.visible!==false
       &&this._mpvPath===path&&this._reverseProxyActive&&!this._nativeReverse&&!this.webCodecsTakeover();
     try{
@@ -4666,7 +4670,7 @@ const Media = {
     if(targetIdx >= 0) { Wave.selectSource(targetIdx); }
     emit('media:srcSel');
   },
-  _manualRate:1,
+  _transportRate:1,
   async prepareClipFreeze(c,time){
     if(!c||c.type==='image'||Seq.byId(c.id)!==c||!Number.isFinite(time)||time<0) return null;
     const operation=this._assetOperation(null,{kind:'clip-freeze-frame',path:c.path,time},()=>Seq.byId(c.id)===c);
@@ -4738,7 +4742,7 @@ const Media = {
   audioSourceRate(source,t){
     const clip=this.externalAudio.bySource(source)||State.clips.find(c=>!Seq.isStill(c)&&Seq.isActiveAt(c,t)&&
       (c.audioSrc||(c.primary?'video':'clip:'+c.id))===source);
-    return this._manualRate*(Number(clip?.speed)>0?Number(clip.speed):1);
+    return this._clipPlaybackRate(clip);
   },
   audioSourcePlayback(source,t){
     return this.audioSourcePlaybacks(source,t)[0]||null;
@@ -4756,7 +4760,7 @@ const Media = {
       (c.audioSrc||(c.primary?'video':'clip:'+c.id))===source);
     return clips.map(clip=>({clip,reverse:!!clip.reverse,sourceTime:Seq.toSource(t,clip),
       offset:clip.reverse?Seq.toReverseAudio(t,clip):Seq.toSource(t,clip),
-      rate:this._manualRate*(Number(clip.speed)>0?Number(clip.speed):1)}));
+      rate:this._clipPlaybackRate(clip)}));
   },
   async prepareClipReverseAudio(c){
     if(!c?.reverse||c.audioDetached||Seq.isStill(c)) return true;
@@ -4854,9 +4858,15 @@ const Media = {
       return false;
     }finally{signal?.removeEventListener('abort',cancel);}
   },
+  _clipPlaybackRate(clip){
+    return this._transportRate*(Number(clip?.speed)>0?Number(clip.speed):1);
+  },
   _applyClipRate(clip){
-    const rate=this._manualRate*(Number(clip?.speed)>0?Number(clip.speed):1);
-    video.playbackRate=rate;
+    const rate=this._clipPlaybackRate(clip);
+    // The hidden HTML mirror cannot represent every rate mpv can play.
+    // Keep the native transport at the exact product of the clip and monitor rates.
+    try{ video.playbackRate=rate; }
+    catch(error){ if(!this.mpvMode||error.name!=='NotSupportedError') throw error; }
     if('preservesPitch' in video) video.preservesPitch=rate>=0.25&&rate<=4;
     getPlayerAdapter().rate(rate).catch(()=>{});
     for(const tr of this.tracks){
@@ -4875,7 +4885,7 @@ const Media = {
     if(this._transport.virtualStartedAt!==null && (this.audioOnlyTimeline() || !video.hasAttribute('src'))){
       this._transport.reanchorVirtual({playbackRate:video.playbackRate||1});
     }
-    this._manualRate=r;
+    this._transportRate=r;
     this._applyClipRate(this.seqOn()?this._activeClip():null);
     if(resumeRecovery&&this.playing){
       this._presentationSession?.setPlaybackIntent(false);
@@ -4948,6 +4958,7 @@ const Media = {
       if(previousPath&&owns()) await this._performReverseShuttleSourceSwitch(previousPath,previousProxy,{owns,reposition:false});
       return false;
     }
+    this._applyClipRate(clip);
     if(!proxy){
       const activeClip=this.seqOn()?this._activeClip():null;
       if(activeClip&&activeClip===clip&&clip.path===path&&loaded.sourceSessionId){
@@ -5188,7 +5199,8 @@ const Media = {
     // 注意：videoSrcNode 需重用，不可 null（同一 video 只能建立一次 source）
     for(const url of [...this.objectURLs]) if(!keepObjectURLs.has(url)) this._releaseObjectURL(url);
     this.playing=false; this._transport.reset();
-    this._manualRate=1; video.playbackRate=1;
+    this._transportRate=State.monitorPlaybackRate ?? 1;
+    video.playbackRate=this._transportRate;
     // 影片序列：清空（取代式載入=開新序列；載入完成後由 _registerPrimary 重新登錄第一段）
     Seq.clear(); this.activeClipId=null; this._mpvPath=null; deselect('video'); deselect('audio');
     if(!options.keepVideoTracks) resetVideoTracks();
