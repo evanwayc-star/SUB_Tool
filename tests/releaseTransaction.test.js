@@ -576,15 +576,18 @@ describe('release transaction', () => {
       .toHaveLength(1);
   });
 
-  it('package scripts 讓 prepare 與 predist 共用同一個 release guard', () => {
+  it('package scripts 共用 release guard，來源與工具通過後才建置辨識核心', () => {
     const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8'));
 
     expect(packageJson.scripts['release:prepare'])
       .toBe('node scripts/release/release-transaction.js prepare');
     expect(packageJson.scripts['release:verify-source'])
       .toBe('node scripts/release/release-transaction.js verify');
-    expect(packageJson.scripts.predist)
-      .toBe('npm run release:verify-source && node scripts/release/verify-native-binaries.js --platform win32 --arch x64');
+    expect(packageJson.scripts.predist.split(' && ')).toEqual([
+      'npm run release:verify-source',
+      'node scripts/release/verify-native-binaries.js --platform win32 --arch x64',
+      'npm run native:prepare:card-vision',
+    ]);
   });
 
   it('任何 content guard 失敗都在 manifest 寫入前中止', () => {

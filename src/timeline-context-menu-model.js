@@ -91,6 +91,7 @@ export function buildVideoClipMenu(context, actions = {}) {
     isImage = false,
     locked = false,
     canReveal = false,
+    canRecognizeScreenText = false,
     canSplit = false,
     trimmed = false,
     audioDetached = false,
@@ -108,6 +109,9 @@ export function buildVideoClipMenu(context, actions = {}) {
   appendGroup(items, [
     canReveal ? action('reveal_source', '📂 在檔案管理器中顯示', actions.revealSource) : null,
     action('seek_clip_start', '⏱ 播放頭移到此片段開頭', actions.seekStart),
+    canRecognizeScreenText && !isImage && !frozen
+      ? action('screen_text_recognition', '🔤 辨識畫面文字', actions.recognizeScreenText)
+      : null,
   ], { separator: false });
 
   if (locked) return items;

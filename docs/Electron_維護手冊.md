@@ -55,6 +55,8 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 
 `settings-file.js` 各自持有 `settings.json` 與 `key.json`。相鄰暫存發布前驗身分與內容。遇解析錯誤先備份原 bytes 至 `.corrupt-*`，無法備份就拒絕覆寫。失敗要回報。最近清單暫讀失敗不以空陣列回寫，最近目錄從交易內的 `current.lastDirs` 合併，成功才更新顯示快取。[隔離設定與 CDP](開發與驗證.md#3-真機驗證cdp)
 
+畫面文字辨識的供應商、模型及取樣設定另存 `getConfigDir()/screen-text-settings.json`；其中 `encryptedKeys` 只保存 Electron `safeStorage` 密文，renderer 讀回金鑰就緒狀態。沒有已存金鑰時，才使用對應的 `OPENAI_API_KEY` 或 `GEMINI_API_KEY`／`GOOGLE_API_KEY` 環境變數。明文只隨本次工作經 stdin 傳入核心，不放在程序 argv、專案或快取。辨識快取位於同設定目錄的 `card-vision-cache`。
+
 ## 3. Preload／IPC 介面
 
 需要完整簽名、欄位、通道或事件名時，直接讀對應 preload。一般操作使用 `invoke`／Promise。`send` 無回覆，事件另有 listener 生命週期。新增入口須同步驗 sender、main 准入、preload 與回歸測試。事件包裝不把 Electron event 交給頁面。
@@ -70,6 +72,7 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 | 來源與載入 | `probe(path)`、`mediaSourceKey(path)`。`ingest(opts)`／`streamIngest(opts)` 傳來源、duration、音訊配置、sessionId、requestId。`prepareSourceWaveform(opts)` 以 `sourceWaveformContinuous` 判斷連續能力。`releaseStream` 只釋放該 sender 的 reader。 |
 | 聲道與效果 | `audioSourceFingerprint` 對應 `audio:source-fingerprint`，`vocalWaveFingerprint` 對應 `audio:vocal-wave-fingerprint`。`normalizeAudio`／`analyzeAudioLoudness` 各帶 requestId。`audioEffectPeaks` 讀顯示資料，`releaseAudioEffect` 歸還 lease。 |
 | 辨識 | `speechAudioRead` 讀授權母素材，按 stream／channel 與來源時間取得 16 kHz mono Float32，每段最多 600 秒。`speechAudioCancel` 限同 sender／request。`compressSpeechAudio` 接 44–20,000,000 bytes WAV 與壓縮 requestId，取消涵蓋 MP3 讀取及清理。 |
+| 畫面文字 | `getScreenTextSettings`／`saveScreenTextSettings` 讀寫私有辨識設定。`recognizeScreenText` 傳授權母素材的來源範圍與非機密設定；main 選擇自有 Rust 引擎、FFmpeg／ffprobe、金鑰與快取路徑。`cancelScreenText` 及 `onScreenTextProgress` 以 sender／requestId 配對，取消必須等待本次原生程序關閉。 |
 | 交付 | `beginDeliveryTargetRequest` → `prepareDeliveryTargets` → 各列 `exportVideo`，之後 `finishDeliveryTargetRequest` 或取消該 ticket。`stopExport(jobId)` 只停該交付，媒體取消另走 `cancelMediaIntake`。 |
 
 ### 主頁面：mpv
@@ -252,7 +255,9 @@ Apple Silicon 測試包回報 mpv 不支援。使用 ffmpeg ingest／Proxy、HTM
 
 ## 7. 打包與發布
 
-核對 [package.json](../package.json) 的平台 `files`、`asarUnpack` 與 `extraResources`。兩平台皆需 shared。standalone watchdog、lease、artifact 及格式相依須可在 ASAR 外執行。字型在 extraResources。Windows 收 §4／§5 工具、光碟 manifest 與授權。NSIS 為 perMachine。不要在 repo 根執行 `asar extract-file`。核對同一份安裝器、ASAR 來源及原生能力的順序見[正式發版與 Mac 分流](開發與驗證.md#2-建置與發版流程)。
+核對 [package.json](../package.json) 的平台 `files`、`asarUnpack` 與 `extraResources`。兩平台皆需 shared。standalone watchdog、lease、artifact 及格式相依須可在 ASAR 外執行。字型在 extraResources。畫面文字辨識的 Rust 執行檔由 `electron/card-vision/bin/<platform>-<arch>/` 複製至 `resources/card-vision/`，其原始碼、Cargo target 與舊 Python worker 不進安裝包。Windows 收 §4／§5 工具、光碟 manifest 與授權。NSIS 為 perMachine。不要在 repo 根執行 `asar extract-file`。核對同一份安裝器、ASAR 來源及原生能力的順序見[正式發版與 Mac 分流](開發與驗證.md#2-建置與發版流程)。
+
+Rust 建置會依 Cargo.lock 與目標平台產生 `THIRD_PARTY_NOTICES.txt`，並附上工具鏈提供的 `RUST_STANDARD_LIBRARY_NOTICES.html`；兩份均隨核心放在 `resources/card-vision/`。缺少實際授權文字時建置失敗，不能只複製執行檔交付。[授權文字生成器](../scripts/release/card-vision-notices.js)
 
 ## 8. 排查
 
@@ -261,6 +266,7 @@ Apple Silicon 測試包回報 mpv 不支援。使用 ffmpeg ingest／Proxy、HTM
 | 現象 | 先查／怎麼驗 |
 |---|---|
 | 啟動或原生工具失敗 | 查 `status()`、`mpv.detect()`、平台、工具路徑與實際 ASAR／unpacked 內容。主程序啟動錯誤另查 shared 是否封裝。 |
+| 畫面文字辨識失敗或未產生字幕 | 核對 `resources/card-vision`／開發版 `bin` 的平台執行檔、API 金鑰就緒狀態、模型權限與額度。查看目前來源範圍的連續 checkpoint，不把後方完成視窗當成前方已完成。禁止在 log 印出金鑰；辨識品質另對照原畫格。 |
 | 波形重做、重開後無個別聲道 | 查配方、原 stream／channel、`checkpoint.json` 與 PCM SHA、續算 overlap。對照讀取 bytes、FFmpeg 次數及聲道峰值。warm wave 已有但仍重產時查 duration、來源證據與 argv 的映射。 |
 | NAS 慢或快取不可寫 | 查 `sourceContent.format`、receipt、processedBytes、worker／main 分工與 PCM 背壓。分辨母素材全文驗證、WAV 驗證、暫時 I/O 錯誤及唯讀缺件。 |
 | 換專案仍跑舊 Proxy、串流黑畫面 | 查 session／request 取消、`INGEST_SUPERSEDED`、writer close、readiness、HTTP Range／lease 與實際 presenter。 |

@@ -48,6 +48,20 @@ jobs:
           if (-not (Test-Path -LiteralPath $ffprobe)) { throw 'FFprobe missing' }
           "FFMPEG_PATH=$($ffmpeg[0].FullName)" | Add-Content -LiteralPath $env:GITHUB_ENV
           "FFPROBE_PATH=$ffprobe" | Add-Content -LiteralPath $env:GITHUB_ENV
+      - name: Prepare pinned Rust and verified FFmpeg for screen text
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed' }
+          rustup override set 1.100.0
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain override failed' }
+          New-Item -ItemType Directory -Force electron/ffmpeg | Out-Null
+          Copy-Item -LiteralPath $env:FFMPEG_PATH, $env:FFPROBE_PATH -Destination electron/ffmpeg
+      # Test builds refuse HTTP; this verifies source frames and cache contracts without cloud calls.
+      - name: Test screen text native engine offline
+        run: npm run test:card-vision
+      - name: Build screen text release engine
+        run: npm run native:prepare:card-vision
       - name: Prepare verified DVD and BD authoring tools
         run: npm run native:prepare:disc
       - run: npm run build

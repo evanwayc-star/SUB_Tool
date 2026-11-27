@@ -1,0 +1,21 @@
+[package]
+name = "subtool-card-vision"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+# The original GPUI dependency enabled this transitively; payload order is part of cache fingerprints.
+serde_json = { version = "1.0", features = ["preserve_order", "float_roundtrip"] }
+ureq = { version = "3.5", features = ["json", "platform-verifier", "win-system-proxy"] }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+sha2 = "0.10"
+chrono = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

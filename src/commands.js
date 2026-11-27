@@ -13,6 +13,7 @@ import { showSettingsModal } from './settings.js';
 import { showProjectSettings } from './project-settings.js';
 import { openStatusErrorReport } from './status-error-report.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
+import { openScreenTextMonitorDialog } from './screen-text-recognition-dialog.js';
 import { importSub, showExportDialog, showExportVideoDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
 import { renderCheckPanel, deleteSelected } from './subtitles.js';
 import {
@@ -105,6 +106,7 @@ function createCommands() {
     'asr-monitor': () => {
       openSpeechRecognitionDialog();
     },
+    'screen-text-monitor': () => openScreenTextMonitorDialog(),
     'audio-project-settings': () => {
       AudioRouting.openOutputSettings();
     },

@@ -25,6 +25,8 @@ import { setManualPlaybackSpeed } from './keyboard.js';
 import { splitMenuLabel } from './menu-label.js';
 import { copySelectedStyle, pasteStyleToSelected, hasClipboardStyle } from './subtitles.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
+import { openScreenTextRecognitionDialog } from './screen-text-recognition-dialog.js';
+import { screenTextSourcePath } from './screen-text-recognition.js';
 import { openHardLimiterDialog } from './audio-normalizer-dialog.js';
 import { requestPointerSeek } from './timeline-interaction-engine.js';
 import { lastSourceFrameIndex } from '../shared/clip-visual.cjs';
@@ -602,11 +604,13 @@ function tlContextMenuHandler(e){
     const c=Seq.byId(clipEl.dataset.clipId); if(!c)return;
     const isLocked = c.locked || State.videoTracks[c.vtrack||0]?.locked;
     const owns=captureClipEdit(c);
+    const ownsWorkspace=Project.captureWorkspaceOwnership();
     if(!isLocked) selectClip(c.id); // 右鍵即選取（高亮，之後可直接 Del / 上下鍵切換）
     const isImg = c.type==='image';
     const trimmed=c.in>0.01||c.out<c.dur-0.01;
     const pt=Media.displayTime();
     const filePath=clipSourcePath(c);
+    const recognitionPath=screenTextSourcePath(c);
     // 相鄰段交換（同一視訊軌內、依時間軸順序；保留兩段之間的間距）
     const sorted=Seq.trackClips(c.vtrack||0).sort((a,b)=>a.offset-b.offset);
     const idx=sorted.indexOf(c);
@@ -638,6 +642,7 @@ function tlContextMenuHandler(e){
       isImage:isImg,
       locked:isLocked,
       canReveal:IS_DESKTOP&&!!filePath,
+      canRecognizeScreenText:IS_DESKTOP&&!!recognitionPath,
       canSplit:Seq.editClipAt(pt)===c,
       trimmed,
       audioDetached:!!c.audioDetached,
@@ -651,6 +656,8 @@ function tlContextMenuHandler(e){
     },{
       revealSource:()=>revealSourceInFolder(filePath),
       seekStart:()=>{ requestPointerSeek(c.offset); emit('playhead:ensure'); },
+      recognizeScreenText:()=>openScreenTextRecognitionDialog(c,
+        ()=>owns.isCurrent() && !Seq.isStill(c) && screenTextSourcePath(c)===recognitionPath, ownsWorkspace),
       splitAtPlayhead:()=>{ if(owns() && Seq.editClipAt(pt)===c) Media.splitClipAt(pt); },
       editDuration:()=>showClipDuration(c),
       editSpeed:()=>showClipSpeed(c),

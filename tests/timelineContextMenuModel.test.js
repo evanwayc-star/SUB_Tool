@@ -72,6 +72,19 @@ describe('normalizeWaveOptions', () => {
 });
 
 describe('影片／圖片片段右鍵選單', () => {
+  it('有母素材的桌面影片可辨識畫面文字，鎖定來源仍可讀取', () => {
+    const recognizeScreenText = vi.fn();
+    for (const locked of [false, true]) {
+      const items = buildVideoClipMenu({ locked, canRecognizeScreenText: true }, { recognizeScreenText });
+      itemById(items, 'screen_text_recognition').act();
+    }
+    expect(recognizeScreenText).toHaveBeenCalledTimes(2);
+    for (const context of [{ isImage:true }, { frozen:true }, { canRecognizeScreenText:false }]) {
+      const items = buildVideoClipMenu({ canRecognizeScreenText:true, ...context }, { recognizeScreenText });
+      expect(itemIds(items)).not.toContain('screen_text_recognition');
+    }
+  });
+
   it('未鎖定影片依安全定位、剪輯、聲音、排列、轉場、移除分組', () => {
     const items = buildVideoClipMenu({
       name: 'master.mov',

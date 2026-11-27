@@ -49,6 +49,24 @@ beforeEach(() => {
 });
 
 describe('command registry dispatch', () => {
+  it('從工具列開回正在背景辨識的畫面文字片段', async () => {
+    const sessions = await import('../src/screen-text-session.js');
+    const snapshot = vi.spyOn(sessions, 'getScreenTextSession').mockReturnValue({
+      id:'ocr-1', clipName:'片段二', status:'running', progress:0.42, message:'讀取畫面',
+      languages:['ko','en'], sampleFps:2, dialogOpen:false,
+      scope:'clip', range:{start:2,end:5}, windowCount:1, fps:25, dropFrame:false,
+    });
+    try {
+      Commands.run(document.getElementById('screenTextMonitorBtn').dataset.act);
+      expect(document.getElementById('modalBody').textContent).toContain('片段二');
+      expect(document.getElementById('modalBody').textContent).toContain('00:00:05:00');
+      expect(document.getElementById('ocrStatus').textContent).toContain('42%');
+    } finally {
+      document.getElementById('ocrMinimize')?.click();
+      snapshot.mockRestore();
+    }
+  });
+
   it('open-media 會把明確 relink 交給 project transaction，過期 generation 不開 picker', async () => {
     const picker = document.getElementById('fileMedia');
     const pickerClick = vi.spyOn(picker, 'click').mockImplementation(() => picker.onchange?.());

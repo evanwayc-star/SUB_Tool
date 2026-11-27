@@ -618,6 +618,38 @@ export function renderAsrIndicator(button, session = null) {
   return true;
 }
 
+export function bindScreenTextIndicator(button, initialSession, subscribe) {
+  if (!button) return;
+  const label = button.querySelector('.lbl');
+  let previous = null;
+  function update(session) {
+    const before = previous;
+    previous = session;
+    const status = session?.status;
+    const running = status === 'running' || status === 'cancelling';
+    const reviewable = status === 'partial' || status === 'completed' || status === 'failed';
+    button.classList.toggle('ocr-running', running);
+    button.style.display = running || reviewable ? '' : 'none';
+    if (!running && !reviewable) return;
+
+    const percent = Number.isFinite(session.progress)
+      ? Math.round(Math.max(0, Math.min(1, session.progress)) * 100) + '%'
+      : '辨識中';
+    const state = { running:percent, cancelling:'取消中', partial:'待加入', completed:'完成', failed:'失敗' }[status];
+    label.textContent = '畫面文字 ' + state;
+    const action = reviewable ? '查看辨識結果' : '查看辨識進度';
+    button.title = ['畫面文字辨識', session.clipName, state, session.message, action].filter(Boolean).join(' · ');
+    button.setAttribute('aria-label', button.title);
+
+    if (reviewable && !session.dialogOpen && before?.id === session.id && before.status !== status) {
+      if (status === 'failed') showToast('畫面文字辨識失敗：' + session.message, 'error');
+      else showToast(session.message);
+    }
+  }
+  update(initialSession);
+  return subscribe(update);
+}
+
 export {
   setStatus,
   showToast,

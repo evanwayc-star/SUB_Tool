@@ -39,6 +39,8 @@ node_modules/
 electron/ffmpeg/
 electron/mpv/
 electron/disc/
+electron/card-vision/target/
+electron/card-vision/bin/
 *.exe
 .config/
 tmp_profile/

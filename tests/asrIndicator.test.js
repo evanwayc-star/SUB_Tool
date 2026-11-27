@@ -8,7 +8,7 @@ describe('頂部工具列語音辨識指示器 (asr-indicator)', () => {
   beforeEach(() => {
     document.body.innerHTML = `
       <button id="asrMonitorBtn" data-act="asr-monitor" style="display:none;" title="語音辨識進度">
-        <span class="asr-monitor-ring"></span>
+        <span class="recognition-monitor-ring"></span>
         <span id="asrMonitorLbl" class="lbl">🎙 辨識中</span>
       </button>
     `;

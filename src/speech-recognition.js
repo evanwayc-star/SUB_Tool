@@ -12,7 +12,7 @@ import { AudioEngine } from './audio-engine.js';
 import { createRecognitionRangeSource } from './speech-recognition-source.js';
 import { Media } from './media.js';
 import { Seq } from './sequence.js';
-import { snapTimeToFrame, secToEncore } from './time.js';
+import { getExactFps, snapTimeToFrame, secToEncore } from './time.js';
 import { sortCues, hasActiveCueEdit, extendDurationForCues } from './subtitle-model.js';
 import { recordHistory } from './history.js';
 import { Project } from './project.js';
@@ -591,10 +591,14 @@ function downloadAlignmentDiagnostic(diagnostic) {
 
 export function insertAsrSubtitles(results, {
   trackName = '語音辨識',
+  trackNameForSegment = null,
   historyLabel = '🎙 語音辨識生成字幕',
   requireValidTimes = false,
   allowPartialValidTimes = false,
+  allowOverlap = false,
   preserveUntimedSegments = false,
+  preserveSelection = false,
+  boundToPlacement = false,
   onSkippedSegment = null,
   timelineFps = State.fps || 24,
   timelineDropFrame = State.dropFrame || false
@@ -605,7 +609,7 @@ export function insertAsrSubtitles(results, {
   // strict 模式必須在吸附後重新拒絕零長度或重疊 cue，不可自行補成一格。
   const fps = Number(timelineFps) || 24;
   const dropFrame = !!timelineDropFrame;
-  const plannedCues = [];
+  let plannedCues = [];
 
   for (const item of results) {
     const clip = item.clip;
@@ -618,6 +622,10 @@ export function insertAsrSubtitles(results, {
       in: sourceStart,
       out: Number(clip.out ?? clip.trimEnd ?? clip.duration ?? clip.dur) || sourceStart
     };
+    const timelineLimit = Seq.toTimeline(placement.reverse ? placement.in : placement.out, placement);
+    const exactFps = getExactFps(fps);
+    const firstFrame = Math.ceil(clipStartTimeline * exactFps - 1e-8) / exactFps;
+    const lastFrame = Math.floor(timelineLimit * exactFps + 1e-8) / exactFps;
 
     for (const seg of segments) {
       if (!seg.text || !seg.text.trim()) continue;
@@ -650,17 +658,28 @@ export function insertAsrSubtitles(results, {
       }
       const segStart = Number.isFinite(rawStart) ? rawStart : 0;
       const segEnd = Number.isFinite(rawEnd) ? rawEnd : (segStart + 1.5);
+      if (boundToPlacement && segEnd <= segStart) continue;
 
       // FPS-SYNC: ASR 秒數相對於裁切後的母素材；時間域換算只交給序列層。
       const first = Seq.toTimeline(sourceStart + segStart, placement);
       const last = Seq.toTimeline(sourceStart + segEnd, placement);
-      const timelineStartRaw = Math.min(first, last);
-      const timelineEndRaw = Math.max(first, last);
+      let timelineStartRaw = Math.min(first, last);
+      let timelineEndRaw = Math.max(first, last);
+      if (boundToPlacement) {
+        timelineStartRaw = Math.max(clipStartTimeline, timelineStartRaw);
+        timelineEndRaw = Math.min(timelineLimit, timelineEndRaw);
+        if (timelineEndRaw <= timelineStartRaw) continue;
+      }
 
-      const start = Math.max(0, snapTimeToFrame(timelineStartRaw, fps, dropFrame));
+      let start = Math.max(0, snapTimeToFrame(timelineStartRaw, fps, dropFrame));
       let end = snapTimeToFrame(timelineEndRaw, fps, dropFrame);
+      if (boundToPlacement) start = Math.max(firstFrame, start);
       if (end <= start && !requireValidTimes) {
         end = snapTimeToFrame(start + (1 / fps), fps, dropFrame);
+      }
+      if (boundToPlacement) {
+        end = Math.min(lastFrame, end);
+        if (end <= start) continue;
       }
       if (requireValidTimes && end <= start && allowPartialValidTimes) {
         onSkippedSegment?.(seg);
@@ -690,12 +709,12 @@ export function insertAsrSubtitles(results, {
       .filter(cue => cue.timed !== false)
       .sort((a, b) => a.start - b.start || a.end - b.end);
     const accepted = [];
+    const lastByTrack = new Map();
     for (let index = 0; index < ordered.length; index++) {
       const cue = ordered[index];
-      const previous = (allowPartialValidTimes || preserveUntimedSegments)
-        ? accepted.at(-1)
-        : ordered[index - 1];
-      if (!hasValidSubtitleTime(cue.start, cue.end) || (previous && cue.start < previous.end - 0.000001)) {
+      const name = trackNameForSegment?.(cue.sourceSegment) || trackName;
+      const previous = lastByTrack.get(name);
+      if (!hasValidSubtitleTime(cue.start, cue.end) || (!allowOverlap && previous && cue.start < previous.end - 0.000001)) {
         if (preserveUntimedSegments) {
           cue.start = 0;
           cue.end = 0;
@@ -710,20 +729,21 @@ export function insertAsrSubtitles(results, {
         throw new Error('影格吸附後無法維持有效且不重疊的字幕時間，未建立字幕軌');
       }
       accepted.push(cue);
+      lastByTrack.set(name, cue);
     }
-    if (allowPartialValidTimes) {
-      plannedCues.length = 0;
-      plannedCues.push(...accepted);
-    }
+    if (allowPartialValidTimes) plannedCues = accepted;
   }
 
   if (plannedCues.length === 0) return 0;
 
-  const trackObj = newTrack(trackName);
-  const preserveEditing = hasActiveCueEdit();
-  State.tracks.push(trackObj);
-  const trackIdx = State.tracks.length - 1;
-  if (!preserveEditing) State.listTrack = trackIdx;
+  const selectNewTrack = !preserveSelection && !hasActiveCueEdit();
+  const tracks = new Map();
+  for (const cue of plannedCues) {
+    const name = trackNameForSegment?.(cue.sourceSegment) || trackName;
+    if (!tracks.has(name)) tracks.set(name, { index:State.tracks.length + tracks.size, track:newTrack(name) });
+  }
+  for (const { track } of tracks.values()) State.tracks.push(track);
+  if (selectNewTrack) State.listTrack = tracks.values().next().value.index;
   const newCues = plannedCues.map(cue => ({
     start: cue.start,
     end: cue.end,
@@ -731,12 +751,13 @@ export function insertAsrSubtitles(results, {
     style: cue.style,
     timed: cue.timed !== false,
     id: newId(),
-    track: trackIdx
+    track: tracks.get(trackNameForSegment?.(cue.sourceSegment) || trackName).index,
+    ...(trackNameForSegment && ['card','dialogue'].includes(cue.sourceSegment.kind) ? { kind:cue.sourceSegment.kind } : {})
   }));
 
-  State.cues.push(...newCues);
+  for (const cue of newCues) State.cues.push(cue);
   sortCues();
-  if (!preserveEditing) {
+  if (selectNewTrack) {
     setSelection({ kind:'sub', ids:[newCues[0].id] });
     State.activeEdge='start';
   }

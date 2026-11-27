@@ -7,7 +7,7 @@
 /* SUB Tool — Electron 主程序
    提供：原生檔案對話框、平台原生 ffmpeg/ffprobe（MXF 轉檔、多音軌抽取、波形）、
          專案/字幕直接讀寫磁碟。前端沿用同一份 index.html。 */
-const { app, BrowserWindow, ipcMain, dialog, protocol, session, webContents, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, session, webContents, screen, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 /* RecentProjects 的 missing probe 會觸及 SMB 路徑，不可用同步 stat 阻塞
@@ -48,6 +48,8 @@ const {
   createSpeechCompressionRuntime,
 } = require('./speech-audio-compressor');
 const { createSpeechAudioReader, validateSpeechAudioRequest } = require('./speech-audio-reader');
+const { createScreenTextRuntime } = require('./screen-text-runtime');
+const { createScreenTextSettings } = require('./screen-text-settings');
 const { createAudioNormalizationRuntime } = require('./audio-normalization-runtime');
 const { createNativeAudioMeter } = require('./native-audio-meter');
 const { motherSourceFingerprint } = require('./mother-source-evidence');
@@ -371,6 +373,7 @@ app.on('before-quit', (event) => {
         deliveryCapabilities.cancelAllAndWait(),
         speechCompressionRuntime.cancelAllAndWait(),
         speechAudioReader.cancelAllAndWait(),
+        screenTextRuntime.cancelAllAndWait(),
         vocalWaveformRuntime.cancelAllAndWait(),
         nativeAudioMeter.stop(),
         mediaIngestCoordinator.cancelAllAndWait(),
@@ -922,6 +925,17 @@ const speechAudioCompressor = createSpeechAudioCompressor({
   execute: (args, options) => runFF(args, options)
 });
 const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
+const screenTextSettings = createScreenTextSettings({ configDir: getConfigDir, safeStorage });
+const screenTextRuntime = createScreenTextRuntime({
+  executable: () => path.join(app.isPackaged ? path.join(process.resourcesPath, 'card-vision')
+    : path.join(__dirname, 'card-vision', 'bin', `${process.platform}-${process.arch}`),
+  process.platform === 'win32' ? 'subtool-card-vision.exe' : 'subtool-card-vision'),
+  settings: screenTextSettings,
+  cacheDir: () => path.join(getConfigDir(), 'card-vision-cache'),
+  ffmpegPath: () => FFMPEG,
+  ffprobePath: () => FFPROBE,
+  onProgress: (sender, update) => safeSend(sender, 'ocr:progress', update),
+});
 const speechAudioReader = createSpeechAudioReader({
   getFFmpegPath: () => FFMPEG,
   probe: (source, options) => {
@@ -1717,6 +1731,22 @@ ipcMain.handle('speech:audioRead', (e, request) => {
 });
 ipcMain.handle('speech:audioCancel', (e, { requestId } = {}) =>
   speechAudioReader.cancel(e.sender, requestId));
+
+ipcMain.handle('ocr:settings-get', event => {
+  if (!isMainWindowSender(event)) throw new Error('無法在此視窗讀取畫面文字辨識設定');
+  return screenTextSettings.get();
+});
+ipcMain.handle('ocr:settings-save', (event, settings) => {
+  if (!isMainWindowSender(event) || _isAppQuitting) throw new Error('無法在此視窗儲存畫面文字辨識設定');
+  return screenTextSettings.save(settings);
+});
+ipcMain.handle('ocr:recognize', (event, request) => {
+  if (!isMainWindowSender(event) || _isAppQuitting) throw new Error('無法在此視窗開始畫面文字辨識');
+  requireReadablePath('ocr:recognize', request?.path);
+  return screenTextRuntime.recognize(event.sender, request);
+});
+ipcMain.handle('ocr:cancel', (event, requestId, keepPartial) =>
+  isMainWindowSender(event) && screenTextRuntime.cancel(event.sender, requestId, keepPartial === true));
 
 /* Renderer 只能交付程式自己編出的 16 kHz mono PCM WAV bytes，不能指定輸入／輸出路徑。
    64 kbps MP3 只活在這次辨識呼叫期間；成功、失敗都由 compressor 清掉暫存檔。 */

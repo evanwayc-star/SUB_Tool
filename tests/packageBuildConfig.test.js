@@ -6,6 +6,28 @@ import { describe, expect, it } from 'vitest';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const discTools = JSON.parse(readFileSync(new URL('../electron/disc-tools.json', import.meta.url), 'utf8'));
+const retiredOcrFiles = ['screen-text-worker.py', 'ocr-requirements.txt'];
+
+it('桌面安裝包只將目前平台的 Rust 辨識執行檔與授權文字複製到 resources/card-vision', () => {
+  expect(packageJson.build.extraResources).toContainEqual({
+    from: 'electron/card-vision/bin/${platform}-${arch}',
+    to: 'card-vision',
+    filter: ['subtool-card-vision', 'subtool-card-vision.exe', 'THIRD_PARTY_NOTICES.txt', 'RUST_STANDARD_LIBRARY_NOTICES.html'],
+  });
+  expect(packageJson.build.extraResources.some(resource => resource.to === 'ocr')).toBe(false);
+  for (const platform of ['win', 'mac']) {
+    const electronFiles = packageJson.build[platform].files.find(item => item.from === 'electron');
+    expect(electronFiles.filter).toContain('!card-vision/**');
+    for (const file of retiredOcrFiles) expect(electronFiles.filter).toContain('!' + file);
+  }
+});
+
+it('兩平台封裝前皆重新建置 Rust 辨識核心，避免打入過期執行檔', () => {
+  expect(packageJson.scripts['native:prepare:card-vision']).toBe('node scripts/release/build-card-vision.js');
+  expect(packageJson.scripts.predist).toContain('npm run native:prepare:card-vision');
+  expect(packageJson.scripts['dist:mac:test']).toContain('npm run native:prepare:card-vision');
+  expect(packageJson.scripts['test:card-vision']).toBe('cargo test --manifest-path electron/card-vision/Cargo.toml --locked');
+});
 
 describe('Windows 安裝檔設定', () => {
   it('獨立 Node watchdog 的本機 require 相依閉包全部解包，避免只在開發環境可載入', () => {
@@ -75,7 +97,7 @@ describe('Windows 安裝檔設定', () => {
       {
         from: 'electron',
         to: 'electron',
-        filter: ['**/*', '!ffmpeg/**', '!mpv/**', '!disc/**'],
+        filter: ['**/*', '!ffmpeg/**', ...retiredOcrFiles.map(file => '!' + file), '!card-vision/**', '!mpv/**', '!disc/**'],
       },
       {
         from: 'electron/ffmpeg',
@@ -109,7 +131,7 @@ describe('Apple Silicon 安裝檔設定', () => {
       {
         from: 'electron',
         to: 'electron',
-        filter: ['**/*', '!ffmpeg/**', '!mpv/**', '!disc/**'],
+        filter: ['**/*', '!ffmpeg/**', ...retiredOcrFiles.map(file => '!' + file), '!card-vision/**', '!mpv/**', '!disc/**'],
       },
       {
         from: 'electron/ffmpeg/darwin-arm64',

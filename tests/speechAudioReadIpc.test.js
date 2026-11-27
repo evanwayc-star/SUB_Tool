@@ -108,7 +108,7 @@ it('真before-quit handler包含辨識讀取屏障，未收尾時不能宣告退
     app: { on: (_channel, fn) => { handler = fn; }, quit: vi.fn() },
     _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false,
     audioNormalizationJobs: new Map(), mediaProbe: nativeOwner(), ffmpegExecution: nativeOwner(),
-    deliveryCapabilities: nativeOwner(), speechCompressionRuntime: nativeOwner(), speechAudioReader,
+    deliveryCapabilities: nativeOwner(), speechCompressionRuntime: nativeOwner(), speechAudioReader, screenTextRuntime: nativeOwner(),
     vocalWaveformRuntime: nativeOwner(), nativeAudioMeter: { stop: vi.fn(async () => {}) },
     mediaIngestCoordinator: nativeOwner(), mediaWaveformCoordinator: nativeOwner(),
     directoryOutput: { close: vi.fn(async () => {}) }, QueueManager: { prepareForShutdown: vi.fn(async () => {}) },

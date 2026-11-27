@@ -40,7 +40,8 @@ import { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist } from './dom.j
 import { createCommands } from './commands.js';
 import { renderPointerSeekControl, requestPointerSeek, timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds } from './timeline-interaction-engine.js';
 import { getAsrSession, onAsrSessionChange } from './speech-recognition-session.js';
-import { togglePanel, bindOverlayDrag, keepPanelInViewport, renderQueueMonitorIndicator, renderAsrIndicator, renderProjectIdentity, renderCurrentTimecode, bindAudioEffectStatusView } from './ui.js';
+import { getScreenTextSession, onScreenTextSessionChange } from './screen-text-session.js';
+import { togglePanel, bindOverlayDrag, keepPanelInViewport, renderQueueMonitorIndicator, renderAsrIndicator, bindScreenTextIndicator, renderProjectIdentity, renderCurrentTimecode, bindAudioEffectStatusView } from './ui.js';
 import { State, syncTrackCount, FPS_SET, snapFps, setFps, ensureTrackCount, trackVisible, videoTrackVisible, newId, DESK, IS_DESKTOP, isSel, cueSuffix, loadConfig, saveConfig, loadKeys, saveKeys, clearSelection, setSelection, deselect } from './state.js';
 import { Media, Wave } from './media.js';
 import { bindMediaIntakeView, handleMediaIntakeProgress } from './media-intake-view.js';
@@ -810,6 +811,7 @@ async function initDesktop(){
     void handleStartupFile(desktopStatus.catch(() => {}).then(() => DESK.getStartupFile()));
   }
   if (DESK.onOpenFile) DESK.onOpenFile(file => handleStartupFile(file));
+  bindScreenTextIndicator($('screenTextMonitorBtn'), getScreenTextSession(), onScreenTextSessionChange);
   const brand=document.querySelector('.brand');
   if(brand && !brand.querySelector('small')){ const sm=document.createElement('small'); sm.style.cssText='opacity:.55;font-size:11px;margin-left:6px;vertical-align:middle'; sm.textContent='桌面版'; brand.appendChild(sm); }
   document.querySelectorAll('.desktop-only').forEach(el=>{ el.style.display=''; }); // 顯示桌面專屬功能（匯出影片等）

@@ -1,6 +1,6 @@
 {
   "name": "sub-tool",
-  "version": "9.3.0",
+  "version": "9.4.0",
   "description": "SUB Tool 上字幕工具",
   "author": "Evan",
   "repository": "evanwayc-star/SUB_Tool",
@@ -12,11 +12,13 @@
     "preview": "vite preview",
     "electron": "vite build && electron .",
     "electron:dev": "electron . --dev",
-    "predist": "npm run release:verify-source && node scripts/release/verify-native-binaries.js --platform win32 --arch x64",
+    "predist": "npm run release:verify-source && node scripts/release/verify-native-binaries.js --platform win32 --arch x64 && npm run native:prepare:card-vision",
     "dist": "vite build && electron-builder --win --x64",
     "native:prepare:mac": "node scripts/release/prepare-macos-native-binaries.js",
     "native:prepare:disc": "node scripts/release/prepare-windows-disc-tools.js",
-    "dist:mac:test": "npm run native:prepare:mac && node scripts/release/verify-native-binaries.js --platform darwin --arch arm64 && npm run build && electron-builder --mac --arm64 -c.mac.identity=null -c.mac.hardenedRuntime=false",
+    "native:prepare:card-vision": "node scripts/release/build-card-vision.js",
+    "test:card-vision": "cargo test --manifest-path electron/card-vision/Cargo.toml --locked",
+    "dist:mac:test": "npm run native:prepare:mac && node scripts/release/verify-native-binaries.js --platform darwin --arch arm64 && npm run native:prepare:card-vision && npm run build && electron-builder --mac --arm64 -c.mac.identity=null -c.mac.hardenedRuntime=false",
     "release:prepare": "node scripts/release/release-transaction.js prepare",
     "release:verify-source": "node scripts/release/release-transaction.js verify",
     "release:verify-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/verify-release-install.ps1",
@@ -43,6 +45,16 @@
       "output": "release"
     },
     "extraResources": [
+      {
+        "from": "electron/card-vision/bin/${platform}-${arch}",
+        "to": "card-vision",
+        "filter": [
+          "subtool-card-vision",
+          "subtool-card-vision.exe",
+          "THIRD_PARTY_NOTICES.txt",
+          "RUST_STANDARD_LIBRARY_NOTICES.html"
+        ]
+      },
       {
         "from": "font",
         "to": "font",
@@ -80,6 +92,9 @@
           "filter": [
             "**/*",
             "!ffmpeg/**",
+            "!screen-text-worker.py",
+            "!ocr-requirements.txt",
+            "!card-vision/**",
             "!mpv/**",
             "!disc/**"
           ]
@@ -153,6 +168,9 @@
           "filter": [
             "**/*",
             "!ffmpeg/**",
+            "!screen-text-worker.py",
+            "!ocr-requirements.txt",
+            "!card-vision/**",
             "!mpv/**",
             "!disc/**"
           ]

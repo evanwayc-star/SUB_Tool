@@ -125,6 +125,17 @@ contextBridge.exposeInMainWorld('subtool', {
     return () => ipcRenderer.removeListener('audio:normalize-progress', handler);
   },
   cleanupAudio: (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:cleanup', { path: p }); },
+  getScreenTextSettings: () => ipcRenderer.invoke('ocr:settings-get'),
+  saveScreenTextSettings: ({provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, apiKey}) =>
+    ipcRenderer.invoke('ocr:settings-save', {provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, apiKey}),
+  recognizeScreenText: ({path, start, end, provider, model, sourceLang, samplesPerSecond, frameWidth, smartAccuracy, requestId}) =>
+    ipcRenderer.invoke('ocr:recognize', {path, start, end, provider, model, sourceLang, samplesPerSecond, frameWidth, smartAccuracy, requestId}),
+  cancelScreenText: (requestId, keepPartial = false) => ipcRenderer.invoke('ocr:cancel', requestId, keepPartial === true),
+  onScreenTextProgress: callback => {
+    const listener = (_event, update) => callback(update);
+    ipcRenderer.on('ocr:progress', listener);
+    return () => ipcRenderer.removeListener('ocr:progress', listener);
+  },
   speechAudioRead: (request) => {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少辨識音訊片段參數');
     const { path, start, duration, sourceStream = 0, sourceChannel = null, processed = false, requestId } = request;
