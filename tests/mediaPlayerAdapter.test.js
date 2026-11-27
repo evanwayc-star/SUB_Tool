@@ -347,6 +347,7 @@ describe('active transport', () => {
       requestVideoFrameCallback:callback=>{callbacks.push(callback);return callbacks.length;},cancelVideoFrameCallback:vi.fn()};
     const emit=name=>{for(const callback of [...listeners.get(name)||[]])callback();};
     const runtime=resetPlayerAdapter(null,videoEl);
+    const elementListeners = new Map([...listeners].map(([event, handlers]) => [event, [...handlers]]));
     runtime.registerSourceClock(videoEl.src,{timestampOffset:-.5,presentationTimestampOffset:-5.5});
     let completed=false;
     const initial=runtime.seek(0).then(()=>{completed=true;});
@@ -360,7 +361,7 @@ describe('active transport', () => {
     videoEl.duration=8.5;emit('durationchange');expect(rawTime).toBe(8.3);
     callbacks.shift()(0,{mediaTime:8.3});
     await expect(presentation).resolves.toMatchObject({presentedSourceTime:expect.closeTo(2.8,10)});
-    expect([...listeners.values()].every(set=>set.size===0)).toBe(true);
+    for (const [event, handlers] of listeners) expect([...handlers]).toEqual(elementListeners.get(event) || []);
   });
 
   it.each(['signal','source','transport'])('deferred HTML seek loses ownership on %s and never changes a newer source',async reason=>{
@@ -533,10 +534,189 @@ describe('active transport', () => {
     listeners.get('seeked')?.();
     await Promise.resolve();
     expect(settled).toBe(false);
-    expect(videoEl.addEventListener).not.toHaveBeenCalledWith('seeked', expect.any(Function));
 
     frameCallback(0, { mediaTime: 7 });
     await expect(pending).resolves.toEqual({ backend: 'html5', presentedSourceTime: 7 });
+  });
+
+  it.each(['seek', 'play', 'source', 'decoded frame'])('a repeated paused capture reuses proven pixels only until a new %s', async change => {
+    const callbacks = [], listeners = new Map();
+    let decoded = 1;
+    const video = { currentTime: 0, paused: true, readyState: 4, src: 'blob:source',
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: decoded }),
+      requestVideoFrameCallback: callback => { callbacks.push(callback); return 1; },
+      cancelVideoFrameCallback: vi.fn(),
+      addEventListener: (name, handler) => listeners.set(name, handler),
+    };
+    const runtime = resetPlayerAdapter(null, video);
+    const first = runtime.present(2, { waitForFrame: true });
+    callbacks.shift()(0, { mediaTime: 2 });
+    await first;
+    await expect(runtime.present(2, { waitForFrame: true })).resolves.toMatchObject({ presentedSourceTime: 2 });
+    expect(callbacks).toHaveLength(0);
+    if (change === 'seek') listeners.get('seeking')();
+    if (change === 'play') listeners.get('play')();
+    if (change === 'source') video.src = 'blob:replacement';
+    if (change === 'decoded frame') decoded++;
+    const updated = runtime.present(2, { waitForFrame: true });
+    expect(callbacks).toHaveLength(1);
+    callbacks.shift()(0, { mediaTime: 2 });
+    await updated;
+  });
+
+  it('an ordinary seek to the same paused frame preserves its decoded evidence for repeated captures', async () => {
+    const callbacks = [], video = new EventTarget();
+    Object.assign(video, { src:'blob:step', paused:true, currentTime:0, readyState:4,
+      requestVideoFrameCallback: fn => { callbacks.push(fn); return callbacks.length; } });
+    const runtime = resetPlayerAdapter(null, video);
+    const first = runtime.present(.4);
+    callbacks.shift()(0, { mediaTime:.4 });
+    await first;
+    const ordinary = runtime.present(.4);
+    expect(callbacks).toHaveLength(0);
+    await ordinary;
+    await expect(runtime.present(.4, { waitForFrame:true })).resolves.toMatchObject({ presentedSourceTime:.4 });
+    // Ordinary seeks to another position within the usual tolerance must
+    // still move the element's audio clock and request its actual picture.
+    const moved = runtime.present(.42);
+    expect(video.currentTime).toBe(.42);
+    expect(callbacks).toHaveLength(1);
+    callbacks.shift()(0, { mediaTime:.42 });
+    await moved;
+  });
+
+  it('observes the first paused decoded picture once per element and can capture it before the first play', async () => {
+    const video = new EventTarget(), callbacks = [];
+    Object.assign(video, { src: 'blob:cold', paused: true, currentTime: 0, readyState: 2,
+      requestVideoFrameCallback: callback => { callbacks.push(callback); return callbacks.length; } });
+    resetPlayerAdapter(null, video);
+    const runtime = resetPlayerAdapter(null, video);
+    video.dispatchEvent(new Event('loadstart'));
+    expect(callbacks).toHaveLength(1);
+    video.seeking = true; video.readyState = 1;
+    callbacks.shift()(0, { mediaTime: 0 });
+    video.seeking = false; video.readyState = 2;
+    video.dispatchEvent(new Event('seeked'));
+    await expect(runtime.present(0, { waitForFrame: true })).resolves.toMatchObject({ presentedSourceTime: 0 });
+    expect(callbacks).toHaveLength(0);
+  });
+
+  it('holds the matching HTML frame callback until the browser allows drawing that picture', async () => {
+    const video = new EventTarget(), callbacks = [];
+    Object.assign(video, { src: 'blob:timed', paused: true, currentTime: 0, readyState: 4,
+      requestVideoFrameCallback: callback => { callbacks.push(callback); return callbacks.length; } });
+    const runtime = resetPlayerAdapter(null, video);
+    let settled = false;
+    const frame = runtime.present(4, { waitForFrame: true }).then(result => { settled = true; return result; });
+    video.readyState = 1; video.seeking = true;
+    callbacks.shift()(0, { mediaTime: 4 });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    video.readyState = 4; video.seeking = false;
+    video.dispatchEvent(new Event('seeked'));
+    await expect(frame).resolves.toMatchObject({ presentedSourceTime: 4 });
+    expect(callbacks).toHaveLength(0);
+  });
+
+  it('keeps the decoded PTS when the frame counter settles after an ordinary seek callback', async () => {
+    const video = new EventTarget(), callbacks = [];
+    let decoded = 526;
+    Object.assign(video, { src:'blob:seek', paused:true, currentTime:.12, readyState:4,
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: decoded }),
+      requestVideoFrameCallback: callback => { callbacks.push(callback); return callbacks.length; } });
+    const runtime = resetPlayerAdapter(null, video);
+    const ordinary = runtime.present(.4);
+    video.seeking = true; video.readyState = 1;
+    callbacks.shift()(0, { mediaTime:.4 });
+    await ordinary;
+    const capture = runtime.present(.4, { waitForFrame:true });
+    decoded = 529; video.seeking = false; video.readyState = 4;
+    video.dispatchEvent(new Event('seeked'));
+    await expect(capture).resolves.toMatchObject({ presentedSourceTime:.4 });
+  });
+
+  it.each(['ready', 'replaced'])('a cold frame waiting for pixels may only wake its original source (%s)', async mode => {
+    const video = new EventTarget(), callbacks = [];
+    let decoded = 1;
+    Object.assign(video, { src:'blob:opening', paused:true, currentTime:0, readyState:1,
+      getVideoPlaybackQuality: () => ({ totalVideoFrames:decoded }),
+      requestVideoFrameCallback: fn => { callbacks.push(fn); return callbacks.length; },
+      cancelVideoFrameCallback: vi.fn() });
+    const runtime = resetPlayerAdapter(null, video);
+    video.dispatchEvent(new Event('loadstart'));
+    const first = callbacks.shift();
+    const capture = runtime.present(0, { waitForFrame:true });
+    first(0, { mediaTime:0 });
+    if (mode === 'replaced') {
+      // Reloading even the same URL changes ownership of decoded evidence.
+      video.dispatchEvent(new Event('emptied'));
+      video.dispatchEvent(new Event('loadstart'));
+    }
+    decoded = 4; video.readyState = 4;
+    video.dispatchEvent(new Event('loadeddata'));
+    if (mode === 'replaced') await expect(capture).rejects.toMatchObject({name:'AbortError'});
+    else {
+      await expect(capture).resolves.toMatchObject({ presentedSourceTime:0 });
+      await expect(runtime.present(0, { waitForFrame:true })).resolves.toMatchObject({ presentedSourceTime:0 });
+      expect(video.cancelVideoFrameCallback).toHaveBeenCalled();
+    }
+  });
+
+  it('opening a File at its source start keeps only that file’s decoded first frame', async () => {
+    const video = new EventTarget(), callbacks = [], assignments = [];
+    let clock = 0;
+    Object.defineProperty(video, 'currentTime', {
+      get:() => clock, set:value => { assignments.push(value); clock = value; },
+    });
+    Object.assign(video, { src:'blob:first', paused:true, readyState:4,
+      requestVideoFrameCallback: fn => { callbacks.push(fn); return callbacks.length; },
+      cancelVideoFrameCallback: vi.fn() });
+    const runtime = resetPlayerAdapter(null, video);
+    for (const url of ['blob:first', 'blob:next']) {
+      video.src = url;
+      video.dispatchEvent(new Event('emptied')); video.dispatchEvent(new Event('loadstart'));
+      const first = callbacks.shift();
+      runtime.registerSourceClock(url, { presentationTimestampOffset:0 });
+      runtime.seekElement(video, 0, {owns:() => true});
+      expect(assignments).toEqual([]);
+      const capture = runtime.present(0, {waitForFrame:true});
+      expect(callbacks).toHaveLength(1);
+      // Only the source's original rVFC arrives. The capture callback does
+      // not receive a duplicate frame from the paused browser.
+      first(0, {mediaTime:0});
+      await expect(capture).resolves.toMatchObject({presentedSourceTime:0});
+      callbacks.length = 0;
+      runtime.seekElement(video, 0, {owns:() => true});
+      await expect(runtime.present(0, {waitForFrame:true})).resolves.toMatchObject({presentedSourceTime:0});
+      expect(assignments).toEqual([]);
+    }
+    runtime.registerSourceClock(video.src, {presentationTimestampOffset:-2});
+    runtime.seekElement(video, 0);
+    expect(assignments).toEqual([2]);
+  });
+
+  it.each([120000, 160000])('after decoder prefetch, checks the drawable picture PTS (%i) before reusing a receipt', async timestamp => {
+    const video = new EventTarget(), callbacks = [], close = vi.fn();
+    let decoded = 1;
+    Object.assign(video, {src:'blob:prefetch', paused:true, currentTime:0, readyState:4,
+      getVideoPlaybackQuality:() => ({totalVideoFrames:decoded}),
+      requestVideoFrameCallback:fn => { callbacks.push(fn); return callbacks.length; }});
+    vi.stubGlobal('VideoFrame', class {
+      constructor(source) { expect(source).toBe(video); this.timestamp = timestamp; }
+      close() { close(); }
+    });
+    try {
+      const runtime = resetPlayerAdapter(null, video);
+      const initial = runtime.present(.12);
+      callbacks.shift()(0, {mediaTime:.12});
+      await initial;
+      decoded = 4;
+      const capture = runtime.present(.12, {waitForFrame:true});
+      expect(close).toHaveBeenCalledOnce();
+      expect(callbacks).toHaveLength(timestamp === 120000 ? 0 : 1);
+      if (callbacks.length) callbacks.shift()(0, {mediaTime:.12});
+      await expect(capture).resolves.toMatchObject({presentedSourceTime:.12});
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it('沒有畫格回呼的 HTML5 環境仍可在 seeked 後完成定位', async () => {

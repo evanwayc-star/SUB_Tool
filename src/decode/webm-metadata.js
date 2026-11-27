@@ -60,6 +60,11 @@ function metadata(bytes){
           if(child.id===0xd7)track.number=uint(bytes,child);
           if(child.id===0x83)track.type=uint(bytes,child);
           if(child.id===0x56aa)track.delay=uint(bytes,child);
+          if(child.id===0xe1){
+            for(const field of elements(bytes,child.start,child.end)){
+              if(field.id===0x9f) track.channels=uint(bytes,field);
+            }
+          }
         }
         tracks.push(track);
       }
@@ -74,6 +79,7 @@ function metadata(bytes){
     const offsets=audio.map(item=>origins.has(item.number)?-origins.get(item.number)||0:null);
     const decodedOffsets=audio.map(item=>decodedOrigins.has(item.number)?-decodedOrigins.get(item.number)||0:null);
     return Object.freeze({presentationTimestampOffset:-origin||0,duration:Math.max(0,duration*scale/1e9-origin),
+      ...(audio[0]?.channels>0?{audioChannels:audio[0].channels}:{}),
       ...(Number.isFinite(offsets[0])?{audioPresentationTimestampOffset:offsets[0]}:{}),
       ...(offsets.length?{audioPresentationTimestampOffsets:Object.freeze(offsets)}:{}),
       ...(decodedOffsets.length?{decoderAudioPresentationTimestampOffsets:Object.freeze(decodedOffsets)}:{}),

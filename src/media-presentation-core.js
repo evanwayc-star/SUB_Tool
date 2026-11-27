@@ -58,6 +58,7 @@ export function createMediaPresentationCore({
   function finish(request, result) {
     if (!request || request.settled) return;
     request.settled = true;
+    if (request.cancel) request.options.signal.removeEventListener('abort', request.cancel);
     if (request.timer != null) clearTimeoutFn(request.timer);
     request.timer = null;
     if (result?.status !== 'presented') request.controller?.abort?.(result?.reason || result?.status);
@@ -78,6 +79,12 @@ export function createMediaPresentationCore({
     startNext();
   }
 
+  function releaseSuperseded() {
+    if (pending && (active?.activatingSource || active?.waitingForComposite)) {
+      releaseActive(active, { status: 'superseded', presentedTime: lastPresentedTime });
+    }
+  }
+
   function completePresentation(request, observed, source) {
     if (active !== request || request.settled || request.holding) return;
     if (!pending) lastPresentedTime = observed;
@@ -96,7 +103,7 @@ export function createMediaPresentationCore({
     const isCurrent = () => active === request && !request.settled && !pending
       && !request.controller?.signal.aborted;
     Promise.resolve().then(() => request.options.whilePresented({
-      presentedTime: observed, signal: request.controller?.signal || null, isCurrent,
+      presentedTime: observed, source, signal: request.controller?.signal || null, isCurrent,
     })).then(value => complete({ value }), captureError => complete({ captureError }));
   }
 
@@ -124,6 +131,17 @@ export function createMediaPresentationCore({
         if (active === request && !request.settled) armTimeout(requestTimeout);
       }
     };
+    const waitForComposite = async evidence => {
+      // The underlying seek has settled. The compositor follows the newest
+      // playhead, so it may never draw this request's frame after another seek.
+      request.waitingForComposite = true;
+      try {
+        releaseSuperseded();
+        return await evidence;
+      } finally {
+        request.waitingForComposite = false;
+      }
+    };
 
     let outbound;
     try {
@@ -135,6 +153,7 @@ export function createMediaPresentationCore({
         signal: request.controller?.signal || null,
         isLatestRequest: () => active === request && pending == null,
         activateSource,
+        waitForComposite,
         ...(request.options.whilePresented ? { waitForFrame: true } : {}),
         ...(hasRequestedTolerance
           ? { tolerance: Math.max(0, requestedTolerance) }
@@ -161,6 +180,16 @@ export function createMediaPresentationCore({
 
   function request(targetTime, options = {}) {
     const next = makeRequest(targetTime, options);
+    if (options.signal && options.whilePresented) {
+      next.cancel = () => {
+        if (pending === next) pending = null;
+        const cancelled = { status: 'cancelled', reason: 'capture-aborted', presentedTime: lastPresentedTime };
+        if (active === next) releaseActive(next, cancelled);
+        else finish(next, cancelled);
+      };
+      if (options.signal.aborted) { next.cancel(); return next.promise; }
+      options.signal.addEventListener('abort', next.cancel, { once: true });
+    }
     if (!active) {
       // An abort listener can synchronously issue an even newer request.
       if (pending) { const queued = pending; pending = null; finish(queued, { status: 'superseded', presentedTime: lastPresentedTime }); }
@@ -179,9 +208,7 @@ export function createMediaPresentationCore({
     if (pending && canSharePresentation(pending, next)) return pending.promise;
     if (pending) finish(pending, { status: 'superseded', presentedTime: lastPresentedTime });
     pending = next;
-    // Source I/O has its own ownership guard; unlike a native frame/capture, it
-    // must not keep the latest target waiting behind a long NAS probe.
-    if (active.activatingSource) releaseActive(active, { status: 'superseded', presentedTime: lastPresentedTime });
+    releaseSuperseded();
     return next.promise;
   }
 
@@ -247,7 +274,7 @@ export function createMediaPresentationSession(options = {}) {
   let playbackRunning = false;
   let playbackRequestToken = 0;
 
-  function presentationWaiter(targetTime, { requestId, signal, tolerance: requestedTolerance } = {}) {
+  function presentationWaiter(targetTime, { requestId, signal, tolerance: requestedTolerance, waitForComposite } = {}) {
     const key = requestId ?? Symbol('webcodecs-presentation');
     const tolerance = requestedTolerance != null && Number.isFinite(Number(requestedTolerance))
       ? Math.max(0, Number(requestedTolerance))
@@ -286,7 +313,9 @@ export function createMediaPresentationSession(options = {}) {
       next(){
         if(aborted||signal?.aborted) return Promise.reject(Object.assign(new Error('media presentation aborted'),{name:'AbortError'}));
         const shown=decision();
-        return shown?Promise.resolve(shown):new Promise((resolve,reject)=>{waiting={resolve,reject};});
+        if (shown) return Promise.resolve(shown);
+        const evidence = new Promise((resolve, reject) => { waiting = { resolve, reject }; });
+        return waitForComposite(evidence);
       },
     };
     compositeWaiters.set(key,waiter);
@@ -313,6 +342,7 @@ export function createMediaPresentationSession(options = {}) {
     tolerance: requestedTolerance,
     isLatestRequest,
     activateSource,
+    waitForComposite,
     waitForFrame = false,
   } = {}) {
     if (signal?.aborted) {
@@ -357,7 +387,7 @@ export function createMediaPresentationSession(options = {}) {
       ? Math.max(0, Number(requestedTolerance))
       : Math.max(0, Number(getTolerance(targetTime, { source: adapter.type })) || 0);
     // 每個請求從 native seek 開始便持有呈現工作，接管可在 ACK 前後改變。
-    const waiter=presentationWaiter(targetTime,{signal,requestId,tolerance});
+    const waiter=presentationWaiter(targetTime,{signal,requestId,tolerance,waitForComposite});
     try{
     const frameTarget=clip?.reverse?sourceFrameTargetUs(sourceTarget,clip)/1e6:sourceTarget;
     const window=typeof player.frameWindow==='function'?await player.frameWindow(frameTarget,clip):null;

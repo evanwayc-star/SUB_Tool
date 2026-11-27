@@ -28,6 +28,7 @@
 |---|---|
 | 定位、暫停、拖曳與逐格 | 統一 `snapTimeToFrame()`。DF 只影響標籤 |
 | 建立／載入／改 FPS | `snapCueToFrames()` 先正規化端點，正片長至少一格，再建立 History／存檔基準。保留 `timed:false` |
+| 播放點單格 OCR | 喚出時凍結播放點，確認後從該格算兩秒，再將終點吸附專案格網。25 fps 跨 50 格，29.97 fps 跨 60 格 |
 | 批次時長 | 下限向上、鄰句上限向下轉合法格點，再限制終點。非整格鄰句容不下一格就保留原句 |
 | 字幕 FPS 轉換 | 預覽與確認都乘 `getExactFps(from) / getExactFps(to)`，再吸附目的格網。以顯示小數計算可讓長片偏一格 |
 | ASS | `secToASS()` 用原秒數轉百分秒。自產 metadata 保留精確 frame，舊檔相容見 [ADR-0002](adr/0002-自產-ass-無損往返.md) |
@@ -44,7 +45,7 @@
 
 | 可見 presenter | 本次請求的有效證據 |
 |---|---|
-| HTML video | `requestVideoFrameCallback()` 回傳的 `mediaTime` |
+| HTML video | `requestVideoFrameCallback()` 回傳的 `mediaTime`。暫停在同一格可重用同來源、同位置的呈現證據，須等 `seeking` 結束且 `readyState >= 2` 才可讀取像素 |
 | mpv 播放中定位 | 命中目標的 `time-pos` 與配對的 `playback-restart` |
 | mpv 暫停定位 | 命令 ACK 加目標 `time-pos`；同格無新事件時主動查詢 |
 | WebCodecs | 全部可見影片與圖片完成繪製。各影片提供自己的實際來源 timestamp |

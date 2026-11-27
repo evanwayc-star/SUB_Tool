@@ -29,12 +29,12 @@ describe('畫面辨識私有設定', () => {
       frameWidth:1920, smartAccuracy:true };
     expect(store.get()).toEqual({ ...expected, hasApiKey:{ openai:false, gemini:false } });
     expect(validateScreenTextOptions({ qualityDefaultsVersion:999 })).toEqual(expected);
-    expect(validateScreenTextOptions({ provider:'gemini' }).model).toBe('gemini-2.5-pro');
+    expect(validateScreenTextOptions({ provider:'gemini' }).model).toBe('gemini-3.8-flash');
   });
 
   it.each([
     ['openai', 'gpt-5.4-mini', 'gpt-5.4'],
-    ['gemini', 'gemini-2.5-flash', 'gemini-2.5-pro'],
+    ['gemini', 'gemini-2.5-flash', 'gemini-3.8-flash'],
     ['openai', 'my-private-vision-model', 'my-private-vision-model'],
   ])('一次遷移 %s 舊設定，保留語言與加密金鑰，之後允許手動降檔', (provider, model, expectedModel) => {
     const { store, configDir, safeStorage } = fixture();
@@ -47,13 +47,31 @@ describe('畫面辨識私有設定', () => {
       frameWidth:1920, smartAccuracy:true, hasApiKey:{ openai:true, gemini:true } });
     const migrated = JSON.parse(readFileSync(file, 'utf8'));
     expect(migrated.encryptedKeys).toEqual(encryptedKeys);
-    expect(migrated.qualityDefaultsVersion).toBe(1);
+    expect(migrated.qualityDefaultsVersion).toBe(2);
     expect(store.apiKey('openai')).toBe('old-private-key');
     const saved = store.save({ provider, model, sourceLang:'ja', sampleFps:2, frameWidth:1280, smartAccuracy:false });
     const reopened = createScreenTextSettings({ configDir, safeStorage, env:{} });
     expect(reopened.get()).toEqual(saved);
     expect(reopened.get()).toMatchObject({ model, sourceLang:'ja', sampleFps:2, frameWidth:1280, smartAccuracy:false });
     expect(JSON.parse(readFileSync(file, 'utf8')).encryptedKeys).toEqual(encryptedKeys);
+  });
+
+  it.each([['gemini-2.5-flash', 'gemini-3.5-flash-lite'], ['gemini-2.5-pro', 'gemini-3.8-flash'],
+    ['my-model', 'my-model']])('已套用品質新版的 %s 保留使用者的取樣、解析度與複檢選擇', (oldModel, model) => {
+    const { store, configDir } = fixture();
+    writeFileSync(path.join(configDir, 'screen-text-settings.json'), JSON.stringify({
+      qualityDefaultsVersion:1, provider:'gemini', model:oldModel, sampleFps:2, frameWidth:960, smartAccuracy:false
+    }));
+    expect(store.get()).toMatchObject({ model, sampleFps:2, frameWidth:960, smartAccuracy:false });
+  });
+
+  it('舊版本只讀新設定，不會回寫品質或刪除新欄位', () => {
+    const { store, configDir } = fixture();
+    const file=path.join(configDir, 'screen-text-settings.json');
+    const saved=JSON.stringify({qualityDefaultsVersion:3, sampleFps:2, frameWidth:960, futureOption:true});
+    writeFileSync(file,saved);
+    expect(store.get()).toMatchObject({sampleFps:2, frameWidth:960});
+    expect(readFileSync(file,'utf8')).toBe(saved);
   });
 
   it('雙供應商金鑰加密持久化，只回傳就緒狀態，非機密設定可讀回', () => {

@@ -5,14 +5,12 @@
    主執行緒可用 worker.terminate() 真正停止工作；正常完成則保留 Worker 與模型快取。
    ============================================================================ */
 import {
-  BUILTIN_ASR_RUNTIME,
   buildBuiltinGenerationOptions,
   countBuiltinInferenceChunks,
   createBuiltinChunkProgressStreamer,
   detectBuiltinSpeechLanguage,
-  hasCompleteBuiltinWordTimes,
-  normalizeBuiltinAsrSegments,
-  resolveBuiltinExecutionPlan
+  resolveBuiltinExecutionPlan,
+  transcribeBuiltinSegments
 } from './speech-recognition-worker-runtime.js';
 
 const TRANSFORMERS_MODULE_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
@@ -186,26 +184,14 @@ async function transcribe({
     returnTimestamps
   });
 
-  const audioDuration = audioFloat32.length / BUILTIN_ASR_RUNTIME.sampleRate;
-  let output;
-  let timestamps = generateKwargs.return_timestamps;
-  try {
-    output = await transcriber(audioFloat32, generateKwargs);
-  } catch (error) {
-    const isAttnError = typeof error?.message === 'string' &&
-      (error.message.includes('cross attentions') || error.message.includes('output_attentions'));
-    if (!isAttnError || timestamps !== 'word') throw error;
-  }
-  if (!output || (taskMode === 'align' && timestamps === 'word' && !hasCompleteBuiltinWordTimes(output, audioDuration))) {
+  const segments = await transcribeBuiltinSegments(transcriber, audioFloat32, generateKwargs, () => {
     postProgress(jobId, {
       status: 'transcribing',
       device: executionPlan.device,
       message: '模型未提供完整的逐詞時間，正在取得原生句級時間碼…'
     });
-    timestamps = true;
-    output = await transcriber(audioFloat32, { ...generateKwargs, return_timestamps: timestamps, streamer: newStreamer() });
-  }
-  const segments = normalizeBuiltinAsrSegments(output, audioDuration, editorTask ? timestamps : 'word');
+    return newStreamer();
+  });
   postProgress(jobId, { status: 'done', percent: 100, message: '本機辨識完成！' });
   return { segments, language };
 }

@@ -95,6 +95,8 @@ function freezeWorkSpec(initData = {}) {
     provider: initData.provider || 'builtin',
     builtinModel: initData.builtinModel || '',
     language: initData.language || 'auto',
+    openaiTiming: initData.openaiTiming === 'local' ? 'local' : 'provider',
+    projectTerms: Object.freeze([...(initData.projectTerms || [])]),
     timelineFps: Number(initData.timelineFps) || 24,
     timelineDropFrame: !!initData.timelineDropFrame,
     apiKey: typeof initData.apiKey === 'string' ? initData.apiKey : '',
@@ -232,6 +234,7 @@ function completeRun(id, result = {}) {
   if (!isRunActive(id)) return false;
   activeRun.result = {
     count: Number(result.count) || 0,
+    ...(result.review && { review:true }),
     quality: result.quality || activeRun.quality.level
   };
   activeRun.progress = {
@@ -402,7 +405,10 @@ async function executeAsrWork(run, adapters) {
         const resolved = await adapters.resolveAlignment?.({
           taskMode: run.spec.taskMode,
           transcript: run.spec.transcript,
-          evidenceSegments: segments
+          evidenceSegments: segments,
+          signal: run.controller.signal,
+          onProgress: fraction => setProgress(run.id, { status:'aligning', percent:90 + 4 * fraction,
+            message:`正在匹配文字稿　${Math.round(fraction * 100)}%` })
         });
         throwIfInactive(run);
         const alignment = resolved?.alignment || null;
@@ -435,7 +441,7 @@ async function executeAsrWork(run, adapters) {
         }
       }
 
-      results.push({ clip, segments });
+      results.push({ clip, segments, ...(run.spec.taskMode==='align' && {evidenceSegments}) });
       setProgress(run.id, {
         status: 'transcribing',
         percent: Math.round(((index + 1) / Math.max(1, run.spec.clips.length)) * 90),
@@ -458,6 +464,7 @@ async function executeAsrWork(run, adapters) {
     throwIfInactive(run);
     const committed = await adapters.commit(results, {
       signal: run.controller.signal,
+      openaiTiming:run.spec.openaiTiming,
       taskMode: run.spec.taskMode,
       timelineFps: run.spec.timelineFps,
       timelineDropFrame: run.spec.timelineDropFrame,
@@ -476,6 +483,7 @@ async function executeAsrWork(run, adapters) {
     }
     const outcome = {
       status: 'completed',
+      review: !!commitResult.review,
       count: Number(commitResult.count) || 0,
       results,
       diagnostic: run.diagnostic,
@@ -483,7 +491,7 @@ async function executeAsrWork(run, adapters) {
     };
     completeRun(run.id, {
       ...outcome,
-      statusText: completionStatusText(run.spec, outcome.count, run.quality)
+      statusText: outcome.review ? `有 ${outcome.count} 則候選字幕待複核` : completionStatusText(run.spec, outcome.count, run.quality)
     });
     return outcome;
   } catch (error) {

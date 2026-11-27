@@ -8,7 +8,8 @@ import {
   detectBuiltinSpeechLanguage,
   hasCompleteBuiltinWordTimes,
   normalizeBuiltinAsrSegments,
-  resolveBuiltinExecutionPlan
+  resolveBuiltinExecutionPlan,
+  transcribeBuiltinSegments
 } from '../src/speech-recognition-worker-runtime.js';
 
 describe('本機 ASR Worker runtime 規則', () => {
@@ -44,6 +45,49 @@ describe('本機 ASR Worker runtime 規則', () => {
     }
     expect(hasCompleteBuiltinWordTimes({ text: '電視' }, 1)).toBe(false);
     expect(hasCompleteBuiltinWordTimes({ text: '' }, 1)).toBe(true);
+  });
+
+  it('逐詞結果落在片長外時，用同一段音訊重取句級時間並保留全文', async () => {
+    const text = 'The train leaves the station at 9.';
+    const pcm = new Float32Array(4 * 16000);
+    const options = { language: 'en', return_timestamps: 'word', streamer: {} };
+    const replacementStreamer = {};
+    const transcriber = vi.fn()
+      .mockResolvedValueOnce({ text, chunks: text.split(' ').map(word => ({ text: word, timestamp: [8, 8] })) })
+      .mockResolvedValueOnce({ text, chunks: [{ text, timestamp: [0, 2.4] }] });
+    await expect(transcribeBuiltinSegments(transcriber, pcm, options, () => replacementStreamer)).resolves.toEqual([
+      { text, start: 0, end: 2.4 }
+    ]);
+    expect(transcriber.mock.calls).toEqual([
+      [pcm, options], [pcm, { ...options, return_timestamps: true, streamer: replacementStreamer }]
+    ]);
+  });
+
+  it('已有完整逐詞時間時只推論一次；推論本身失敗時保留錯誤', async () => {
+    const pcm = new Float32Array(16000);
+    const options = { return_timestamps: 'word' };
+    const fallback = vi.fn();
+    const model = vi.fn()
+      .mockResolvedValueOnce({ text: 'Hello', chunks: [{ text: 'Hello', timestamp: [.2, .4] }] })
+      .mockRejectedValueOnce(new Error('GPU failed'));
+    await expect(transcribeBuiltinSegments(model, pcm, options, fallback)).resolves.toMatchObject([
+      { text: 'Hello', words: [{ start: .2, end: .4, text: 'Hello' }] }
+    ]);
+    await expect(transcribeBuiltinSegments(model, pcm, options, fallback)).rejects.toThrow('GPU failed');
+    expect(model).toHaveBeenCalledTimes(2);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it('多處抽樣可糾正片頭的語言，證據打平時要求明確指定',async()=>{
+    const model=vi.fn(async({input_features})=>({logits:{data:input_features.value>0
+      ?Float32Array.of(0,8):Float32Array.of(8,0),dispose(){}}}));
+    model.generation_config={decoder_start_token_id:1,lang_to_id:{'<|en|>':0,'<|zh|>':1}};
+    const processor=vi.fn(async data=>({input_features:{value:data[0],dispose(){}}}));
+    class Tensor { dispose(){} }
+    const samples=new Float32Array(90*16000).fill(1);samples.fill(-1,0,30*16000);
+    await expect(detectBuiltinSpeechLanguage({processor,model},samples,Tensor)).resolves.toBe('zh');
+    expect(model).toHaveBeenCalledTimes(3);
+    await expect(detectBuiltinSpeechLanguage({processor,model},samples.subarray(0,60*16000),Tensor)).rejects.toThrow('指定語言');
   });
 
   it('2 分 31 秒音訊依 29 秒 window／5 秒 stride 計為 8 個真實推論段', () => {

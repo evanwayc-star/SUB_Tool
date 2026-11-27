@@ -43,10 +43,8 @@ pub fn redact_secrets(message: &str, secrets: &[&str]) -> String {
             safe = safe.replace(secret, "[REDACTED]");
         }
     }
-    if let Some(secret) = API_KEY.get() {
-        if !secret.is_empty() {
-            safe = safe.replace(secret, "[REDACTED]");
-        }
+    if let Some(secret) = API_KEY.get().filter(|secret| !secret.is_empty()) {
+        safe = safe.replace(secret, "[REDACTED]");
     }
     safe
 }

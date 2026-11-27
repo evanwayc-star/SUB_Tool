@@ -14,6 +14,7 @@ import { showProjectSettings } from './project-settings.js';
 import { openStatusErrorReport } from './status-error-report.js';
 import { openSpeechRecognitionDialog } from './speech-recognition.js';
 import { openScreenTextMonitorDialog } from './screen-text-recognition-dialog.js';
+import { openPlayheadOcr } from './playhead-ocr-dialog.js';
 import { importSub, showExportDialog, showExportVideoDialog, showFpsConvertDialog, applyTcShift, applyDurAdjTc, applyDurAdjPct } from './subio.js';
 import { renderCheckPanel, deleteSelected } from './subtitles.js';
 import { openSubtitleDictionaryDialog } from './subtitle-dictionary-dialog.js';
@@ -108,6 +109,7 @@ function createCommands() {
       openSpeechRecognitionDialog();
     },
     'screen-text-monitor': () => openScreenTextMonitorDialog(),
+    'playhead-ocr': openPlayheadOcr,
     'audio-project-settings': () => {
       AudioRouting.openOutputSettings();
     },

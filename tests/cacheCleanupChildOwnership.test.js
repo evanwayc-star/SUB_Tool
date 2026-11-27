@@ -208,8 +208,7 @@ it('clearAll 掃描活躍 writer 父目錄後，不能遞迴清除被取代的�
   const runtime = createMediaIntakeRuntime({
     cacheRoot, tempRoot, allowSidecarCache: true,
     fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }),
-    delay: () => { started(); return gate; },
-    ffmpegExecution: { async execute() {} },
+    ffmpegExecution: { execute: () => { started(); return gate; } },
   });
   const writer = runtime.ingest({ src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] });
   writer.catch(() => {});
@@ -249,7 +248,7 @@ it('cleanOrphans 遇到活躍 sidecar writer 的祖先時保留整個候選並�
   const runtime = createMediaIntakeRuntime({
     cacheRoot, tempRoot, allowSidecarCache: true,
     fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }),
-    delay: () => { started(); return gate; }, ffmpegExecution: { async execute() {} },
+    ffmpegExecution: { execute: () => { started(); return gate; } },
   });
   const writer = runtime.ingest({ src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] });
   writer.catch(() => {});
@@ -274,7 +273,7 @@ it('clearAll 掃描活躍 writer 父目錄後，不能清除同一父目錄中�
   const runtime = createMediaIntakeRuntime({
     cacheRoot, tempRoot, allowSidecarCache: true,
     fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }),
-    delay: () => { started(); return gate; }, ffmpegExecution: { async execute() {} },
+    ffmpegExecution: { execute: () => { started(); return gate; } },
   });
   const writer = runtime.ingest({ src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] });
   writer.catch(() => {});
@@ -308,7 +307,7 @@ it('活躍 writer 父目錄先清理一個 sibling 時，另一 sibling 內更�
   const runtime = createMediaIntakeRuntime({
     cacheRoot, tempRoot, allowSidecarCache: true,
     fileAuthority: new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }),
-    delay: () => { started(); return gate; }, ffmpegExecution: { async execute() {} },
+    ffmpegExecution: { execute: () => { started(); return gate; } },
   });
   const writer = runtime.ingest({ src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] });
   writer.catch(() => {});

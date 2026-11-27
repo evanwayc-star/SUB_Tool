@@ -20,35 +20,47 @@ export function resolveBuiltinExecutionPlan({
 // Whisper's detect_language: decode just <|startoftranscript|> and compare
 // only the language token logits from this multilingual model.
 export async function detectBuiltinSpeechLanguage(transcriber, samples, Tensor) {
-  const start = samples.findIndex(sample => sample !== 0);
-  if (start < 0) return null;
   const config = transcriber.model.generation_config;
-  const startToken = config?.decoder_start_token_id;
-  if (!Number.isInteger(startToken) || !config.lang_to_id) {
-    throw new Error('本機模型缺少自動偵測語言所需的設定。');
-  }
-  const features = await transcriber.processor(samples.subarray(start, start + SAMPLE_RATE * 30));
-  const decoderStart = new Tensor('int64', BigInt64Array.of(BigInt(startToken)), [1, 1]);
-  let outputs;
-  try {
-    outputs = await transcriber.model({ input_features: features.input_features, decoder_input_ids: decoderStart });
-    const scores = outputs.logits.data;
-    let maxScore = -Infinity;
-    let language;
-    for (const [token, id] of Object.entries(config.lang_to_id)) {
-      const score = scores[id];
-      if (Number.isFinite(score) && score > maxScore) {
-        maxScore = score;
-        language = token.slice(2, -2);
-      }
+  const tokens = Object.entries(config?.lang_to_id || {});
+  const regions = Math.min(3, Math.max(1, Math.floor(samples.length / (SAMPLE_RATE * 30))));
+  const totals = new Map();
+  let used = 0;
+  for (let region = 0; region < regions; region++) {
+    const left = Math.floor((region * samples.length) / regions),
+      right = Math.floor(((region + 1) * samples.length) / regions);
+    const first = samples.subarray(left, right).findIndex((value) => value !== 0);
+    if (first < 0) continue;
+    if (!Number.isInteger(config?.decoder_start_token_id) || !tokens.length)
+      throw new Error('本機模型缺少自動偵測語言所需的設定。');
+    const start = left + first;
+    const features = await transcriber.processor(
+      samples.subarray(start, Math.min(right, start + SAMPLE_RATE * 30))
+    );
+    const decoderStart = new Tensor('int64', BigInt64Array.of(BigInt(config.decoder_start_token_id)), [1, 1]);
+    let outputs;
+    try {
+      outputs = await transcriber.model({
+        input_features: features.input_features,
+        decoder_input_ids: decoderStart
+      });
+      const logits = outputs.logits.data;
+      const highest = Math.max(...tokens.map(([, id]) => (Number.isFinite(logits[id]) ? logits[id] : -Infinity)));
+      if (!Number.isFinite(highest)) continue;
+      const weights = tokens.map(([, id]) => (Number.isFinite(logits[id]) ? Math.exp(logits[id] - highest) : 0));
+      const total = weights.reduce((sum, x) => sum + x, 0);
+      tokens.forEach(([token], i) => totals.set(token, (totals.get(token) || 0) + weights[i] / total));
+      used++;
+    } finally {
+      for (const tensor of Object.values(outputs || {})) tensor.dispose();
+      decoderStart.dispose();
+      for (const tensor of Object.values(features)) tensor.dispose();
     }
-    if (!language) throw new Error('本機模型未能偵測音訊語言，請指定語言後重試。');
-    return language;
-  } finally {
-    for (const tensor of Object.values(outputs || {})) tensor.dispose();
-    decoderStart.dispose();
-    for (const tensor of Object.values(features)) tensor.dispose();
   }
+  if (!used && !samples.some((value) => value !== 0)) return null;
+  const results = [...totals].sort((a, b) => b[1] - a[1]);
+  if (!results.length || (results[0][1] - (results[1]?.[1] || 0)) / used < 0.05)
+    throw new Error('不同音訊段落無法可靠辨別主要語言，請指定語言後重試。');
+  return results[0][0].slice(2, -2);
 }
 
 export function hasCompleteBuiltinWordTimes(output, audioDuration) {
@@ -61,6 +73,25 @@ export function hasCompleteBuiltinWordTimes(output, audioDuration) {
     previousEnd = end;
     return valid;
   });
+}
+
+export async function transcribeBuiltinSegments(transcriber, samples, options, fallbackStreamer) {
+  const duration = samples.length / SAMPLE_RATE;
+  const timestamps = options.return_timestamps;
+  let result;
+  try {
+    result = await transcriber(samples, options);
+  } catch (error) {
+    const message = String(error?.message || '');
+    if (timestamps !== 'word' || !/cross attentions|output_attentions/.test(message)) throw error;
+  }
+  if (timestamps === 'word' && (!result || !hasCompleteBuiltinWordTimes(result, duration))) {
+    const sentenceResult = await transcriber(samples, {
+      ...options, return_timestamps: true, streamer: fallbackStreamer()
+    });
+    return normalizeBuiltinAsrSegments(sentenceResult, duration, true);
+  }
+  return normalizeBuiltinAsrSegments(result, duration, timestamps);
 }
 
 export function buildBuiltinGenerationOptions({ language, prompt, temperature = 0, streamer, returnTimestamps = 'word' } = {}) {

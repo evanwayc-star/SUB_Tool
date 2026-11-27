@@ -10,9 +10,37 @@ vi.mock('../src/media.js', () => ({ Media: { tracks: [], activeSource: null } })
 vi.mock('../src/dom.js', () => ({ $: vi.fn(), video: {} }));
 vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), setStatus: vi.fn() }));
 
-import { Wave } from '../src/waveform-decoder.js';
+import { Wave, canDecodeWaveform } from '../src/waveform-decoder.js';
 import { State } from '../src/state.js';
 import { Media } from '../src/media.js';
+import { AudioEngine } from '../src/audio-engine.js';
+
+it('相同壓縮大小的長片、多聲道與高取樣率依 PCM 工作量決定能否整檔解碼', () => {
+  const file={size:8*1024*1024};
+  expect(canDecodeWaveform(file,120,2,48000)).toBe(true);
+  expect(canDecodeWaveform(file,7200,2,48000)).toBe(false);
+  expect(canDecodeWaveform(file,120,8,48000)).toBe(false);
+  expect(canDecodeWaveform(file,120,2,192000)).toBe(false);
+  expect(canDecodeWaveform(file,Infinity,2,48000)).toBe(false);
+});
+
+it('長外音只在實際來源位置寫波峰，解除來源後釋放漸進資料', () => {
+  const source={audioSrc:'ext-test',audioSourceId:'external-a'};
+  const monitor=vi.fn(()=>Float32Array.of(-.5,.25));
+  AudioEngine.readTimeDomain=monitor;
+  Media.liveElementWaveTimes=()=>new Map([['ext-test',2]]);
+  Wave.live=false;
+  Wave.prepareLiveSource(source,10);
+  expect(Wave.getSourceMixPeaks(source)).toBeNull();
+  Wave.captureLive();
+  expect(monitor).toHaveBeenCalledWith({source:'ext-test'});
+  const peaks=Wave.getSourceMixPeaks(source);
+  expect([...peaks.slice(400,402)]).toEqual([-.5,.25]);
+  expect(peaks[0]).toBe(0);
+  Wave.forgetSourceWaveforms(source);
+  expect(Wave.liveElementSources.size).toBe(0);
+  expect(Wave.getSourceMixPeaks(source)).toBeNull();
+});
 
 const deferred = () => {
   let resolve;

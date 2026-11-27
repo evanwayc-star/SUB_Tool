@@ -438,6 +438,7 @@ const State = {
   videoWidth: 0,
   videoHeight: 0,
   projectCanvas: null, // null = source-derived canvas; explicit dimensions belong to the project.
+  recognitionTerms: [],
   muted:false, lastVol:1,
   mediaPath:null,
   clipboard:[],  // copied cues for paste
@@ -598,6 +599,7 @@ State.defaultKeymap = {
   'scroll_playhead': [{key:'u'}],
   'screenshot': [{key:'t'}],
   'screenshot_tc': [{key:'t', ctrl:true}],
+  'playhead_ocr': [{key:'e', ctrl:true}],
   'export_video': [{key:'/'}],          // 匯出影片（交付清單）
   /* 監控匯出佇列（桌面版）。`.` 是兩個視窗之間的【切換鍵】：
      主視窗按 . → 佇列監控到前面；佇列監控按 . → 主視窗到前面（見 electron/queue.html）。

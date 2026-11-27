@@ -1006,6 +1006,7 @@
             <p class="job-specline">
               <span class="job-chip job-chip--spec">${escapeHTML(deliverySpec)}</span>
               ${job.payload?.sizeLabel ? `<span class="job-chip">${escapeHTML(job.payload.sizeLabel)}</span>` : ''}
+              ${job.payload?.spaceNote ? `<span class="job-chip">${escapeHTML(job.payload.spaceNote)}</span>` : ''}
               ${subtitleLabel ? `<span class="job-chip job-subs" title="${escapeHTML('會燒進這份交付的字幕軌：' + subtitleLabel)}">${escapeHTML(subtitleLabel)}</span>` : ''}
               ${burnsTimecode(job.payload) ? '<span class="job-chip job-chip--tc" title="會在畫面上燒入時間碼">燒入 TC</span>' : ''}
               ${airlineOutput ? `<span class="job-chip job-chip--output">${legacyAirlineOutput ? '舊版分流檔 · 請從交付清單重送以產生 .mpg' : '自動合成 .mpg · MPEG-TS'}</span>` : ''}

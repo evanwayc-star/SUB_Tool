@@ -32,7 +32,7 @@ function amplitude(samples, seconds, frequency) {
   return 2 * Math.hypot(sine, cosine) / count;
 }
 
-function fixture(origin, lateAudio = false) {
+function fixture(origin, lateAudio = false, secondDelay = 0) {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-speech-native-'));
   directories.push(dir);
   const mother = path.join(dir, '母片 # source.mov');
@@ -41,7 +41,7 @@ function fixture(origin, lateAudio = false) {
     '-itsoffset', String(origin + .5), '-f', 'lavfi', '-i', 'color=red:s=64x48:r=24:d=4',
     '-itsoffset', String(origin + (lateAudio ? 1 : 0)), '-f', 'lavfi', '-i',
     `aevalsrc=0.2*sin(2*PI*${frequency}*t)|0.2*sin(2*PI*1320*t):s=48000:d=3`,
-    '-itsoffset', String(origin + (lateAudio ? 1 : 0)), '-f', 'lavfi', '-i',
+    '-itsoffset', String(origin + (lateAudio ? 1 : 0)+secondDelay), '-f', 'lavfi', '-i',
     'aevalsrc=0.2*sin(2*PI*1760*t):s=48000:d=3',
     '-map', '0:v', '-map', '1:a', '-map', '2:a', '-c:v', 'libx264', '-c:a', 'pcm_s16le', mother]);
   const probe = async file => descriptorOf(JSON.parse(run(ffprobe,
@@ -91,6 +91,11 @@ describe.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('ASR native r
     const mixed = await read(.3, .5, { sourceChannel: null });
     expect(amplitude(mixed, .1, 880)).toBeCloseTo(.1, 2);
     expect(amplitude(mixed, .1, 1320)).toBeCloseTo(.1, 2);
+    const combined=await read(.3,.5,{mixChannels:[{sourceStream:0,sourceChannel:null},{sourceStream:1,sourceChannel:0}]});
+    for(const hz of [880,1320,1760])expect(amplitude(combined,.1,hz)).toBeCloseTo(.2/3,3);
+    const subset=await read(.3,.5,{mixChannels:[{sourceStream:0,sourceChannel:1},{sourceStream:1,sourceChannel:0}]});
+    expect(amplitude(subset,.1,880)).toBeLessThan(.002);
+    for(const hz of [1320,1760])expect(amplitude(subset,.1,hz)).toBeCloseTo(.1,3);
     const ended = await read(3.5, .5);
     expect(ended.every(sample => sample === 0)).toBe(true);
   });
@@ -106,5 +111,17 @@ describe.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('ASR native r
     const processed = await read(.2, .5, { path: cache, processed: true });
     expect(amplitude(processed, .1, 2200)).toBeGreaterThan(.19);
     expect(amplitude(processed, .1, 440)).toBeLessThan(.002);
+  });
+
+  it('one decode keeps each selected stream on its own presentation clock',async()=>{
+    const {read}=fixture(5,false,1.5);
+    const first=await read(.75,.55,{sourceStream:0,sourceChannel:1});
+    const second=await read(.75,.55,{sourceStream:1,sourceChannel:0});
+    const mixed=await read(.75,.55,{mixChannels:[{sourceStream:0,sourceChannel:1},{sourceStream:1,sourceChannel:0}]});
+    expect(amplitude(mixed,.02,1760)).toBeLessThan(.002);
+    expect(amplitude(mixed,.30,1760)).toBeCloseTo(.1,3);
+    let peakError=0;
+    for(let i=0;i<mixed.length;i++)peakError=Math.max(peakError,Math.abs(mixed[i]-(first[i]+second[i])/2));
+    expect(peakError).toBeLessThan(.0001);
   });
 });

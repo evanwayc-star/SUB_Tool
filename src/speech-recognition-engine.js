@@ -7,6 +7,11 @@
    ============================================================================== */
 import { transcribeBuiltinAudioInWorker } from './speech-recognition-worker-client.js';
 import { b64ToBytes } from './util.js';
+import { fetchSpeech } from './speech-cloud.js';
+import { normalizeRecognitionTerms } from './recognition-terms.js';
+import { matchRecognitionTranscript } from './transcript-alignment-client.js';
+import { recognitionCheckpointKey } from './speech-recognition-checkpoints.js';
+import { addSpeechChannel, addSpeechChannelInBlocks } from './speech-resampler.js';
 import OpenCC from 'opencc-js/cn2t';
 
 // 16 kHz / 16-bit / mono PCM 每秒 32,000 bytes。雲端 Whisper 單段固定控制在
@@ -105,6 +110,15 @@ function inferAsrLanguage(segments) {
 }
 
 function recordAsrLanguage(segments, requestedLanguage, detectedLanguage) {
+  // Provider labels are local to one response. A second request can call a
+  // different person "speaker_0", even when it covers the same recording.
+  const hasSpeaker = segment => segment.speaker !== undefined && segment.speaker !== null && segment.speaker !== '';
+  if (segments.some(hasSpeaker)) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    const speakerScope = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+    segments = segments.map(segment => hasSpeaker(segment) ? { ...segment, speakerScope } : segment);
+  }
   if (knownAsrLanguage(requestedLanguage)) return segments;
   const language = knownAsrLanguage(detectedLanguage) || inferAsrLanguage(segments);
   if (!language) return segments;
@@ -144,7 +158,9 @@ export function convertAsrSegmentsToTraditionalChinese(segments, language = 'zh'
       : '';
     const effectiveLanguage = requestedLanguage || detectedLanguage;
     if (isChineseAsrLanguage(effectiveLanguage) && typeof result.text === 'string') {
-      result.text = convert(normalizeSubtitleSpacing(result.text, 'zh'));
+      const original = result.text;
+      result.text = convert(normalizeSubtitleSpacing(original, 'zh'));
+      if (result.text !== original) result.originalText ??= original;
     }
     return result;
   });
@@ -187,22 +203,9 @@ function downmixAndResampleMono16k(audioBuffer, startSec = 0, endSec = null) {
   const targetLength = Math.floor(srcLength * (targetSampleRate / srcSampleRate));
   if (targetLength <= 0) return null;
 
-  const monoSamples = new Float32Array(srcLength);
-  for (let ch = 0; ch < numChannels; ch++) {
-    const chData = audioBuffer.getChannelData(ch);
-    for (let i = 0; i < srcLength; i++) {
-      monoSamples[i] += chData[startSample + i] / numChannels;
-    }
-  }
-
-  const ratio = srcSampleRate / targetSampleRate;
   const targetSamples = new Float32Array(targetLength);
-  for (let i = 0; i < targetLength; i++) {
-    const srcIdx = i * ratio;
-    const i0 = Math.floor(srcIdx);
-    const i1 = Math.min(monoSamples.length - 1, i0 + 1);
-    const frac = srcIdx - i0;
-    targetSamples[i] = (1 - frac) * monoSamples[i0] + frac * monoSamples[i1];
+  for (let ch = 0; ch < numChannels; ch++) {
+    addSpeechChannel(targetSamples,audioBuffer.getChannelData(ch),srcSampleRate,startSample,{gain:1/numChannels});
   }
 
   return targetSamples;
@@ -481,7 +484,7 @@ async function* geminiModelCandidates(apiKey, signal, preferredModels = GEMINI_A
     do {
       throwIfRecognitionAborted(signal);
       const query = pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : '';
-      const response = await fetch(`https://generativelanguage.googleapis.com/${version}/models${query}`, {
+      const response = await fetchSpeech(`https://generativelanguage.googleapis.com/${version}/models${query}`, {
         headers: { 'x-goog-api-key': apiKey }, signal
       });
       throwIfRecognitionAborted(signal);
@@ -560,7 +563,7 @@ function geminiWordSegments(content, language) {
 
 async function geminiSpeechToText(base64Audio, key, language, signal) {
   const locale = GEMINI_TRANSCRIBE_LANGUAGES[language];
-  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+  const response = await fetchSpeech('https://generativelanguage.googleapis.com/v1beta/interactions', {
     method: 'POST', signal,
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({
@@ -646,7 +649,7 @@ ${!timedTranscript && prompt ? `\n提示詞補充導引：${prompt}` : ''}`;
   let lastError = null;
   for await (const { version, model } of geminiModelCandidates(apiKey.trim(), signal)) {
     throwIfRecognitionAborted(signal);
-    const response = await fetch(`https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent`, {
+    const response = await fetchSpeech(`https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey.trim() },
       body: JSON.stringify(payload), signal
@@ -1125,7 +1128,7 @@ export async function callAzureSpeechTranscription({
   formData.append('definition', JSON.stringify(definition));
 
   const endpoint = `https://${normalizedRegion}.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe?api-version=2025-10-15`;
-  const response = await fetch(endpoint, {
+  const response = await fetchSpeech(endpoint, {
     method: 'POST',
     redirect: 'error',
     headers: { 'Ocp-Apim-Subscription-Key': key },
@@ -1293,6 +1296,7 @@ export async function callElevenLabsSpeechTranscription({
   taskMode,
   language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh',
   keyterms = [],
+  projectTerms = [],
   numSpeakers = null,
   tagAudioEvents = false,
   audioDuration = Infinity,
@@ -1320,7 +1324,7 @@ export async function callElevenLabsSpeechTranscription({
     formData.append('language_code', language);
   }
 
-  const cleanKeyterms = (!automatic && Array.isArray(keyterms) ? keyterms : [])
+  const cleanKeyterms = (projectTerms.length ? projectTerms : !automatic && Array.isArray(keyterms) ? keyterms : [])
     .map(term => typeof term === 'string' ? term.trim() : '')
     .filter((term, index, list) => term && list.indexOf(term) === index)
     .slice(0, 100);
@@ -1330,7 +1334,7 @@ export async function callElevenLabsSpeechTranscription({
   }
 
   const endpoint = 'https://api.elevenlabs.io/v1/speech-to-text';
-  const response = await fetch(endpoint, {
+  const response = await fetchSpeech(endpoint, {
     method: 'POST',
     headers: { 'xi-api-key': key },
     body: formData,
@@ -1374,6 +1378,8 @@ export async function callWhisperApi({
   taskMode,
   language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh',
   audioDuration = Infinity,
+  openaiTiming = 'provider',
+  projectTerms = [],
   prompt = '',
   temperature = 0,
   signal = null
@@ -1385,12 +1391,13 @@ export async function callWhisperApi({
 
   let endpoint = 'https://api.groq.com/openai/v1/audio/transcriptions';
   let model = 'whisper-large-v3';
-  const diarized = provider === 'openai' && taskMode === 'transcribe';
+  const textModel = provider === 'openai' && openaiTiming === 'local';
+  const diarized = provider === 'openai' && !textModel && taskMode === 'transcribe';
   const automatic = !isLocal && isEditorSpeechTask(taskMode);
 
   if (provider === 'openai') {
     endpoint = 'https://api.openai.com/v1/audio/transcriptions';
-    model = diarized ? 'gpt-4o-transcribe-diarize' : 'whisper-1';
+    model = textModel ? 'gpt-transcribe' : diarized ? 'gpt-4o-transcribe-diarize' : 'whisper-1';
   } else if (isLocal) {
     endpoint = (localEndpoint && localEndpoint.trim()) || 'http://127.0.0.1:8080/v1/audio/transcriptions';
     model = 'whisper-1';
@@ -1400,7 +1407,10 @@ export async function callWhisperApi({
   const uploadName = audioBlob?.type === 'audio/mpeg' ? 'audio.mp3' : 'audio.wav';
   formData.append('file', audioBlob, uploadName);
   formData.append('model', model);
-  if (diarized) {
+  if (textModel) {
+    formData.append('response_format', 'json');
+    for (const term of projectTerms) formData.append('keywords[]', term);
+  } else if (diarized) {
     formData.append('response_format', 'diarized_json');
     formData.append('chunking_strategy', 'auto');
   } else {
@@ -1411,9 +1421,11 @@ export async function callWhisperApi({
   }
 
   if (language && language !== 'auto') {
-    formData.append('language', language);
+    formData.append(textModel ? 'languages[]' : 'language', language);
   }
-  if (!automatic && prompt && prompt.trim()) {
+  if (projectTerms.length && !diarized && !textModel) {
+    formData.append('prompt', projectTerms.join('、').slice(0, 800));
+  } else if (!automatic && prompt && prompt.trim()) {
     formData.append('prompt', prompt.trim());
   }
 
@@ -1422,7 +1434,7 @@ export async function callWhisperApi({
     headers['Authorization'] = `Bearer ${apiKey.trim()}`;
   }
 
-  const resp = await fetch(endpoint, {
+  const resp = await fetchSpeech(endpoint, {
     method: 'POST',
     headers,
     body: formData,
@@ -1435,6 +1447,10 @@ export async function callWhisperApi({
   }
 
   const data = await resp.json();
+  if (textModel) {
+    if (typeof data?.text !== 'string') throw new Error('OpenAI 未回傳辨識原文');
+    return {text:data.text, language:data.languages?.[0]?.code};
+  }
   if (diarized) {
     const segments = (Array.isArray(data?.segments) ? data.segments : []).flatMap(segment => {
       const text = typeof segment?.text === 'string' ? segment.text.trim() : '';
@@ -1735,34 +1751,63 @@ async function readRecognitionRange(source, start, end, signal) {
   return buffer;
 }
 
-async function planRecognitionReaderChunks(source, start, end, signal, overlap, chunkSeconds) {
-  const chunks = [];
-  for (let chunkStart = start; chunkStart < end;) {
-    const targetEnd = chunkStart + chunkSeconds;
-    let chunkEnd = Math.min(end, targetEnd);
-    if (chunkEnd < end) {
-      const searchStart = Math.max(chunkStart + 60, targetEnd - 45);
-      // Only the 45-second boundary neighborhood is decoded for silence search.
-      // No PCM survives this iteration; planning retains time ranges alone.
-      const buffer = await readRecognitionRange(source, searchStart, chunkEnd, signal);
-      const localSplit = findSilenceSplitPoint(buffer, 0, buffer.duration);
-      const split = searchStart + localSplit;
-      if (Number.isFinite(localSplit) && split > chunkStart + 30 && split <= chunkEnd) {
-        chunkEnd = split;
-      }
+function monoPcmBuffer(samples) {
+  return {
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    length: samples.length,
+    duration: samples.length / 16000,
+    getChannelData: () => samples
+  };
+}
+
+// Decode each source sample once. Only the silence-search tail and overlap
+// are carried into the next window, with no preflight over the remaining film.
+async function* recognitionReaderWindows(source, start, end, signal, overlap, seconds) {
+  let carry = new Float32Array(0),
+    readEnd = start;
+  for (let chunkStart = start; chunkStart < end; ) {
+    const target = Math.min(end, chunkStart + seconds);
+    const next = await readRecognitionRange(source, readEnd, target, signal);
+    let samples = next.getChannelData(0);
+    if (carry.length) {
+      const joined = new Float32Array(carry.length + samples.length);
+      joined.set(carry);
+      joined.set(samples, carry.length);
+      samples = joined;
     }
-    chunks.push({ start: chunkStart, end: chunkEnd });
-    if (chunkEnd >= end) break;
-    chunkStart = Math.max(chunkStart + 1, chunkEnd - overlap);
+    readEnd = target;
+    const last = target === end,
+      full = monoPcmBuffer(samples);
+    const split = last
+      ? full.duration
+      : (findSilenceSplitPoint(full, Math.max(60, seconds - 45), full.duration) ?? full.duration);
+    const length = Math.min(samples.length, Math.round(split * 16000));
+    const chunkEnd = last ? end : chunkStart + length / 16000;
+    const nextStart = chunkEnd - overlap;
+    carry = last ? null : samples.slice(Math.round((nextStart - chunkStart) * 16000));
+    yield {
+      start: chunkStart,
+      end: chunkEnd,
+      buffer: monoPcmBuffer(samples.subarray(0, length)),
+      last,
+      nextStart
+    };
+    if (last) return;
+    chunkStart = nextStart;
   }
-  return chunks;
 }
 
 async function transcribeRecognitionReader(source, options) {
   const { inT, outT, provider, onProgress, signal } = options;
-  if (!Number.isFinite(source.duration) || source.duration <= 0 ||
-      !Number.isFinite(inT) || inT < 0 || inT >= source.duration ||
-      (outT != null && (!Number.isFinite(outT) || outT <= inT))) {
+  if (
+    !Number.isFinite(source.duration) ||
+    source.duration <= 0 ||
+    !Number.isFinite(inT) ||
+    inT < 0 ||
+    inT >= source.duration ||
+    (outT != null && (!Number.isFinite(outT) || outT <= inT))
+  ) {
     throw new Error('辨識音訊來源或選取範圍無效');
   }
   if (!['builtin', 'openai', 'groq', 'google', 'azure', 'elevenlabs'].includes(provider)) {
@@ -1771,50 +1816,129 @@ async function transcribeRecognitionReader(source, options) {
   const end = Math.min(outT ?? source.duration, source.duration);
   const duration = end - inT;
   const chunkSeconds = provider === 'google' ? GEMINI_INLINE_CHUNK_SECONDS : WHISPER_CLOUD_CHUNK_SECONDS;
-  const chunks = await planRecognitionReaderChunks(source, inT, end, signal,
-    transcriptionChunkOverlap(provider, options.taskMode), chunkSeconds);
+  const windows = recognitionReaderWindows(
+    source,
+    inT,
+    end,
+    signal,
+    transcriptionChunkOverlap(provider, options.taskMode),
+    chunkSeconds
+  );
   const allSegments = [];
   const chunkEvidence = [];
-  const totalWork = chunks.reduce((sum, chunk) => sum + chunk.end - chunk.start, 0);
-  let completedWork = 0;
-  for (const [index, chunk] of chunks.entries()) {
+  const chunks = [];
+  for await (const chunk of windows) {
     throwIfRecognitionAborted(signal);
+    const index = chunks.length,
+      completedWork = chunk.start - inT,
+      totalWork = duration;
+    chunks.push({ start: chunk.start, end: chunk.end });
     const chunkDuration = chunk.end - chunk.start;
-    onProgress?.({ status: 'transcribing', percent: Math.round(completedWork / totalWork * 100),
-      message: `正在讀取第 ${index + 1}/${chunks.length} 段辨識音訊…` });
-    const buffer = await readRecognitionRange(source, chunk.start, chunk.end, signal);
+    onProgress?.({
+      status: 'transcribing',
+      percent: Math.round((completedWork / totalWork) * 100),
+      message: `正在辨識第 ${index + 1} 段音訊…`
+    });
+    const buffer = chunk.buffer;
+    const silent = !buffer.getChannelData(0).some((sample) => sample !== 0);
     // Each provider receives the same bounded, source-aligned PCM with local
     // zero as its origin. The session owns close(); this engine owns no files.
-    const segments = await transcribeAudioSegments({ ...options, audioBuffer: buffer,
-      inT: 0, outT: buffer.duration, onProgress: update => {
-        if (signal?.aborted) return;
-        const fraction = Math.max(0, Math.min(1, (Number(update?.percent) || 0) / 100));
-        onProgress?.({ ...update, percent: Math.round((completedWork + chunkDuration * fraction) / totalWork * 100),
-          message: `第 ${index + 1}/${chunks.length} 段：${update?.message || '正在辨識…'}` });
-      } });
+    const checkpointKey =
+      !silent && options.checkpoints
+        ? await recognitionCheckpointKey(buffer.getChannelData(0), chunk, options)
+        : null;
+    const saved = checkpointKey ? await options.checkpoints.read(checkpointKey) : null;
     throwIfRecognitionAborted(signal);
+    const reused =
+      Array.isArray(saved) &&
+      saved.every(
+        (entry) =>
+          typeof entry?.segment?.text === 'string' &&
+          Number.isFinite(entry.segment.start) &&
+          Number.isFinite(entry.segment.end)
+      );
+    const segments = silent
+      ? []
+      : reused
+        ? saved.map(({ segment, language }) =>
+            language ? { ...segment, [asrLanguageEvidence]: language } : segment
+          )
+        : await transcribeAudioSegments({
+            ...options,
+            checkpoints: null,
+            audioBuffer: buffer,
+            inT: 0,
+            outT: buffer.duration,
+            onProgress: (update) => {
+              if (signal?.aborted) return;
+              const fraction = Math.max(0, Math.min(1, (Number(update?.percent) || 0) / 100));
+              onProgress?.({
+                ...update,
+                percent: Math.round(((completedWork + chunkDuration * fraction) / totalWork) * 100),
+                message: `第 ${index + 1} 段：${update?.message || '正在辨識…'}`
+              });
+            }
+          });
+    throwIfRecognitionAborted(signal);
+    if (checkpointKey && !reused) {
+      await options.checkpoints.write(
+        checkpointKey,
+        segments.map((entry) => {
+          const { [asrLanguageEvidence]: language, ...segment } = entry;
+          return { segment, language };
+        })
+      );
+      throwIfRecognitionAborted(signal);
+    }
     const offset = chunk.start - inT;
     const evidence = createWhisperChunkWordEvidence(
-      segments.flatMap(segment => Array.isArray(segment.words) ? segment.words : []), index, offset, duration
+      segments.flatMap((segment) => (Array.isArray(segment.words) ? segment.words : [])),
+      index,
+      offset,
+      duration
     );
     chunkEvidence.push(evidence);
     const previous = chunks[index - 1];
-    const next = chunks[index + 1];
-    allSegments.push(...offsetWhisperSegments(segments, offset, duration,
-      previous ? (chunk.start + previous.end) / 2 - inT : 0,
-      next ? (chunk.end + next.start) / 2 - inT : duration,
-      index === chunks.length - 1, evidence.refByWord, true));
-    completedWork += chunkDuration;
-    onProgress?.({ status: 'transcribing', percent: Math.round(completedWork / totalWork * 100),
-      message: `已完成第 ${index + 1}/${chunks.length} 段音訊` });
+    allSegments.push(
+      ...offsetWhisperSegments(
+        segments,
+        offset,
+        duration,
+        previous ? (chunk.start + previous.end) / 2 - inT : 0,
+        chunk.last ? duration : (chunk.end + chunk.nextStart) / 2 - inT,
+        chunk.last,
+        evidence.refByWord,
+        true
+      )
+    );
+    onProgress?.({
+      status: 'transcribing',
+      percent: Math.round(((chunk.end - inT) / duration) * 100),
+      message: `${silent ? '已略過全靜音' : reused ? '已還原' : '已完成'}第 ${index + 1} 段音訊`
+    });
   }
   throwIfRecognitionAborted(signal);
   return deduplicateWhisperOverlapSegments(allSegments, chunkEvidence, chunks, inT);
 }
 
-/**
- * 統一音訊串流辨識總入口（深層模組核心接縫）
- */
+async function timeCloudTranscript(text, evidenceSegments, signal) {
+  // Keep the cloud spelling and punctuation. The local model supplies only the clock.
+  const segmenter = new Intl.Segmenter(undefined, { granularity:'sentence' });
+  const sentences = text.split(/\r?\n/u).flatMap(line =>
+    [...segmenter.segment(line)].map(part => part.segment.trim()).filter(Boolean));
+  const { segments } = await matchRecognitionTranscript({
+    taskMode:'align', transcript:sentences.join('\n'), evidenceSegments, signal
+  });
+  const localWords = evidenceSegments.flatMap(segment => segment.words || []);
+  return segments.map(segment => {
+    if (!segment.timed || !['word', 'segment'].includes(segment.alignment?.timingEvidence)) {
+      return { ...segment, start:0, end:0, timed:false };
+    }
+    const words = localWords.filter(word => word.start >= segment.start && word.end <= segment.end);
+    return { ...segment, ...(words.length && {words}) };
+  });
+}
+
 export async function transcribeAudioStream(options) {
   const { taskMode, provider, language = isEditorSpeechTask(taskMode) ? 'auto' : 'zh' } = options;
   const segments = await transcribeAudioSegments({ ...options, language });
@@ -1833,6 +1957,8 @@ async function transcribeAudioSegments({
   azureRegion = DEFAULT_AZURE_SPEECH_REGION,
   azurePhrases = [],
   azureProfanity = 'Raw',
+  projectTerms = [],
+  openaiTiming = 'provider',
   keyterms = [],
   elevenlabsNumSpeakers = null,
   elevenlabsTagAudioEvents = false,
@@ -1841,20 +1967,37 @@ async function transcribeAudioSegments({
   temperature = 0,
   vocalFilter = false,
   onProgress = null,
-  signal = null
+  signal = null,
+  checkpoints = null,
+  channelSelection = null
 }) {
   throwIfRecognitionAborted(signal);
   if (!audioBuffer) {
     throw new Error('未提供有效的音訊來源');
   }
 
-  if (typeof audioBuffer.readRange === 'function') {
-    return transcribeRecognitionReader(audioBuffer, { inT, outT, provider, taskMode, builtinModel,
-      apiKey, azureRegion, azurePhrases, azureProfanity, keyterms, elevenlabsNumSpeakers,
-      elevenlabsTagAudioEvents, language, prompt, temperature, vocalFilter, onProgress, signal });
-  }
-
   const endT = Math.min(outT ?? audioBuffer.duration, audioBuffer.duration);
+  projectTerms = normalizeRecognitionTerms(projectTerms);
+  const automaticSettings = isEditorSpeechTask(taskMode);
+  const chunkSeconds = provider === 'google' ? GEMINI_INLINE_CHUNK_SECONDS : WHISPER_CLOUD_CHUNK_SECONDS;
+  const needsReader = checkpoints || endT - inT > chunkSeconds && (provider === 'google' ||
+    (automaticSettings && provider === 'elevenlabs'));
+  if (typeof audioBuffer.readRange === 'function' || needsReader) {
+    const source = typeof audioBuffer.readRange === 'function' ? audioBuffer : {
+      duration: audioBuffer.duration,
+      async readRange(start,end,{signal:rangeSignal}={}) {
+        const pcm=new Float32Array(Math.round((end-start)*16000));
+        const {numberOfChannels:channels,sampleRate}=audioBuffer;
+        if(!pcm.length||!channels)throw new Error('辨識音訊範圍沒有可讀取的樣本');
+        for(let ch=0;ch<channels;ch++)await addSpeechChannelInBlocks(pcm,audioBuffer.getChannelData(ch),
+          sampleRate,start*sampleRate,{gain:1/channels},()=>throwIfRecognitionAborted(rangeSignal));
+        return monoPcmBuffer(pcm);
+      }
+    };
+    return transcribeRecognitionReader(source, { inT, outT: endT, provider, taskMode, builtinModel,
+      apiKey, azureRegion, azurePhrases, azureProfanity, keyterms, projectTerms, openaiTiming, elevenlabsNumSpeakers,
+      elevenlabsTagAudioEvents, language, prompt, temperature, vocalFilter, onProgress, signal, checkpoints, channelSelection });
+  }
 
   if (provider === 'builtin') {
     const audioFloat32 = extractClipFloat32Mono16k(audioBuffer, inT, endT, { vocalFilter: isEditorSpeechTask(taskMode) ? false : vocalFilter });
@@ -1901,18 +2044,27 @@ async function transcribeAudioSegments({
         throw new Error(`雲端語音辨識分段仍超過安全上傳大小（${wavBlob.size} bytes）`);
       }
       const chunkBlob = isEditorSpeechTask(taskMode) ? wavBlob : await compressWhisperUploadForDesktop(wavBlob, signal);
+      const localTimes = provider === 'openai' && openaiTiming === 'local';
+      const timing = localTimes ? await transcribeWithBuiltinModel({ taskMode:'align',
+        audioFloat32:extractClipFloat32Mono16k(audioBuffer, chunk.start, chunk.end), language, signal, onProgress }) : null;
+      throwIfRecognitionAborted(signal);
       const result = await callWhisperApi({
         audioBlob: chunkBlob,
         provider,
         apiKey,
         taskMode,
         audioDuration: chunk.end - chunk.start,
+        projectTerms, openaiTiming,
         language,
         prompt,
         temperature,
         signal
       });
       throwIfRecognitionAborted(signal);
+      if (localTimes) {
+        result.segments = await timeCloudTranscript(result.text, timing?.segments || [], signal);
+        result.words = result.segments.flatMap(segment => segment.words || []);
+      }
       const chunkOffset = chunk.start - inT;
       const wordEvidence = createWhisperChunkWordEvidence(
         result?.words,
@@ -1940,7 +2092,7 @@ async function transcribeAudioSegments({
         coreEnd,
         index === chunks.length - 1,
         wordEvidence.refByWord,
-        provider === 'openai' && taskMode === 'transcribe'
+        localTimes || provider === 'openai' && taskMode === 'transcribe'
       ));
       completedWorkSeconds += chunk.end - chunk.start;
       onProgress?.({
@@ -1953,23 +2105,6 @@ async function transcribeAudioSegments({
     return deduplicateWhisperOverlapSegments(allSegments, chunkEvidence, chunks, inT);
   }
 
-  // Desktop supplies a range reader. Browser-decoded long clips use the same
-  // bounded upload and subtitle stitching instead of encoding the complete film.
-  const automaticSettings = isEditorSpeechTask(taskMode);
-  const chunkSeconds = provider === 'google' ? GEMINI_INLINE_CHUNK_SECONDS : WHISPER_CLOUD_CHUNK_SECONDS;
-  if ((provider === 'google' || (automaticSettings && provider === 'elevenlabs')) && endT - inT > chunkSeconds) {
-    const source = {
-      duration: audioBuffer.duration,
-      readRange(start, end) {
-        const pcm = downmixAndResampleMono16k(audioBuffer, start, end);
-        if (!pcm?.length) throw new Error('辨識音訊範圍沒有可讀取的樣本');
-        return { sampleRate: 16000, numberOfChannels: 1, length: pcm.length,
-          duration: pcm.length / 16000, getChannelData: () => pcm };
-      }
-    };
-    return transcribeRecognitionReader(source, { provider, taskMode, apiKey, language, prompt, vocalFilter,
-      inT, outT: endT, onProgress, signal });
-  }
   const wavBlob = encodeWav16kMono(audioBuffer, inT, endT, { vocalFilter: automaticSettings ? false : vocalFilter });
   if (!wavBlob) throw new Error('音訊長度為 0');
 
@@ -1993,6 +2128,7 @@ async function transcribeAudioSegments({
       region: azureRegion,
       language,
       ...(isEditorSpeechTask(taskMode) ? {} : { phrases: azurePhrases, profanityFilterMode: azureProfanity }),
+      ...(projectTerms.length && {phrases:projectTerms}),
       signal
     });
     throwIfRecognitionAborted(signal);
@@ -2010,6 +2146,7 @@ async function transcribeAudioSegments({
       taskMode,
       audioDuration: endT - inT,
       keyterms: effectiveKeyterms,
+      projectTerms,
       numSpeakers: elevenlabsNumSpeakers,
       tagAudioEvents: elevenlabsTagAudioEvents,
       signal

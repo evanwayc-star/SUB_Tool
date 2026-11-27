@@ -2,7 +2,7 @@
 //! dual-kind (`card` vs `dialogue`) VLM & LLM HTTPS clients (OpenAI & Google Gemini).
 
 use crate::credentials::Provider;
-use crate::pricing::TokenUsage;
+use crate::pricing::{ObservedCharges, TokenUsage};
 use crate::srt::{CaptionKind, SourceLang, clean_cue_text};
 use crate::stitcher::RawCardEvent;
 use base64::Engine as _;
@@ -281,6 +281,7 @@ fn agent() -> &'static ureq::Agent {
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(180)))
+            .max_redirects(0)
             .http_status_as_error(false)
             .build()
             .into()
@@ -301,8 +302,8 @@ fn classify(status: u16, text: &str) -> LlmError {
         "model_not_found",
         "permission_denied",
     ];
-    let fatal =
-        matches!(status, 400 | 401 | 403 | 404 | 413) || markers.iter().any(|m| lower.contains(m));
+    let fatal = matches!(status, 300..=399 | 400 | 401 | 403 | 404 | 413)
+        || markers.iter().any(|m| lower.contains(m));
     let msg = format!("HTTP {status}：{snippet}");
     if fatal {
         LlmError::Fatal(msg)
@@ -311,6 +312,57 @@ fn classify(status: u16, text: &str) -> LlmError {
     }
 }
 
+static REQUEST_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static REQUEST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static OBSERVED: std::sync::LazyLock<std::sync::Mutex<(TokenUsage, ObservedCharges)>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn observe_response(model: &str, usage: &TokenUsage, reported: bool) {
+    let mut observed = OBSERVED.lock().unwrap();
+    observed.0.add(usage);
+    if reported {
+        observed.1.record(model, usage);
+    }
+}
+
+pub fn cost_snapshot() -> (ObservedCharges, u64) {
+    (OBSERVED.lock().unwrap().1, new_requests())
+}
+
+pub fn estimated_usd_since((before, first_request): (ObservedCharges, u64)) -> Option<f64> {
+    let (after, requests) = cost_snapshot();
+    after.estimated_usd_since(before, requests - first_request)
+}
+
+pub fn live_metrics(mut value: Value) -> Value {
+    let observed = OBSERVED.lock().unwrap();
+    let usage = &observed.0;
+    value["newRequests"] = json!(new_requests());
+    value["inputTokens"] = json!(usage.input_tokens);
+    value["outputTokens"] = json!(usage.output_tokens);
+    value["cachedInputTokens"] = json!(usage.cached_input_tokens);
+    value
+}
+pub fn set_request_limit(limit: Option<u64>) {
+    REQUEST_LIMIT.store(limit.unwrap_or(u64::MAX), Ordering::SeqCst);
+}
+pub fn new_requests() -> u64 {
+    REQUEST_COUNT.load(Ordering::SeqCst)
+}
+fn reserve_request() -> Result<(), LlmError> {
+    let limit = REQUEST_LIMIT.load(Ordering::SeqCst);
+    reserve_below(&REQUEST_COUNT, limit)
+}
+
+fn reserve_below(count: &std::sync::atomic::AtomicU64, limit: u64) -> Result<(), LlmError> {
+    #[allow(deprecated)] // Available on Rust versions predating AtomicU64::try_update.
+    count
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            n.checked_add(1).filter(|v| *v <= limit)
+        })
+        .map(|_| ())
+        .map_err(|_| LlmError::Fatal("已達本次新增 API 請求上限。".into()))
+}
 fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value, LlmError> {
     if cfg!(test) {
         return Err(LlmError::Fatal(
@@ -321,6 +373,7 @@ fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value,
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
+    reserve_request()?;
     let mut resp = req
         .send_json(body)
         .map_err(|e| LlmError::Retryable(format!("網路連線錯誤：{e}")))?;
@@ -333,32 +386,6 @@ fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value,
         return Err(classify(status, &text));
     }
     serde_json::from_str(&text).map_err(|e| LlmError::Retryable(format!("回應不是有效 JSON：{e}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn original_detail_is_limited_to_supported_openai_models() {
-        assert_eq!(vision_detail(Provider::OpenAI, "gpt-5.4"), "original");
-        assert_eq!(vision_detail(Provider::OpenAI, "gpt-5.4-mini"), "original");
-        assert_eq!(vision_detail(Provider::OpenAI, "gpt-4.1"), "high");
-        assert_eq!(vision_detail(Provider::OpenAI, "custom-vision"), "high");
-        assert_eq!(vision_detail(Provider::Gemini, "gemini-2.5-pro"), "high");
-    }
-
-    #[test]
-    fn spending_limit_is_fatal_but_rate_limit_can_retry() {
-        assert!(matches!(
-            classify(429, "project_spend_limit_exceeded"),
-            LlmError::Fatal(_)
-        ));
-        assert!(matches!(
-            classify(429, "rate_limit_exceeded"),
-            LlmError::Retryable(_)
-        ));
-    }
 }
 
 fn u64_at(v: &Value, path: &[&str]) -> u64 {
@@ -401,6 +428,16 @@ fn openai_generate(req: &JsonRequest) -> Result<(String, TokenUsage), LlmError> 
         &[("Authorization", &auth)],
         &body,
     )?;
+    let usage = TokenUsage {
+        input_tokens: u64_at(&resp, &["usage", "input_tokens"]),
+        output_tokens: u64_at(&resp, &["usage", "output_tokens"]),
+        cached_input_tokens: u64_at(&resp, &["usage", "input_tokens_details", "cached_tokens"]),
+    };
+    observe_response(
+        req.model,
+        &usage,
+        resp["usage"]["input_tokens"].is_u64() && resp["usage"]["output_tokens"].is_u64(),
+    );
     if resp["status"].as_str() != Some("completed") {
         return Err(LlmError::Retryable(format!(
             "OpenAI 回覆未完成（status={}）。",
@@ -425,11 +462,6 @@ fn openai_generate(req: &JsonRequest) -> Result<(String, TokenUsage), LlmError> 
             }
         }
     }
-    let usage = TokenUsage {
-        input_tokens: u64_at(&resp, &["usage", "input_tokens"]),
-        output_tokens: u64_at(&resp, &["usage", "output_tokens"]),
-        cached_input_tokens: u64_at(&resp, &["usage", "input_tokens_details", "cached_tokens"]),
-    };
     Ok((text, usage))
 }
 
@@ -464,10 +496,24 @@ fn gemini_generate(req: &JsonRequest) -> Result<(String, TokenUsage), LlmError> 
         req.model
     );
     let resp = post_json(&url, &[("x-goog-api-key", req.api_key)], &body)?;
+    let meta = &resp["usageMetadata"];
+    let usage = TokenUsage {
+        input_tokens: meta["promptTokenCount"].as_u64().unwrap_or(0),
+        output_tokens: meta["candidatesTokenCount"].as_u64().unwrap_or(0)
+            + meta["thoughtsTokenCount"].as_u64().unwrap_or(0),
+        cached_input_tokens: meta["cachedContentTokenCount"].as_u64().unwrap_or(0),
+    };
+    observe_response(
+        req.model,
+        &usage,
+        meta["promptTokenCount"].is_u64() && meta["candidatesTokenCount"].is_u64(),
+    );
     let mut text = String::new();
     if let Some(parts) = resp["candidates"][0]["content"]["parts"].as_array() {
         for p in parts {
-            text.push_str(p["text"].as_str().unwrap_or_default());
+            if p["thought"].as_bool() != Some(true) {
+                text.push_str(p["text"].as_str().unwrap_or_default());
+            }
         }
     }
     if text.trim().is_empty() {
@@ -476,13 +522,6 @@ fn gemini_generate(req: &JsonRequest) -> Result<(String, TokenUsage), LlmError> 
             resp["candidates"][0]["finishReason"]
         )));
     }
-    let meta = &resp["usageMetadata"];
-    let usage = TokenUsage {
-        input_tokens: meta["promptTokenCount"].as_u64().unwrap_or(0),
-        output_tokens: meta["candidatesTokenCount"].as_u64().unwrap_or(0)
-            + meta["thoughtsTokenCount"].as_u64().unwrap_or(0),
-        cached_input_tokens: meta["cachedContentTokenCount"].as_u64().unwrap_or(0),
-    };
     Ok((text, usage))
 }
 
@@ -493,6 +532,14 @@ pub fn generate_json(req: &JsonRequest) -> Result<(Value, TokenUsage), LlmError>
     };
     let value = serde_json::from_str::<Value>(&text)
         .map_err(|e| LlmError::Retryable(format!("模型未回傳有效 JSON：{e}")))?;
+    if req.schema_name == "variety_multislot_events" {
+        let count = req
+            .parts
+            .iter()
+            .filter(|p| matches!(p, Part::Jpeg(_)))
+            .count();
+        parse_vision_events(&value, count).map_err(LlmError::Retryable)?;
+    }
     Ok((value, usage))
 }
 
@@ -531,34 +578,52 @@ pub fn parse_vision_events(
 ) -> Result<(String, Vec<RawCardEvent>), String> {
     let detected_lang = value["detected_language"]
         .as_str()
-        .unwrap_or("ko")
-        .to_string();
+        .filter(|lang| matches!(*lang, "ko" | "ja" | "zh" | "en"))
+        .ok_or("模型回傳未知的來源語言。")?
+        .to_owned();
     let events = value["events"]
         .as_array()
-        .ok_or_else(|| "模型回傳 JSON 缺少 events 陣列。".to_string())?;
+        .ok_or("模型回傳 JSON 缺少 events 陣列。")?;
     let mut out = Vec::new();
     for ev in events {
-        let lines: Vec<&str> = ev["lines"]
+        let lines = ev["lines"]
             .as_array()
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+            .ok_or("模型回傳無效的字幕行。")?
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .ok_or("模型回傳無效的字幕行。")?;
         let text = clean_cue_text(&lines.join("\n"));
         if text.is_empty() {
-            continue;
+            return Err("模型回傳空白字幕。".into());
         }
-        let slot = match ev["slot"].as_str().unwrap_or("bottom") {
-            "bottom" | "center" | "top_left" | "top_right" | "floating" => {
-                ev["slot"].as_str().unwrap_or("bottom").to_string()
-            }
-            _ => "bottom".to_string(),
+        let slot = ev["slot"]
+            .as_str()
+            .filter(|s| {
+                matches!(
+                    *s,
+                    "bottom" | "center" | "top_left" | "top_right" | "floating"
+                )
+            })
+            .ok_or("模型回傳無效的文字位置。")?
+            .to_owned();
+        let kind = match ev["kind"].as_str() {
+            Some("dialogue") => CaptionKind::Dialogue,
+            Some("card") => CaptionKind::Card,
+            _ => return Err("模型回傳無效的文字分類。".into()),
         };
-        let kind = match ev["kind"].as_str().unwrap_or("card") {
-            "dialogue" => CaptionKind::Dialogue,
-            _ => CaptionKind::Card,
+        let index = |k: &str| {
+            ev[k]
+                .as_u64()
+                .and_then(|i| usize::try_from(i).ok())
+                .filter(|i| *i < num_frames)
+                .ok_or("模型回傳超出視窗的畫格。")
         };
-        let last = num_frames.saturating_sub(1);
-        let sf = (ev["start_frame"].as_i64().unwrap_or(0).max(0) as usize).min(last);
-        let ef = (ev["end_frame"].as_i64().unwrap_or(0).max(0) as usize).clamp(sf, last);
+        let sf = index("start_frame")?;
+        let ef = index("end_frame")?;
+        if sf > ef {
+            return Err("模型回傳倒置的畫格區間。".into());
+        }
         out.push(RawCardEvent {
             start_frame: sf,
             end_frame: ef,
@@ -601,5 +666,71 @@ pub fn test_connection(provider: Provider, api_key: &str, model: &str) -> Result
                 .map(|_| format!("Gemini 連線成功（{model}）"))
                 .map_err(|e| e.message().to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_workers_cannot_exceed_the_shared_request_limit() {
+        let count = std::sync::atomic::AtomicU64::new(0);
+        std::thread::scope(|threads| {
+            let handles: Vec<_> = (0..12)
+                .map(|_| threads.spawn(|| reserve_below(&count, 3).is_ok()))
+                .collect();
+            assert_eq!(
+                handles
+                    .into_iter()
+                    .filter_map(|h| h.join().ok())
+                    .filter(|ok| *ok)
+                    .count(),
+                3
+            );
+        });
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn invalid_window_responses_cannot_become_cached_subtitles() {
+        let valid = json!({"detected_language":"en","events":[{"start_frame":1,"end_frame":2,"slot":"bottom","kind":"dialogue","lines":["Yes."]}]});
+        assert!(parse_vision_events(&valid, 3).is_ok());
+        for (field, value) in [
+            ("start_frame", json!(-1)),
+            ("start_frame", json!(3)),
+            ("end_frame", json!(0)),
+            ("slot", json!("bad")),
+            ("kind", json!("unknown")),
+            ("lines", json!(["", 3])),
+        ] {
+            let mut bad = valid.clone();
+            bad["events"][0][field] = value;
+            assert!(parse_vision_events(&bad, 3).is_err(), "{field}");
+        }
+        let mut bad = valid;
+        bad["detected_language"] = Value::Null;
+        assert!(parse_vision_events(&bad, 3).is_err());
+    }
+
+    #[test]
+    fn original_detail_is_limited_to_supported_openai_models() {
+        assert_eq!(vision_detail(Provider::OpenAI, "gpt-5.4"), "original");
+        assert_eq!(vision_detail(Provider::OpenAI, "gpt-5.4-mini"), "original");
+        assert_eq!(vision_detail(Provider::OpenAI, "gpt-4.1"), "high");
+        assert_eq!(vision_detail(Provider::OpenAI, "custom-vision"), "high");
+        assert_eq!(vision_detail(Provider::Gemini, "gemini-2.5-pro"), "high");
+    }
+
+    #[test]
+    fn spending_limit_is_fatal_but_rate_limit_can_retry() {
+        assert!(matches!(
+            classify(429, "project_spend_limit_exceeded"),
+            LlmError::Fatal(_)
+        ));
+        assert!(matches!(
+            classify(429, "rate_limit_exceeded"),
+            LlmError::Retryable(_)
+        ));
     }
 }

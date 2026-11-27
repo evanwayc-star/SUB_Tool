@@ -667,6 +667,7 @@ describe('語音辨識與字幕生成模組', () => {
       start: 1.25,
       end: 3.5,
       text: '我來不及了，還沒回來。軟件和鼠標。',
+      originalText: original[0].text,
       confidence: 0.9
     }]);
     expect(convertAsrSegmentsToTraditionalChinese(original, 'en')).toBe(original);

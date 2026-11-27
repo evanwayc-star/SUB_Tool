@@ -5,7 +5,7 @@ const mocks=vi.hoisted(()=>({
   media:{tracks:[]},transcribe:vi.fn(),decode:vi.fn(),open:vi.fn(),close:vi.fn(),toast:vi.fn(),
 }));
 vi.mock('../src/media.js',()=>({Media:mocks.media}));
-vi.mock('../src/project.js',()=>({Project:{captureWorkspaceOwnership:()=>()=>true}}));
+vi.mock('../src/project.js',()=>({Project:{captureWorkspaceOwnership:()=>()=>true,onWorkspaceInvalidated:()=>()=>{}}}));
 vi.mock('../src/events.js',()=>({emit:vi.fn(),on:vi.fn()}));
 vi.mock('../src/history.js',()=>({recordHistory:vi.fn()}));
 vi.mock('../src/ui.js',()=>({renderCurrentTimecode:vi.fn(),openModal:mocks.open,closeModal:mocks.close,showToast:mocks.toast}));
@@ -29,7 +29,10 @@ const start=()=>mocks.open.mock.calls.at(-1)[2].find(button=>button.primary).act
 beforeEach(()=>{
   vi.clearAllMocks();clearAsrSession();localStorage.clear();document.body.innerHTML='';
   mocks.media.tracks=[];mocks.transcribe.mockReset().mockResolvedValue([]);mocks.decode.mockReset();
-  mocks.open.mockImplementation((_title,html)=>{document.body.innerHTML=html+'<div id="modalFoot"></div>';});
+  mocks.open.mockImplementation((_title,html)=>{
+    document.body.innerHTML=html+'<div id="modalFoot"></div>';
+    return {isCurrent:()=>true,close:mocks.close};
+  });
   State.clips=[];State.externalAudioState=[];State.cues=[];State.tracks=[{name:'字幕',locked:false}];
   setSelection();
   saveAsrConfig({...getAsrConfig(),provider:'google',googleApiKey:'saved-google',prompt:'已保存提示'});
@@ -37,6 +40,74 @@ beforeEach(()=>{
 afterEach(()=>{clearAsrSession();vi.unstubAllGlobals();});
 
 describe('辨識設定草稿由同一 live dialog 保留',()=>{
+  it('只重跑一則附近的音訊，選取建議前後均保留其他候選的人工修訂',async()=>{
+    const target=source('rerun',{duration:40,out:40,audioBuffer:{...pcm(.2),duration:40}});
+    State.clips=[target];State.fps=25;
+    mocks.transcribe.mockResolvedValueOnce([{start:4,end:5,text:'一'},{start:20,end:21,text:'二'}])
+      .mockResolvedValueOnce([{start:2,end:3,text:'二號'}]);
+    await open(target);element('asrResultMode').value='review';await start();
+    element('recognitionReviewText').value='人工一';element('recognitionReviewText').dispatchEvent(new Event('input'));
+    element('recognitionReviewNext').click();element('recognitionReviewRerun').click();
+    await vi.waitFor(()=>expect(element('recognitionReviewSuggestedText').textContent).toBe('二號'));
+    expect(mocks.transcribe.mock.lastCall[0]).toMatchObject({inT:18,outT:23});
+    expect(element('recognitionReviewText').value).toBe('二');
+    element('recognitionReviewUseSuggestion').click();await start();
+    expect(State.cues.map(cue=>[cue.text,cue.start,cue.end])).toEqual([['人工一',4,5],['二號',20,21]]);
+    expect(State.cues.map(cue=>cue.recognition.originalText)).toEqual(['一','二']);
+  });
+  it('舊金鑰確認可解密後才移除，等待期間連按兩次只開始一次工作', async () => {
+    const target=source('migration',{audioBuffer:pcm(.4)}); State.clips=[target];
+    let confirm;
+    const saved=new Promise(resolve=>{confirm=resolve;});
+    window.subtool={speechKeyStatus:async()=>({openai:false}),saveSpeechKeys:vi.fn(()=>saved)};
+    const old={provider:'openai',openaiApiKey:'synthetic-old',speechLanguage:'en'};
+    localStorage.setItem('subtool_asr_config',JSON.stringify(old));
+    try {
+      await open(target);
+      expect(element('asrApiKey').value).toBe('');
+      expect(window.subtool.saveSpeechKeys).toHaveBeenCalledWith({openai:'synthetic-old'});
+      const first=start(), second=start();
+      expect(JSON.parse(localStorage.getItem('subtool_asr_config'))).toEqual(old);
+      confirm({openai:true});
+      await Promise.all([first,second]);
+      expect(mocks.transcribe).toHaveBeenCalledOnce();
+      expect(mocks.transcribe.mock.calls[0][0].apiKey).toBe('subtool-saved-credential-openai');
+      expect(localStorage.getItem('subtool_asr_config')).not.toContain('synthetic-old');
+    } finally {delete window.subtool;}
+  });
+  it('OpenAI 供應商時間在服務截止前仍可用，截止日起明示本機模型、開窗不會下載或辨識',async()=>{
+    const date=vi.spyOn(Date,'now');
+    const target=source('cutoff',{audioBuffer:pcm(.4)});State.clips=[target];
+    try{
+      saveAsrConfig({...getAsrConfig(),provider:'openai',openaiTiming:'provider'});
+      date.mockReturnValue(Date.UTC(2027,1,26)-1);await open(target);
+      expect(element('asrOpenAiTiming').value).toBe('provider');
+      expect(element('asrOpenAiTiming').options[0].disabled).toBe(false);
+      date.mockReturnValue(Date.UTC(2027,1,26));await open(target);
+      expect(element('asrOpenAiTiming').value).toBe('local');expect(getAsrConfig().openaiTiming).toBe('local');
+      expect(element('asrOpenAiTiming').options[0].disabled).toBe(true);
+      expect(element('asrOpenAiTimingField').textContent).toContain('首次使用會下載 Whisper');
+      expect(mocks.transcribe).not.toHaveBeenCalled();
+    }finally{date.mockRestore();}
+  });
+  it('桌面已存金鑰試跑傳送播放點附近 20 秒及詞表，候選修改後才寫入，保留原文和無時間的聽寫',async()=>{
+    window.subtool={speechKeyStatus:async()=>({openai:true})};
+    const previousTerms=State.recognitionTerms;
+    State.recognitionTerms=['舊詞'];mocks.media.displayTime=()=>12;
+    const target=source('trial',{out:50,duration:50,audioBuffer:{...pcm(.2),duration:50}});
+    State.clips=[target];mocks.transcribe.mockResolvedValue([{start:0,end:0,timed:false,text:'原文'}]);
+    try{
+      await open(target);switchProvider('openai');element('asrApiKey').value='';
+      element('asrOpenAiTiming').value='local';element('asrProjectTerms').value='李華\n李華';element('asrResultMode').value='trial';
+      await start();
+      expect(mocks.transcribe.mock.lastCall[0]).toMatchObject({inT:12,outT:32,apiKey:'subtool-saved-credential-openai',projectTerms:['李華'],openaiTiming:'local'});
+      expect(State.cues).toEqual([]);expect(State.tracks).toHaveLength(1);expect(State.recognitionTerms).toEqual(['舊詞']);
+      element('recognitionReviewText').value='人工改字';element('recognitionReviewText').dispatchEvent(new Event('input'));
+      await start();
+      expect(State.cues).toMatchObject([{timed:false,text:'人工改字',recognition:{originalText:'原文',timingEvidence:'none',kind:'speech'}}]);
+      await open(target);expect(element('asrOpenAiTiming').value).toBe('local');
+    }finally{delete window.subtool;delete mocks.media.displayTime;State.recognitionTerms=previousTerms;}
+  });
   it('往返引擎與模式保留各自的 API Key，開始時使用目前引擎的金鑰', async () => {
     const target = source('draft', {audioBuffer:pcm(.4)});
     State.clips = [target];
@@ -221,6 +292,10 @@ describe('語音辨識的全片與輸出 In／Out 範圍', () => {
     expect(first.audioBuffer.getChannelData(0)[0]).toBeCloseTo(.2);
     expect(second.inT).toBeCloseTo(mode === 'all' ? 2 : 5.96); expect(second.outT).toBe(10);
     expect(second.audioBuffer.getChannelData(0)[0]).toBeCloseTo(.7);
+    expect(State.cues).toEqual([]);
+    expect(element('recognitionReviewMoved').hidden).toBe(false);
+    element('recognitionReviewPosition').value='original';
+    mocks.open.mock.calls.at(-1)[2].find(button=>button.primary).act();
     const startTime = mode === 'all' ? 4 : 5;
     expect(State.cues.map(({start,end,text}) => [start,end,text])).toEqual([
       [startTime, startTime + 1, '影片'], [9, mode === 'all' ? 13 : 11, '外音']

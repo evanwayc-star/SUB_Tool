@@ -57,6 +57,7 @@ export async function renderRecentMenu() {
   try { list = await DESK.recentProjects(); } catch (e) { list = []; }
 
   if (generation !== _renderGeneration || $('recentItems') !== box) return;
+  const focusToken = box.contains(document.activeElement) ? document.activeElement.dataset.recentToken : null;
   box.replaceChildren();
   if (!list.length) {
     const empty = document.createElement('div');
@@ -71,6 +72,7 @@ export async function renderRecentMenu() {
     const b = document.createElement('button');
     b.type = 'button';
     b.tabIndex = -1;
+    b.dataset.recentToken = item.token;
     /* 無法找到時標灰但仍可點，儲存裝置恢復後可用相同項目重試。 */
     b.style.cssText = 'display:block;text-align:left;line-height:1.3;'
       + (item.missing ? 'opacity:.45;' : '');
@@ -93,6 +95,7 @@ export async function renderRecentMenu() {
   const clear = document.createElement('button');
   clear.type = 'button';
   clear.tabIndex = -1;
+  clear.dataset.recentToken = 'clear';
   clear.textContent = '清除清單';
   clear.addEventListener('click', async () => {
     if ($('recentItems') !== box) return;
@@ -102,6 +105,10 @@ export async function renderRecentMenu() {
     await renderRecentMenu();
   });
   box.append(sep, clear);
+  if(focusToken && box.closest('.menu.open')) {
+    const buttons=[...box.querySelectorAll('button')];
+    (buttons.find(button=>button.dataset.recentToken===focusToken)||buttons[0])?.focus();
+  }
   /* 內容是非同步填進來的，選單高度到這一刻才確定。沒有這一行的話，讓位判斷用的是
      還沒長高的空盒子矩形——那個矩形通常還構不到影片區，於是 mpv 不讓位，選單照樣
      被蓋住。這是本次事故最容易漏掉的一半。 */

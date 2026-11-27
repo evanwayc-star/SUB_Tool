@@ -56,7 +56,22 @@ function createClipCacheArtifact(directoryPath, key, extension) {
     verifyRoot();
     const result = [];
     const add = (folder, file, ready) => {
-      try { result.push({ path: file, verify: makeGuard(folder, file, rootOwner, ready) }); }
+      try {
+        const verify = makeGuard(folder, file, rootOwner, ready);
+        result.push({ path: file, ready, verify, retire() {
+          if (!ready) return;
+          verify();
+          const folderOwner = directory(folder);
+          const verifyFile = makeGuard(folder,file,rootOwner);
+          fs.unlinkSync(ready);
+          verifyFile();
+          fs.unlinkSync(file);
+          verifyBucket();
+          if (!same(folderOwner,directory(folder))) throw changed();
+          fs.rmdirSync(folder);
+          try { verifyBucket(); fs.rmdirSync(bucket); } catch (_) { /* Other entries still exist. */ }
+        } });
+      }
       catch (_) { /* 缺件或不能確認身分時不接納。 */ }
     };
     add(directoryPath, path.join(directoryPath, `${key}.${extension}`), null);
@@ -97,15 +112,30 @@ function createClipCacheArtifact(directoryPath, key, extension) {
       verify(fileOwner);
     } catch (error) {
       if (fd !== null) try { fs.closeSync(fd); } catch (_) {}
+      try { verifyBucket(); if (same(folderOwner, directory(folder))) fs.rmdirSync(folder); } catch (_) {}
       throw error;
     }
+    let markerOwner;
     return {
       path: file, fd, verify,
-      publish() {
+      publish(receipt) {
         verify(fs.fstatSync(fd, { bigint: true }));
         const marker = path.join(folder, 'ready');
-        const ready = fs.openSync(marker, 'wx');
-        fs.closeSync(ready);
+        const temp = committed ? path.join(folder,'ready-'+randomUUID()+'.tmp') : marker;
+        const ready = fs.openSync(temp, 'wx');
+        try {
+          if (receipt !== undefined) {
+            fs.writeFileSync(ready, JSON.stringify(receipt), 'utf8');
+            fs.fsyncSync(ready);
+          }
+          const nextOwner = fs.fstatSync(ready, {bigint:true});
+          if(committed) {
+            verify();
+            if(!same(markerOwner,regular(marker))||!same(nextOwner,regular(temp)))throw changed();
+            fs.renameSync(temp,marker);
+          }
+          markerOwner=nextOwner;
+        } finally { fs.closeSync(ready); }
         verify();
         committed = true;
         return file;

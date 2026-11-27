@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { observeFullSourceOpen } from './fixtures/full-source-reads.js';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -152,7 +153,7 @@ it('同一 NAS 母檔在兩個客戶端掛載路徑重用 MIX 與聲道，冷建
   const native=fs.realpathSync.native.bind(fs.realpathSync);
   vi.spyOn(fs.realpathSync,'native').mockImplementation((file,...args)=>
     [input,source].includes(file)?'//subtool-test-nas/projects/source.mov':native(file,...args));
-  const fullReads=vi.spyOn(fsp,'open');
+  const fullReads=observeFullSourceOpen();
   const channel={sourceStream:0,sourceChannel:0}, request={...a.request,src:input,displayPeaks:true};
   const originalKey=cacheKeyFor(input);
   const first=a.create(undefined,input), mix=await first.waveform(request), separate=await first.waveform({...request,channel});

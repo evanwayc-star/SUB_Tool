@@ -104,6 +104,7 @@ function shutdownHandler(vocalRuntime, overrides = {}) {
     clipAudioCache: { waitForIdle: vi.fn().mockResolvedValue() },
     clipFrameCache: { waitForIdle: vi.fn().mockResolvedValue() },
     speechCompressionRuntime: nativeOwner(), speechAudioReader: nativeOwner(), screenTextRuntime: nativeOwner(), mediaIngestCoordinator: nativeOwner(), mediaWaveformCoordinator: nativeOwner(),
+    frameTextRuntime: { close: vi.fn().mockResolvedValue() },
     vocalWaveformRuntime: vocalRuntime,
     nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
     QueueManager: { prepareForShutdown: vi.fn().mockResolvedValue(), cancelShutdown: vi.fn().mockResolvedValue(true) },

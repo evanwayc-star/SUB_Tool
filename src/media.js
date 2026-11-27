@@ -219,7 +219,7 @@ import { clipSourceFingerprint, liveClipForSource, sourceWaveformChunkLength } f
 import { createSourceWaveformProgress, sourceDisplayPeaks } from './source-waveform-progress.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
 import { emit, on } from './events.js';
-import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
+import { Wave, WAVE_DECODE_MAX, canDecodeWaveform } from './waveform-decoder.js';
 
 // An ingest can return a second WAV for a mother source whose complete MIX
 // has already been delivered. Only a verified, complete buffer may be reused.
@@ -504,6 +504,7 @@ const Media = {
   // briefly reconnecting them to the audible mix.
   _commitOriginalAudioTracks(source,incoming,{replace=false}={}){
     const key=source.audioSourceId;
+    if(incoming.length && this._previewMix?.sourceId===key)this._stopPreviewMix();
     const current=this.tracks.filter(track=>track.audioSourceId===key);
     const effected=current.some(track=>track._audioEffect);
     const controls=new Map(current.map(track=>[`${track.sourceStream}:${track.sourceChannel}`,track]));
@@ -854,25 +855,39 @@ const Media = {
     const clip=this._previewClip(),record=clip?this._previewSources?.get(clipSourceFingerprint(clip)):null;
     const preparation=clip?.path&&!record?MediaIntakeJobs.proxyState(clip.path):null;
     const path=this.mpvMode?this._mpvPath:clip?.path;
-    const proxy=!!path&&path!==clip?.path;
+    const htmlSource=!this.mpvMode&&clip?.web&&clip.web.url===(video?.currentSrc||video?.src)?clip.web.previewKind:null;
+    const proxy=this.mpvMode?!!path&&path!==clip?.path:htmlSource==='proxy'||htmlSource==='stream';
     const position=this.displayTime();
+    let streamPreview=null;
+    if(htmlSource==='stream'){
+      const ranges=[];
+      const buffered=video.buffered;
+      for(let i=0;i<(buffered?.length||0);i++){
+        const start=Math.max(clip.in,buffered.start(i)),end=Math.min(clip.out,buffered.end(i));
+        if(end<=start)continue;
+        const a=Seq.toTimeline(start,clip),b=Seq.toTimeline(end,clip);
+        ranges.push([Math.min(a,b),Math.max(a,b)]);
+      }
+      streamPreview={ranges,duration:State.duration,frame:1/getExactFps(State.fps||25)};
+    }
     // The hidden mpv carrier can use the mother while the visible compositor
     // still uses preview assets. Keep that distinction separate from preference.
     const stack=this.mpvMode&&!this.inGap()&&this.seqOn()
       ?visualStackPlan(Seq.clipsAt(this.tlTime()),State.videoTracks):null;
-    const compositePreview=!!stack?.videos.length&&(stack.needsComposite||this.webCodecsTakeover());
+    const compositePreview=this.mpvMode?!!stack?.videos.length&&(stack.needsComposite||this.webCodecsTakeover()):
+      !!clip&&!this.inGap()&&this.webCodecsTakeover();
     const start=this._presenterStart;
     const phase=this._previewFailure?'error':this.presentationPending()||this.mpvSourceTransitionPending()||this._seqSwitching?'seeking':
       this._nativeBufferingPending()?'video':start?(start.phase==='waiting'?'video':'audio'):
       this.playing?'playing':clip?'paused':'idle';
     return {mode:State.previewMode==='original'?'original':'smooth',available:!!this.mpvMode&&!!clip?.path&&!Seq.isStill(clip)
         &&!clip.reverse&&!this._nativeReverse&&!this._reverseShuttleMuted,
-      sourceKind:proxy?'proxy':'original',
+      sourceKind:proxy?(htmlSource==='stream'&&!this.mpvMode?'stream':'proxy'):'original',
       compositePreview,
       network:isNetworkPreviewPath(path||clip?.path),phase,proxyAvailable:!!record&&!record.failed,
       proxyFailed:!!record?.failed||preparation?.state==='failed',proxyPreparation:preparation?.state||null,
       canRetryProxy:!!record?.failed||!!preparation?.retryId,
-      position,sourceTime:this.vTime()};
+      streamPreview,position,sourceTime:this.vTime()};
   },
   _publishPreviewState(){
     const state=this.previewState();
@@ -891,7 +906,25 @@ const Media = {
     const clip=this._previewClip(),target=this.displayTime();
     if(mode==='smooth'&&clip){
       const catalog=this._previewSources;
-      catalog?.setFailed(catalog.get(clipSourceFingerprint(clip)),false);
+      const record=catalog?.get(clipSourceFingerprint(clip));
+      if(record?.failed&&DESK?.ingest){
+        if(!record.repair){
+          record.repair=(async()=>{
+            const result=await MediaIntakeJobs.ingest({path:clip.path,duration:clip.dur,needsProxy:true,
+              audio:[],queue:true,interactive:true,failedProxy:record.assets.proxy});
+            if(catalog.get(record.key)!==record||!result?.proxy)return;
+            const url=await DESK.fileURL(result.proxy);
+            if(catalog.get(record.key)!==record)return;
+            const live=this._liveClipForSource(clip);
+            if(!live)return;
+            live.proxyUrl=url;
+            if(this._wcProxyPath===clip.path)this._wcProxyUrl=url;
+            if(this._reverseProxySourcePath===clip.path)this._reverseProxyPath=result.proxy;
+            this._publishPreviewAssets(live,{...record.assets,proxy:result.proxy},record.owns);
+          })().finally(()=>{record.repair=null;});
+        }
+        await record.repair;
+      }else catalog?.setFailed(record,false);
     }
     this._publishPreviewState();
     if(version!==this._previewModeVersion||!ownsTarget())return false;
@@ -1543,7 +1576,7 @@ const Media = {
     return true;
   },
 
-  async probeAndMaybeExtract(file,{owns=()=>true}={}){
+  async probeAndMaybeExtract(file,{owns=()=>true,audioStreamCount}={}){
     const version=++this._audioProbeVersion;
     const operation=this._assetOperation(null,{kind:'web-audio-probe',file},owns);
     const current=()=>this._audioProbeVersion===version&&this._ownsAssetOperation(operation);
@@ -1569,7 +1602,9 @@ const Media = {
     }catch(e){}
     // 用 ffmpeg 探測（不阻塞主流程，量力而為）
     if(file.size <= FFMPEG_MAX_BYTES){
-      this.ffprobeTracks(file,{owns}).then(streams=>{
+      const description=Number.isInteger(audioStreamCount) && audioStreamCount>=0
+        ?Promise.resolve({aCount:audioStreamCount}):this.ffprobeTracks(file,{owns});
+      description.then(streams=>{
         if(!owns()) return;
         if(streams && streams.aCount>1){
           showToast(`此檔含 ${streams.aCount} 條音軌，點音軌面板的「抽取多軌」以同時混音`);
@@ -1649,8 +1684,10 @@ const Media = {
       // 網頁版沒有 ffmpeg 的逐聲道 cache，仍可直接從原檔解碼出 MIX / 每條聲道峰值。
       // 這個狀態只留在 Wave 的 runtime registry，不會被寫入專案檔。
       const ownsWave=()=>owns()&&this.externalAudioSources.includes(asset);
-      if(file.size<=WAVE_DECODE_MAX) void Wave.fromFile(file,asset,{owns:ownsWave}).catch(()=>{});
-      if(!Wave.peaks) Wave.initLive();
+      if(canDecodeWaveform(file,sourceDuration,sourceInfo?.audioChannels)) {
+        void Wave.fromFile(file,asset,{owns:ownsWave}).catch(()=>{ if(ownsWave()) Wave.prepareLiveSource(asset,sourceDuration); });
+      } else Wave.prepareLiveSource(asset,sourceDuration);
+      if(!Wave.peaks && Seq.primary()) Wave.initLive();
       setStatus('音軌已加入','ok');
       notifyAudioTracks();
       if(this.playing) this.startElementSources(this.vTime());
@@ -1820,7 +1857,7 @@ const Media = {
     const previousUrl=this._liveClipForSource(primary)?.web?.url;
     getPlayerAdapter().registerSourceClock(url,null);
     for(const clip of State.clips){
-      if(clipSourceFingerprint(clip)===fingerprint)clip.web={...clip.web,url};
+      if(clipSourceFingerprint(clip)===fingerprint)clip.web={...clip.web,url,previewKind:'proxy'};
     }
     const active=this._activeClip();
     let refreshed=false;
@@ -1940,7 +1977,7 @@ const Media = {
       // 初次匯入只抽音軌；此處在使用者加入第二支影片後才補做影像快取。
       // queue:true 避免與同一母素材的音訊快取同時寫入。
       const res=await MediaIntakeJobs.ingest({
-        path:spec.path,duration:spec.duration,needsProxy:true,audio:spec.audio,queue:true,
+        path:spec.path,duration:spec.duration,needsProxy:true,audio:[],queue:true,interactive:true,
       });
       if(!owns()||!res?.proxy) return;
       const url=await DESK.fileURL(res.proxy);
@@ -2233,6 +2270,17 @@ const Media = {
     } else { try{ this.videoSrcNode.disconnect(); }catch(e){} }
     const g=AudioEngine.createGain(); this.videoSrcNode.connect(g); AudioEngine.connectToMaster(g);
     return g;
+  },
+  _startPreviewMix(source){
+    this._stopPreviewMix();
+    const gain=this.connectNativeAudio();
+    if(gain){gain.gain.value=0;this._previewMix={sourceId:source.audioSourceId,gain};}
+  },
+  _stopPreviewMix(){
+    if(!this._previewMix)return;
+    this._previewMix.gain.gain.value=0;
+    this._previewMix.gain.disconnect();
+    this._previewMix=null;
   },
   /* 立體聲分頻：L / R 各自一條 native 音軌，可獨立靜音/獨奏/電平表 */
   _connectStereo(sourceName='video', clip=null){
@@ -2537,6 +2585,26 @@ const Media = {
     if(this.externalAudioSources.some(asset=>this.externalAudio.sourceTime(asset.audioSrc,time)!=null)) return null;
     const sourceTime=this.vTime();
     return Number.isFinite(sourceTime)&&sourceTime>=0?sourceTime:null;
+  },
+  liveElementWaveTimes(sources){
+    const times=new Map();
+    if(!this.presenterClockMoving() || this._reverseShuttleMuted || State.muted) return times;
+    const elements=new Map();
+    for(const track of this.tracks){
+      if(!sources.has(track.source) || track._srcHidden || track.kind!=='element') continue;
+      const el=track.el;
+      if(!el || el.paused || el.seeking || el.ended || el.readyState<2) continue;
+      // Multiple channels of one element share a clock. Separate voices can
+      // represent different placements of the same source at the same instant.
+      if(elements.has(track.source) && elements.get(track.source)!==el) elements.set(track.source,null);
+      else elements.set(track.source,el);
+    }
+    for(const [source,el] of elements){
+      if(!el) continue;
+      const time=getPlayerAdapter().sourceTime(el.currentTime,el.currentSrc||el.src);
+      if(Number.isFinite(time) && time>=0) times.set(source,time);
+    }
+    return times;
   },
   observePresentedTimelineTime(time,source='unknown'){
     return this._ensurePresentationSession().observe(time,{source});
@@ -3349,7 +3417,7 @@ const Media = {
       poll=setInterval(()=>{if(!current()){finish(false);session?.close?.({committed:true});}},25);
     });
   },
-  async loadDesktopMedia(p, projectRestore=null) { return loadDesktopMedia(this, p, projectRestore); },
+  async loadDesktopMedia(p, projectRestore=null, failedProxy=null) { return loadDesktopMedia(this, p, projectRestore, failedProxy); },
   async loadVideoFile(file, projectRestore=null) { return loadVideoFile(this, file, projectRestore); },
   async _loadViaMpv(p, info, projectRestore=null, intakeToken=null, options={}) {
     const loaded=await _loadViaMpv(this, p, info, projectRestore, intakeToken, options);
@@ -3485,7 +3553,20 @@ const Media = {
     // needsProxy:true（v4.25）：加入的片段一律備短 GOP proxy——原檔可能非原生（ProRes/MXF）
     // 或過大（>600MB WebCodecs 讀不進來）；沒有 proxy 時預覽引擎解不了它 →【無法參與疊層合成】
     // 且 mpv 模式會讓回 mpv 顯示（HTML 字幕層被隱藏 →「字幕完全不見」）。proxy 走同一份快取、只轉一次。
-    const preparation=DESK?.prepareSourceWaveform?await this._prepareWaveformForIngest(c,c.path,info?.audio,c.dur,owns,recovery):true;
+    const waveform=DESK?.prepareSourceWaveform?this._prepareWaveformForIngest(c,c.path,info?.audio,c.dur,owns,recovery):true;
+    const visible=this.mpvMode?visualStackPlan(Seq.clipsAt(this.displayTime()),State.videoTracks):null;
+    const needsEarlyPicture=visible?.needsComposite&&visible.videos.includes(c)&&!c.proxyUrl;
+    const earlyPicture=async()=>{
+      try{
+        const picture=await MediaIntakeJobs.ingest({path:c.path,duration:c.dur,needsProxy:true,audio:[],queue:true,interactive:true});
+        if(owns()&&picture?.proxy){
+          const url=await DESK.fileURL(picture.proxy);
+          const live=owns()&&this._liveClipForSource(c);
+          if(live)live.proxyUrl=url;
+        }
+      }catch(error){if(owns())console.warn('疊層預覽將由完整背景工作重試',error);}
+    };
+    const preparation=needsEarlyPicture?(await Promise.all([waveform,earlyPicture()]))[0]:waveform===true?true:await waveform;
     if(!preparation||!owns()) return;
     let res; try{ res = await MediaIntakeJobs.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
     catch(e){ if(owns()){recovery.fail(e);setMediaProcessingStatus('影片音訊抽取失敗：' + (e?.message||e), 'err');} return; }
@@ -3718,10 +3799,13 @@ const Media = {
     emit('history:record', '加入影片：' + c.name);
     setStatus(`已加入序列：${c.name}`, 'ok');
     // 原音已安裝；整檔 PCM 只供可選的波形，不可決定此段是否能出聲。
-    if(f.size <= WAVE_DECODE_MAX){
+    if(canDecodeWaveform(f,dur,sourceInfo?.audioChannels)){
       const ownsWave=()=>owns()&&this._sourceStillReferenced(c);
-      void Wave.fromFile(f,c,{owns:ownsWave}).catch(()=>{});
-    } else showToast('檔案較大：此段不產生波形（可另載入音訊檔）');
+      void Wave.fromFile(f,c,{owns:ownsWave}).catch(()=>{ if(ownsWave()) Wave.prepareLiveSource(c,dur); });
+    } else {
+      Wave.prepareLiveSource(c,dur);
+      showToast('此段波形將於播放時逐步產生。');
+    }
     return c;
   },
   /* 在播放點切割影片段（Ctrl+K）：一段變兩段，共用來源（音軌/波形/播放資源） */
@@ -4405,11 +4489,13 @@ const Media = {
     const hasPresentationTolerance=options?.presentationTolerance!=null
       &&Number.isFinite(presentationTolerance);
     const request=()=>{
+      if (options.signal?.aborted) return cancelled();
       const session=this._ensurePresentationSession();
       const pending=session.requestPlayback(t,{
         timeoutMs:10000,
         sourceActivationTimeoutMs:SOURCE_ACTIVATION_TIMEOUT_MS,
         ...(hasPresentationTolerance?{tolerance:Math.max(0,presentationTolerance)}:{}),
+        ...(options.whilePresented ? { whilePresented: options.whilePresented, signal: options.signal } : {}),
       });
       if((resumeRecovery||previewChanged||options.resumePlayback)&&this.playing)session.setPlaybackIntent(true);
       return pending;
@@ -4420,7 +4506,7 @@ const Media = {
     // 播放目標與 UI 已同步更新；真正的 presenter 要等 Proxy 切回母素材。
     // restore 會 reset 舊 presentation session，若提前建立 request 會被取消。
     return this._latestSeekPromise=restoring.then(restored=>{
-      if(seekVersion!==this._seekIntentVersion) return {status:'cancelled',reason:'newer-seek'};
+      if(replaced() || options.signal?.aborted) return cancelled();
       if(restored?.status==='failed'){
         this._failPlaybackPresentation(restored);
         return restored;
@@ -4481,6 +4567,20 @@ const Media = {
         muted:!!active?.muted,_srcHidden:this.activeSource!==null&&this.activeSource!==source}));
     const silent=this.sourceMuted(source)||(routedChannels.length>0&&!routedChannels.some(track=>interpretation.trackState(track).audible));
     video.muted = this._reverseShuttleMuted||mix||silent ? true : (State.muted || !!active?.audioDetached || !!active?.reverse);
+    const provisional=this._previewMix;
+    if(provisional)provisional.gain.gain.value=0;
+    if(!this.mpvMode&&active?.web?.previewKind){
+      // A rendered mono mix cannot isolate one of its original channels.
+      // Only use it while every source channel has the same effective gain.
+      const gains=routedChannels.map(track=>interpretation.trackState(track)).map(state=>state.audible?state.gain:0);
+      const gain=gains[0]||0;
+      const allowed=provisional && provisional.sourceId===sourceId && !mix && !channels.length
+        && gain>0 && gains.every(value=>value===gain);
+      // The file stores the mean to leave headroom. The final mono elements
+      // sum at the master, so restore the same scale during the handoff.
+      if(allowed)provisional.gain.gain.value=gain*gains.length;
+      if(!allowed)video.muted=true;
+    }
     if(this.mpvMode){
       const sourceHasElements=!!source&&this.tracks.some(track=>
         (track.kind==='buffer'||track.kind==='element')&&
@@ -4723,7 +4823,7 @@ const Media = {
     if(this._reverseProxyPath&&this._reverseProxySourcePath===c.path) return true;
     const operation=this._assetOperation(null,{kind:'clip-reverse-proxy',path:c.path},()=>Seq.byId(c.id)===c&&owns());
     try{
-      const result=await MediaIntakeJobs.ingest({path:c.path,duration:c.dur,needsProxy:true,audio:[],queue:true});
+      const result=await MediaIntakeJobs.ingest({path:c.path,duration:c.dur,needsProxy:true,audio:[],queue:true,interactive:true});
       if(!this._ownsAssetOperation(operation)||!result?.proxy) return false;
       this._reverseProxyPath=result.proxy;
       this._reverseProxySourcePath=c.path;
@@ -5193,6 +5293,7 @@ const Media = {
     // main video 也有可能建立 scrubber，需要一併清
     try{ destroyScrubber(video); }catch(e){}
     this.tracks=keptTracks; this.usingWebAudio=false;
+    this._stopPreviewMix();
     this._clipRuntimeReadySources?.clear();
     this._clipRuntimePromises?.clear();
     emit('media:clearMeters'); // Fix #10：清除 mixer 的舊音軌參照，避免 rafLoop 讀取廢棄 analyser

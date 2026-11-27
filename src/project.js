@@ -19,6 +19,8 @@
      `makeProjectData` (存檔) 與 `loadProjectData` (讀檔) 是否有涵蓋到該欄位。
      尤其是讀檔時，必須做好舊版專案檔缺乏該欄位的防呆保護 (Fallback)。
 ============================================================================== */
+import { normalizeRecognitionTerms } from './recognition-terms.js';
+import { normalizeRecognitionEvidence } from './recognition-evidence.js';
 import { State, IS_DESKTOP, DESK, snapFps, setFps, newId, ensureTrackCount, ensureVideoTrackCount, resetVideoTracks,
   normalizeAudioProject, registerAudioSource, resetAudioProject, deselect } from './state.js';
 import { $ } from './dom.js';
@@ -39,8 +41,10 @@ import { captureSubtitleRemovalOwnership } from './subtitle-removal-guard.js';
 import { normalizeExternalAudioData, assetRange } from './external-audio.js';
 import { audioLimiterSnapshot, audioMotherPath } from '../shared/audio-loudness.cjs';
 import { validProjectCanvas } from './project-canvas.js';
+import { saveBrowserDraft, listBrowserDrafts, removeBrowserDraft } from './browser-project-drafts.js';
 export const CURRENT_PROJECT_SCHEMA_VERSION = 3;
 const PROJECT_APP = 'SUB Tool';
+const projectHeader = { app: PROJECT_APP, version: CURRENT_PROJECT_SCHEMA_VERSION };
 
 function isRecord(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -61,11 +65,7 @@ function arrayOrEmpty(value) {
  */
 function createProjectSnapshot(document = {}) {
   const data = isRecord(document) ? cloneProjectValue(document) : {};
-  return {
-    ...data,
-    app: PROJECT_APP,
-    version: CURRENT_PROJECT_SCHEMA_VERSION,
-  };
+  return { ...data, ...projectHeader };
 }
 
 /**
@@ -162,9 +162,10 @@ let _editGuardDone = false;  // 本 session 是否已顯示過「請先儲存」
 let _savePath      = null;   // 上次儲存的完整路徑（desktop only）
 let _saveBaseName  = null;   // 基礎名稱（不含副檔名），自動備份用
 let _autoSaveTimer = null;
+let browserDraftId = null;
 let _lastBackupContent = null;
 let _backupInFlight = null;
-let _lastSavedDataStr = null; // 用於判斷專案是否被修改
+let _lastSavedContent = null; // 已儲存的內容投影，排除播放點、縮放與來源 FPS
 let _savedWriteRevision = 0; // 相同 bytes 的成功寫入，也是一份不能被載入 completion 取代的回覆。
 let _autoRelinkNeedsSave = false; // 載入時找到新素材路徑，但磁碟上的專案尚未寫入新路徑
 const _projectLoadSession = new ProjectLoadSession({
@@ -297,28 +298,31 @@ function _buildProjectData({snapshot=null,workspace=null}={}){
     ? Math.max(cueEnd,_externalAudioEnd(committed.externalAudioState),clipEnd)
     : workspace?.duration??State.duration;
   const usedPresets = [];
-  const allPresets = getAllPresets();
-  const keys = Object.keys(STYLE_DEFAULTS);
+  const customPresets = getAllPresets().filter(preset=>!preset.builtin);
   
   const checkStyle = (st) => {
-    for (const p of allPresets) {
-      if (p.builtin) continue;
-      const ps = p.style || {};
-      const match = keys.every(k => (ps[k] != null ? ps[k] : STYLE_DEFAULTS[k]) === st[k]);
-      if (match && !usedPresets.some(x => presetIdentity(x) === presetIdentity(p))) {
+    for (const p of customPresets) {
+      if (styleMatchesPreset(st,p) && !usedPresets.some(x => presetIdentity(x) === presetIdentity(p))) {
         usedPresets.push({ name: p.name, ...(p.group?{group:p.group}:{}), style: structuredClone(p.style) });
       }
     }
   };
   
-  for (const t of committed.tracks) checkStyle(effStyle(null, t));
-  for (const c of committed.cues) checkStyle(effStyle(c, committed.tracks[c.track || 0]));
+  if(customPresets.length){
+    for (const t of committed.tracks) checkStyle(effStyle(null, t));
+    for (const c of committed.cues){
+      const track=committed.tracks[c.track || 0];
+      if(c.style || !track) checkStyle(effStyle(c,track));
+    }
+  }
 
-  return createProjectSnapshot({
+  // committed 已經與即時 State 隔離，這份新文件可直接拿來編碼及建立存檔基準。
+  return {
     playhead: Math.max(0, Media.displayTime() || 0),
     media:{name:State.mediaName,size:State.mediaSize,path:IS_DESKTOP?State.mediaPath:null},
     fps:committed.fps, dropFrame:committed.dropFrame, duration, trackCount:committed.trackCount,
     projectCanvas:committed.projectCanvas??null,
+    recognitionTerms:normalizeRecognitionTerms(committed.recognitionTerms),
     // 存檔時固定展開「當下生效樣式」，避免日後 STYLE_DEFAULTS 調整後讓既有專案外觀漂移。
     // posPct 僅供舊版 SUB Tool 讀取；新版以同值的 posY 為準。
     tracks:committed.tracks.map(t=>{
@@ -340,9 +344,11 @@ function _buildProjectData({snapshot=null,workspace=null}={}){
     externalAudioSources:committed.externalAudioState,
     notes:committed.notes.map(n=>({time:n.time,text:n.text,done:!!n.done})),
     cues:committed.cues.map(c=>({start:c.start,end:c.end,text:c.text,track:(c.track||0)+1,timed:c.timed!==false,
+      recognition:normalizeRecognitionEvidence(c.recognition),
       ...(c.style&&Object.keys(c.style).length?{style:c.style}:{})})), // v4.23 逐句樣式覆蓋（有才存）
-    usedPresets
-  });
+    usedPresets,
+    ...projectHeader
+  };
 }
 function _buildBytes(data=_buildProjectData()){
   // 桌面資訊由主程序在寫檔時加入；瀏覽器無權讀取作業系統的電腦名稱。
@@ -369,11 +375,11 @@ function _onSaved(fullPath, webName, snapshot){
     _saveBaseName=(webName||'').replace(/\.subtool$/i,'');
     setStatus('專案已儲存：'+webName,'ok');
   }
-  _lastSavedDataStr = snapshot;
+  _lastSavedContent = snapshot;
   _lastBackupContent = null;
   _savedWriteRevision++;
   _autoRelinkNeedsSave = false;
-  if(!_autoSaveTimer) _autoSaveTimer=setInterval(_autoSave, 3*60*1000);
+  startBackupTimer();
   _publishProjectIdentity();
 }
 
@@ -381,7 +387,7 @@ function _saveProject(asNew){
   History.setExternalAudioSnapshotProvider(_savedExternalAudioSources);
   // Capture the bytes and dirty baseline together, before any picker or disk IO.
   const data=_buildProjectData();
-  const snapshot=JSON.stringify(data);
+  const snapshot=_projectContentString(data);
   const bytes=_buildBytes(data);
   const name=_defaultSaveName();
   const epoch=_saveEpoch, generation=_projectLoadSession.generation;
@@ -417,8 +423,59 @@ function _saveProject(asNew){
   return result;
 }
 
+function startBackupTimer(){
+  if (!_autoSaveTimer) _autoSaveTimer = setInterval(_autoSave, 3*60*1000);
+}
+
+function updateDraftButton(available){
+  const button = $('browserDrafts');
+  if (button) button.style.display = available ? '' : 'none';
+}
+
+function showBrowserDrafts({startup=false}={}){
+  let drafts;
+  try { drafts = listBrowserDrafts(localStorage); }
+  catch { if(!startup) showToast('瀏覽器拒絕讀取本機備份','error'); return; }
+  updateDraftButton(!!drafts.length);
+  if (!drafts.length) return;
+  const options = drafts.map((draft, index) => {
+    const date = draft.savedAt ? ' · '+new Date(draft.savedAt).toLocaleString() : '';
+    return `<option value="${index}">${escapeHTML(draft.name + date)}</option>`;
+  }).join('');
+  const selected = () => drafts[Number($('draftChoice')?.value || 0)];
+  const session = openModal('還原本機專案備份',
+    `<label>可還原的專案 <select id="draftChoice">${options}</select></label><p id="draftPreview"></p>`,
+    [{label:'還原專案', primary:true, act:()=>{
+      const draft=selected();
+      session.close({committed:true});
+      void Project.open(()=>new File([b64ToBytes(draft.payload)],draft.projectName || draft.name,{type:'application/json'}))
+        .catch(()=>showToast('無法還原這份備份，請先下載檢查','error'));
+    }},{label:'下載備份',act:()=>{
+      try { const draft=selected(); downloadBytes(b64ToBytes(draft.payload),draft.name,'application/json'); }
+      catch { showToast('無法讀取這份備份','error'); }
+    }},{label:'刪除備份',act:()=>{
+      const draft=selected();
+      openModal('刪除本機備份',`<p>確定刪除「${escapeHTML(draft.name)}」的這份備份？</p>`,[
+        {label:'取消',act:()=>showBrowserDrafts()},{label:'刪除',act:()=>{
+          try { removeBrowserDraft(localStorage,draft); }
+          catch { showToast('無法刪除備份','error'); }
+          closeModal(); showBrowserDrafts();
+        }}]);
+    }},{label:'稍後',act:closeModal}]);
+  const preview=()=>{
+    const target=$('draftPreview');
+    if(!target)return;
+    try {
+      const data=JSON.parse(decodeText(b64ToBytes(selected().payload).buffer));
+      target.textContent=`${data.cues?.length||0} 句字幕 · ${data.clips?.length||0} 個片段 · ${data.notes?.length||0} 則備註`;
+    } catch { target.textContent='無法預覽，請下載檢查。'; }
+  };
+  $('draftChoice')?.addEventListener('change',preview);
+  preview();
+}
+
 async function _autoSave(){
-  if(!_saveBaseName || _backupInFlight?.()) return;
+  if((IS_DESKTOP && !_saveBaseName) || _backupInFlight?.()) return;
   const data=_buildProjectData();
   const content=_projectContentString(data);
   if(content===_lastBackupContent || !_needsProjectSave(content)) return;
@@ -427,7 +484,7 @@ async function _autoSave(){
   const savePath=_savePath,saveBaseName=_saveBaseName;
   const ownsTarget=()=>ownsWorkspace()&&_savePath===savePath&&_saveBaseName===saveBaseName;
   const revision=_savedWriteRevision;
-  const name=`${saveBaseName}_${_timestamp()}.subtool`;
+  const name=`${saveBaseName || '未命名專案'}_${_timestamp()}.subtool`;
   const payload=bytesToB64(_buildBytes(data));
   _backupInFlight=ownsTarget;
   try{
@@ -445,10 +502,12 @@ async function _autoSave(){
       setStatus('自動備份：'+name,'ok');
     }else{
       try{
-        localStorage.setItem('subtool_autosave_data',payload);
-        localStorage.setItem('subtool_autosave_name',name);
+        browserDraftId ||= globalThis.crypto?.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2);
+        saveBrowserDraft(localStorage,browserDraftId,{name,projectName:(saveBaseName || '未命名專案')+'.subtool',savedAt:Date.now(),payload});
+        updateDraftButton(true);
       }catch(error){
         console.warn('auto-save localStorage failed:',error);
+        setStatus('本機備份寫入失敗，請下載專案或釋放瀏覽器空間','err');
         return;
       }
       setStatus('自動備份已存（瀏覽器本地）','ok');
@@ -465,7 +524,9 @@ function ensureProjectSaved(){
   _editGuardDone=true;
   return new Promise(resolve=>{
     openModal('開始前先儲存專案',
-      `<p style="margin:0 0 10px;font-size:13px;color:var(--text-faint)">開始編輯前建議先儲存專案，<br>儲存後每 3 分鐘自動備份一份。</p>`,
+      `<p style="margin:0 0 10px;font-size:13px;color:var(--text-faint)">${IS_DESKTOP
+        ? '開始編輯前建議先儲存專案。之後每 3 分鐘會備份有修改的內容。'
+        : '未命名草稿也會每 3 分鐘備份在這個瀏覽器。你可以現在下載一份專案檔。'}</p>`,
       [{label:'立即儲存',primary:true,act:async()=>{
         closeModal({committed:true});
         await Project.saveAs();
@@ -526,14 +587,16 @@ function resetProject(){
   _editGuardDone=false;
   _savePath=null;
   _saveBaseName=null;
+  browserDraftId=null;
   _publishProjectIdentity();
-  _lastSavedDataStr=null;
+  _lastSavedContent=null;
   _lastBackupContent=null;
   _autoRelinkNeedsSave=false;
   if(_autoSaveTimer){ clearInterval(_autoSaveTimer); _autoSaveTimer=null; }
   resetAudioProject();
   State.vtracksCollapsed=false;
   State.projectCanvas=null;
+  State.recognitionTerms=[];
   State.videoWidth=0; State.videoHeight=0;
   emit('project:canvasChanged');
   State.exportIn=null;
@@ -545,8 +608,9 @@ function resetProject(){
 // clip.fps 是母素材來源影格率，瀏覽器會在播放後非同步偵測，並非使用者
 // 修改專案格網。保留實測值供播放器及手動存檔，但不讓測量本身產生 dirty。
 // 未儲存判斷與等待 picker 時的丟棄同意使用相同投影，避免兩處規則分歧。
+function _clipContent({fps,...clip}){ return clip; }
 function _projectContentString(data){
-  const clips=Array.isArray(data.clips)?data.clips.map(({fps,...clip})=>clip):data.clips;
+  const clips=Array.isArray(data.clips)?data.clips.map(_clipContent):data.clips;
   return JSON.stringify({...data,clips,playhead:0,pxPerSec:0,vtracksCollapsed:false});
 }
 
@@ -556,10 +620,13 @@ function _captureProjectOpenConsent(){
   const content=_projectContentString(_buildProjectData());
   const cues=[...State.cues],tracks=[...State.tracks];
   const subtitles=JSON.stringify({cues:State.cues,tracks:State.tracks});
-  return ()=>State.cues.length===cues.length&&cues.every((cue,i)=>State.cues[i]===cue)
-    &&State.tracks.length===tracks.length&&tracks.every((track,i)=>State.tracks[i]===track)
-    &&subtitles===JSON.stringify({cues:State.cues,tracks:State.tracks})
-    &&(!isProjectDirty()||content===_projectContentString(_buildProjectData()));
+  return ()=>{
+    if(State.cues.length!==cues.length||!cues.every((cue,i)=>State.cues[i]===cue)
+      ||State.tracks.length!==tracks.length||!tracks.every((track,i)=>State.tracks[i]===track)
+      ||subtitles!==JSON.stringify({cues:State.cues,tracks:State.tracks})) return false;
+    const current=_projectContentString(_buildProjectData());
+    return content===current || !_needsProjectSave(current);
+  };
 }
 async function _confirmProjectReplacement(consent,generation){
   const current=()=>_isCurrentProjectLoad(generation);
@@ -573,13 +640,7 @@ function _needsProjectSave(content) {
   if (_autoRelinkNeedsSave) return true;
   // 空軌道的名稱、樣式、格網與交付範圍也是持久內容，與有無字幕／片段無關。
   // 新工作區和磁碟存檔都以同一份 committed snapshot 作為乾淨基準。
-  if (!_lastSavedDataStr) return true;
-  
-  try {
-    return content !== _projectContentString(JSON.parse(_lastSavedDataStr));
-  } catch (e) {
-    return true;
-  }
+  return content !== _lastSavedContent;
 }
 
 function isProjectDirty() {
@@ -591,8 +652,7 @@ function _beginProjectLoad(){
   const sourceIds=[..._savedClips(),..._savedExternalAudioSources()].map(source=>source.audioSourceId);
   const finishHistory=History.beginProjectRestore({sourceIds});
   const workspace=_buildProjectData();
-  const saved=JSON.stringify(workspace);
-  _lastSavedDataStr=saved;
+  _lastSavedContent=_projectContentString(workspace);
   return {finishHistory,workspace,savedRevision:_savedWriteRevision};
 }
 function _finishProjectLoad(context){
@@ -606,7 +666,7 @@ function _finishProjectLoad(context){
     const pending=plan?.pendingClipsForSave?.()??plan?.pendingClips?.()??[];
     snapshot.clips=[...(clipGeo||[]),...pending].map(clip=>Seq.persistentMetadata(clip));
     snapshot.externalAudioState=_normalExternalAudioSources(snapshot.externalAudioState);
-    _lastSavedDataStr=JSON.stringify(_buildProjectData({snapshot,workspace:context.workspace}));
+    _lastSavedContent=_projectContentString(_buildProjectData({snapshot,workspace:context.workspace}));
   }
   _projectLoadSession.activePlan?.setBaselineRevision?.(context.savedRevision);
   setStatus('專案已載入','ok');
@@ -617,9 +677,8 @@ function _finishProjectLoad(context){
 // saved projection; never adopt unrelated live edits or an intervening save.
 function _rebaseLegacyBrowserSources(plan){
   if(IS_DESKTOP||!plan?.owns?.()||plan!==_projectLoadSession.activePlan
-    ||plan.baselineRevision?.()!==_savedWriteRevision||!_lastSavedDataStr) return;
-  let baseline;
-  try{baseline=JSON.parse(_lastSavedDataStr);}catch(error){return;}
+    ||plan.baselineRevision?.()!==_savedWriteRevision||!_lastSavedContent) return;
+  const baseline=JSON.parse(_lastSavedContent);
   if(!Array.isArray(baseline.clips)) return;
   // The browser cannot reopen the original path. Require its saved name and
   // byte length to match the file explicitly selected for this handoff; these
@@ -630,15 +689,15 @@ function _rebaseLegacyBrowserSources(plan){
   for(const handoff of plan.legacyHandoffs?.()||[]){
     const {saved,clip,sourceId,evidence}=handoff;
     if(!evidence||!State.clips.includes(clip)||clip.audioSourceId!==sourceId) continue;
-    const expected=JSON.stringify({..._projectClip(saved),fps:0});
-    const matches=baseline.clips.filter(item=>!item.audioSourceId&&JSON.stringify({...item,fps:0})===expected);
+    const expected=JSON.stringify(_clipContent(_projectClip(saved)));
+    const matches=baseline.clips.filter(item=>!item.audioSourceId&&JSON.stringify(item)===expected);
     if(matches.length!==1) continue;
     matches[0].audioSourceId=sourceId;
     baseline.audioProject=registerAudioSource(baseline.audioProject,sourceId,evidence.channels,evidence.options,evidence.allocation);
     History.rebaseRestoredSource?.(clip.id,sourceId,{...evidence,allocation:baseline.audioProject});
     changed=true;
   }
-  if(changed) _lastSavedDataStr=JSON.stringify(baseline);
+  if(changed) _lastSavedContent=_projectContentString(baseline);
 }
 
 /* ProjectLoadSession owns the latest-wins generation, serial runtime tail, and
@@ -771,6 +830,13 @@ async function _autoRelinkMissingMedia(data, projectPath, owns = () => true) {
 }
 
 const Project = {
+  initBrowserDrafts(){
+    if(IS_DESKTOP)return;
+    startBackupTimer();
+    $('browserDrafts')?.addEventListener('click',()=>showBrowserDrafts());
+    window.addEventListener('pagehide',()=>{void _autoSave();});
+    showBrowserDrafts({startup:true});
+  },
   /* 開啟意圖從確認／picker／IPC 等待前開始。runtime load generation 仍只在
      真正接受檔案時啟動，取消 picker 不清掉目前專案的 restore plan。 */
   async open(read, { confirm = true } = {}){
@@ -843,7 +909,7 @@ const Project = {
   },
   establishCleanBaseline(){
     History.setExternalAudioSnapshotProvider(_savedExternalAudioSources);
-    _lastSavedDataStr=JSON.stringify(_buildProjectData());
+    _lastSavedContent=_projectContentString(_buildProjectData());
   },
   async _checkMissingFonts(data) {
     await loadFonts();
@@ -924,11 +990,14 @@ const Project = {
     State.cues=(data.cues||[]).map(c=>{
       const tk=_restoredCueTrack(c,data.version);
       const style=normalizeStyleRecord(c.style);
+      const recognition=normalizeRecognitionEvidence(c.recognition);
       return {id:newId(),start:c.start||0,end:c.end||0,text:c.text||'',track:tk,timed:c.timed!==false,
+        ...(recognition && {recognition}),
         ...(style&&Object.keys(style).length?{style}:{})}; // v4.23 逐句樣式覆蓋
     });
     setFps(data.dropFrame?String(data.fps||24)+'df':String(data.fps||24));
     State.projectCanvas=data.projectCanvas?{width:data.projectCanvas.width,height:data.projectCanvas.height}:null;
+    State.recognitionTerms=normalizeRecognitionTerms(data.recognitionTerms);
     State.videoWidth=0; State.videoHeight=0;
     snapAllCuesToFrames();
     if(Array.isArray(data.tracks)&&data.tracks.length) State.tracks=data.tracks.map(_restoreSubtitleTrack);
@@ -1016,6 +1085,8 @@ const Project = {
     if(!this.apply(data,generation)) return;
     if(!_isCurrentProjectLoad(generation)) return;
     _saveBaseName=(fileName||'').replace(/\.subtool$/i,'')||null;
+    browserDraftId=null;
+    if(!IS_DESKTOP) startBackupTimer();
     _publishProjectIdentity();
     if(data.media&&data.media.name){
       const plan=_projectLoadSession.activePlan;
@@ -1155,6 +1226,7 @@ function startNewProject() {
          const nv = $('noVideo'); if (nv) nv.style.display = '';
          emit('duration:known'); renderAudioTracks();
          emit('render:listTrackSel'); emit('render:all'); renderNotes(); drawTimeline();
+         if(!IS_DESKTOP) startBackupTimer();
          setStatus('新專案', 'ok');
        });
      } }]);

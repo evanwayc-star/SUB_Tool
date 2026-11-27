@@ -7,6 +7,7 @@
    搜尋邏輯請使用 `subtitle-search.js`。
    ============================================================================== */
 import { $, sublist } from './dom.js';
+import { subtitleListViewport } from './subtitle-list-viewport.js';
 import { State, isSel, trackVisible, cueSuffix, setSelection, deselect, pruneSelection } from './state.js';
 import { escapeHTML, escapeHTMLWithSpaces } from './util.js';
 import { getSubtitleDictionaryMatcher } from './subtitle-dictionary-dialog.js';
@@ -47,6 +48,9 @@ const _presetNameCache = new Map();
 const _customCodeMap = new Map();
 let _customCodeCounter = 1;
 let _selectionRevealSeq = 0;
+let trackIndices = new Map(), rowOverlaps = new Set(), identicalById = new Map();
+let expandedStyleCue = null;
+const viewport = subtitleListViewport(sublist, id => paintSubtitleWindow(false, id));
 
 function clearPresetNameCache(){ 
   _presetNameCache.clear(); 
@@ -307,13 +311,14 @@ function updateTlSel(){
 
 const IDENTICAL_GROUP_COLORS=['red','green','blue'];
 function refreshIdenticalGroupMarkers(){
-  const cues=State.cues.filter(c=>(c.track||0)===State.listTrack),byId=new Map();
+  const cues=State.cues.filter(c=>(c.track||0)===State.listTrack);
+  identicalById=new Map();
   consecutiveIdenticalGroups(cues).forEach((group,index)=>{
-    for(const number of group)byId.set(cues[number-1].id,{number:index+1,color:IDENTICAL_GROUP_COLORS[index%3]});
+    for(const number of group)identicalById.set(cues[number-1].id,{number:index+1,color:IDENTICAL_GROUP_COLORS[index%3]});
   });
   for(const row of sublist.querySelectorAll('.sub-row')){
     for(const color of IDENTICAL_GROUP_COLORS)row.classList.remove('identical-group-'+color);
-    const group=byId.get(row.dataset.id),index=row.querySelector('.idx');
+    const group=identicalById.get(row.dataset.id),index=row.querySelector('.idx');
     if(group){row.classList.add('identical-group-'+group.color);row.dataset.identicalGroup=String(group.number);}
     else delete row.dataset.identicalGroup;
     if(index)index.title=group?`第 ${group.number} 組相同字幕`:'';
@@ -421,7 +426,7 @@ function refreshStyleSummaries(){
       const oldVal = filterEl.value;
       const newVal = updateStyleFilterOptions(allList);
       const expected=filteredSubtitleCues().map(c=>c.id);
-      const shown=[...sublist.querySelectorAll('.sub-row')].map(row=>row.dataset.id);
+      const shown=viewport.cues.map(cue=>cue.id);
       if (oldVal !== newVal || expected.length!==shown.length || expected.some((id,i)=>id!==shown[i])) {
         renderSubList();
         return;
@@ -433,7 +438,7 @@ function refreshStyleSummaries(){
     for(const row of rows){
       const c=byId.get(row.dataset.id); if(!c)continue;
       const sty=row.querySelector('.sub-sty'); if(sty)sty.innerHTML=styleSummaryHtml(c);
-      const nm=row.querySelector('.sub-styname'); if(nm)nm.innerHTML=styleNameHtml(c);
+      const nm=row.querySelector('.sub-styname'); if(nm)nm.innerHTML=styleDisclosureHtml(c);
     }
   }, 200);
 }
@@ -475,6 +480,27 @@ function renderSubList(){
   }
 
   const list = filteredSubtitleCues();
+  trackIndices = new Map(allList.map((cue,i)=>[cue.id,i]));
+  rowOverlaps = detectOverlaps(allList.filter(c=>c.timed!==false), 0.001);
+  viewport.setCues(list);
+  refreshIdenticalGroupMarkers();
+  if(!list.includes(expandedStyleCue)) expandedStyleCue=null;
+  $('subCount').textContent=list.length+' 句' + (allList.length !== list.length ? ` / ${allList.length} 句` : '');
+  paintSubtitleWindow(true);
+  if(list.length===0){
+    const title=allList.length?'沒有符合樣式的字幕':State.tracks.length?'此字幕軌尚無字幕':'尚無字幕';
+    const nextStep=allList.length
+      ? `改選上方「所有樣式」，即可顯示此軌的 ${allList.length} 句字幕。`
+      : State.tracks[State.listTrack]?.locked
+        ? '此字幕軌已鎖定。請先在時間軸解鎖，再新增字幕。'
+        : '匯入字幕檔，或點上方「⬇＋」在播放點新增字幕。';
+    sublist.innerHTML=`<div class="empty"><strong>${title}</strong><p>${nextStep}</p></div>`;
+  }
+  renderCheckPanel();
+}
+
+function paintSubtitleWindow(refresh, revealId){
+  const list=viewport.cues;
   const editingRows = new Map();
   const timeEditingRows = new Set();
   for(const [txt, {cue, owner}] of textEditors){
@@ -490,40 +516,36 @@ function renderSubList(){
     } else editor.discard();
   }
 
-  if(list.length===0){
-    const title=allList.length?'沒有符合樣式的字幕':State.tracks.length?'此字幕軌尚無字幕':'尚無字幕';
-    const nextStep=allList.length
-      ? `改選上方「所有樣式」，即可顯示此軌的 ${allList.length} 句字幕。`
-      : State.tracks[State.listTrack]?.locked
-        ? '此字幕軌已鎖定。請先在時間軸解鎖，再新增字幕。'
-        : '匯入字幕檔，或點上方「⬇＋」在播放點新增字幕。';
-    sublist.innerHTML=`<div class="empty"><strong>${title}</strong><p>${nextStep}</p></div>`;
-    $('subCount').textContent=list.length+' 句' + (allList.length !== list.length ? ` / ${allList.length} 句` : '');
-    renderCheckPanel();
-    return;
-  }
-  $('subCount').textContent=list.length+' 句' + (allList.length !== list.length ? ` / ${allList.length} 句` : '');
-  const timed=State.cues.filter(c=>c.timed!==false&&(c.track||0)===State.listTrack);
-  const overlaps=detectOverlaps(timed, 0.001);
-  let html='';
-  for(let i=0;i<list.length;i++) html+=_subRowHTML(list[i],allList.indexOf(list[i]),overlaps);
-  if(!editingRows.size) sublist.innerHTML=html;
-  else {
-    // 背景提交只更新其他列及文字以外的欄位；仍有效的 editor 保留 DOM、游標與 preview owner。
-    const template=document.createElement('template');
-    template.innerHTML=html;
+  const oldRows=new Map([...sublist.querySelectorAll('.sub-row')].map(row=>[row.dataset.id,row]));
+  const focusedRow=document.activeElement?.closest?.('.sub-row');
+  const slots=viewport.slots([...editingRows.keys(),focusedRow?.dataset.id,revealId]);
+  const template=document.createElement('template');
+  const newSlots=slots.filter(slot=>slot.cue && (refresh||!oldRows.has(slot.cue.id)));
+  template.innerHTML=newSlots.map(({cue})=>_subRowHTML(cue,trackIndices.get(cue.id),rowOverlaps)).join('');
+  const newRows=new Map([...template.content.children].map(row=>[row.dataset.id,row]));
+  const gaps=[...sublist.querySelectorAll('.sub-list-gap')];
+  const wanted=slots.map(({cue,gap})=>{
+    if(!cue){
+      const spacer=gaps.shift()||document.createElement('div');
+      spacer.className='sub-list-gap';
+      spacer.setAttribute('aria-hidden','true');
+      spacer.style.height=gap+'px';
+      return spacer;
+    }
+    const rendered=newRows.get(cue.id);
+    if(!rendered)return oldRows.get(cue.id);
+    const row=editingRows.get(cue.id);
+    if(!row)return rendered;
+    row.className=rendered.className;
+    for(const selector of ['.idx',...(timeEditingRows.has(row)?[]:['.times']),'.sub-sty','.sub-styname'])
+      row.querySelector(selector).innerHTML=rendered.querySelector(selector).innerHTML;
+    const txt=row.querySelector('.txt');
+    if(txt?.contentEditable!=='true') txt.innerHTML=rendered.querySelector('.txt').innerHTML;
+    return row;
+  });
+  {
     let cursor=sublist.firstChild;
-    const focusedRow=document.activeElement?.closest?.('.sub-row');
-    for(const rendered of [...template.content.children]){
-      const existing=editingRows.get(rendered.dataset.id);
-      const row=existing || rendered;
-      if(existing){
-        row.className=rendered.className;
-        for(const selector of ['.idx',...(timeEditingRows.has(row)?[]:['.times']),'.sub-sty','.sub-styname'])
-          row.querySelector(selector).innerHTML=rendered.querySelector(selector).innerHTML;
-        const text=row.querySelector('.txt');
-        if(text?.contentEditable!=='true') text.innerHTML=rendered.querySelector('.txt').innerHTML;
-      }
+    for(const row of wanted){
       // Move the other rows around the focused editor; moving the editor node
       // itself can blur it and commit or discard a still-active draft.
       if(row===focusedRow && row!==cursor && row.parentElement===sublist){
@@ -534,8 +556,25 @@ function renderSubList(){
     }
     while(cursor){ const next=cursor.nextSibling; cursor.remove(); cursor=next; }
   }
-  refreshIdenticalGroupMarkers();
-  renderCheckPanel();
+  viewport.observeRows(wanted.filter(row=>row.dataset.id));
+}
+
+function subtitleRow(id){
+  if(id==null)return null;
+  const find=()=>[...sublist.querySelectorAll('.sub-row')].find(item=>item.dataset.id===String(id));
+  let row=find();
+  if(!row){viewport.reveal(id);row=find();}
+  return row;
+}
+
+function refreshSearchHighlights(){
+  for(const row of sublist.querySelectorAll('.sub-row')){
+    const id=row.dataset.id,cue=viewport.cue(id);
+    if(!cue)continue;
+    row.classList.toggle('search-hit',isSearchHit(id));
+    const text=row.querySelector('.txt');
+    if(text.contentEditable!=='true')text.innerHTML=_txtInner(cue.text);
+  }
 }
 
 function lineCountClass(text){
@@ -573,8 +612,9 @@ function _subRowHTML(c,i,overlaps){
   const containsHit=_checkContains.length&&_checkContains.some(kw=>(c.text||'').toLowerCase().includes(kw.toLowerCase()));
   const cls='sub-row'+(rc?' '+rc:'')+(isSearchHit(c.id)?' search-hit':'')+(isSel(c.id)?' sel':'')+(c.id===State.selectedId?' primary':'')+(c.id===State.activeId?' active':'')+(overlaps?.has(c.id)?' overlap':'')+(containsHit?' contains-match':'');
   const timed=c.timed!==false;
-  return `<div class="${cls}" data-id="${c.id}">`+
-    `<div class="idx">${i+1}</div>`+
+  const group=identicalById.get(c.id);
+  return `<div class="${cls}${group?' identical-group-'+group.color:''}${expandedStyleCue===c?' style-expanded':''}" data-id="${escapeHTML(c.id)}" tabindex="-1"${group?` data-identical-group="${group.number}"`:''}>`+
+    `<div class="idx"${group?` title="第 ${group.number} 組相同字幕"`:''}>${i+1}</div>`+
     `<div class="body">`+
       `<div class="times">`+
          (timed?`<span class="tin">${secToEncore(c.start,State.fps,State.dropFrame)}</span> → <span class="tout">${secToEncore(c.end,State.fps,State.dropFrame)}</span>`
@@ -584,8 +624,13 @@ function _subRowHTML(c,i,overlaps){
       `<div class="txt" contenteditable="false" spellcheck="false">${_txtInner(c.text)}</div>`+
     `</div>`+
     `<div class="sub-sty">${styleSummaryHtml(c)}</div>`+
-    `<div class="sub-styname">${styleNameHtml(c)}</div>`+
+    `<div class="sub-styname">${styleDisclosureHtml(c)}</div>`+
   `</div>`;
+}
+
+function styleDisclosureHtml(cue){
+  const label=styleNameHtml(cue),expanded=expandedStyleCue===cue;
+  return `${label}<button type="button" class="style-disclosure" aria-expanded="${expanded}" aria-label="此句的樣式詳情" title="顯示或收合此句的樣式詳情"><span aria-hidden="true">⌄</span></button>`;
 }
 
 function renderSubRow(id){
@@ -692,6 +737,7 @@ function commitCueTimeEdit(c, edge){
   if(tk===State.listTrack && before===order()){
     renderSubRow(c.id);
     const ov=detectOverlaps(State.cues.filter(x=>x.timed!==false&&(x.track||0)===tk), 0.001);
+    rowOverlaps=ov;
     for(const row of sublist.children){ const id=row.dataset?.id; if(id) row.classList.toggle('overlap', ov.has(id)); }
     emit('render:videoSub'); emit('mpv:refreshSubs');
   } else {
@@ -714,7 +760,7 @@ function refreshSelectionUI(opts={}){
     r.classList.toggle('sel',isSel(r.dataset.id));
     r.classList.toggle('primary',r.dataset.id===State.selectedId);
   });
-  const row=State.selectedId&&sublist.querySelector(`.sub-row[data-id="${State.selectedId}"]`);
+  const row=State.selectedId&&!opts.preventScroll&&subtitleRow(State.selectedId);
   if(row && !opts.preventScroll){
     const selectedId=State.selectedId;
     const reveal=()=>{
@@ -840,7 +886,7 @@ function splitCueAtCursor(c, txtEl){
     if(!ownsWorkspace() || !State.cues.includes(newCue) || State.tracks[newCue.track||0]!==track ||
       track?.locked || newCue.text!==textAfter || State.selectedId!==newCue.id ||
       document.activeElement!==focusedAfterSplit) return;
-    const nr=sublist.querySelector(`.sub-row[data-id="${newCue.id}"]`);
+    const nr=subtitleRow(newCue.id);
     if(!nr)return;
     const nt=nr.querySelector('.txt');
     if(!nt || nt.contentEditable==='true' || !beginTextEditor(nt,newCue))return;
@@ -856,13 +902,23 @@ function splitCueAtCursor(c, txtEl){
   },30);
 }
 
-sublist?.addEventListener?.('click', async e => {
+sublist?.addEventListener?.('click', e => {
+  const button=e.target.closest('.style-disclosure');
+  if(!button)return;
+  const row=button.closest('.sub-row'),cue=State.cues.find(item=>item.id===row.dataset.id);
+  expandedStyleCue=expandedStyleCue===cue?null:cue;
+  for(const item of sublist.querySelectorAll('.sub-row')){
+    const expanded=item.dataset.id===expandedStyleCue?.id;
+    item.classList.toggle('style-expanded',expanded);
+    item.querySelector('.style-disclosure')?.setAttribute('aria-expanded',String(expanded));
+  }
 });
 
 sublist?.addEventListener?.('mousedown', e => {
   if (e.button === 2) return;
   const row = e.target.closest('.sub-row');
   if (!row) return;
+  if(e.target.closest('.style-disclosure'))return;
   const c = State.cues.find(x => x.id === row.dataset.id);
   if (!c) return;
 
@@ -1108,6 +1164,7 @@ function applyTrackStylePlan(track, cues, desiredStyle, preserveKeys = []) {
 }
 
 export { 
+  subtitleRow, refreshSearchHighlights,
   renderSubList, renderCheckPanel, renderSubRow, filteredSubtitleCues, selectCue, selectCueSingle, commitCueTimeEdit, refreshSelectionUI, updateTlSel, formatSubSelectionText, formatSubSelectionHTML,
   addCue, addCueRelative, deleteSelectedWithPrompt as deleteSelected, deleteSelectedWithPrompt, deleteCue, clearSelectedCuesTime, sortCues, shiftTextsDown, shiftTextsUp,
   enterSwapMode, cancelSwapMode, swapAdjacentCues, mergeAdjacentCues, trimTrackSpaces,

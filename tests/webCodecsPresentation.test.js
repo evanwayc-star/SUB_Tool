@@ -17,6 +17,7 @@ const mediaMock = vi.hoisted(() => ({
   webCodecsTakeover: vi.fn(() => true),
   setWebCodecsTakeover: vi.fn(),
   setWebCodecsComposited: vi.fn(),
+  previewComposition: vi.fn(),
   reportWebCodecsPresentation: vi.fn(),
 }));
 const contextMock = vi.hoisted(() => ({
@@ -53,7 +54,7 @@ vi.mock('../src/decode/demux.js', async importOriginal => ({...await importOrigi
 }));
 vi.mock('../src/decode/sample-index.js', () => ({ keyIndexBefore: vi.fn(() => 0) }));
 
-const { WCPreview } = await import('../src/decode/player.js');
+const { WCPreview, reserveProjectFrame } = await import('../src/decode/player.js');
 const { Seq } = await import('../src/sequence.js');
 
 describe('WebCodecs presentation acknowledgement', () => {
@@ -68,6 +69,12 @@ describe('WebCodecs presentation acknowledgement', () => {
     mediaMock.mpvMode = false;
     mediaMock.webCodecsTakeover.mockReturnValue(true);
     mediaMock.tlTime.mockReturnValue(104);
+    let composition = null;
+    mediaMock.setWebCodecsComposited.mockImplementation((visible, next) => {
+      if (!visible) composition = null;
+      else if (next) composition = { ...next };
+    });
+    mediaMock.previewComposition.mockImplementation(() => composition);
     Seq.clipsAt.mockImplementation(() => [clipA,clipB]);
     contextMock.drawImage.mockReset();
     vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue(contextMock);
@@ -91,6 +98,66 @@ describe('WebCodecs presentation acknowledgement', () => {
     expect(mediaMock.reportWebCodecsPresentation).toHaveBeenCalledWith([
       expect.objectContaining({time:104,start:104,reverse:false}),expect.objectContaining({time:104,start:104,reverse:false})
     ]);
+  });
+
+  it('redraws the presented source frames with frozen opacity and track clipping at project resolution', () => {
+    Object.assign(stateMock.State.videoTracks[1], { scale: .5, posX: 1, posY: 0, opacity: .4 });
+    const request = reserveProjectFrame(104);
+    try {
+      WCPreview.tick();
+      const sources = contextMock.drawImage.mock.calls.map(call => call[0]);
+      expect(sources).toHaveLength(2);
+      // Changes to the live inspector must not mutate the published pixels.
+      Object.assign(stateMock.State.videoTracks[1], { scale: 1, posX: 0, posY: 1, opacity: 1 });
+      contextMock.drawImage.mockClear();
+      contextMock.rect.mockClear();
+      const alphas = [];
+      contextMock.drawImage.mockImplementation(() => alphas.push(contextMock.globalAlpha));
+      const canvas = request.take();
+      expect([canvas.width, canvas.height]).toEqual([1920, 1080]);
+      expect(contextMock.drawImage.mock.calls).toEqual([
+        [sources[0], 0, 0, 1920, 1080], [sources[1], 960, 0, 960, 540],
+      ]);
+      expect(contextMock.rect.mock.calls).toEqual([[0, 0, 1920, 1080], [960, 0, 960, 540]]);
+      expect(alphas).toEqual([1, .4]);
+    } finally { request.release(); }
+  });
+
+  it('rejects another target, superseded owners, missing layers and a replaced composition', () => {
+    const earlier = reserveProjectFrame(103);
+    WCPreview.tick();
+    expect(() => earlier.take()).toThrow();
+    const request = reserveProjectFrame(104);
+    earlier.release();
+    try {
+      const upper = WCPreview.sources.get('b.mp4#1');
+      upper.request.mockReturnValueOnce(null);
+      WCPreview.tick();
+      expect(() => request.take()).toThrow();
+      WCPreview.tick();
+      expect(request.take().width).toBe(1920);
+      contextMock.drawImage.mockImplementationOnce(() => { throw new Error('closed VideoFrame'); });
+      expect(() => request.take()).toThrow('closed VideoFrame');
+      mediaMock.setWebCodecsComposited(true, { time: 104 });
+      expect(() => request.take()).toThrow();
+    } finally { request.release(); }
+    expect(() => request.take()).toThrow();
+  });
+
+  it('checks layers at the requested fractional NTSC boundary when the element clock rounds to microseconds', () => {
+    const boundary = 2494 * 1001 / 24000;
+    mediaMock.tlTime.mockReturnValue(Math.round(boundary * 1e6) / 1e6);
+    const request = reserveProjectFrame(boundary);
+    try {
+      for (const key of ['a.mp4#0', 'b.mp4#1']) {
+        WCPreview.sources.get(key).request.mockImplementation(time => ({
+          timestamp: time, duration: 41708, displayWidth: 1920, displayHeight: 1080,
+        }));
+      }
+      WCPreview.tick();
+      expect(Seq.clipsAt).toHaveBeenCalledWith(boundary);
+      expect(request.take().width).toBe(1920);
+    } finally { request.release(); }
   });
 
   it('custom portrait canvas controls source containment and freezes the rendered composition dimensions',()=>{

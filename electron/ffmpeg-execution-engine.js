@@ -228,8 +228,14 @@ function createDeliveryCapabilities(options = {}) {
 
   async function checkReady(spec, { signal } = {}) {
     signal?.throwIfAborted();
+    const spaceNote = options.checkSpace ? await options.checkSpace(spec) : undefined;
+    signal?.throwIfAborted();
     const ffmpeg = getFFmpegPath();
     if (!ffmpeg) throw fail('DELIVERY_ENCODER_UNAVAILABLE', '找不到交付所需的 ffmpeg');
+    if (spec.format === 'h264' && encoder.ready) {
+      await encoder.ready();
+      signal?.throwIfAborted();
+    }
     // Font and chapter staging belong to the real delivery runner. This pass
     // reads codec choices only; neither staged artifact exists at admission.
     const plan = buildDeliveryArgv({ ...spec, timecodeWatermark: null, chapters: null }, {
@@ -274,6 +280,7 @@ function createDeliveryCapabilities(options = {}) {
       }
     }
     signal?.throwIfAborted();
+    return spaceNote;
   }
 
   function resume() {
@@ -286,7 +293,28 @@ function createDeliveryCapabilities(options = {}) {
 
   function assertReady(spec, { signal } = {}) {
     const combined = signal ? AbortSignal.any([signal, shutdown.signal]) : shutdown.signal;
-    const work = checkReady(spec, { signal: combined });
+    return track(checkReady(spec, { signal: combined }));
+  }
+
+  function selectVideoEncoder(platform = process.platform) {
+    const ffmpeg = getFFmpegPath(), signal = shutdown.signal;
+    const select = async () => {
+      for (const name of videoEncoderCandidates(platform)) {
+        signal.throwIfAborted();
+        if (!ffmpeg) break;
+        try {
+          await probe(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-nostats', '-progress', 'pipe:1',
+            '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=5:duration=0.2',
+            '-c:v', name, '-f', 'null', '-'], { signal, label: name, outputToken: /frame=[1-9]\d*[\s\S]*progress=end/ });
+          return name;
+        } catch { signal.throwIfAborted(); }
+      }
+      return 'libx264';
+    };
+    return track(select());
+  }
+
+  function track(work) {
     active.add(work);
     return work.finally(() => {
       active.delete(work);
@@ -309,7 +337,7 @@ function createDeliveryCapabilities(options = {}) {
     } finally { clearTimeout(timer); }
   }
 
-  return Object.freeze({ assertReady, cancelAllAndWait, resume });
+  return Object.freeze({ assertReady, selectVideoEncoder, cancelAllAndWait, resume });
 }
 
 class FFmpegOutputParser {
@@ -477,6 +505,7 @@ function buildIngestArgs({
   chMaps,
   waveLabel,
   wavePath,
+  previewMixLabel,
   encoder,
   video,
   pipeline,
@@ -536,7 +565,13 @@ function buildIngestArgs({
       vf = `setpts=PTS-STARTPTS,setparams=colorspace=${matrix}:color_primaries=${primaries}:color_trc=${transfer}:range=${range},${scale}`;
     }
     const vencArgs = previewVideoEncoderArgs(encoder);
-    args.push('-map', '0:v:0', '-an', '-vf', vf, ...vencArgs);
+    args.push('-map', '0:v:0');
+    // FLAC has no encoder priming. Each fragment can preserve the first
+    // sample and video frame zero without extending the Proxy's clock.
+    if (previewMixLabel) args.push('-map', previewMixLabel, '-c:a', 'flac', '-strict', '-2',
+      '-frame_size:a', '480', '-compression_level:a', '2', '-shortest');
+    else args.push('-an');
+    args.push('-vf', vf, ...vencArgs);
 
     // 全 I 幀 (All-Intra / Ultra-Short GOP) 預覽規格：
     // NVIDIA NVENC SDK 強制要求 gopLength > numBFrames + 1，在 -bf 0 條件下其硬體最小合法 GOP 為 2；
@@ -696,6 +731,8 @@ function createFFmpegExecution(options = {}) {
     outPath,
     shouldSend,
     outputFormat,
+    verification,
+    reverseFeeds,
     discAudioPlan,
     discVideoFps,
     outputAuthority,
@@ -900,6 +937,8 @@ function createFFmpegExecution(options = {}) {
           ...(sourcePaths ? { sourcePaths } : {}),
           ...(inputEvidence ? { inputEvidence } : {}),
           ...(outputFormat ? { outputFormat } : {}),
+          ...(verification && options.getFFprobePath ? { verification, ffprobePath: options.getFFprobePath() } : {}),
+          ...(reverseFeeds?.length ? { reverseFeeds } : {}),
           ...(discAudioPlan ? { discAudioPlan } : {}),
           ...(discVideoFps ? { discVideoFps } : {}),
         }, {

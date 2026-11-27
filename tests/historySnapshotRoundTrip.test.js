@@ -1,7 +1,7 @@
 ﻿// @vitest-environment jsdom
 /* 復原快照的**往返**：snap() 寫進去的每一個欄位，restore() 都要讀回來。
 
-   History.snap() 目前收 12 個欄位。它與 restore() 是兩份手寫清單，
+   History.snap() 與 restore() 是兩份手寫清單，
    彼此沒有任何機制對齊：
 
      - 在 snap() 加了欄位、忘了在 restore() 讀 → 快照變大，Ctrl+Z 卻不還原那一項。
@@ -11,7 +11,7 @@
    這支測試對每個欄位跑「設成 A → 記錄 → 設成 B → 記錄 → undo → 應為 A →
    redo → 應為 B」，任何一邊漏掉就紅。
 
-   同時也守住 Seq.snapshot() ↔ Seq.restore()：clipGeo 是 12 個欄位裡唯一
+   同時也守住 Seq.snapshot() ↔ Seq.restore()：clipGeo 是快照欄位裡唯一
    由另一支模組序列化的，兩邊同樣是兩份手寫清單。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -46,6 +46,7 @@ function resetState() {
   State.cues = [];
   State.tracks = [{ name: '軌道 1', visible: true, locked: false }];
   State.notes = [];
+  State.recognitionTerms = [];
   State.clips = [];
   State.videoTracks = [{ name: '視訊軌 1', visible: true, locked: false, opacity: 1 }];
   State.audioProject = null;
@@ -62,6 +63,13 @@ function resetState() {
 /* 每一列是一個快照欄位的往返案例：把 State 設成 a、設成 b，各記一步，
    再用 read() 取出目前的值來比對。read 回傳可比較的純資料。 */
 const FIELDS = [
+  {
+    name: '辨識專案詞表',
+    a: () => { State.recognitionTerms = ['台北']; },
+    b: () => { State.recognitionTerms = ['台北', 'SUB Tool']; },
+    read: () => State.recognitionTerms,
+    expectA:['台北'], expectB:['台北', 'SUB Tool'],
+  },
   {
     name: '專案畫布（自動與自訂）',
     a: () => { State.projectCanvas=null; },
@@ -215,16 +223,16 @@ describe('快照欄位清單', () => {
   /* 這一條是「有沒有人偷加欄位卻沒接進 restore()」的哨兵。
      加欄位是好事——但加完必須同時（a）在 restore() 讀回來、
      （b）在上面的 FIELDS 表補一列往返案例、（c）更新這裡的清單。 */
-  it('目前是這 13 個欄位；要增減請一併補上往返案例', () => {
+  it('快照欄位與往返案例同步', () => {
     State.cues = [cue(0, 1, 'x')];
     State.clips = [videoClip()];
     expect(Object.keys(History.snap()).sort()).toEqual([
       'audioProject', 'clipGeo', 'cues', 'dropFrame', 'exportIn', 'exportOut',
-      'externalAudioState', 'fps', 'notes', 'projectCanvas', 'trackCount', 'tracks', 'videoTracks',
+      'externalAudioState', 'fps', 'notes', 'projectCanvas', 'recognitionTerms', 'trackCount', 'tracks', 'videoTracks',
     ]);
   });
 
-  /* trackCount 是 12 個欄位裡唯一**寫進去卻不讀回來**的：restore() 改叫
+  /* trackCount 是快照欄位裡唯一**寫進去卻不讀回來**的：restore() 改叫
      syncTrackCount() 從 tracks.length 推導。這是刻意的（軌數是衍生值，
      不是獨立事實），寫在這裡是為了讓下一個人知道那不是漏掉的。 */
   it('trackCount 由 tracks 推導而非從快照讀回', () => {
@@ -255,10 +263,47 @@ describe('快照欄位清單', () => {
     History.undo();
     expect(State.cues[0].text).toBe('原文');
   });
+
+  it('連續改字只保留有改動的字幕版本，逐字時間的原地修改可獨立復原',()=>{
+    State.cues=Array.from({length:50},(_,i)=>({...cue(i,i+1,'原文'),recognition:{
+      kind:'speech',words:[{text:'詞',start:i,end:i+0.5}],
+    }}));
+    History.reset();
+    State.cues.unshift(cue(-1,0,'片頭'));
+    History.record('插入片頭');
+    for(let i=1;i<=4;i++){
+      State.cues[25].text='編輯'+i;
+      History.record('改字');
+    }
+    State.cues[25].recognition.words[0].end=24.75;
+    History.record('校正逐字時間');
+    expect(new Set(History.stack.flatMap(entry=>entry.snap.cues)).size).toBe(56);
+    History.undo();
+    expect(State.cues[25]).toMatchObject({text:'編輯4',recognition:{words:[{end:24.5}]}});
+    State.cues[25].recognition.words[0].text='未提交';
+    History.redo();
+    expect(State.cues[25].recognition.words[0]).toEqual({text:'詞',start:24,end:24.75});
+    History.record('相同內容');
+    expect(History.stack).toHaveLength(7);
+  });
 });
 
 describe('即時預覽與背景 History 的隔離',()=>{
   beforeEach(()=>{resetState();History.reset();});
+
+  it('拖曳中的字幕因背景插入而換位，存檔快照仍投影到原字幕',()=>{
+    const first=cue(1,2,'第一句'), second=cue(3,4,'第二句');
+    State.cues=[first,second];
+    const release=History.beginPreview([first,second].map(target=>({target,fields:['start','end']})));
+    try{
+      first.start=1.5;second.start=3.5;
+      State.cues.unshift(cue(0,0.5,'背景新增'));
+      expect(History.committedSnapshot().cues.map(c=>[c.text,c.start])).toEqual([
+        ['背景新增',0],['第一句',1],['第二句',3],
+      ]);
+      expect(State.cues.map(c=>c.start)).toEqual([0,1.5,3.5]);
+    }finally{release();}
+  });
 
   it('取消時間軸移動後，Undo/Redo 保留背景修改且不恢復暫存時間或 copy cue',()=>{
     const original=cue(1,3,'原字幕');State.cues=[original];History.reset();

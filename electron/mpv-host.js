@@ -1645,12 +1645,12 @@ function createMpvHost(deps) {
     },
     present,
     cancelPresent,
-    screenshot: async filePath => {
+    screenshot: async (filePath, { videoOnly = false } = {}) => {
       while (pendingCanvas) await pendingCanvas.promise;
       const session = fileLoadSession, revision = canvasRevision, frame = canvasFrame;
       const canvas = projectCanvas && { ...projectCanvas };
       if (session?.loading || !canvasFrameReady) throw new Error('mpv 來源或畫布畫格尚未就緒');
-      await send(['screenshot-to-file', filePath, 'subtitles'], true, { requireSuccess: true });
+      await send(['screenshot-to-file', filePath, videoOnly ? 'video' : 'subtitles'], true, { requireSuccess: true });
       if (session !== fileLoadSession || revision !== canvasRevision) throw new Error('mpv 截圖來源或畫布已變更');
       return { ok: true, projectCanvas: canvas, ...(frame || {}) };
     },

@@ -18,7 +18,7 @@ const readSourceFingerprint = (channel,source) => {
 
 contextBridge.exposeInMainWorld('subtool', {
   isDesktop: true,
-  status:       () => ipcRenderer.invoke('app:status'),
+  status:       waitForEncoder => ipcRenderer.invoke('app:status', waitForEncoder === true),
   // 拖放的 File 物件 → 絕對路徑（Electron 32 起 File.path 已移除，官方替代為 webUtils.getPathForFile）。
   // 只接受真正的 File 物件，無法被字串偽造；解析失敗回 null，呼叫端退回瀏覽器路徑。
   getFilePath:  (file) => { try { return webUtils.getPathForFile(file) || null; } catch (e) { return null; } },
@@ -125,17 +125,24 @@ contextBridge.exposeInMainWorld('subtool', {
     return () => ipcRenderer.removeListener('audio:normalize-progress', handler);
   },
   cleanupAudio: (p) => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('ffmpeg:cleanup', { path: p }); },
+  speechKeyStatus: () => ipcRenderer.invoke('speech:keys-status'),
+  saveSpeechKeys: keys => ipcRenderer.invoke('speech:keys-save', keys),
+  speechCloudRequest: request => ipcRenderer.invoke('speech:cloud-request', request),
+  cancelSpeechCloudRequest: id => ipcRenderer.invoke('speech:cloud-cancel', id),
   getScreenTextSettings: () => ipcRenderer.invoke('ocr:settings-get'),
-  saveScreenTextSettings: ({provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, apiKey}) =>
-    ipcRenderer.invoke('ocr:settings-save', {provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, apiKey}),
-  recognizeScreenText: ({path, start, end, provider, model, sourceLang, samplesPerSecond, frameWidth, smartAccuracy, requestId}) =>
-    ipcRenderer.invoke('ocr:recognize', {path, start, end, provider, model, sourceLang, samplesPerSecond, frameWidth, smartAccuracy, requestId}),
+  recognizeFrameText: ({ pngBase64, requestId, languages }) => ipcRenderer.invoke('ocr:frame', { pngBase64, requestId, languages }),
+  cancelFrameText: requestId => ipcRenderer.invoke('ocr:frame-cancel', requestId),
+  saveScreenTextSettings: ({provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, contentMode, region, apiKey}) =>
+    ipcRenderer.invoke('ocr:settings-save', {provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, contentMode, region, apiKey}),
+  planScreenText: request => ipcRenderer.invoke('ocr:plan', request),
+  recognizeScreenText: request => ipcRenderer.invoke('ocr:recognize', request),
   cancelScreenText: (requestId, keepPartial = false) => ipcRenderer.invoke('ocr:cancel', requestId, keepPartial === true),
   onScreenTextProgress: callback => {
     const listener = (_event, update) => callback(update);
     ipcRenderer.on('ocr:progress', listener);
     return () => ipcRenderer.removeListener('ocr:progress', listener);
   },
+  speechAudioMix: true,
   speechAudioRead: (request) => {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少辨識音訊片段參數');
     const { path, start, duration, sourceStream = 0, sourceChannel = null, processed = false, requestId } = request;
@@ -148,7 +155,13 @@ contextBridge.exposeInMainWorld('subtool', {
     if (!Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream > 255) throw new TypeError('無效的來源音訊串流');
     if (sourceChannel !== null && (!Number.isInteger(sourceChannel) || sourceChannel < 0 || sourceChannel > 127)) throw new TypeError('無效的來源音訊聲道');
     if (typeof processed !== 'boolean') throw new TypeError('辨識音訊 processed 必須是布林值');
-    return ipcRenderer.invoke('speech:audioRead', { path, start, duration, sourceStream, sourceChannel, processed, requestId });
+    const mix=request.mixChannels;
+    if(mix!==undefined&&(!Array.isArray(mix)||!mix.length||mix.length>256||mix.some(row=>!row||
+      !Number.isInteger(row.sourceStream)||row.sourceStream<0||row.sourceStream>255||
+      (row.sourceChannel!==null&&(!Number.isInteger(row.sourceChannel)||row.sourceChannel<0||row.sourceChannel>127)))))
+      throw new TypeError('無效的辨識混音聲道');
+    return ipcRenderer.invoke('speech:audioRead', { path, start, duration, sourceStream, sourceChannel, processed, requestId,
+      ...(mix?{mixChannels:mix.map(({sourceStream,sourceChannel})=>({sourceStream,sourceChannel}))}:{}) });
   },
   speechAudioCancel: requestId => {
     if (!isSpeechAudioRequestId(requestId)) throw new TypeError('辨識音訊 requestId 格式不正確');
@@ -229,6 +242,7 @@ contextBridge.exposeInMainWorld('subtool', {
     cancelPresent: () => ipcRenderer.invoke('mpv:cancelPresent'),
     loadfile:  (p)     => { if(typeof p!=='string') throw new TypeError('path must be a string'); return ipcRenderer.invoke('mpv:loadfile', p); },
     screenshot:(p)     => ipcRenderer.invoke('mpv:screenshot', p),
+    captureOcrFrame:() => ipcRenderer.invoke('mpv:captureOcrFrame'),
     play:      (options) => ipcRenderer.invoke('mpv:play', options),
     pause:     (options) => ipcRenderer.invoke('mpv:pause', options),
     direction: (v)     => ipcRenderer.invoke('mpv:direction', v),

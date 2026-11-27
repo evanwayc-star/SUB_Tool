@@ -1,5 +1,6 @@
 import { Project } from './project.js';
-import { getScreenTextPlan, recognizeClipText } from './screen-text-recognition.js';
+import { getScreenTextPlan, recognizeClipText, screenTextTrialPlan } from './screen-text-recognition.js';
+import { stageRecognitionReview } from './recognition-review.js';
 import { SCREEN_TEXT_DEFAULTS as DEFAULTS, SCREEN_TEXT_DEFAULT_MODELS } from '../shared/screen-text-options.cjs';
 
 const listeners = new Set();
@@ -43,27 +44,32 @@ function isPending(status) {
 async function execute(run, clip, plan) {
   const { provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, scope } = run.snapshot;
   try {
-    const { count, commitPartial } = await recognizeClipText(clip, {
+    const { count, commitPartial, wasStaged, review, metrics, error } = await recognizeClipText(clip, {
       provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, scope, plan, signal: run.controller.signal,
+      ...run.options,reviewMode:run.options.resultMode && run.options.resultMode!=='apply',
+      stageReview:options=>stageRecognitionReview('screen',{...options,onResolve:()=>clearScreenTextSession(run.snapshot.id)}),
       preserveSelection: () => run.backgrounded,
-      onProgress({ progress, message }) {
+      onProgress({ progress, message, metrics }) {
         if (run.snapshot.status !== 'running' || !Number.isFinite(progress)) return;
-        update(run, { progress, message: message || '正在辨識畫面文字' });
+        update(run, { progress, ...(metrics?{metrics}:{}),message: message || '正在辨識畫面文字' });
       },
     });
     if (current !== run) return;
     if (commitPartial) {
       run.commitPartial = commitPartial;
-      update(run, { status:'partial', count, message:`已停止辨識，已辨識到 ${count} 則字幕。要將這些字幕加入新軌嗎？` });
+      run.wasStaged=wasStaged;
+      update(run, { status:'partial', count,metrics, message:`${error||'已停止辨識'}，已保留連續完成的 ${count} 則字幕。` });
       return;
     }
-    update(run, { status: 'completed', count, progress: 1,
+    if(review){update(run,{status:'review',count,metrics,progress:1,message:`${count} 則候選字幕待複核。`});return;}
+    update(run, { status: 'completed', count, progress: 1, metrics,
       message: count ? `畫面文字辨識完成，已新增字幕軌與 ${count} 則字幕。` : '這個範圍沒有辨識到文字。' });
   } catch (error) {
     if (error?.name === 'AbortError') {
       update(run, { status: 'cancelled', message: '已取消畫面文字辨識，沒有可加入的字幕。' });
     } else {
-      update(run, { status: 'failed', message: error?.message || '畫面文字辨識失敗，請重試。' });
+      update(run, { status: 'failed', ...(error?.metrics&&{metrics:error.metrics}),
+        message: error?.message || '畫面文字辨識失敗，請重試。' });
     }
   }
 }
@@ -71,12 +77,14 @@ async function execute(run, clip, plan) {
 export function startScreenTextSession(clip, {
   provider = DEFAULTS.provider, model = SCREEN_TEXT_DEFAULT_MODELS[provider], sourceLang = DEFAULTS.sourceLang,
   sampleFps = DEFAULTS.sampleFps, frameWidth = DEFAULTS.frameWidth, smartAccuracy = DEFAULTS.smartAccuracy, scope = 'clip',
+  contentMode, region, maxNewRequests, resultMode,
 }) {
   if (current && (isPending(current.snapshot.status) || current.snapshot.status === 'partial')) return current.snapshot;
-  const plan = getScreenTextPlan(clip, scope);
+  const plan = resultMode==='trial'?screenTextTrialPlan(clip,scope):getScreenTextPlan(clip, scope);
   const scopeName = { all: '全片', export: '輸出 In／Out 範圍' }[scope];
   const run = {
     controller: new AbortController(),
+    options:{contentMode,region,maxNewRequests,resultMode},
     backgrounded: false,
     commitPartial: null,
     snapshot: Object.freeze({
@@ -84,6 +92,7 @@ export function startScreenTextSession(clip, {
       scope, range: Object.freeze({ ...plan.range }), windowCount: plan.windows.length,
       fps: plan.fps, dropFrame: plan.dropFrame,
       provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy, status: 'running',
+      contentMode,region,maxNewRequests,resultMode,
       progress: null, message: '正在擷取畫面並準備雲端辨識…', count: 0, dialogOpen: true,
     }),
   };
@@ -120,6 +129,7 @@ export function resolveScreenTextPartial(id, addToTrack) {
   if (!addToTrack) { forget(run); return; }
   try {
     const count = commit();
+    if(run.wasStaged?.()){update(run,{status:'review',count,message:`${count} 則候選字幕待複核。`});return;}
     update(run, { status:'completed', count, message:count ? `已將 ${count} 則字幕加入新的畫面文字辨識軌。` : '已辨識的字幕未達一個可加入的畫格。' });
   } catch (error) {
     update(run, { status:'failed', message:error?.message || '無法加入已辨識的字幕。' });

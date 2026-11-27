@@ -53,7 +53,7 @@ import {
 import { hideCtx, showCueMenu, refreshOpenWaveMenu } from './menus.js';
 import { waveOptionLabel } from './timeline-context-menu-model.js';
 import { Seq } from './sequence.js';
-import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds, requestPointerSeek } from './timeline-interaction-engine.js';
+import { timeToX, xToTime, snapTargets, snapVal, cueNeighborBounds, groupCueNeighborBounds, requestPointerSeek } from './timeline-interaction-engine.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { planCueStyleAssignment } from './subtitle-style-engine.js';
 import { effStyle } from './substyle.js';
@@ -1508,14 +1508,27 @@ tlScroll?.addEventListener?.('mousedown',e=>{
     if(isCtrl && mode!=='move'){ selectCue(c.id,{additive:true}); if(!isSel(c.id)){ e.preventDefault(); return; } }
     else if(!isCtrl && !isSel(c.id)) selectCue(c.id);
     const grpIds = (mode==='move' && isSel(c.id) && State.selectedIds.length>1) ? State.selectedIds : [c.id];
-    const grpCues = grpIds.map(id => State.cues.find(z => z.id === id)).filter(Boolean);
+    const exSet=new Set(grpIds);
+    let grpCues = [c];
+    if (grpIds.length > 1) {
+      const selected = new Map();
+      for (const cue of State.cues) {
+        if (exSet.has(cue.id)) selected.set(cue.id, cue);
+      }
+      grpCues = grpIds.map(id => selected.get(id)).filter(Boolean);
+    }
     if(grpCues.some(cc => State.tracks[cc.track || 0]?.locked)){
       // 群組中包含鎖定軌道：僅允許選取，不允許拖曳移動
       e.preventDefault(); return;
     }
-    const exSet=new Set(grpIds);
-    const grp=grpIds.map(id=>State.cues.find(z=>z.id===id)).filter(Boolean)
-      .map(cc=>{ const b=cueNeighborBounds(cc.start,cc.end,cc.track||0,exSet); return {c:cc,el:tlTracks.querySelector(`.cue-block[data-id="${cc.id}"]`),os:cc.start,oe:cc.end,ot:cc.track||0,prevEnd:b.prevEnd,nextStart:b.nextStart,origStyle:cc.style ? {...cc.style} : undefined}; }); // P3：快取區塊 element 參照
+    const groupBounds = grpCues.length > 1 ? groupCueNeighborBounds(grpCues, exSet) : null;
+    const visible = groupBounds ? new Map(Array.from(tlTracks.querySelectorAll('.cue-block'), el => [el.dataset.id, el])) : null;
+    const grp = grpCues.map(cue => {
+      const track = cue.track || 0;
+      const bounds = groupBounds?.get(cue) || cueNeighborBounds(cue.start, cue.end, track, exSet);
+      return { c:cue, el:visible ? visible.get(cue.id) : block, os:cue.start, oe:cue.end, ot:track,
+        ...bounds, origStyle:cue.style ? {...cue.style} : undefined };
+    });
     const selectionBefore={ids:[...State.selectedIds],primary:State.selectedId,activeEdge:State.activeEdge};
     const gesture=beginRendererGesture(mode,{
       targets:grp.map(item=>({target:item.c,fields:['start','end','track','style']})),

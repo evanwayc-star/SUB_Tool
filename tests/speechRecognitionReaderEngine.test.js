@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { webcrypto } from 'node:crypto';
 
 const worker = vi.hoisted(() => ({ transcribeBuiltinAudioInWorker: vi.fn() }));
 vi.mock('../src/speech-recognition-worker-client.js', () => worker);
@@ -41,6 +42,68 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response()));
 });
 afterEach(() => vi.unstubAllGlobals());
+
+it('全零不上傳，微弱語音仍辨識；相同短段重跑沿用結果，詞表變更會重新辨識',async()=>{
+  vi.stubGlobal('crypto',webcrypto);
+  const cache=new Map(),checkpoints={read:key=>cache.get(key),write:(key,value)=>cache.set(key,value)};
+  const options={provider:'groq',taskMode:'transcribe',apiKey:'mock',inT:0,outT:4,checkpoints};
+  await transcribeAudioStream({...options,audioBuffer:pcm(4,0)});
+  expect(fetch).not.toHaveBeenCalled();
+  const source=pcm(4,0);source.getChannelData(0)[32000]=.000001;
+  await transcribeAudioStream({...options,audioBuffer:source});
+  await transcribeAudioStream({...options,audioBuffer:source});
+  expect(fetch).toHaveBeenCalledOnce();
+  await transcribeAudioStream({...options,projectTerms:['人名'],audioBuffer:source});
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('延長剪輯 OUT 沿用相同已完成視窗，來源 PCM 只讀一次',async()=>{
+  vi.stubGlobal('crypto',webcrypto);
+  const cache=new Map(),checkpoints={read:key=>cache.get(key),write:(key,value)=>cache.set(key,value)};
+  const options={inT:0,provider:'builtin',taskMode:'transcribe',checkpoints};
+  await transcribeAudioStream({...options,audioBuffer:reader(1210),outT:610});
+  worker.transcribeBuiltinAudioInWorker.mockClear();
+  const longer=reader(1210),progress=vi.fn();
+  await transcribeAudioStream({...options,audioBuffer:longer,outT:1210,onProgress:progress});
+  expect(progress.mock.calls.filter(([p])=>p.message.includes('已還原'))).toHaveLength(1);
+  expect(worker.transcribeBuiltinAudioInWorker).toHaveBeenCalledTimes(2);
+  expect(longer.readRange.mock.calls.reduce((sum,[s,e])=>sum+e-s,0)).toBeCloseTo(1210,8);
+});
+
+it('聲紋標籤只在供應商一次回應內有效，還原快取沿用當時識別',async()=>{
+  vi.stubGlobal('crypto',webcrypto);
+  const cache=new Map(),checkpoints={read:key=>cache.get(key),write:(key,rows)=>cache.set(key,structuredClone(rows))};
+  fetch.mockResolvedValue({ok:true,json:async()=>({segments:[{text:'Hi',start:.1,end:.3,speaker:'A'}]})});
+  const options={provider:'openai',taskMode:'transcribe',audioBuffer:reader(601),apiKey:'test',inT:0,outT:601,checkpoints};
+  const first=await transcribeAudioStream(options),again=await transcribeAudioStream(options);
+  expect(first).toHaveLength(2);
+  expect(first[0].speakerScope).not.toBe(first[1].speakerScope);
+  expect(again.map(segment=>segment.speakerScope)).toEqual(first.map(segment=>segment.speakerScope));
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('第三段中斷後重開只重做缺段，仍保留時間、語言及字幕順序', async () => {
+  vi.stubGlobal('crypto', webcrypto);
+  const cache = new Map();
+  const checkpoints = { read: key => cache.get(key), write: (key, value) => cache.set(key, JSON.parse(JSON.stringify(value))) };
+  const options = { provider: 'builtin', taskMode: 'transcribe', language: 'auto', checkpoints, channelSelection: 'all' };
+  const response = word => ({ language:'chinese', segments:[{ text: word, start:1, end:2 }] });
+  const recognize = worker.transcribeBuiltinAudioInWorker;
+  recognize.mockResolvedValueOnce(response('学校')).mockResolvedValueOnce(response('软件')).mockRejectedValueOnce(new Error('interrupted'));
+  await expect(transcribeAudioStream({ ...options, audioBuffer:reader(1210) })).rejects.toThrow('interrupted');
+  expect(cache.size).toBe(2);
+  recognize.mockClear().mockResolvedValue(response('国立'));
+  const progress = vi.fn();
+  const result = await transcribeAudioStream({ ...options, audioBuffer:reader(1210), onProgress:progress });
+  expect(recognize).toHaveBeenCalledTimes(1);
+  expect(progress.mock.calls.filter(([status])=>status.message.includes('已還原'))).toHaveLength(2);
+  expect(result.map(segment=>segment.text)).toContain('學校');
+  expect(result.every((entry,i)=>i===0 || entry.start>result[i-1].start)).toBe(true);
+  expect(cache.size).toBe(3);
+  recognize.mockClear();
+  await transcribeAudioStream({ ...options, channelSelection:'dialogue', audioBuffer:reader(1210) });
+  expect(recognize).toHaveBeenCalledTimes(3);
+});
 
 it.each(['google', 'openai'])('%s 自動辨識回傳未標語言的華語時，轉為繁體並保留原詞', async provider => {
   const text = '我 在 用 数 据 库 。';
@@ -139,11 +202,11 @@ it('瀏覽器長音檔的 Gemini 文本匹配分批取逐字時間並還原到�
 it('Google 長片每次上傳的實際 JSON 低於 20 MB，無損 PCM 與重疊來源連續且只加一次 IN 偏移', async () => {
   const source = reader(), uploads = [];
   const inT = 123.125, outT = 744.375;
-  let readSpan;
+  const reads=[];
   const sampleAt = index => ((index % 1024) - 512) / 512;
   const encodedSample = value => Math.trunc(value * (value < 0 ? 32768 : 32767));
   source.readRange.mockImplementation(async (start, end) => {
-    readSpan = { start, end };
+    reads.push({start,end});
     const buffer = pcm(end - start);
     const samples = buffer.getChannelData(0), firstSample = Math.round(start * 16000);
     for (let index = 0; index < samples.length; index++) samples[index] = sampleAt(firstSample + index);
@@ -160,7 +223,9 @@ it('Google 長片每次上傳的實際 JSON 低於 20 MB，無損 PCM 與重疊�
     expect(wav.readUInt32LE(24)).toBe(16000);
     expect(wav.readUInt16LE(34)).toBe(16);
     const sampleCount = wav.readUInt32LE(40) / 2;
-    expect(sampleCount).toBe(Math.round((readSpan.end - readSpan.start) * 16000));
+    expect(sampleCount).toBeLessThanOrEqual(300*16000);
+    const start=uploads.length?uploads.at(-1).end-10:inT;
+    const readSpan={start,end:start+sampleCount/16000};
     for (const index of [0, Math.floor(sampleCount / 2), sampleCount - 1]) {
       expect(wav.readInt16LE(44 + index * 2)).toBe(encodedSample(sampleAt(Math.round(readSpan.start * 16000) + index)));
     }
@@ -181,6 +246,7 @@ it('Google 長片每次上傳的實際 JSON 低於 20 MB，無損 PCM 與重疊�
     expect(segments[index].words[0].end).toBeCloseTo(uploads[index].start - inT + 11.5, 6);
   }
   expect(segments).toHaveLength(uploads.length);
+  expect(reads.reduce((sum,span)=>sum+span.end-span.start,0)).toBeCloseTo(outT-inT,8);
   expect(source.close).not.toHaveBeenCalled();
 });
 
@@ -197,7 +263,7 @@ it('OpenAI 自動辨識依服務實際段落與說話者交接，長片靜音切
   });
   const result = await transcribeAudioStream({ audioBuffer: source, inT: 123, outT: 724,
     provider: 'openai', apiKey: 'test', taskMode: 'transcribe' });
-  expect(source.readRange.mock.calls.map(([start, end]) => [start, end])).toEqual([[678, 723], [123, 678.1], [678.1, 724]]);
+  expect(source.readRange.mock.calls.map(([start, end]) => [start, end])).toEqual([[123,723],[723,724]]);
   for (const body of forms) {
     expect(body.get('model')).toBe('gpt-4o-transcribe-diarize');
     expect(body.get('response_format')).toBe('diarized_json');
@@ -205,6 +271,9 @@ it('OpenAI 自動辨識依服務實際段落與說話者交接，長片靜音切
     for (const field of ['timestamp_granularities[]', 'language', 'prompt', 'temperature']) expect(body.has(field)).toBe(false);
   }
   expect(result.map(({text, speaker}) => [text,speaker])).toEqual([['First sentence. Still the same speaker.', 'A'], ['After the cut.', 'B'], ['Again.', 'B']]);
+  expect(result[0].speakerScope).toMatch(/^[a-f0-9]{32}$/);
+  expect(result[1].speakerScope).not.toBe(result[0].speakerScope);
+  expect(result[1].speakerScope).toBe(result[2].speakerScope);
   for (const [i, [start, end]] of [[549.5,555.1],[555.1,556.7],[560.1,561.1]].entries()) {
     expect(result[i].start).toBeCloseTo(start, 6);
     expect(result[i].end).toBeCloseTo(end, 6);
@@ -251,7 +320,7 @@ describe('bounded recognition source reader', () => {
     const result = await transcribeAudioStream({ audioBuffer: source, inT: 123,
       outT: 724, provider: 'groq', apiKey: 'test', language: 'en' });
     expect(source.readRange.mock.calls.map(([start, end]) => [start, end]))
-      .toEqual([[678, 723], [123, 678.1], [668.1, 724]]);
+      .toEqual([[123,723],[723,724]]);
     expect(uploads).toEqual([17_763_244, 1_788_844]);
     expect(result.flatMap(segment => segment.words.map(word => word.text))).toEqual(['same', 'next']);
     expect(result[1].start).toBeCloseTo(560.1, 6);

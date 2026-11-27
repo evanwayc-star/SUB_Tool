@@ -68,7 +68,7 @@ describe('字幕搜尋與導航定位 (subtitle-search)', () => {
     expect(isSearchHit('c5')).toBe(false); // 跨軌不應納入當前軌道搜尋
 
     expect(getSearchCountText()).toBe('1/3');
-    expect(emit).toHaveBeenCalledWith('render:subList');
+    expect(emit).toHaveBeenCalledWith('render:searchHighlights');
     expect(emit).toHaveBeenCalledWith('render:searchCount');
     expect(selectCueMock).toHaveBeenCalledWith('c1', { seek: false });
   });

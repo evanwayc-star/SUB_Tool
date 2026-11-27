@@ -355,6 +355,15 @@ describe('音量表與播放點視野的預設鍵遷移',()=>{
 });
 
 describe('安全框及播放器 TC 預設鍵遷移', () => {
+  it('新舊設定預設 Ctrl+E 辨識播放點，已有自訂用途的鍵位仍由使用者掌握',()=>{
+    const press=ev('e',{ctrl:true,code:'KeyE'});
+    expect(matchAction(State.defaultKeymap,press)).toBe('playhead_ocr');
+    const free=mergeImportedKeymap(State.defaultKeymap,{pause:[{key:'k'}]}).keymap;
+    expect(matchAction(free,press)).toBe('playhead_ocr');
+    const taken=mergeImportedKeymap(State.defaultKeymap,{save_as:[{key:'e',ctrl:true}]}).keymap;
+    expect(taken.playhead_ocr).toEqual([]);
+    expect(matchAction(taken,press)).toBe('save_as');
+  });
   const safe = 'toggle_safe_frame', tc = 'toggle_timecode_watermark';
   const oldSafe = {key:'g', ctrl:true}, newSafe = {key:'h', ctrl:true};
   it('現有設定與舊匯出檔使用新預設；重新載入仍相同', () => {

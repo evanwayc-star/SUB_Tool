@@ -51,6 +51,7 @@ async function main() {
       _quitReady:false,_quitSequenceStarted:false,_isAppQuitting:false,
       audioNormalizationJobs:new Map(),mediaProbe:scenario==='failure'?{...idle,cancelAllAndWait:async()=>{throw new Error('shutdown failed');}}:idle,
       ffmpegExecution:idle,deliveryCapabilities:idle,speechCompressionRuntime:idle,speechAudioReader:idle, screenTextRuntime: idle,vocalWaveformRuntime:idle,
+      frameTextRuntime:{close:async()=>{}},
       nativeAudioMeter:{stop:async()=>{meterStops++;}},
       mediaIngestCoordinator:idle,mediaWaveformCoordinator:idle,directoryOutput:runtime,
       QueueManager:{prepareForShutdown:async()=>{},cancelShutdown:async()=>{}},

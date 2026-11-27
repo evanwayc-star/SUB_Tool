@@ -389,6 +389,46 @@ export function cueNeighborBounds(os, oe, track, excludeIds) {
   return { prevEnd, nextStart };
 }
 
+// For a group drag, every selected cue ignores the same set of moving cues.
+// Sweep each affected track in both directions so nested intervals still
+// contribute their farthest edge. Neighbors with an equal midpoint never bind.
+export function groupCueNeighborBounds(selected, excludeIds) {
+  const midpoint = cue => (cue.start + cue.end) / 2;
+  const byMidpoint = (a, b) => midpoint(a) - midpoint(b);
+  const tracks = new Map(), bounds = new Map();
+  for (const cue of selected) {
+    bounds.set(cue, { prevEnd: 0, nextStart: Infinity });
+    if (Number.isNaN(midpoint(cue))) continue;
+    const track = cue.track || 0;
+    if (!tracks.has(track)) tracks.set(track, { moving: [], neighbors: [] });
+    tracks.get(track).moving.push(cue);
+  }
+  for (const cue of State.cues) {
+    const row = tracks.get(cue.track);
+    if (row && cue.timed !== false && !excludeIds.has(cue.id) && !Number.isNaN(midpoint(cue))) row.neighbors.push(cue);
+  }
+  for (const { moving, neighbors } of tracks.values()) {
+    moving.sort(byMidpoint);
+    neighbors.sort(byMidpoint);
+    let left = 0, prevEnd = 0;
+    for (const cue of moving) {
+      while (left < neighbors.length && midpoint(neighbors[left]) < midpoint(cue)) {
+        prevEnd = Math.max(prevEnd, neighbors[left++].end);
+      }
+      bounds.get(cue).prevEnd = prevEnd;
+    }
+    let right = neighbors.length - 1, nextStart = Infinity;
+    for (let i = moving.length - 1; i >= 0; i--) {
+      const cue = moving[i];
+      while (right >= 0 && midpoint(neighbors[right]) > midpoint(cue)) {
+        nextStart = Math.min(nextStart, neighbors[right--].start);
+      }
+      bounds.get(cue).nextStart = nextStart;
+    }
+  }
+  return bounds;
+}
+
 export function renderPointerSeekControl() {
   const pauses = !!State.pointerSeekPauses;
   const label = pauses ? '跳轉暫停' : '跳轉繼續';

@@ -60,7 +60,7 @@ describe('片段速度與反轉共用時間域',()=>{
     },{hasAudioStream:()=>false});
     const graph=plan.args[plan.args.indexOf('-filter_complex')+1];
     expect(graph).toContain(')/2.000000)-1');
-    expect(graph).toContain('trim=start_pts=0:end_pts=50,reverse');
+    expect(graph).toContain('trim=start_pts=0:end_pts=50,scale=320:180:force_original_aspect_ratio=decrease,reverse');
     expect(graph).toContain('[ov0]trim=end_frame=50[vdelivery]');
   });
 });

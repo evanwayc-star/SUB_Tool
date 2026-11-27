@@ -84,7 +84,7 @@ const MIN_ESTIMATED_SECONDS_PER_TOKEN = 0.18;
 const MAX_ESTIMATED_SECONDS_PER_TOKEN = 0.8;
 const MAX_LOW_CONFIDENCE_EXACT_GAP_SECONDS = 8;
 
-function alignTokenSequences(transcriptTokens, evidenceTokens) {
+function alignTokenSequences(transcriptTokens, evidenceTokens, onProgress) {
   const transcriptLength = transcriptTokens.length;
   const evidenceLength = evidenceTokens.length;
   if (!transcriptLength || !evidenceLength) return [];
@@ -123,6 +123,7 @@ function alignTokenSequences(transcriptTokens, evidenceTokens) {
   );
 
   for (let i = 1; i <= transcriptLength; i++) {
+    if (onProgress && i % Math.max(100, Math.ceil(transcriptLength / 50)) === 0) onProgress(i / transcriptLength);
     const { start, end } = rangeForRow(i);
     rowStarts[i] = start;
     const currentCosts = new Float64Array(end - start + 1);
@@ -415,7 +416,7 @@ function recoverSparseUnmatchedSegments({
   return { segments: recovered, unmatchedLines: [], estimatedLines, partialEvidenceLines };
 }
 
-export function alignTranscriptToEvidence({ transcript, evidenceSegments } = {}) {
+export function alignTranscriptToEvidence({ transcript, evidenceSegments, onProgress } = {}) {
   const lines = parseTranscriptLines(transcript);
   const evidenceTokens = evidenceTokensFromSegments(evidenceSegments);
   if (!lines.length || !evidenceTokens.length) {
@@ -457,7 +458,7 @@ export function alignTranscriptToEvidence({ transcript, evidenceSegments } = {})
     lineTokenCounts.push(lineTokens.length);
     lineTokens.forEach(token => transcriptTokens.push({ ...token, lineIndex }));
   });
-  const alignedPairs = alignTokenSequences(transcriptTokens, evidenceTokens);
+  const alignedPairs = alignTokenSequences(transcriptTokens, evidenceTokens, onProgress);
   const pairsByLine = lines.map(() => []);
   for (const pair of alignedPairs) {
     const transcriptToken = transcriptTokens[pair.transcriptIndex];

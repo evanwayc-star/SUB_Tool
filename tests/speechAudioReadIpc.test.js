@@ -95,20 +95,22 @@ it('main取消只傳本sender與requestId，不接受renderer指定另一個owne
   expect(runtime.cancel).toHaveBeenCalledWith(sender, 'asr-test');
 });
 
-it('真before-quit handler包含辨識讀取屏障，未收尾時不能宣告退出', async () => {
+it.each([['speechAudioReader','cancelAllAndWait'], ['frameTextRuntime','close']])(
+  '真 before-quit 等到 %s 的 %s 完成才退出，期間拒絕新的播放點 OCR 工作', async (owner, method) => {
   const source = fs.readFileSync('electron/main.js', 'utf8');
   const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
   const registration = ast.body.find(node => node.type === 'ExpressionStatement'
     && node.expression.callee?.object?.name === 'app' && node.expression.callee?.property?.name === 'on'
     && node.expression.arguments[0]?.value === 'before-quit');
   const nativeOwner = () => ({ cancelAllAndWait: vi.fn(async () => {}), resume: vi.fn() });
-  let finish, handler;
-  const speechAudioReader = { cancelAllAndWait: vi.fn(() => new Promise(resolve => { finish = resolve; })), resume: vi.fn() };
+  let finish, handler, recognizeFrame;
   const context = {
     app: { on: (_channel, fn) => { handler = fn; }, quit: vi.fn() },
     _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false,
     audioNormalizationJobs: new Map(), mediaProbe: nativeOwner(), ffmpegExecution: nativeOwner(),
-    deliveryCapabilities: nativeOwner(), speechCompressionRuntime: nativeOwner(), speechAudioReader, screenTextRuntime: nativeOwner(),
+    deliveryCapabilities: nativeOwner(), speechCompressionRuntime: nativeOwner(), speechAudioReader: nativeOwner(), screenTextRuntime: nativeOwner(),
+    frameTextRuntime: { close:vi.fn().mockResolvedValue(), recognize:vi.fn() },
+    ipcMain: { handle: (_channel, callback) => { recognizeFrame = callback; } }, isMainWindowSender: () => true,
     vocalWaveformRuntime: nativeOwner(), nativeAudioMeter: { stop: vi.fn(async () => {}) },
     mediaIngestCoordinator: nativeOwner(), mediaWaveformCoordinator: nativeOwner(),
     directoryOutput: { close: vi.fn(async () => {}) }, QueueManager: { prepareForShutdown: vi.fn(async () => {}) },
@@ -117,10 +119,18 @@ it('真before-quit handler包含辨識讀取屏障，未收尾時不能宣告退
     mpvHost: { disposeAndWait: vi.fn(async () => {}) }, mediaIntakeRuntime: { close: vi.fn(async () => {}) },
     Promise, console,
   };
-  vm.runInNewContext(source.slice(registration.start, registration.end), context);
-  handler({ preventDefault: vi.fn() }); await Promise.resolve(); await Promise.resolve();
-  expect(speechAudioReader.cancelAllAndWait).toHaveBeenCalledTimes(1);
+  context[owner][method].mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const ipc = ast.body.find(node => node.expression?.callee?.object?.name === 'ipcMain'
+    && node.expression.callee.property.name === 'handle' && node.expression.arguments[0]?.value === 'ocr:frame');
+  vm.createContext(context);
+  for (const call of [registration, ipc]) vm.runInContext(source.slice(call.start, call.end), context);
+  handler({ preventDefault: vi.fn() });
+  // Let the entire quit chain advance; only this one owner remains pending.
+  await new Promise(resolve => setImmediate(resolve));
+  expect(context[owner][method]).toHaveBeenCalledOnce();
   expect(context.app.quit).not.toHaveBeenCalled(); expect(context._quitReady).toBe(false);
+  expect(() => recognizeFrame({sender:{}}, {})).toThrow(/無法.*開始單格辨識/);
+  expect(context.frameTextRuntime.recognize).not.toHaveBeenCalled();
   finish(); await vi.waitFor(() => expect(context.app.quit).toHaveBeenCalledTimes(1));
   expect(context._quitReady).toBe(true);
 });

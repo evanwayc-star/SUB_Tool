@@ -99,6 +99,7 @@ function descriptorOf(document = {}) {
       ...(displayTransform ? { displayTransform: true } : {}),
       ...(Object.hasOwn(video, 'field_order') ? { fieldOrder: video.field_order } : {}),
       fps: fpsOf(video),
+      ...(Number.isFinite(Number(video.start_time)) ? { streamStart: Number(video.start_time) } : {}),
       ...(positiveRatio(video.time_base) ? { timeBase: positiveRatio(video.time_base) } : {}),
       ...(positiveRatio(video.r_frame_rate) ? { nominalFrameRate: positiveRatio(video.r_frame_rate) } : {}),
       timestampOffset: containerStart - videoStart,
@@ -111,6 +112,8 @@ function descriptorOf(document = {}) {
       streamIndex: stream.index,
       codec: stream.codec_name || '',
       channels: Math.max(1, Math.floor(finiteNumber(stream.channels, 1))),
+      ...(Number.isFinite(Number(video?.start_time)) && Number.isFinite(Number(stream.start_time))
+        ? { startOffset: Number(stream.start_time) - Number(video.start_time) } : {}),
       lang: stream.tags?.language || stream.tags?.LANGUAGE || '',
       title: stream.tags?.title || stream.tags?.TITLE || '',
       timestampOffset: containerStart - videoStart,

@@ -18,7 +18,7 @@ import {transcribeAudioStream,transcribeWithBuiltinModel} from '../src/speech-re
 beforeEach(()=>{capture.requests.length=0;capture.generation.length=0;});
 describe('public builtin recognition option chain',()=>{
   it.each(['buffer','reader'])('%s 語音辨識自動選完整 Large v3，忽略文字匹配留下的模型與設定',async source=>{
-    const buffer={duration:1,length:16000,sampleRate:16000,numberOfChannels:1,getChannelData:()=>new Float32Array(16000)};
+    const buffer={duration:1,length:16000,sampleRate:16000,numberOfChannels:1,getChannelData:()=>new Float32Array(16000).fill(.1)};
     const audioBuffer=source==='reader'?{duration:1,readRange:vi.fn(async()=>buffer)}:buffer;
     await transcribeAudioStream({audioBuffer,provider:'builtin',taskMode:'transcribe',
       builtinModel:'onnx-community/whisper-tiny',temperature:1,prompt:'舊提示'});

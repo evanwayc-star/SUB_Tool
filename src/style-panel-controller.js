@@ -1,8 +1,8 @@
-import { $, sublist } from './dom.js';
+import { $ } from './dom.js';
 import { State, cueSuffix } from './state.js';
 import { effStyle, styleNumberBounds, STYLE_DEFAULTS, CUE_STYLE_KEYS, getAllPresets, getPresets, getFonts, loadFonts, isBuiltinPresetName, savePresets, styleSnapshot, presetIdentity, capturePresetUpdate } from './substyle.js';
 import { GEOMETRY_STYLE_KEYS, planCueStyleAssignment, planTrackStyleAssignment } from './subtitle-style-engine.js';
-import { applyCueStylePatch, applyTrackStylePlan } from './subtitles.js';
+import { applyCueStylePatch, applyTrackStylePlan, subtitleRow } from './subtitles.js';
 import { History, recordHistory, syncCompareSnapshot } from './history.js';
 import { openModal, closeModal, showToast } from './ui.js';
 import { secToEncore } from './time.js';
@@ -263,7 +263,7 @@ async function openCueEditModal(c){
         session.close({committed:true});
         setTimeout(()=>{
           if(request!==cueEditRequest || $('modalBg')?.classList.contains('show') || !State.cues.includes(nc)) return;
-          const nr=sublist.querySelector(`.sub-row[data-id="${nc.id}"]`);
+          const nr=subtitleRow(nc.id);
           if(nr)nr.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,view:window}));
         },30);
       } else if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doConfirm();}

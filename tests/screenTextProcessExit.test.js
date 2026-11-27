@@ -28,7 +28,7 @@ function fixture(messages, options = {}) {
     onProgress: () => {},
     spawnChild(_executable, _args, spawnOptions) {
       const message = messages[index++];
-      const script = scriptForMessage?.(message) ?? `process.stdin.resume(); process.stdin.once('end', () => {
+      const script = scriptForMessage?.(message) ?? `require('node:readline').createInterface({input:process.stdin}).once('line', () => {
         process.stdout.write(${JSON.stringify(JSON.stringify(message) + '\n')}, () => process.exit(0));
       });`;
       const child = spawn(process.execPath, ['-e', script], {
@@ -110,8 +110,8 @@ describe.skipIf(process.platform !== 'win32')('畫面辨識程序退出與 Windo
         });
         descendant.once('spawn', () => {
           process.send({ ownedDescendant: descendant.pid }, () => {
-            process.stdin.resume();
-            process.stdin.once('end', () => process.stdout.write(${JSON.stringify(JSON.stringify(message) + '\n')}));
+            require('node:readline').createInterface({input:process.stdin}).once('line',
+              () => process.stdout.write(${JSON.stringify(JSON.stringify(message) + '\n')}));
           });
         });
         setInterval(() => {}, 1000);

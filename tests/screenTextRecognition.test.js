@@ -37,6 +37,29 @@ describe('整條時間軸與輸出範圍的畫面文字辨識', () => {
     return second;
   }
 
+  it('跨片扣除本次新增請求，保存原文、來源秒數及相同片段的新位置',async()=>{
+    secondClip();
+    bridge.recognizeScreenText.mockResolvedValueOnce({cues:[{start:3,end:5,text:'原片字卡',kind:'card'}],metrics:{newRequests:2}})
+      .mockResolvedValueOnce({cues:[{start:0,end:1,text:'對白',kind:'dialogue'}],metrics:{newRequests:1}});
+    let review;
+    await recognizeClipText(null,{...options,scope:'all',contentMode:'faithful',region:{x:0,y:.5,width:1,height:.5},maxNewRequests:3,
+      reviewMode:true,stageReview:args=>{review=args;return 2;}});
+    expect(bridge.recognizeScreenText.mock.calls.map(([req])=>req.maxNewRequests)).toEqual([3,1]);
+    expect(State.cues).toHaveLength(0);
+    clip.offset+=5;expect(review.changed()).toBe(true);
+    const current=review.rebase(review.groups);expect(current).not.toBeNull();expect(review.apply(current)).toBe(2);
+    expect(State.cues.find(c=>c.text==='原片字卡')).toMatchObject({start:15,end:16,recognition:{kind:'screen',sourceId:'clip',sourceStart:3,sourceEnd:5}});
+  });
+
+  it.each([[0,.00001,.00001],[.001,.002,.003],[.1,null,null],[null,.2,null],[undefined,undefined,undefined]])(
+    '完成多來源估價 %s 與 %s，只加已回傳價格且未知保持未知',async(a,b,total)=>{
+      secondClip();
+      const metrics=value=>value===undefined?{windows:1}:{windows:1,estimatedCostUsd:value};
+      bridge.recognizeScreenText.mockResolvedValueOnce({cues:[],metrics:metrics(a)}).mockResolvedValueOnce({cues:[],metrics:metrics(b)});
+      const done=await recognizeClipText(null,{...options,scope:'all'});
+      expect(done.metrics.estimatedCostUsd).toBe(total);
+    });
+
   it('以可見影片分段，跳過純外音尾段、空白、隱藏軌與疊圖，保留片段參照', () => {
     Object.assign(clip, { offset:1, in:100, out:124 });
     const top = secondClip({ in:20, out:24, offset:4, speed:2, reverse:true, vtrack:1 });
@@ -245,7 +268,9 @@ describe('整條時間軸與輸出範圍的畫面文字辨識', () => {
     if (action === '遮擋改變') secondClip({ id:'cover', offset:10, vtrack:1 });
     if (action === '解碼失敗') reject(new Error('讀取失敗'));
     else finish({ cues:[{ start:0,end:1,text:'第二張' }] });
-    await expect(work).rejects.toThrow();
+    if(action==='解碼失敗'){
+      await expect(work).resolves.toMatchObject({count:1,error:'讀取失敗',commitPartial:expect.any(Function)});
+    }else await expect(work).rejects.toThrow();
     if (action === '取消' || action === '換專案') expect(bridge.cancelScreenText).toHaveBeenCalledWith(second.requestId);
     expect(State.tracks).toHaveLength(1);
     expect(State.cues).toEqual([]);

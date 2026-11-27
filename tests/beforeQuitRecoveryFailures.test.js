@@ -34,6 +34,7 @@ it.each(['screenshot', 'queue', 'both'])('真 before-quit 的 %s 恢復失敗仍
     app: { on: (_event, fn) => { beforeQuit = fn; }, quit: vi.fn() },
     _quitReady: false, _quitSequenceStarted: false, _isAppQuitting: false, audioNormalizationJobs: new Map(),
     mediaProbe: null, ffmpegExecution: owner(), deliveryCapabilities: owner(), speechCompressionRuntime: owner(), speechAudioReader: owner(), screenTextRuntime: owner(),
+    frameTextRuntime: { close: vi.fn().mockResolvedValue() },
     vocalWaveformRuntime: owner(), mediaIngestCoordinator: owner(), mediaWaveformCoordinator: owner(), QueueManager: queue,
     nativeAudioMeter: { stop: vi.fn().mockResolvedValue() },
     clipAudioCache: { waitForIdle: vi.fn() }, clipFrameCache: { waitForIdle: vi.fn() },

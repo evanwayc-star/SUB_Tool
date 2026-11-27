@@ -293,6 +293,27 @@ it('validates sampling and API readiness and retains settings for retry', async 
   expect(element('ocrSourceLang').value).toBe('ja');
 });
 
+it('零預算可免金鑰啟動，實際估價 0.00001 與零請求均顯示',async()=>{
+  window.subtool.getScreenTextSettings.mockResolvedValue({...settings,hasApiKey:{}});
+  recognizeClipText.mockResolvedValue({count:0,metrics:{newRequests:0,estimatedCostUsd:.00001}});
+  await openDialog(clip,()=>true);
+  element('ocrBudget').value='0';element('ocrStart').click();
+  await vi.waitFor(()=>expect(element('ocrUsage')?.textContent).toContain('本次估計 US$0.00001'));
+  expect(element('ocrUsage').textContent).toContain('本次新增 0 請求');
+  expect(recognizeClipText.mock.lastCall[1]).toMatchObject({maxNewRequests:0});
+});
+
+it('重試扣除前次已經送出的請求並保留內容模式與區域',async()=>{
+  recognizeClipText.mockRejectedValue(Object.assign(new Error('連線中斷'),{metrics:{newRequests:2}}));
+  await openDialog(clip,()=>true);
+  element('ocrUseRegion').click();element('ocrRegion3').value='30';
+  element('ocrBudget').value='5';element('ocrContentMode').value='variety';element('ocrStart').click();
+  await vi.waitFor(()=>expect(element('ocrError')?.textContent).toBe('連線中斷'));
+  expect(element('ocrBudget').valueAsNumber).toBe(3);
+  expect(element('ocrUseRegion').checked).toBe(true);expect(element('ocrRegion3').valueAsNumber).toBe(30);
+  expect(element('ocrContentMode').value).toBe('variety');
+});
+
 it('a relink or removed clip invalidates an open setup dialog', async () => {
   let current = true;
   await openDialog(clip, () => current);
@@ -309,13 +330,14 @@ it('switches providers without carrying a typed key and stores only nonsecret jo
   element('ocrProvider').value = 'gemini';
   element('ocrProvider').dispatchEvent(new Event('change'));
   expect(element('ocrApiKey').value).toBe('');
-  expect(element('ocrModel').value).toBe('gemini-2.5-pro');
+  const defaultModel=element('ocrModel').selectedOptions[0];
+  expect(defaultModel.textContent).toContain('預設');
   element('ocrApiKey').value = 'gemini-private';
   element('ocrFrameWidth').value = '960';
   element('ocrSmartAccuracy').checked = false;
   element('ocrStart').click(); await tick();
   expect(window.subtool.saveScreenTextSettings).toHaveBeenCalledWith({
-    provider:'gemini', model:'gemini-2.5-pro', sourceLang:'auto', sampleFps:10,
+    provider:'gemini', model:defaultModel.value, sourceLang:'auto', sampleFps:10,contentMode:'faithful',region:null,
     frameWidth:960, smartAccuracy:false, apiKey:'gemini-private',
   });
   expect(getScreenTextSession()).toMatchObject({provider:'gemini', frameWidth:960, smartAccuracy:false});

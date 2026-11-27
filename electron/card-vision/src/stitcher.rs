@@ -10,15 +10,9 @@ use std::collections::BTreeMap;
 pub struct RawCardEvent {
     pub start_frame: usize,
     pub end_frame: usize,
-    #[serde(default = "default_slot")]
     pub slot: String,
-    #[serde(default)]
     pub kind: CaptionKind,
     pub text: String,
-}
-
-fn default_slot() -> String {
-    "bottom".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,7 +111,7 @@ fn pick_better_text(a: &str, len_a: usize, b: &str, len_b: usize) -> String {
 }
 
 fn is_flagship_model(model: &str) -> bool {
-    model == "gpt-5.4" || model == "gemini-2.5-pro"
+    matches!(model, "gpt-5.4" | "gemini-3.8-flash" | "gemini-2.5-pro")
 }
 
 /// Check if `sub` is a progressive/typewriter/cumulative precursor (or fade-out subset) of `full`.
@@ -198,6 +192,14 @@ struct Span {
     raw_len: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentMode {
+    #[default]
+    Faithful,
+    Variety,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stitch_single_slot(
     ordered: &[&WindowVisionRecord],
@@ -207,10 +209,18 @@ fn stitch_single_slot(
     clip_start: f64,
     clip_end: f64,
     sample_fps: f64,
+    mode: ContentMode,
     merge_blink_frames: usize,
     sample_track_indices: Option<&[usize]>,
     frame_track: Option<&FrameTrack>,
 ) -> Vec<SubtitleCue> {
+    let same = |a: &str, b: &str| {
+        if mode == ContentMode::Faithful {
+            a == b
+        } else {
+            is_same_caption(a, b)
+        }
+    };
     let total_samples = global_pts.len();
     let interval = 1.0 / sample_fps;
 
@@ -298,7 +308,7 @@ fn stitch_single_slot(
     for sp in owned_spans {
         if let Some(prev) = resolved.last_mut() {
             if sp.g_start <= prev.g_end {
-                if is_same_caption(&prev.text, &sp.text) {
+                if same(&prev.text, &sp.text) {
                     prev.text = pick_better_text(&prev.text, prev.raw_len, &sp.text, sp.raw_len);
                     prev.g_end = prev.g_end.max(sp.g_end);
                     prev.raw_len = prev.g_end - prev.g_start + 1;
@@ -315,7 +325,7 @@ fn stitch_single_slot(
             }
 
             let gap = sp.g_start - prev.g_end - 1;
-            if gap <= merge_blink_frames && is_same_caption(&prev.text, &sp.text) {
+            if gap <= merge_blink_frames && same(&prev.text, &sp.text) {
                 prev.text = pick_better_text(&prev.text, prev.raw_len, &sp.text, sp.raw_len);
                 prev.g_end = sp.g_end;
                 prev.raw_len = prev.g_end - prev.g_start + 1;
@@ -387,6 +397,10 @@ fn stitch_single_slot(
             sample_start: Some(g_start),
             sample_end: Some(g_end),
         });
+    }
+
+    if mode == ContentMode::Faithful {
+        return raw_cues;
     }
 
     // Q3: Clean Progressive / Typewriter / Cumulative / Marquee Consolidation within the same slot!
@@ -486,6 +500,7 @@ pub fn stitch_dual_tracks(
     clip_start: f64,
     clip_end: f64,
     sample_fps: f64,
+    mode: ContentMode,
     merge_blink_frames: usize,
     sample_track_indices: Option<&[usize]>,
     frame_track: Option<&FrameTrack>,
@@ -510,7 +525,12 @@ pub fn stitch_dual_tracks(
             clip_start,
             clip_end,
             sample_fps,
-            merge_blink_frames,
+            mode,
+            if mode == ContentMode::Faithful {
+                0
+            } else {
+                merge_blink_frames
+            },
             sample_track_indices,
             frame_track,
         ));
@@ -522,19 +542,29 @@ pub fn stitch_dual_tracks(
             clip_start,
             clip_end,
             sample_fps,
-            merge_blink_frames,
+            mode,
+            if mode == ContentMode::Faithful {
+                0
+            } else {
+                merge_blink_frames
+            },
             sample_track_indices,
             frame_track,
         ));
     }
 
     // Deduplicate cross-slot clones & contiguous progressive build-ups (e.g. 1-line "bottom" -> 5-line "center")
-    cards = dedup_cross_slot_clones(cards, true);
-    dialogue = dedup_cross_slot_clones(dialogue, false);
+    if mode == ContentMode::Variety {
+        cards = dedup_cross_slot_clones(cards, true);
+        dialogue = dedup_cross_slot_clones(dialogue, false);
+    } else {
+        cards.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.end.total_cmp(&b.end)));
+        dialogue.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.end.total_cmp(&b.end)));
+    }
 
     // Track coherence: if a raw variety feed has <12.5% isolated speech-quote cards mislabeled as `dialogue`,
     // fold them back into `cards` rather than creating a spurious 1-2 line `.dialogue.srt`.
-    if !dialogue.is_empty() && dialogue.len() * 8 < cards.len() {
+    if mode == ContentMode::Variety && !dialogue.is_empty() && dialogue.len() * 8 < cards.len() {
         for mut d in dialogue.drain(..) {
             d.kind = CaptionKind::Card;
             cards.push(d);
@@ -607,6 +637,71 @@ mod tests {
     use crate::pricing::TokenUsage;
 
     #[test]
+    fn faithful_keeps_long_banners_and_minority_dialogue() {
+        let pts: Vec<_> = (0..60).map(|i| i as f64 * 0.5).collect();
+        let mut events: Vec<_> = [
+            "赤雞茸",
+            "都知事",
+            "營養員",
+            "特效鏡頭",
+            "風鈴樹",
+            "電子鼓",
+            "樂團演奏",
+            "北方星",
+            "架空橋",
+            "說話",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| RawCardEvent {
+            start_frame: 5 * i,
+            end_frame: 5 * i + 1,
+            slot: "bottom".into(),
+            kind: if i == 9 {
+                CaptionKind::Dialogue
+            } else {
+                CaptionKind::Card
+            },
+            text: t.into(),
+        })
+        .collect();
+        events.push(RawCardEvent {
+            start_frame: 0,
+            end_frame: 40,
+            slot: "top_right".into(),
+            kind: CaptionKind::Card,
+            text: "PROMO".into(),
+        });
+        let w = WindowVisionRecord {
+            window_index: 0,
+            global_start: 0,
+            global_end: 59,
+            actual_times: pts.clone(),
+            detected_language: "zh".into(),
+            events,
+            usage: TokenUsage::default(),
+            elapsed_seconds: 0.0,
+            provider: "openai".into(),
+            model: "gpt-5.4".into(),
+        };
+        let (cards, dialogue) = stitch_dual_tracks(
+            &[w],
+            &pts,
+            0.,
+            30.,
+            2.,
+            ContentMode::Faithful,
+            1,
+            None,
+            None,
+        );
+        assert_eq!((cards.len(), dialogue.len()), (10, 1));
+        assert_eq!(dialogue[0].text, "說話");
+        let banner = cards.iter().find(|c| c.slot == "top_right").unwrap();
+        assert_eq!((banner.start, banner.end), (0.0, 20.25));
+    }
+
+    #[test]
     fn consolidates_progressive_stack_and_preserves_overlapping_slots() {
         let pts: Vec<f64> = (0..16).map(|i| i as f64 * 0.5).collect();
         let w0 = WindowVisionRecord {
@@ -660,7 +755,17 @@ mod tests {
             model: "gpt-5.4".to_string(),
         };
 
-        let (cards, dlg) = stitch_dual_tracks(&[w0], &pts, 0.0, 8.0, 2.0, 1, None, None);
+        let (cards, dlg) = stitch_dual_tracks(
+            &[w0],
+            &pts,
+            0.0,
+            8.0,
+            2.0,
+            ContentMode::Variety,
+            1,
+            None,
+            None,
+        );
         assert!(dlg.is_empty());
         assert_eq!(cards.len(), 3);
         assert_eq!(cards[0].text, "아우터 1장\n티 7장\n바지 2~3개");
@@ -710,7 +815,17 @@ mod tests {
             model: "gpt-5.4".to_string(),
         };
 
-        let (cards, _) = stitch_dual_tracks(&[w0], &pts, 0.0, 20.0, 2.0, 1, None, None);
+        let (cards, _) = stitch_dual_tracks(
+            &[w0],
+            &pts,
+            0.0,
+            20.0,
+            2.0,
+            ContentMode::Variety,
+            1,
+            None,
+            None,
+        );
         assert_eq!(cards.len(), 2);
         // Corner banner capped at 5.0s!
         assert!((cards[0].end - cards[0].start - 5.0).abs() < 0.01);

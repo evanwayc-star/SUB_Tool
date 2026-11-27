@@ -1,5 +1,6 @@
 // A recognition source keeps accepted inputs, never a whole decoded movie.
 // Only one 16 kHz window and one native response are resident while mixing.
+import { addSpeechChannelInBlocks } from './speech-resampler.js';
 const SAMPLE_RATE = 16000;
 let nextRequest = 0;
 const abortError = () => new DOMException('語音辨識已取消', 'AbortError');
@@ -18,12 +19,42 @@ function retainCancelledRead(bridge, promise) {
 }
 
 export function createRecognitionRangeSource({ duration, inputs, bridge, signal, owns = () => true }) {
-  let closed = false, reading = false, activeRequest = null;
+  // A split effects/cache file is still its own input. Only channels read
+  // from the same physical request path and clock share an FFmpeg decoder.
+  if (bridge?.speechAudioMix === true) {
+    const grouped = [],
+      groups = new Map();
+    for (const item of inputs) {
+      if (!item.request) {
+        grouped.push(item);
+        continue;
+      }
+      const { path, processed, sourceStream, sourceChannel } = item.request;
+      const key = JSON.stringify([path, processed]);
+      let group = groups.get(key);
+      if (!group || group.channels.length === 256) {
+        group = { request: { ...item.request }, weight: 0, channels: [] };
+        groups.set(key, group);
+        grouped.push(group);
+      }
+      group.channels.push({ sourceStream, sourceChannel });
+      group.weight += item.weight || 1;
+    }
+    for (const group of grouped) if (group.channels?.length > 1) group.request.mixChannels = group.channels;
+    inputs = grouped;
+  }
+  let closed = false,
+    reading = false,
+    activeRequest = null;
   const cancelRequest = () => {
     if (!activeRequest || activeRequest.cancelled) return;
     activeRequest.cancelled = true;
     retainCancelledRead(bridge, activeRequest.promise);
-    try { Promise.resolve(bridge.speechAudioCancel(activeRequest.id)).catch(() => {}); } catch (_) { /* already closed */ }
+    try {
+      Promise.resolve(bridge.speechAudioCancel(activeRequest.id)).catch(() => {});
+    } catch (_) {
+      /* already closed */
+    }
   };
   const close = () => {
     if (closed) return;
@@ -32,7 +63,7 @@ export function createRecognitionRangeSource({ duration, inputs, bridge, signal,
     cancelRequest();
     inputs = [];
   };
-  const assertCurrent = rangeSignal => {
+  const assertCurrent = (rangeSignal) => {
     if (closed || signal?.aborted || rangeSignal?.aborted || !owns()) {
       cancelRequest();
       throw abortError();
@@ -46,14 +77,24 @@ export function createRecognitionRangeSource({ duration, inputs, bridge, signal,
     async readRange(start, end, { signal: rangeSignal } = {}) {
       assertCurrent(rangeSignal);
       if (reading) throw new Error('辨識音訊已有讀取工作');
-      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > duration + 1e-8 || end - start > 600) {
+      if (
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        start < 0 ||
+        end <= start ||
+        end > duration + 1e-8 ||
+        end - start > 600
+      ) {
         throw new RangeError('辨識音訊範圍必須在來源內且不超過 600 秒');
       }
       const frames = Math.round((end - start) * SAMPLE_RATE);
       if (!frames) throw new RangeError('辨識音訊範圍不足一個 sample');
       reading = true;
       let rangeAborted = false;
-      const cancelRange = () => { rangeAborted = true; cancelRequest(); };
+      const cancelRange = () => {
+        rangeAborted = true;
+        cancelRequest();
+      };
       rangeSignal?.addEventListener('abort', cancelRange, { once: true });
       try {
         const mixed = new Float32Array(frames);
@@ -67,13 +108,18 @@ export function createRecognitionRangeSource({ duration, inputs, bridge, signal,
             const sourceLength = input.clock.length;
             const shift = input.clock.shiftSamples;
             // Apply whole-buffer clock normalization to requested indices only.
-            const sample = index => index < 0 || index >= sourceLength || index + shift < 0 || index + shift >= buffer.length
-              ? 0 : data[index + shift];
-            for (let index = 0; index < frames; index++) {
-              const position = (start + index / SAMPLE_RATE) * buffer.sampleRate;
-              const left = Math.floor(position), fraction = position - left;
-              mixed[index] += (sample(left) * (1 - fraction) + sample(left + 1) * fraction) * weight;
-            }
+            await addSpeechChannelInBlocks(
+              mixed,
+              data,
+              buffer.sampleRate,
+              start * buffer.sampleRate + shift,
+              {
+                gain: weight,
+                validFrom: Math.max(0, shift),
+                validTo: Math.min(buffer.length, sourceLength + shift)
+              },
+              () => assertCurrent(rangeSignal)
+            );
           } else {
             let draining = cancelledReads.get(bridge);
             while (draining?.size) {
@@ -90,14 +136,26 @@ export function createRecognitionRangeSource({ duration, inputs, bridge, signal,
               // or adapters which synchronously trigger owner cancellation.
               request.promise = Promise.resolve().then(() => {
                 assertCurrent(rangeSignal);
-                return bridge.speechAudioRead({ ...input.request, start, duration: end - start, requestId: request.id });
+                return bridge.speechAudioRead({
+                  ...input.request,
+                  start,
+                  duration: end - start,
+                  requestId: request.id
+                });
               });
               response = await request.promise;
               assertCurrent(rangeSignal);
               if (request.cancelled || rangeAborted) throw abortError();
-            } finally { if (activeRequest === request) activeRequest = null; }
-            if (response?.sampleRate !== SAMPLE_RATE || response.numberOfChannels !== 1 || response.frames !== frames
-              || !(response.pcm instanceof ArrayBuffer) || response.pcm.byteLength !== frames * Float32Array.BYTES_PER_ELEMENT) {
+            } finally {
+              if (activeRequest === request) activeRequest = null;
+            }
+            if (
+              response?.sampleRate !== SAMPLE_RATE ||
+              response.numberOfChannels !== 1 ||
+              response.frames !== frames ||
+              !(response.pcm instanceof ArrayBuffer) ||
+              response.pcm.byteLength !== frames * Float32Array.BYTES_PER_ELEMENT
+            ) {
               throw new Error('辨識音訊 PCM 回傳格式或長度不符');
             }
             const data = new Float32Array(response.pcm);
@@ -108,11 +166,16 @@ export function createRecognitionRangeSource({ duration, inputs, bridge, signal,
           }
         }
         assertCurrent(rangeSignal);
-        return { sampleRate: SAMPLE_RATE, numberOfChannels: 1, length: frames, duration: frames / SAMPLE_RATE,
+        return {
+          sampleRate: SAMPLE_RATE,
+          numberOfChannels: 1,
+          length: frames,
+          duration: frames / SAMPLE_RATE,
           getChannelData(channel) {
             if (channel !== 0) throw new RangeError('辨識音訊只有一個聲道');
             return mixed;
-          } };
+          }
+        };
       } finally {
         reading = false;
         rangeSignal?.removeEventListener('abort', cancelRange);

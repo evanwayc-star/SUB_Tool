@@ -13,16 +13,99 @@ function presentationAbortError() {
   return error;
 }
 
+// Presentation evidence belongs to the actual element. Reselecting it or
+// rebuilding an adapter must not install another set of media listeners.
+const pausedFrameObservers = new WeakMap();
+function observePausedFrames(video) {
+  if (typeof video?.requestVideoFrameCallback !== 'function') return null;
+  if (pausedFrameObservers.has(video)) return pausedFrameObservers.get(video);
+  const source = () => video.currentSrc || video.src;
+  const decoded = () => video.getVideoPlaybackQuality?.()?.totalVideoFrames;
+  let frame = null, pending = null, firstCallback = null, loadVersion = 0;
+  const listeners = new Set();
+  const clear = () => { frame = pending = null; };
+  const samePosition = evidence => evidence && video.paused && evidence.url === source()
+    && evidence.object === video.srcObject && evidence.currentTime === video.currentTime;
+  const current = () => {
+    if (!samePosition(frame) || video.seeking || video.readyState < 2) return null;
+    const count = decoded();
+    if (frame.decoded === count) return frame;
+    // Chromium may decode ahead while the first picture is still paused.
+    // Verify the actual drawable frame's PTS before renewing an earlier rVFC.
+    if (typeof VideoFrame !== 'function') return null;
+    let picture;
+    try {
+      picture = new VideoFrame(video);
+      if (picture.timestamp !== Math.round(frame.mediaTime * 1e6)) return null;
+      frame.decoded = count;
+      return frame;
+    } catch {
+      return null;
+    } finally {
+      picture?.close();
+    }
+  };
+  const publish = () => {
+    if (!samePosition(pending) || video.seeking || video.readyState < 2) return;
+    frame = { ...pending, decoded: decoded() };
+    pending = null;
+    for (const notify of listeners) notify(frame);
+  };
+  const record = mediaTime => {
+    if (!video.paused || !Number.isFinite(mediaTime)) return;
+    pending = { mediaTime, currentTime: video.currentTime, url: source(), object: video.srcObject };
+    publish();
+  };
+  for (const event of ['play', 'seeking']) video.addEventListener?.(event, clear);
+  for (const event of ['loadeddata', 'seeked', 'canplay']) video.addEventListener?.(event, publish);
+  const resetSource = () => {
+    clear();
+    loadVersion++;
+    if (firstCallback != null) video.cancelVideoFrameCallback?.(firstCallback);
+    firstCallback = null;
+    for (const notify of listeners) notify(null);
+  };
+  video.addEventListener?.('emptied', resetSource);
+  // Observe the first decoded picture before playback. Reassigning an
+  // already paused element to zero may never produce another frame.
+  video.addEventListener?.('loadstart', () => {
+    resetSource();
+    const version = loadVersion, url = source(), object = video.srcObject;
+    firstCallback = video.requestVideoFrameCallback((now, metadata) => {
+      if (version !== loadVersion) return;
+      firstCallback = null;
+      if (source() === url && video.srcObject === object) record(metadata?.mediaTime);
+    });
+  });
+  const observer = { clear, record, current,
+    awaiting: () => video.paused && (firstCallback != null || samePosition(pending)),
+    subscribe(notify) { listeners.add(notify); return () => listeners.delete(notify); },
+  };
+  pausedFrameObservers.set(video, observer);
+  return observer;
+}
+
 class Html5Transport {
-  constructor(video, clockFor = () => null) { this.video = video; this.clockFor = clockFor; }
+  constructor(video, clockFor = () => null) {
+    this.video = video;
+    this.clockFor = clockFor;
+    this.frames = observePausedFrames(video);
+  }
   clock() { return this.clockFor(this.video?.currentSrc || this.video?.src); }
   sourceTime(value = this.video?.currentTime || 0) { return sourceClockTime(value, this.clock()); }
   cancelPendingSeek() { this.pendingSeek?.cancel(); }
-  setRawTime(target, signal, owns) {
+  setRawTime(target, signal, owns, { requestFrame = false } = {}) {
     const video=this.video;
     if(!video) return;
     if(signal?.aborted||(owns&&!owns())) throw presentationAbortError();
     this.cancelPendingSeek();
+    // Import positions the paused element at its real source start after
+    // metadata is known. Reassigning an identical clock discards its first
+    // rVFC and Chromium is not required to repaint that same frame. This is
+    // only a clock operation; present() still requires decoded evidence.
+    if (!requestFrame && this.frames && video.paused && video.readyState >= 1 &&
+        Math.abs(video.currentTime - target) <= 1e-6) return;
+    this.frames?.clear();
     let attemptedDuration=video.duration;
     video.currentTime=target;
     // MOV 的首份 duration 可能只含 stream 長度，讀到實際 PTS 後才延長。
@@ -65,13 +148,14 @@ class Html5Transport {
   }
   get type() { return 'html5'; }
   async play() {
+    this.frames?.clear();
     const result = this.video?.play?.();
     if (result?.catch) result.catch(() => {});
     return result;
   }
   async pause() { this.video?.pause?.(); }
   async seek(time, {signal,owns}={}) { return this.setRawTime(Math.max(0,playerClockTime(time,this.clock())),signal,owns); }
-  async present(time, { signal, owns, tolerance = 1.5 / 30, frameTarget = time, frameStart = null, frameDuration = 0 } = {}) {
+  async present(time, { signal, owns, tolerance = 1.5 / 30, frameTarget = time, frameStart = null, frameDuration = 0, waitForFrame = false } = {}) {
     if (!this.video) throw new Error('HTML5 video element is unavailable');
     if (signal?.aborted||(owns&&!owns())) throw presentationAbortError();
     const target = Math.max(0, Number(time) || 0);
@@ -83,17 +167,25 @@ class Html5Transport {
       let settled = false;
       let frameCallbackId = null;
       let seekedHandler = null;
+      let waitForData = null;
       let rawSeek = null;
+      let unsubscribe = null;
 
       const cleanup = () => {
+        unsubscribe?.();
         rawSeek?.cancel();
         if (frameCallbackId != null) video.cancelVideoFrameCallback?.(frameCallbackId);
         frameCallbackId = null;
         if (seekedHandler) video.removeEventListener?.('seeked', seekedHandler);
         seekedHandler = null;
+        if (waitForData) {
+          for (const event of ['loadeddata', 'seeked', 'canplay']) video.removeEventListener?.(event, waitForData);
+          waitForData = null;
+        }
         signal?.removeEventListener?.('abort', abort);
       };
       const finish = presentedSourceTime => {
+        if (settled) return;
         if (settled) return;
         settled = true;
         cleanup();
@@ -107,24 +199,60 @@ class Html5Transport {
         cleanup();
         reject(presentationAbortError());
       };
-      const accept = value => {
+      const accept = (value, decoded = false) => {
         if(owns&&!owns()){abort();return true;}
+        if (!Number.isFinite(value)) return false;
         const presented = this.sourceTime(value);
         if (!Number.isFinite(presented) || (knownFrame
           ? Math.abs(presented-Number(frameStart))>2e-6
           : Math.abs(presented-target)>allowedDrift)) return false;
-        finish(presented);
+        // A frame callback can precede seeked while readyState is still
+        // HAVE_METADATA. Wait for that same decoded picture to be drawable.
+        if (decoded && waitForFrame && (video.seeking || video.readyState < 2)) {
+          const url = video.currentSrc || video.src, object = video.srcObject, currentTime = video.currentTime;
+          waitForData = () => {
+            if (signal?.aborted || (owns && !owns()) || (video.currentSrc || video.src) !== url
+              || video.srcObject !== object || Math.abs(video.currentTime - currentTime) > 2e-6) { abort(); return; }
+            if (video.seeking || video.readyState < 2) return;
+            this.frames?.record(value);
+            finish(presented);
+          };
+          for (const event of ['loadeddata', 'seeked', 'canplay']) video.addEventListener?.(event, waitForData);
+        } else {
+          if (decoded) this.frames?.record(value);
+          finish(presented);
+        }
         return true;
       };
       const requestFrame = () => {
         if (settled) return;
         frameCallbackId = video.requestVideoFrameCallback((unusedNow, metadata) => {
           frameCallbackId = null;
-          if (!accept(metadata?.mediaTime)) requestFrame();
+          if (!accept(metadata?.mediaTime, true)) requestFrame();
         });
       };
 
+      // A paused Chromium element need not produce a second frame callback
+      // for the same seek. Reuse its actual decoded PTS only while the same
+      // source, media clock, and frame counter still describe that picture.
+      const clockTarget = Math.max(0, playerClockTime(target, this.clock()));
+      const samePosition = Math.abs(video.currentTime - clockTarget) <= 1e-6;
+      const frame = (waitForFrame || samePosition) && this.frames?.current();
+      if (frame && accept(frame.mediaTime)) return;
       signal?.addEventListener?.('abort', abort, { once: true });
+      // The initial frame observer may receive the only rVFC Chromium will
+      // deliver at this position. Accept its decoded PTS when its pixels are
+      // drawable, even if this request's own callback was registered later.
+      if (samePosition && this.frames?.awaiting()) {
+        const url = video.currentSrc || video.src, object = video.srcObject;
+        unsubscribe = this.frames.subscribe(evidence => {
+          if (!evidence || evidence.url !== url || evidence.object !== object ||
+              Math.abs(evidence.currentTime - clockTarget) > 1e-6) { abort(); return; }
+          if (!settled) accept(evidence.mediaTime);
+        });
+        try { requestFrame(); } catch (error) { cleanup(); reject(error); }
+        return;
+      }
       // FPS-SYNC: seeked confirms a new source position, not a composited frame.
       // Chromium's frame callback is the presentation evidence when available.
       if (typeof video.requestVideoFrameCallback !== 'function' && typeof video.addEventListener === 'function') {
@@ -132,7 +260,7 @@ class Html5Transport {
         video.addEventListener('seeked', seekedHandler);
       }
       try {
-        const pending=this.setRawTime(Math.max(0,playerClockTime(target,this.clock())),signal,owns);
+        const pending=this.setRawTime(clockTarget,signal,owns,{ requestFrame:true });
         rawSeek=this.pendingSeek;
         pending?.catch(error=>{if(settled)return;settled=true;cleanup();reject(error);});
       } catch (error) { cleanup(); reject(error); return; }
@@ -658,6 +786,10 @@ export function createNativePreviewRuntime({
     async screenshot(filePath) {
       if (mode !== 'mpv' || !bridge?.screenshot) return false;
       return bridge.screenshot(filePath);
+    },
+    async captureOcrFrame() {
+      if (mode !== 'mpv' || !bridge?.captureOcrFrame) throw new Error('原生播放器無法擷取畫格');
+      return bridge.captureOcrFrame();
     },
     async setTimecodeWatermark(payload) {
       if (!bridge?.setTimecodeWatermark) return false;

@@ -135,7 +135,8 @@ function createDeliveryRunner(options = {}) {
       checkCancelled();
       queue.assertJobCapabilities(job);
       assertOutputAuthority(job.outputAuthority, outPath);
-      await nativeCapabilities.assertReady(payload, { signal: abort.signal });
+      const spaceNote = await nativeCapabilities.assertReady(payload, { signal: abort.signal });
+      if (typeof spaceNote === 'string' && spaceNote) sendProgress({ jobId, label: spaceNote, pct: 0 });
       checkCancelled();
       fs.mkdirSync(tempDir, { recursive: true });
       const chapterMetadata = serializeDeliveryChapters(payload.chapters, duration, format);
@@ -160,23 +161,23 @@ function createDeliveryRunner(options = {}) {
       const probeSourcePaths = QueueStore.collectSourcePaths({
         clips: (clips || []).filter(clip => clip.type !== 'image'), audioPlan: rawAudioPlan,
       });
-      const audioPresence = new Map(await settleProbes(probeSourcePaths
-        .map(async sourcePath => [sourceKey(sourcePath), await probe.hasAudio(sourcePath, { signal: abort.signal })])));
-      checkCancelled();
+      const audioPresence = new Map();
       const sourceStartOffsets = new Map();
       const sourceClocks = new Map();
-      if (probe.describe) {
-        await settleProbes(probeSourcePaths.map(async sourcePath => {
+      await settleProbes(probeSourcePaths.map(async sourcePath => {
+        const key = sourceKey(sourcePath);
+        if (probe.describe) {
           const media = await probe.describe(sourcePath, { signal: abort.signal });
-          sourceClocks.set(sourceKey(sourcePath), media.video || media.audio?.[0] || null);
-        }));
-      }
-      checkCancelled();
-      if (probe.audioVideoStartOffsets) {
-        await settleProbes(probeSourcePaths.filter(sourcePath => audioPresence.get(sourceKey(sourcePath)))
-          .map(async sourcePath => sourceStartOffsets.set(sourceKey(sourcePath),
-            await probe.audioVideoStartOffsets(sourcePath, { signal: abort.signal }))));
-      }
+          audioPresence.set(key, !!media.audio?.length);
+          sourceClocks.set(key, media.video || media.audio?.[0] || null);
+          sourceStartOffsets.set(key, (media.audio || []).map(stream => stream.startOffset || 0));
+        } else {
+          const present = await probe.hasAudio(sourcePath, { signal: abort.signal });
+          audioPresence.set(key, present);
+          if (present && probe.audioVideoStartOffsets)
+            sourceStartOffsets.set(key, await probe.audioVideoStartOffsets(sourcePath, { signal: abort.signal }));
+        }
+      }));
       checkCancelled();
       const plan = buildDeliveryArgv({
         format, clips, videoTracks, width, height, fps, duration, videoKbps,
@@ -189,6 +190,7 @@ function createDeliveryRunner(options = {}) {
         vencArgsBitrate: encoder.bitrateArgs,
         proresArgs: encoder.proresArgs,
         encoderName: encoder.name?.() || null,
+        bufferedReverse: true,
         hasAudioStream: sourcePath => audioPresence.get(sourceKey(sourcePath)) ?? true,
         audioVideoStartOffset: (sourcePath, streamIndex = 0) =>
           sourceStartOffsets.get(sourceKey(sourcePath))?.[streamIndex] ?? 0,
@@ -197,6 +199,17 @@ function createDeliveryRunner(options = {}) {
         timecodeFontFile: timecodeFontName,
       });
       const { args, label, duration: plannedDuration, kbps, audioBitrates } = plan;
+      const verification = preset ? null : {
+        format, fps, duration: plannedDuration,
+        channels: audioOnly ? [plan.audioChannels] : plan.streamChannels,
+      };
+      const graph = args.indexOf('-filter_complex');
+      // Windows passes one UTF-16 command line to CreateProcess. Keep the graph
+      // in the job's verified input set before that complete command approaches its limit.
+      if (graph >= 0 && args.reduce((length, part) => length + part.length + 3, 0) >= 24000) {
+        const file = temporaryInputs.create('ffgraph', Buffer.from(args[graph + 1], 'utf8'));
+        args.splice(graph, 2, process.platform === 'win32' ? '-/filter_complex' : '-filter_complex_script', file);
+      }
       const startedAt = now();
       // Probe is asynchronous: sources may have acquired a different alias
       // while it was running, so revalidate before starting the writer.
@@ -213,7 +226,8 @@ function createDeliveryRunner(options = {}) {
 
       if (audioOnly) {
         await runFfmpeg(args, {
-          executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, outPath,
+          executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
+          outputFormat: format, verification,
           outputAuthority: job.outputAuthority, sourcePaths, inputEvidence,
           onProgress: sendProgress,
           onProcess: ownController,
@@ -234,6 +248,8 @@ function createDeliveryRunner(options = {}) {
         executionKind: 'queued-delivery', duration: plannedDuration, jobId, label, cwd: tempDir, outPath,
         outputAuthority: job.outputAuthority, sourcePaths, inputEvidence,
         outputFormat: format,
+        verification,
+        reverseFeeds: plan.reverseFeeds,
         ...(isDisc ? { discAudioPlan: plan.discAudioPlan, discVideoFps: plan.discVideoFps } : {}),
         onProgress: sendProgress,
         onProcess: ownController,

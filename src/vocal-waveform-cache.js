@@ -1,3 +1,4 @@
+import { cacheTransaction } from './cache-transaction.js';
 import { VOCAL_MODELS } from './vocal-waveform-models.js';
 import { VOCAL_SAMPLE_RATE, VOCAL_RESOLUTION } from './vocal-waveform-engine.js';
 
@@ -68,30 +69,8 @@ export class VocalWaveformCache {
       this.localStorage.setItem(PREFERENCE_KEY, raw); return true;
     } catch (_) { return false; }
   }
-  async transaction(mode, run) {
-    if (!this.indexedDB) return null;
-    return new Promise(resolve => {
-      let database = null, transaction = null, settled = false, result = null;
-      const finish = value => {
-        if (settled) return; settled = true; clearTimeout(timer);
-        database?.close(); resolve(value);
-      };
-      const timer = setTimeout(() => { try { transaction?.abort(); } catch (_) {} finish(null); }, this.timeoutMs);
-      let request;
-      try { request = this.indexedDB.open(DATABASE, 1); } catch (_) { finish(null); return; }
-      request.onupgradeneeded = () => request.result.createObjectStore(STORE, { keyPath: 'key' });
-      request.onerror = request.onblocked = () => finish(null);
-      request.onsuccess = () => {
-        database = request.result;
-        if (settled) { database.close(); return; }
-        try {
-          transaction = database.transaction(STORE, mode);
-          transaction.oncomplete = () => finish(result);
-          transaction.onerror = transaction.onabort = () => finish(null);
-          run(transaction.objectStore(STORE), value => { result = value; });
-        } catch (_) { try { transaction?.abort(); } catch (_) {} finish(null); }
-      };
-    });
+  transaction(mode, run) {
+    return cacheTransaction(this.indexedDB, DATABASE, STORE, mode, run, this.timeoutMs);
   }
   async read(descriptor, duration, { selectedOnly = false, preferenceKey = null } = {}) {
     if (!descriptor) return null;

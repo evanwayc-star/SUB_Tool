@@ -20,7 +20,7 @@ import { Project } from './project.js';
 import { History, recordHistory } from './history.js';
 import { addNote } from './notes.js';
 import { emit } from './events.js';
-import { setStatus, closeModal } from './ui.js';
+import { setStatus, closeModal, closeMenus } from './ui.js';
 import { matchAction } from './keybinding-engine.js';
 import {
   jklClear,
@@ -60,9 +60,68 @@ function exportBracketChord(e) {
     && matchAction(State.keymap, { ...modifiers, key:']', code:'BracketRight' }) === 'exp_out';
 }
 if (typeof window !== 'undefined') {
-  // 上方操作按鈕不留鍵盤焦點，即使對話框關閉時嘗試還原焦點。
+  let toolbarOrigin=null;
+  const leaveToolbar=(restore=false)=>{
+    const origin=toolbarOrigin;
+    toolbarOrigin=null;
+    document.querySelector('.menubar')?.classList.remove('keyboard-nav');
+    if(!restore||!origin)return;
+    const row=origin.cueId && [...document.querySelectorAll('#sublist .sub-row')].find(e=>e.dataset.id===origin.cueId);
+    const target=origin.element?.isConnected && origin.element!==document.body ? origin.element : row;
+    if(target)target.focus({preventScroll:true});
+    if(document.activeElement!==target && row)row.focus({preventScroll:true});
+    if(!target)document.activeElement?.blur();
+  };
+  window.addEventListener('pointerdown',()=>leaveToolbar(),true);
+  window.addEventListener('keydown',e=>{
+    if(e.isComposing||e.keyCode===229||e.defaultPrevented||e.ctrlKey||e.metaKey||e.altKey||
+        document.querySelector('#modalBg.show,#settingsModal,.ctxmenu.show'))return;
+    const bar=document.querySelector('.menubar');
+    if(!bar)return;
+    const visible=elements=>[...elements].filter(el=>!el.disabled&&!el.closest('[hidden]')&&el.getClientRects().length);
+    const controls=()=>visible(bar.querySelectorAll('button:not(.items button),select'));
+    const handled=()=>{e.preventDefault();e.stopPropagation();};
+    if(e.key==='F10'&&!e.shiftKey){
+      handled();
+      if(toolbarOrigin){closeMenus();leaveToolbar(true);return;}
+      const first=controls()[0];
+      if(!first)return;
+      const origin=document.activeElement;
+      toolbarOrigin={element:origin,cueId:origin?.closest('.sub-row')?.dataset.id||State.selectedId};
+      bar.classList.add('keyboard-nav');first.focus();
+      return;
+    }
+    if(!toolbarOrigin||!bar.contains(e.target))return;
+    const menu=e.target.closest('.menu'),open=menu?.classList.contains('open');
+    if(e.key==='Escape'){
+      handled();
+      if(open){closeMenus();menu.querySelector('button')?.focus();}
+      else leaveToolbar(true);
+      return;
+    }
+    if(e.key==='Tab'){leaveToolbar();return;}
+    if(e.key===' ' && e.target.matches('button')){handled();e.target.click();return;}
+    if(menu&&['ArrowDown','ArrowUp'].includes(e.key)){
+      handled();
+      if(!open)menu.querySelector('button').click();
+      const items=visible(menu.querySelectorAll('.items button'));
+      if(items.length){
+        const index=items.indexOf(e.target);
+        const next=index<0?(e.key==='ArrowDown'?0:items.length-1):(index+(e.key==='ArrowDown'?1:-1)+items.length)%items.length;
+        items[next].focus();
+      }
+      return;
+    }
+    if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){
+      handled();if(open)closeMenus();
+      const buttons=controls(),index=buttons.indexOf(menu?.querySelector('button')||e.target);
+      const next=e.key==='Home'?0:e.key==='End'?buttons.length-1:(index+(e.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;
+      buttons[next]?.focus();
+    }
+  },true);
+  // Mouse activation hands transport shortcuts back to the workspace.
   window.addEventListener('focusin', e => {
-    if (e.target.matches?.('.menubar button')) e.target.blur();
+    if (!toolbarOrigin && e.target.matches?.('.menubar button')) e.target.blur();
   }, true);
   window.addEventListener('click', e => {
     if ($('modalBg')?.classList?.contains('show') || document.getElementById('settingsModal')) return;
@@ -171,6 +230,10 @@ if (typeof window !== 'undefined') {
       break;
     case 'screenshot': e.preventDefault(); emit('action', 'screenshot'); break;
     case 'screenshot_tc': e.preventDefault(); emit('action', 'screenshot_tc'); break;
+    case 'playhead_ocr':
+      e.preventDefault();
+      if (!e.repeat) emit('action', 'playhead-ocr');
+      break;
     case 'toggle_mixer': e.preventDefault(); emit('action', 'mixer'); break;
     case 'scroll_playhead': e.preventDefault(); alignTimelineToPlayhead(); break;
     case 'export_video': e.preventDefault(); emit('action', 'exp-video'); break;

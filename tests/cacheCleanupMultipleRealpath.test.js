@@ -45,14 +45,19 @@ it.each(['cleanOrphans', 'clearAll'].flatMap(cleanup => ['cancel', 'error'].map(
     return realRead(directory, ...args);
   });
   const request = { src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] };
-  const first = runtime.ingest(request, { isCancelled: () => firstCancelled }); first.catch(() => {});
-  const second = runtime.stream(request, { isCancelled: () => secondCancelled }); second.catch(() => {});
+  const waitForPreflight = (arrival, work) => Promise.race([
+    arrival, work.then(() => { throw new Error('工作未進入快取預檢'); }),
+  ]);
+  const first = runtime.ingest(request, { isCancelled: () => firstCancelled });
+  let second;
   let nativeSpy;
   try {
-    await Promise.all(entered);
+    await waitForPreflight(entered[0], first);
+    second = runtime.stream(request, { isCancelled: () => secondCancelled });
+    await waitForPreflight(entered[1], second);
     firstCancelled = firstOutcome === 'cancel'; gates[0].release();
-    const firstError = await first.catch(error => error);
-    if (firstOutcome === 'error') expect(firstError.message).toContain('first writer failure');
+    if (firstOutcome === 'error') await expect(first).rejects.toThrow('first writer failure');
+    else await expect(first).rejects.toMatchObject({code:'INGEST_SUPERSEDED'});
     const native = fs.realpathSync.native;
     nativeSpy = vi.spyOn(fs.realpathSync, 'native').mockImplementation((file, ...args) => {
       if (path.resolve(String(file)) === source) throw Object.assign(new Error('source identity unavailable'), { code: 'EACCES' });
@@ -66,7 +71,8 @@ it.each(['cleanOrphans', 'clearAll'].flatMap(cleanup => ['cancel', 'error'].map(
     const stillActive = cleanup === 'clearAll' ? await runtime.clearAll(null) : await runtime.cleanOrphans();
     expect(stillActive.incomplete).toBe(true);
     expect(fs.readFileSync(source, 'utf8')).toBe('active mother source');
-    secondCancelled = true; gates[1].release(); await second.catch(() => {});
+    secondCancelled = true; gates[1].release();
+    await expect(second).resolves.toEqual({response:null, completion:null});
     const completed = cleanup === 'clearAll' ? await runtime.clearAll(null) : await runtime.cleanOrphans();
     expect(completed.incomplete).toBe(false);
     expect(fs.existsSync(source)).toBe(false);

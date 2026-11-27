@@ -303,6 +303,7 @@ export async function demuxIndex(url,{allowAudio=false,metadataOnly=false,signal
         presentationStartUs: edit?.startUs ?? null,
         audioPresentationTimestampOffset: audioOffsets[0]??null,
         audioPresentationTimestampOffsets: audioOffsets,
+        ...(audioTrack?.audio?.channel_count>0 ? {audioChannels:audioTrack.audio.channel_count} : {}),
         decoderAudioPresentationTimestampOffsets: audioOffsets,
       },
     };

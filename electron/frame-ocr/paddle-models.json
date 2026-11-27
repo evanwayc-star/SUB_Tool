@@ -1,0 +1,30 @@
+{
+  "detector.onnx": {
+    "repo": "PaddlePaddle/PP-OCRv5_mobile_det_onnx", "revision": "e6f4fa85f00e168c862bc462aebca69eef9b3d3d",
+    "file": "inference.onnx", "size": 4826518, "sha256": "a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d"
+  },
+  "recognizer.onnx": {
+    "repo": "PaddlePaddle/PP-OCRv5_mobile_rec_onnx", "revision": "ed152b8b495f84de93cda5709d768548a9127622",
+    "file": "inference.onnx", "size": 16534782, "sha256": "da72dc72ca4dc220df0dfde68c1dedc31c58d3e76a25871122e5056227d50092"
+  },
+  "recognition.yml": {
+    "repo": "PaddlePaddle/PP-OCRv5_mobile_rec_onnx", "revision": "ed152b8b495f84de93cda5709d768548a9127622",
+    "file": "inference.yml", "size": 148345, "sha256": "5dfeb2777f6d0db8177d8128a8acfcf6e6276dc4ac73ea3bf0dc06d6a5e85d8e"
+  },
+  "korean.onnx": {
+    "repo": "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx", "revision": "5c6f574b8e2230adf4287b33e736d71b9fabd28e",
+    "file": "inference.onnx", "size": 13418787, "sha256": "92f0b7785e64fc9090106a241cf4c1eb97472824558272751b88a2a4476d3a08"
+  },
+  "korean.yml": {
+    "repo": "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx", "revision": "5c6f574b8e2230adf4287b33e736d71b9fabd28e",
+    "file": "inference.yml", "size": 96039, "sha256": "f757fa1c40e99edcf27e9cce879b93eb2a51fa46f5ef39095689b8c37dd75998"
+  },
+  "english.onnx": {
+    "repo": "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx", "revision": "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b",
+    "file": "inference.onnx", "size": 7848423, "sha256": "b5f833dfc5d0eb71da397b4efa06ebeee9b431b690a47d6af40d77d8eabc557f"
+  },
+  "english.yml": {
+    "repo": "PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx", "revision": "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b",
+    "file": "inference.yml", "size": 3964, "sha256": "27e91d0582f40168aa218303c76e184bc78fa7a5d105aad0cfbad8458b441067"
+  }
+}

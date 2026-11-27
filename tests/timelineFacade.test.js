@@ -151,6 +151,31 @@ describe('timeline-renderer commands and operations', () => {
     expect(interaction.cueNeighborBounds(4, 6, 0)).toEqual({ prevEnd: 3, nextStart: 7 });
   });
 
+  it('多選拖曳與逐句掃描取得相同的邊界，保留同中點、嵌套區間與不同軌道的行為', async () => {
+    const { groupCueNeighborBounds, cueNeighborBounds } = await import('../src/timeline-interaction-engine.js');
+    const cue = (id, start, end, track = 0) => ({ id, start, end, track });
+    const selected = [cue('other-track', 1, 3, 1), cue('later', 7, 9), cue('middle', 4, 6), cue('first', 0, 1)];
+    const cues = [
+      cue('later-midpoint', 2, 12), cue('same-midpoint', 0, 10), cue('nested', 1, 2),
+      cue('near-left', 4, 5), cue('near-right', 5.5, 6.5),
+      cue('earlier-midpoint', 0, 8), { ...cue('untimed', 0, 20), timed: false },
+      cue('other-track-neighbor', 3, 4, 1), ...selected,
+    ];
+    const excluded = new Set(selected.map(c => c.id));
+    const originalCues = harness.State.cues;
+    harness.State.cues = cues;
+    try {
+      const batch = groupCueNeighborBounds(selected, excluded);
+      expect(batch.get(selected[2])).toEqual({ prevEnd: 8, nextStart: 2 });
+      for (const c of selected) {
+        expect(batch.get(c)).toEqual(cueNeighborBounds(c.start, c.end, c.track, excluded));
+      }
+      expect(selected.map(c => c.id)).toEqual(['other-track', 'later', 'middle', 'first']);
+    } finally {
+      harness.State.cues = originalCues;
+    }
+  });
+
   it('執行縮放與軌道鎖定命令正確變更狀態', async () => {
     document.body.innerHTML = `
       <video id="video"></video>

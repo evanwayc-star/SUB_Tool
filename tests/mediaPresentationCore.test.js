@@ -57,9 +57,73 @@ describe('held presented-frame capture',()=>{
     expect(playback.resume).toHaveBeenCalledOnce();expect(playback.fail).not.toHaveBeenCalled();
     expect(session.isPlaybackPending()).toBe(false);
   });
+  it.each(['waiting', 'holding'])('aborting a %s capture releases only that owner and ignores its late pixels', async stage => {
+    const decode = deferred(), pixels = deferred(), entered = deferred();
+    const callback = vi.fn(async ({ isCurrent, source }) => {
+      expect(source).toBe('mpv');
+      entered.resolve(isCurrent);
+      return pixels.promise;
+    });
+    const native = vi.fn().mockReturnValueOnce(decode.promise).mockResolvedValue({ presentedTime: 6, source: 'mpv' });
+    const core = createMediaPresentationCore({ presentTarget: native });
+    const owner = new AbortController();
+    const capture = core.request(2, { signal: owner.signal, whilePresented: callback });
+    let isCurrent;
+    if (stage === 'holding') {
+      decode.resolve({ presentedTime: 2, source: 'mpv' });
+      isCurrent = await entered.promise;
+    }
+    const next = core.request(6);
+    owner.abort();
+    await expect(capture).resolves.toMatchObject({ status: 'cancelled' });
+    await expect(next).resolves.toMatchObject({ status: 'presented', presentedTime: 6 });
+    if (isCurrent) expect(isCurrent()).toBe(false);
+    decode.resolve({ presentedTime: 2, source: 'mpv' });
+    pixels.resolve('stale');
+    await Promise.resolve();
+    expect(callback).toHaveBeenCalledTimes(stage === 'holding' ? 1 : 0);
+    expect(core.presentedTime()).toBe(6);
+  });
 });
 
 describe('visible presenter may change during an acknowledged seek',()=>{
+  it.each([true, false])('resumes from the newest visible frame when the previous native ACK came first=%s', async ackFirst => {
+    const seeks = [];
+    const commits = [];
+    const resume = vi.fn();
+    const adapter = { type: 'html5', present: time => new Promise(resolve => {
+      seeks.push({ time, acknowledge: () => resolve({ backend: 'html5', presentedSourceTime: time }) });
+    }) };
+    const session = createMediaPresentationSession({
+      getTolerance: () => .01,
+      timeline: { normalizeTarget: t => t },
+      player: { adapter: () => adapter },
+      playback: { resume },
+      commitPresented: time => { commits.push(time); return time; }
+    });
+    session.setWebCodecsTakeover(true);
+    const old = session.requestPlayback(2);
+    if (ackFirst) {
+      seeks[0].acknowledge();
+      await Promise.resolve();
+    }
+    const latest = session.requestPlayback(6);
+    session.setPlaybackIntent(true);
+    if (!ackFirst) {
+      expect(seeks.map(seek => seek.time)).toEqual([2]);
+      seeks[0].acknowledge();
+    }
+    await Promise.resolve();
+    expect(seeks.map(seek => seek.time)).toEqual([2, 6]);
+    await expect(old).resolves.toMatchObject({ status: 'superseded' });
+    seeks[1].acknowledge();
+    expect(session.reportWebCodecsPresentation([2])).toBe(false);
+    expect(resume).not.toHaveBeenCalled();
+    expect(session.reportWebCodecsPresentation([6])).toBe(true);
+    await expect(latest).resolves.toMatchObject({ status: 'presented', presentedTime: 6, source: 'webcodecs' });
+    expect(commits).toEqual([6]);
+    expect(resume).toHaveBeenCalledOnce();
+  });
   it('反向畫格使用左開右閉區間，拒絕相鄰舊畫格並保留片段起點的clamp',async()=>{
     const {session,ack,commit}=handoffSession();session.setWebCodecsTakeover(true);
     const pending=session.request(3.04);ack(3.04);

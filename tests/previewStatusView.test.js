@@ -55,6 +55,20 @@ it('播放器顯示實際來源與暫用原片原因，來源切換後更新而�
   expect(root.querySelector('[data-preview-preparation]').textContent).not.toContain('合成');
 });
 
+it('串流畫出真正已緩衝的區間，在缺口可以回到已收到的畫格',()=>{
+  view.dispose();
+  const bar=document.getElementById('seekBar'),seek=vi.fn();
+  state={...state,sourceKind:'stream',streamPreview:{duration:20,ranges:[[0,2],[8,10]],frame:0.04}};
+  view=bindPreviewStatusView({root,readState:()=>state,setMode,seekBar:bar,seek});
+  expect(root.querySelector('[data-preview-source]').textContent).toBe('串流 Proxy');
+  expect(root.querySelector('[data-preview-preparation]').textContent).toContain('8.0–10.0 秒');
+  const button=root.querySelector('[data-preview-return]');
+  expect(button.hidden).toBe(false);button.click();expect(seek).toHaveBeenCalledWith(1.96);
+  expect(bar.style.getPropertyValue('--preview-buffer')).toContain('40% 50%');
+  state={...state,sourceKind:'proxy',streamPreview:null};view.update();
+  expect(button.hidden).toBe(true);expect(bar.style.getPropertyValue('--preview-buffer')).toBe('');
+});
+
 it('等待未滿250ms不閃提示，跨定位/影片/聲道階段沿用連續等待時間',()=>{
   const status=root.querySelector('[data-preview-wait]');
   state={...state,phase:'seeking'};view.update();vi.advanceTimersByTime(200);

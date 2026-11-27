@@ -120,6 +120,19 @@ it('底部 Proxy 就緒依已登記產物，讀取失敗和明確重試後跟著
   }finally{f.dispose();}
 });
 
+it('讀取失敗後按 Proxy 會重建原資產並保留可用聲道',async()=>{
+  const f=await fixture();
+  try{
+    const record=f.register(),newProxy='C:/cache/rebuilt/proxy.mp4';
+    f.Media._previewCatalog().setFailed(record,true);
+    f.desktop.ingest=vi.fn(async()=>({proxy:newProxy,channels:[],cached:false}));
+    await f.Media.setPreviewMode('smooth');
+    expect(f.desktop.ingest).toHaveBeenCalledWith(expect.objectContaining({failedProxy:f.assets.proxy,audio:[],interactive:true}));
+    expect(f.Media._previewCatalog().get(record.key).assets).toMatchObject({proxy:newProxy,channels:f.assets.channels});
+    expect(f.Media.tracks.filter(track=>track.el).map(track=>track.el)).toEqual(f.elements);
+  }finally{f.dispose();}
+});
+
 it('Proxy 編碼失敗後，只有按該來源的 Proxy 預覽才在背景重試，原片持續可用',async()=>{
   const f=await fixture({mode:'smooth'}),retry=vi.fn(),otherRetry=vi.fn(),gate=deferred();
   const {MediaIntakeJobs:jobs}=await import('../src/media-intake-jobs.js');

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { observeFullSourceOpen } from './fixtures/full-source-reads.js';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -244,7 +245,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const originalMetadata = JSON.stringify(raw);
     fs.writeFileSync(metadata(saved.wave), originalMetadata);
     const open = fsp.open;
-    vi.spyOn(fsp, 'open').mockImplementation((file, ...args) => {
+    observeFullSourceOpen((file, ...args) => {
       if (file === original.source) throw new Error('波形不得等待母素材全文 SHA');
       return open(file, ...args);
     });
@@ -263,7 +264,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const movedMetadata = path.join(moved.media, path.relative(original.media, metadata(saved.wave)));
     const before = fs.readFileSync(movedMetadata);
     const open = fsp.open;
-    vi.spyOn(fsp, 'open').mockImplementation((file, ...args) => {
+    observeFullSourceOpen((file, ...args) => {
       if (file === moved.source) throw new Error('波形不得等待跨機全文 SHA');
       return open(file, ...args);
     });
@@ -367,7 +368,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     removeSourceReceipts(cacheDir(saved.proxy));
     fs.writeFileSync(metadata(saved.proxy), JSON.stringify(stored));
     const open = fsp.open;
-    const fullReads = vi.spyOn(fsp, 'open').mockImplementation((file, ...args) => {
+    const fullReads = observeFullSourceOpen((file, ...args) => {
       if (file === original.source) throw new Error('不應在本機快取命中時讀完整母素材');
       return open(file, ...args);
     });
@@ -388,7 +389,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const saved = await first.runtime.ingest(request(moved.source, [{ channels: 2 }]));
     fs.unlinkSync(saved.wave);
     const open = fsp.open;
-    vi.spyOn(fsp, 'open').mockImplementation((file, ...args) => {
+    observeFullSourceOpen((file, ...args) => {
       if (file === moved.source) throw new Error('已綁本機來源不應再次全文驗證');
       return open(file, ...args);
     });
@@ -407,7 +408,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const original = fixture(Buffer.alloc(4 * 1024 * 1024, 27));
     const open = fsp.open;
     let readBytes = 0;
-    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+    observeFullSourceOpen(async (file, ...args) => {
       const handle = await open(file, ...args);
       if (path.resolve(file) === original.source) {
         const read = handle.read.bind(handle);
@@ -449,7 +450,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const source = path.join(movedDirectory, 'mother.mxf');
     expect(cacheKeyFor(source)).not.toBe(oldKey);
     const open = fsp.open, sourceReads = [];
-    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+    observeFullSourceOpen(async (file, ...args) => {
       if (path.resolve(file) === source) sourceReads.push(file);
       return open(file, ...args);
     });
@@ -481,6 +482,21 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     const changedStat = (stat, options) => options?.bigint
       ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { birthtimeNs: stat.birthtimeNs + 1n })
       : originalStat;
+    // Both the asynchronous admission sample and the synchronous publication
+    // fence observe this simulated filesystem's unchanged coarse timestamp.
+    const asyncOpen=fsp.open, asyncStat=fsp.stat;
+    vi.spyOn(fsp,'open').mockImplementation(async (file,...args)=>{
+      const handle=await asyncOpen(file,...args);
+      if(typeof file==='string' && path.resolve(file)===original.source){
+        const readStat=handle.stat.bind(handle);
+        handle.stat=async options=>changedStat(await readStat(options),options);
+      }
+      return handle;
+    });
+    vi.spyOn(fsp,'stat').mockImplementation(async (file,options)=>{
+      const value=await asyncStat(file,options);
+      return typeof file==='string'&&path.resolve(file)===original.source?changedStat(value,options):value;
+    });
     vi.spyOn(fs, 'openSync').mockImplementation((file, ...args) => {
       const fd = openSync(file, ...args);
       if (typeof file === 'string' && path.resolve(file) === original.source) tracked.add(fd);
@@ -496,7 +512,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     });
     expect(cacheKeyFor(original.source)).toBe(key);
     const open = fsp.open, sourceReads = [];
-    vi.spyOn(fsp, 'open').mockImplementation((file, ...args) => {
+    observeFullSourceOpen((file, ...args) => {
       if (path.resolve(file) === original.source) sourceReads.push(file);
       return open(file, ...args);
     });
@@ -533,7 +549,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     await producer.runtime.close();
     const moved = path.join(original.root, 'renamed-share'); fs.renameSync(original.media, moved);
     const source = path.join(moved, 'mother.mxf'), open = fsp.open, reads = [];
-    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+    observeFullSourceOpen(async (file, ...args) => {
       if (path.resolve(file) === source) reads.push(file);
       return open(file, ...args);
     });
@@ -570,7 +586,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
       const stat = statSync(file, options);
       return typeof file === 'string' && path.resolve(file) === original.source && options?.bigint ? alter(stat) : stat;
     });
-    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+    observeFullSourceOpen(async (file, ...args) => {
       const handle = await open(file, ...args);
       if (path.resolve(file) === original.source) {
         const close = handle.close.bind(handle);
@@ -919,7 +935,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     temporaryFailure.mockRestore();
     expect(fs.readFileSync(warm.proxy)).toEqual(proxyBytes);
     const open = fsp.open;
-    const reopen = vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+    const reopen = observeFullSourceOpen(async (file, ...args) => {
       if (file === moved.source) throw new Error('the verified source must not be rehashed');
       return open(file, ...args);
     });
@@ -1295,7 +1311,7 @@ describe('母素材與 Proxy 同處的跨電腦快取', () => {
     let release, entered = false, revoked = false;
     const gate = new Promise(resolve => { release = resolve; });
     const open = fsp.open;
-    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+    observeFullSourceOpen(async (file, ...args) => {
       const handle = await open(file, ...args);
       if (path.resolve(file) === moved.source) {
         const read = handle.read.bind(handle);

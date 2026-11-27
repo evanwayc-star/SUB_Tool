@@ -39,7 +39,7 @@ it.runIf(process.platform === 'win32').each(['cleanOrphans', 'clearAll'])(
     authority.grantTrustedFile(source);
     // Explicitly isolate this central-cleanup guard from the production sidecar-only policy.
     const runtime = createMediaIntakeRuntime({ cacheRoot, tempRoot, allowSidecarCache: false,
-      fileAuthority: authority, delay: () => { started(); return gate; }, ffmpegExecution: { async execute() {} } });
+      fileAuthority: authority, ffmpegExecution: { execute: () => { started(); return gate; } } });
     const writer = runtime.ingest({ src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] });
     writer.catch(() => {});
     try {
@@ -76,7 +76,7 @@ it.runIf(process.platform === 'win32').each(['cleanOrphans', 'clearAll'])(
     const entered = new Promise(resolve => { started = resolve; });
     const authority = new FileAuthority({ internalDirectories: [cacheRoot, tempRoot] }); authority.grantTrustedFile(source);
     const runtime = createMediaIntakeRuntime({ cacheRoot, tempRoot, allowSidecarCache: true,
-      fileAuthority: authority, delay: () => { started(); return gate; }, ffmpegExecution: { async execute() {} } });
+      fileAuthority: authority, ffmpegExecution: { execute: () => { started(); return gate; } } });
     const writer = runtime.ingest({ src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] });
     writer.catch(() => {});
     try {
@@ -152,15 +152,22 @@ it.each(['cleanOrphans', 'clearAll'])('%s 在同源預檢取消一份後仍保�
     return originalRead(directory, ...args);
   });
   const request = { src: source, duration: 1, needsProxy: false, audio: [{ channels: 1 }] };
-  const first = runtime.ingest(request, { isCancelled: () => cancelledFirst }); first.catch(() => {});
-  const second = runtime.stream(request, { isCancelled: () => cancelledSecond }); second.catch(() => {});
+  const waitForPreflight = (arrival, work) => Promise.race([
+    arrival, work.then(() => { throw new Error('工作未進入快取預檢'); }),
+  ]);
+  const first = runtime.ingest(request, { isCancelled: () => cancelledFirst });
+  let second;
   try {
-    await Promise.all(entered);
-    cancelledFirst = true; gates[0].release(); await first.catch(() => {});
+    await waitForPreflight(entered[0], first);
+    second = runtime.stream(request, { isCancelled: () => cancelledSecond });
+    await waitForPreflight(entered[1], second);
+    cancelledFirst = true; gates[0].release();
+    await expect(first).rejects.toMatchObject({ code: 'INGEST_SUPERSEDED' });
     const partial = cleanup === 'clearAll' ? await runtime.clearAll(null) : await runtime.cleanOrphans();
     expect(fs.readFileSync(source, 'utf8')).toBe('shared mother source');
     expect(partial.incomplete).toBe(true);
-    cancelledSecond = true; gates[1].release(); await second.catch(() => {});
+    cancelledSecond = true; gates[1].release();
+    await expect(second).resolves.toEqual({ response: null, completion: null });
     const completed = cleanup === 'clearAll' ? await runtime.clearAll(null) : await runtime.cleanOrphans();
     expect(completed.incomplete).toBe(false);
     expect(fs.existsSync(source)).toBe(false);

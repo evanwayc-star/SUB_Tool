@@ -379,6 +379,52 @@ describe('HTML fallback mother audio follows the installed effect owner', () => 
     expect(source.peaks[1]).toBeCloseTo(.8,4);
   });
 
+  it('漸進 MIX 跟隨靜音與配線；完整聲道就緒後只播放各聲道一次',async()=>{
+    class AudioAdapter {
+      constructor(){this.readyState=4;this.paused=true;this.duration=12;this.currentTime=0;}
+      addEventListener(){} removeEventListener(){} pause(){this.paused=true;} load(){}
+      play=vi.fn(()=>{this.paused=false;return Promise.resolve();});
+    }
+    vi.stubGlobal('Audio',AudioAdapter);
+    const channels=[0,1].map(sourceChannel=>({file:`C:/cache/ch${sourceChannel}.m4a`,sourceStream:0,sourceChannel}));
+    deskMock.probe.mockResolvedValue({duration:12,video:{codec:'prores',fps:25},audio:[{channels:2}]});
+    window.subtool.streamIngest=vi.fn(async()=>({streamUrl:'http://127.0.0.1/proxy',previewMix:true,channels,ingestJobId:22,cached:false}));
+    deskMock.fileURL.mockImplementation(async file=>'file:///'+file);
+    resetPlayerAdapter(window.subtool,domMock.video);
+    State.muted=false;
+    await Media.loadDesktopMedia('C:/media/progressive.mov');
+    const provisional=Media._previewMix.gain;
+    expect(Media.tracks).toHaveLength(0);
+    expect(domMock.video.muted).toBe(false);
+    expect(provisional.gain.value).toBe(2);
+    State.muted=true;Media.syncMuteState();expect(domMock.video.muted).toBe(true);
+    State.muted=false;
+    const source=State.clips[0],routes=State.audioProject.sourceMaps[source.audioSourceId].channels;
+    routes[0].gain=.4;Media.syncMuteState();
+    expect(domMock.video.muted).toBe(true);
+    expect(provisional.gain.value).toBe(0);
+    routes[1].gain=.4;Media.syncMuteState();
+    expect(domMock.video.muted).toBe(false);
+    expect(provisional.gain.value).toBe(.8);
+    const active=Media.activeClipId;
+    Media.activeClipId=null;Media.syncMuteState();expect(provisional.gain.value).toBe(0);
+    Media.activeClipId=active;Media.syncMuteState();
+    expect(domMock.video.muted).toBe(false);
+    Media.playing=true;
+    window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:{jobId:22}}));
+    await vi.waitFor(()=>expect(Media.tracks).toHaveLength(2));
+    expect(Media._previewMix).toBeNull();
+    expect(provisional.disconnect).toHaveBeenCalledOnce();
+    expect(domMock.video.muted).toBe(true);
+    expect(Media.tracks.map(track=>track.gain.gain.value)).toEqual([.4,.4]);
+    await vi.waitFor(()=>expect(Media.tracks.map(track=>track.el.play.mock.calls.length)).toEqual([1,1]));
+    State.audioProject.sourceMaps[source.audioSourceId].channels[0].gain=0;Media.syncMuteState();
+    expect(Media.tracks.map(track=>track.gain.gain.value)).toEqual([0,.4]);
+    window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:{jobId:22}}));
+    expect(Media.tracks).toHaveLength(2);
+    expect(domMock.video.muted).toBe(true);
+  });
+
   it.each(['before IPC reply','during video metadata'])('retains stream completion %s and installs original audio exactly once',async moment=>{
     let made=0;
     class AudioAdapter {

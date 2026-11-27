@@ -4,6 +4,7 @@ const { getDeliveryFormatPreset } = require('../shared/delivery-formats.cjs');
 const nativeDisc = require('./disc-authoring');
 const { finalizeAirlineOutput } = require('./airline-output');
 const { finalizeModFhdTransport } = require('./mod-fhd-transport');
+const { verifyDeliveryMedia } = require('./delivery-verification');
 
 const DISC_ENCODE_PROGRESS = 95;
 const DISC_AUTHORING_PROGRESS = 4;
@@ -89,12 +90,15 @@ function createExportArtifact(config, owner = {}, adapters = {}) {
             await airline(format, writePath, { signal, tempDir, ...(assertOutput ? { assertOutput } : {}) });
           } else if (format === 'mod-fhd') {
             await modFhd(writePath, { signal, ...(assertOutput ? { assertOutput } : {}) });
+          } else if (config.verification) {
+            await verifyDeliveryMedia(writePath, config.verification, config.ffprobePath, signal);
           }
         } catch (error) {
           outcome.error = error;
           if (['AIRLINE_TEMP_CLEANUP_FAILED', 'AIRLINE_TEMP_HANDLE_CLOSE_FAILED', 'OUTPUT_HANDLE_CLOSE_FAILED'].includes(error?.code)) outcome.cleanupError = error;
           outcome.reason = isDisc ? 'disc-finalize-failed'
-            : preset?.transport === 'airline' ? 'airline-finalize-failed' : 'mod-fhd-finalize-failed';
+            : preset?.transport === 'airline' ? 'airline-finalize-failed'
+              : config.verification ? 'media-verification-failed' : 'mod-fhd-finalize-failed';
         }
       }
       if (stage) {

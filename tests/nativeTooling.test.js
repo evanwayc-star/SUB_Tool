@@ -48,6 +48,16 @@ function capabilities(overrides = {}) {
 }
 
 describe('交付 native 能力的公開 interface', () => {
+  it.each([['h264_qsv', 'h264_qsv'], [null, 'libx264']])('背景試編碼只接納有實際畫格的編碼器 %s', async (available, expected) => {
+    const { engine, calls } = capabilities({ respond: ({ child, args }) => {
+      if (available && args.includes(available)) child.stdout.emit('data', Buffer.from('frame=1\nprogress=end\n'));
+      child.emit('close', 0, null);
+    } });
+    const pending = engine.selectVideoEncoder('win32');
+    expect(calls).toHaveLength(1);
+    await expect(pending).resolves.toBe(expected);
+    expect(calls.every(call => call.options.windowsHide)).toBe(true);
+  });
   it.each([
     ['h264', ['v:libx264', 'a:aac'], []],
     ['prores', ['v:prores_ks', 'a:pcm_s24le'], []],

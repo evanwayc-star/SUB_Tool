@@ -50,7 +50,7 @@ import { bindPreviewStatusView, bindProxyStatusView } from './preview-status-vie
 import { renderProjectCanvasButton } from './project-canvas-preview.js';
 import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, refreshClipEffectBadges } from './timeline-renderer.js';
-import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, applyCueStylePatch } from './subtitles.js';
+import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, refreshSearchHighlights, subtitleRow, applyCueStylePatch } from './subtitles.js';
 import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames, hasActiveCueEdit } from './subtitle-model.js';
 import { searchUpdate, searchNav, searchReplace, searchSelectAll, replaceOne, setSelectCueHandler } from './subtitle-search.js';
 import { initRecentProjects } from './recent-projects.js';
@@ -83,12 +83,14 @@ if (typeof __APP_VERSION__ !== 'undefined') {
 
 const previewStatusView=bindPreviewStatusView({
   root:$('previewStatus'),readState:()=>Media.previewState(),setMode:mode=>Media.setPreviewMode(mode),
+  seekBar:$('seekBar'),seek:time=>Media.seek(time),
 });
 const proxyStatusView=bindProxyStatusView({root:$('stProxy'),readState:()=>Media.proxyStatus()});
 bindAudioEffectStatusView(refreshClipEffectBadges,refreshAudioNormalizerDialog);
 renderProjectCanvasButton();
 function updatePreviewViews(){previewStatusView.update();proxyStatusView.update();}
 on('media:preview-state',updatePreviewViews);
+video.addEventListener('progress',()=>previewStatusView.update());
 
 /* app.js 為協調層：訂閱各模組發送的事件並呼叫對應的渲染/指令函式。
    各模組只 emit、不再反向 import app.js，藉此切斷雙向相依。
@@ -108,6 +110,7 @@ on('render:trackStyle', StylePanelController.renderTrackStyle); // 換選取字�
      render:checkPanel  → Trim 後字元檢查面板不刷新
    由 tests/eventBusContract.test.js 擋住往後再出現半條邊。 */
 on('render:subList', renderSubList);
+on('render:searchHighlights', refreshSearchHighlights);
 on('render:searchCount', updateSearchCount);
 on('render:selection', refreshSelectionUI);
 on('render:checkPanel', renderCheckPanel);
@@ -297,7 +300,7 @@ function markActiveRow(id){
   sublist.querySelectorAll('.sub-row.active').forEach(r=>r.classList.remove('active'));
   if (State.subMode) return;
   
-  const row=sublist.querySelector(`.sub-row[data-id="${id}"]`);
+  const row=subtitleRow(id);
   if(row){
     row.classList.add('active');
     row.scrollIntoView({block:'nearest'});
@@ -468,7 +471,9 @@ function initUI(){
   $('cpContainsInput').addEventListener('input',renderCheckPanel);
   $('cpContainsInput').addEventListener('keydown',e=>{if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation();});
   // 搜尋浮動視窗
-  $('searchInput').addEventListener('input',()=>searchUpdate($('searchInput').value));
+  const searchInput=$('searchInput');
+  searchInput.addEventListener('input',event=>{if(!event.isComposing)searchUpdate(searchInput.value);});
+  searchInput.addEventListener('compositionend',()=>searchUpdate(searchInput.value));
   $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ e.preventDefault(); searchNav(e.shiftKey ? -1 : 1); } });
   $('replaceInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ replaceOne(); } });
   $('searchDialog').addEventListener('keydown',e=>{
@@ -719,7 +724,7 @@ function rafLoop(renderVideoSubCallback) {
     if (window._ensurePlayheadVisible) window._ensurePlayheadVisible();
     updatePlayhead();
     renderVideoSubCallback(true);
-    if (Wave.live) { Wave.captureLive(); if ((_rafFrame++ % 6) === 0) emit('media:waveform'); }
+    if (Wave.live || Wave.liveElementSources.size) { Wave.captureLive(); if ((_rafFrame++ % 6) === 0) emit('media:waveform'); }
     
     const active=subtitlePreviewIndex.activeAtTime(State.cues,getExactFps(State.fps||25),t+0.001,_rafLastIdx,State.listTrack);
     const act=active?.cue||null;
@@ -787,7 +792,10 @@ async function init(){
   History.reset();
   Project.establishCleanBaseline();
   if(IS_DESKTOP) initDesktop();
-  else setStatus('就緒 — 匯入影音或字幕開始','ok');
+  else {
+    setStatus('就緒 — 匯入影音或字幕開始','ok');
+    Project.initBrowserDrafts();
+  }
 }
 async function initDesktop(){
   const desktopStatus = Promise.resolve().then(() => DESK.status());
@@ -818,7 +826,12 @@ async function initDesktop(){
   try{
     const s=await desktopStatus;
     const eng=$('stEngine');
-    if(eng){
+    const renderEngine = s => {
+      if(!eng)return;
+      if(s.ffmpeg && s.venc===null){
+        eng.textContent='引擎：ffmpeg ✓ · 偵測 GPU 中';
+        return;
+      }
       const hasGpu = !!(s.venc && s.venc !== 'libx264');
       eng.innerHTML = '引擎：' + (s.ffmpeg
         ? 'ffmpeg ✓' + (hasGpu
@@ -830,7 +843,9 @@ async function initDesktop(){
             ? `已偵測到 GPU 編碼器：${s.venc}\n· MP4（H.264）匯出：使用 GPU 編碼\n· ProRes 422 HQ 匯出：CPU 編碼（ffmpeg 無 GPU ProRes 編碼器）\n· 來源解碼：嘗試硬體加速\n匯出完成後，狀態列會顯示本次「實際使用」的編碼器。`
             : '未偵測到 GPU 編碼器，H.264 將以 CPU（libx264）編碼。')
         : '未偵測到 ffmpeg';
-    }
+    };
+    renderEngine(s);
+    if(s.ffmpeg && s.venc===null) void DESK.status(true).then(renderEngine).catch(()=>{});
     if(!s.ffmpeg){
       const isMac=s.platform==='darwin';
       openModal('未偵測到 ffmpeg', isMac

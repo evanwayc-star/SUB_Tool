@@ -33,7 +33,59 @@ pub struct VideoInfo {
     pub fps: f64,
     pub width: u32,
     pub height: u32,
+    pub stream_index: u64,
+    pub region: Option<Region>,
     pub timestamp_offset: f64,
+}
+
+/// Normalized coordinates in the rotated, square-pixel display.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Region {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Region {
+    pub fn valid(&self) -> bool {
+        self.x >= 0.0
+            && self.y >= 0.0
+            && self.width > 0.0
+            && self.height > 0.0
+            && self.x + self.width <= 1.0
+            && self.y + self.height <= 1.0
+    }
+}
+
+impl VideoInfo {
+    // FPS-SYNC: an off-grid seek can fall inside a held VFR frame. Keep the decoded
+    // GOP preroll and sample the image already visible at each requested source time.
+    fn grid_filter(&self, source_start: f64, track_fps: f64) -> String {
+        let origin_us = ((source_start - self.timestamp_offset) * 1_000_000.0).round() as i64;
+        format!("settb=AVTB,setpts=PTS-({origin_us}),fps={track_fps:.9}:start_time=0:round=up")
+    }
+
+    fn filters(&self) -> String {
+        self.region.map(|r| format!(
+            "crop=w='max(2,iw*{:.12})':h='max(2,ih*{:.12})':x=iw*{:.12}:y=ih*{:.12}:exact=1,",
+            r.width, r.height, r.x, r.y
+        )).unwrap_or_default()
+    }
+
+    pub fn extraction_size(&self, max_width: u32) -> Result<(u32, u32), String> {
+        let (w, h) = self
+            .region
+            .map(|r| {
+                (
+                    (self.width as f64 * r.width).round() as u32,
+                    (self.height as f64 * r.height).round() as u32,
+                )
+            })
+            .unwrap_or((self.width, self.height));
+        extraction_dimensions(w, h, max_width)
+    }
 }
 
 static TOOLS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
@@ -62,6 +114,24 @@ pub struct FrameTrack {
 impl FrameTrack {
     pub fn frame_count(&self) -> usize {
         self.global_scores.len()
+    }
+
+    pub fn matches_source(&self, start: f64, end: f64, fps: f64) -> bool {
+        let count = self.frame_count();
+        let expected = ((end - start) * fps).ceil() as usize;
+        count > 0
+            && self.track_fps == fps
+            && self.clip_start == start
+            && self.clip_end == end
+            && count.abs_diff(expected) <= 1
+            && self.zone_scores.len() == count
+            && count.checked_mul(NUM_TILES) == Some(self.flat_tiles.len())
+            && self.global_scores.iter().all(|score| score.is_finite())
+            && self
+                .zone_scores
+                .iter()
+                .flatten()
+                .all(|score| score.is_finite())
     }
 
     pub fn tile_slice(&self, frame_idx: usize) -> &[u8] {
@@ -181,6 +251,27 @@ pub fn probe_video(video_path: &Path) -> Result<VideoInfo, String> {
 
     let width = v_stream["width"].as_u64().unwrap_or(1920) as u32;
     let height = v_stream["height"].as_u64().unwrap_or(1080) as u32;
+    let stream_index = v_stream["index"].as_u64().ok_or("缺少視訊軌編號。")?;
+    let sar = v_stream["sample_aspect_ratio"]
+        .as_str()
+        .and_then(|v| v.split_once(':'))
+        .and_then(|(n, d)| Some(n.parse::<f64>().ok()? / d.parse::<f64>().ok()?))
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1.0);
+    // Shrink the denser axis so a square-pixel JPEG never invents source detail.
+    let width = (width as f64 * sar.min(1.0)).round() as u32;
+    let height = (height as f64 / sar.max(1.0)).round() as u32;
+    let rotation = v_stream["side_data_list"]
+        .as_array()
+        .and_then(|items| items.iter().find_map(|v| v["rotation"].as_f64()))
+        .or_else(|| v_stream["tags"]["rotate"].as_str()?.parse().ok())
+        .unwrap_or(0.0);
+    let quadrant = rotation.rem_euclid(180.0);
+    let (width, height) = if (quadrant - 90.0).abs() < 1.0 {
+        (height, width)
+    } else {
+        (width, height)
+    };
     let container_start = val["format"]["start_time"]
         .as_str()
         .and_then(|s| s.parse::<f64>().ok())
@@ -214,17 +305,14 @@ pub fn probe_video(video_path: &Path) -> Result<VideoInfo, String> {
                 .and_then(|s| s.parse::<f64>().ok())
         })
         .unwrap_or(0.0);
-    let rate_str = v_stream["r_frame_rate"]
-        .as_str()
-        .or_else(|| v_stream["avg_frame_rate"].as_str())
-        .unwrap_or("30/1");
-    let fps = if let Some((num, den)) = rate_str.split_once('/') {
-        let n = num.parse::<f64>().unwrap_or(30.0);
-        let d = den.parse::<f64>().unwrap_or(1.0);
-        if d > 0.0 { n / d } else { 30.0 }
-    } else {
-        rate_str.parse::<f64>().unwrap_or(30.0)
-    };
+    let fps = ["avg_frame_rate", "r_frame_rate"]
+        .iter()
+        .find_map(|field| {
+            let (n, d) = v_stream[*field].as_str()?.split_once('/')?;
+            let rate = n.parse::<f64>().ok()? / d.parse::<f64>().ok()?;
+            (rate.is_finite() && rate > 0.0).then_some(rate)
+        })
+        .unwrap_or(30.0);
     if duration <= 0.0 {
         return Err("無法取得有效影片長度。".to_string());
     }
@@ -235,16 +323,18 @@ pub fn probe_video(video_path: &Path) -> Result<VideoInfo, String> {
         fps,
         width,
         height,
+        stream_index,
+        region: None,
         timestamp_offset: container_start - video_start,
     })
 }
 
-/// Choose native tracking FPS (exact `video.fps` up to 30fps; half-rate for 50/60fps so frame step <= 33ms).
+/// Keep the source cadence for common rates and sample a whole divisor for high frame rate video.
 pub fn choose_track_fps(video_fps: f64) -> f64 {
     if !video_fps.is_finite() || video_fps <= 1.0 {
         30.0
-    } else if video_fps > 36.0 {
-        video_fps / 2.0
+    } else if video_fps > 30.01 {
+        video_fps / (video_fps / 30.01).ceil()
     } else {
         video_fps.max(12.0)
     }
@@ -392,7 +482,11 @@ pub fn scan_full_fps_zones(
     }
     let expected = ((span * track_fps).ceil() as usize).max(1);
     let frame_bytes = SCAN_W * SCAN_H;
-    let vf = format!("fps={track_fps:.6},scale={SCAN_W}:{SCAN_H}:flags=fast_bilinear");
+    let vf = format!(
+        "{},{}scale={SCAN_W}:{SCAN_H}:flags=fast_bilinear",
+        video.grid_filter(clip_start, track_fps),
+        video.filters()
+    );
 
     let mut child = new_tool_cmd("ffmpeg")
         .args([
@@ -400,10 +494,15 @@ pub fn scan_full_fps_zones(
             "-hide_banner",
             "-loglevel",
             "error",
+            "-copyts",
+            "-start_at_zero",
+            "-noaccurate_seek",
             "-ss",
             &format!("{:.6}", clip_start - video.timestamp_offset),
             "-i",
             &video.path.to_string_lossy(),
+            "-map",
+            &format!("0:{}", video.stream_index),
             "-t",
             &format!("{span:.4}"),
             "-an",
@@ -707,7 +806,7 @@ pub fn build_adaptive_sample_plan(
         let mut transients: Vec<(f32, usize)> = Vec::new();
         for pair in anchors.windows(2) {
             let (fa, fb) = (pair[0], pair[1]);
-            if fb <= fa + 2 {
+            if fb <= fa + 1 {
                 continue;
             }
             let d_ab = zone_profile_distance(tr.tile_slice(fa), tr.tile_slice(fb), 4);
@@ -778,13 +877,15 @@ pub fn build_adaptive_sample_plan(
     })
 }
 
-/// Decode a single 640x360 JPEG preview frame at `timestamp_sec` for the GPUI Visual Inspector.
+/// Decode a square-pixel source-time preview at up to 640 pixels wide.
 pub fn extract_preview_jpeg(
     video_path: &Path,
     timestamp_sec: f64,
     preview_dir: &Path,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(preview_dir).map_err(|e| format!("建立預覽目錄失敗：{e}"))?;
+    let video = probe_video(video_path)?;
+    let (w, h) = video.extraction_size(640)?;
     let ts_ms = (timestamp_sec.max(0.0) * 1000.0).round() as u64;
     let stem_len = video_path.to_string_lossy().len();
     let out_file = preview_dir.join(format!("prv_{stem_len}_{ts_ms:09}.jpg"));
@@ -800,14 +901,22 @@ pub fn extract_preview_jpeg(
             "-hide_banner",
             "-loglevel",
             "error",
+            "-copyts",
+            "-start_at_zero",
+            "-noaccurate_seek",
             "-ss",
-            &format!("{:.4}", timestamp_sec.max(0.0)),
+            &format!("{:.6}", timestamp_sec.max(0.0) - video.timestamp_offset),
             "-i",
             &video_path.to_string_lossy(),
+            "-map",
+            &format!("0:{}", video.stream_index),
             "-frames:v",
             "1",
             "-vf",
-            "scale=640:-2:flags=lanczos",
+            &format!(
+                "{},scale={w}:{h}:flags=lanczos,setsar=1",
+                video.grid_filter(timestamp_sec.max(0.0), choose_track_fps(video.fps))
+            ),
             "-q:v",
             "3",
             &tmp_file.to_string_lossy(),
@@ -927,11 +1036,14 @@ where
         return Ok(());
     }
 
-    let (out_w, out_h) = extraction_dimensions(video.width, video.height, frame_width)?;
-    let frame_bytes = (out_w * out_h * 3) as usize;
-    let vf =
-        format!("fps={track_fps:.6},scale={out_w}:{out_h}:flags=lanczos,unsharp=3:3:0.35:3:3:0.0");
-
+    let (out_w, out_h) = video.extraction_size(frame_width)?;
+    let frame_bytes =
+        usize::try_from(u64::from(out_w) * u64::from(out_h) * 3).map_err(|_| "辨識畫格太大。")?;
+    let sharpening = if out_w >= 4 && out_h >= 4 {
+        ",unsharp=3:3:0.35:3:3:0.0"
+    } else {
+        ""
+    };
     let gap_limit = (track_fps * 8.0).round() as usize;
     let mut clusters: Vec<&[WindowSpec]> = Vec::new();
     let mut c_start = 0;
@@ -971,6 +1083,11 @@ where
             .collect();
 
         let seek_start = clip_start + (min_f as f64) / track_fps;
+        let vf = format!(
+            "{},{}scale={out_w}:{out_h}:flags=lanczos,setsar=1{sharpening}",
+            video.grid_filter(seek_start, track_fps),
+            video.filters()
+        );
         let span_duration =
             ((max_f - min_f + 1) as f64 / track_fps + 0.5).min((clip_end - seek_start).max(0.3));
 
@@ -980,10 +1097,15 @@ where
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                "-copyts",
+                "-start_at_zero",
+                "-noaccurate_seek",
                 "-ss",
                 &format!("{:.6}", seek_start - video.timestamp_offset),
                 "-i",
                 &video.path.to_string_lossy(),
+                "-map",
+                &format!("0:{}", video.stream_index),
                 "-t",
                 &format!("{span_duration:.4}"),
                 "-an",
@@ -1037,31 +1159,27 @@ where
                 break;
             }
 
-            let mut jpegs = Vec::with_capacity(win.track_indices.len());
-            for (local_idx, &f_idx) in win.track_indices.iter().enumerate() {
-                let rgb = ring
-                    .get(&f_idx)
-                    .ok_or_else(|| format!("缺少第 {f_idx} 追蹤幀資料。"))?;
-                let ts = win.sample_times[local_idx];
-                jpegs.push(stamp_and_encode_jpeg(
-                    rgb,
-                    out_w,
-                    out_h,
-                    local_idx,
-                    ts,
-                    jpeg_quality,
-                )?);
-            }
-
-            if let Err(e) = on_window(win, jpegs) {
-                run_res = Err(e);
+            let frames = win
+                .track_indices
+                .iter()
+                .zip(&win.sample_times)
+                .enumerate()
+                .map(|(local, (&index, &time))| {
+                    let rgb = ring
+                        .get(&index)
+                        .ok_or_else(|| format!("缺少第 {index} 追蹤幀資料。"))?;
+                    stamp_and_encode_jpeg(rgb, out_w, out_h, local, time, jpeg_quality)
+                })
+                .collect::<Result<Vec<_>, _>>();
+            if let Err(error) = frames.and_then(|frames| on_window(win, frames)) {
+                run_res = Err(error);
                 break;
             }
 
-            let min_future = cluster[pos + 1..]
-                .iter()
-                .filter_map(|w| w.track_indices.first().copied())
-                .min()
+            // Window starts are ordered by their global sample index.
+            let min_future = cluster
+                .get(pos + 1)
+                .and_then(|w| w.track_indices.first().copied())
                 .unwrap_or(max_f + 1);
             ring.retain(|&k, _| k >= min_future);
         }
@@ -1093,6 +1211,9 @@ mod tests {
 
     #[test]
     fn extraction_preserves_native_pixels_without_upscaling_even_small_odd_sources() {
+        for (input, expected) in [(120.0, 30.0), (59.94, 29.97), (50.0, 25.0), (29.97, 29.97)] {
+            assert!((choose_track_fps(input) - expected).abs() < 1e-8);
+        }
         for (width, height, requested, expected) in [
             (3840, 2160, 1920, (1920, 1080)),
             (1920, 1080, 1920, (1920, 1080)),
@@ -1130,6 +1251,8 @@ mod tests {
                 fps,
                 width: 1920,
                 height: 1080,
+                stream_index: 0,
+                region: None,
                 timestamp_offset: 5.5,
             };
             let plan = build_adaptive_sample_plan(
@@ -1208,6 +1331,8 @@ mod tests {
             fps: 30.0,
             width: 1920,
             height: 1080,
+            stream_index: 0,
+            region: None,
             timestamp_offset: 0.0,
         };
         let plan = build_adaptive_sample_plan(&video, 0.0, None, 2.0, 8.0, 1.5, Some(&track), true)
@@ -1233,6 +1358,237 @@ mod tests {
         );
     }
 
+    fn check_display_pixels_and_short_flash(dir: &Path, ffmpeg: &Path) {
+        let make = |name: &str, args: &[&str]| {
+            let destination = dir.join(name);
+            let output = Command::new(ffmpeg)
+                .args(["-nostdin", "-v", "error"])
+                .args(args)
+                .arg(&destination)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            destination
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let first = |video: &VideoInfo| {
+            let plan =
+                build_adaptive_sample_plan(video, 0.0, None, 10.0, 8.0, 1.5, None, false).unwrap();
+            let mut image = None;
+            stream_missing_windows(
+                video,
+                &plan.windows[..1],
+                0.0,
+                video.duration,
+                plan.track_fps,
+                1920,
+                92,
+                &cancel,
+                |_, frames| {
+                    image = Some(image::load_from_memory(&frames[0]).unwrap().to_rgb8());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            image.unwrap()
+        };
+        let two = make(
+            "two.mkv",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=160x90:r=25:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=blue:s=320x180:r=25:d=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:v",
+                "-c:v",
+                "ffv1",
+                "-disposition:v:0",
+                "0",
+                "-disposition:v:1",
+                "default",
+            ],
+        );
+        let low = probe_video(&two).unwrap();
+        let pic = first(&low);
+        assert_eq!(
+            (low.stream_index, pic.width(), pic.height() - HEADER_HEIGHT),
+            (0, 160, 90)
+        );
+        let pixel = pic.get_pixel(80, 73);
+        assert!(pixel[0] > 240 && pixel[2] < 10, "wrong stream: {pixel:?}");
+        let pattern = make(
+            "marker.mp4",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=black:s=160x90:r=25:d=1,drawbox=x=35:y=20:w=16:h=16:color=white:t=fill",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+        );
+        let bounds = |pic: &image::RgbImage| {
+            let (mut left, mut right, mut top, mut bottom) = (u32::MAX, 0, u32::MAX, 0);
+            for (x, y, _) in pic
+                .enumerate_pixels()
+                .filter(|(_, y, p)| *y >= HEADER_HEIGHT && p[0] > 200 && p[1] > 200 && p[2] > 200)
+            {
+                left = left.min(x);
+                right = right.max(x);
+                top = top.min(y - HEADER_HEIGHT);
+                bottom = bottom.max(y - HEADER_HEIGHT);
+            }
+            assert!(right >= left && bottom >= top);
+            (left, top, right - left + 1, bottom - top + 1)
+        };
+        for (rotation, wh, xy) in [
+            (0, (160, 90), (35, 20)),
+            (90, (90, 160), (20, 109)),
+            (180, (160, 90), (109, 54)),
+            (270, (90, 160), (54, 35)),
+        ] {
+            let rotated = make(
+                &format!("rotated{rotation}.mp4"),
+                &[
+                    "-display_rotation",
+                    &rotation.to_string(),
+                    "-i",
+                    pattern.to_str().unwrap(),
+                    "-c",
+                    "copy",
+                ],
+            );
+            let pic = first(&probe_video(&rotated).unwrap());
+            assert_eq!((pic.width(), pic.height() - HEADER_HEIGHT), wh);
+            assert_eq!(bounds(&pic), (xy.0, xy.1, 16, 16));
+        }
+        let sar = make(
+            "anamorphic.mkv",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=black:s=160x96:r=25:d=1,drawbox=x=30:y=20:w=8:h=16:color=white:t=fill,setsar=2/1",
+                "-c:v",
+                "ffv1",
+            ],
+        );
+        let mut v = probe_video(&sar).unwrap();
+        assert_eq!(bounds(&first(&v)), (30, 10, 8, 8));
+        v.region = Some(Region {
+            x: 0.125,
+            y: 0.0,
+            width: 0.5,
+            height: 0.5,
+        });
+        let roi = first(&v);
+        assert_eq!((roi.width(), roi.height() - HEADER_HEIGHT), (80, 24));
+        assert_eq!(bounds(&roi), (10, 10, 8, 8));
+
+        let vfr = make(
+            "held.mkv",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=96x64:r=25:d=1,drawbox=w=iw:h=ih:c=blue:t=fill:enable='between(n,7,17)',drawbox=w=iw:h=ih:c=green:t=fill:enable='gte(n,18)',select='eq(n,0)+eq(n,6)+eq(n,7)+eq(n,18)+eq(n,24)'",
+                "-fps_mode",
+                "vfr",
+                "-c:v",
+                "ffv1",
+            ],
+        );
+        let v = probe_video(&vfr).unwrap();
+        for (time, is_blue) in [
+            (0.30, true),
+            (0.33, true),
+            (0.68, true),
+            (0.72, false),
+            (0.73, false),
+        ] {
+            let first = WindowSpec {
+                window_index: 0,
+                global_start: 0,
+                global_end: 0,
+                track_indices: vec![0],
+                sample_times: vec![time],
+            };
+            stream_missing_windows(
+                &v,
+                &[first],
+                time,
+                1.0,
+                25.,
+                320,
+                92,
+                &cancel,
+                |_, frames| {
+                    let pic = image::load_from_memory(&frames[0]).unwrap().to_rgb8();
+                    let pixel = pic.get_pixel(34, 53);
+                    assert_eq!(pixel[2] > 200, is_blue, "source time {time}: {pixel:?}");
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+
+        let flash = make(
+            "flash.mkv",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=black:s=320x180:r=25:d=1,drawgrid=width=11:height=11:thickness=2:color=white:enable='eq(n,4)'",
+                "-c:v",
+                "ffv1",
+            ],
+        );
+        let v = probe_video(&flash).unwrap();
+        let track = scan_full_fps_zones(&v, 0.0, 1.0, &cancel).unwrap();
+        let plan =
+            build_adaptive_sample_plan(&v, 0.0, None, 10.0, 8.0, 1.5, Some(&track), true).unwrap();
+        let index = plan
+            .track_indices
+            .iter()
+            .position(|i| *i == 4)
+            .expect("the only interior frame has visible text-like edges");
+        stream_missing_windows(
+            &v,
+            &plan.windows,
+            0.0,
+            1.0,
+            plan.track_fps,
+            320,
+            92,
+            &cancel,
+            |_, frames| {
+                for (local, expected) in [(index - 1, false), (index, true), (index + 1, false)] {
+                    let img = image::load_from_memory(&frames[local]).unwrap().to_rgb8();
+                    let bright = img
+                        .enumerate_pixels()
+                        .filter(|(_, y, p)| *y >= HEADER_HEIGHT && p[0] > 180)
+                        .count();
+                    assert_eq!(bright > 10_000, expected);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn shifted_container_and_delayed_video_keep_source_pixels() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1250,7 +1606,7 @@ mod tests {
             ffmpeg.is_file() && ffprobe.is_file(),
             "prepare bundled FFmpeg before native tests"
         );
-        configure_tools(ffmpeg, ffprobe).unwrap();
+        configure_tools(ffmpeg.clone(), ffprobe).unwrap();
         let dir = std::env::temp_dir().join(format!(
             "subtool-card-vision-native-{}-{}",
             std::process::id(),
@@ -1261,6 +1617,7 @@ mod tests {
         ));
         std::fs::create_dir(&dir).unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
+        check_display_pixels_and_short_flash(&dir, &ffmpeg);
         let mut pictures = Vec::new();
         let mut tracks = Vec::new();
         for (name, video_start, audio_start) in [("zero", 0.0, 0.0), ("shifted", 5.5, 5.0)] {

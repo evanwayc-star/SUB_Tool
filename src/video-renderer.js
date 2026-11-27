@@ -681,34 +681,46 @@ function loadCaptureImage(url){
 
 // The snapshot owns its canvas and image plan before any save-dialog or file
 // allocation awaits. Callers do not select a hidden playback adapter themselves.
-export async function capturePreviewFrame({nativePath,readBase64}={}){
+export async function capturePreviewFrame({nativePath,readBase64,ocrFrame}={}){
   const preview=$('previewCanvas');
   const previewVisible=preview&&getComputedStyle(preview).display!=='none'&&getComputedStyle(preview).visibility!=='hidden';
-  const composition=previewVisible?Media.previewComposition?.():null;
+  const usePreview = previewVisible && (!ocrFrame || ocrFrame.source === 'webcodecs');
+  const composition=usePreview?Media.previewComposition?.():null;
   const canvasSetting=State.projectCanvas;
   const canvasSize=projectCanvasSize();
   const width=composition?.width||canvasSize.width,height=composition?.height||canvasSize.height;
-  const hasCanvas=previewVisible&&preview.width&&preview.height&&(!Media.inGap()||composition);
-  const time=composition?.time??Media.displayTime(),fps=State.fps,dropFrame=State.dropFrame;
+  const hasCanvas=usePreview&&preview.width&&preview.height&&(!Media.inGap()||composition);
+  const useDecodedLayers = ocrFrame?.source === 'webcodecs';
+  if (useDecodedLayers && (!hasCanvas || !composition || !ocrFrame.isCurrent())) throw new Error('合成預覽畫格已變更');
+  const time=ocrFrame?.time??composition?.time??Media.displayTime(),fps=State.fps,dropFrame=State.dropFrame;
   const videoDarkness=Math.max(0,Math.min(1,Media.previewFadeDarkness()));
   const stack=visualStackPlan(Seq.clipsAt(time).filter(c=>videoTrackVisible(c.vtrack||0)),State.videoTracks);
   const images=stack.images
     .map(c=>({clip:{...c},track:{...State.videoTracks[c.vtrack||0]},src:_imageSrc(c)}));
   const topVideo=stack.videos.at(-1);
   const videoLayer=topVideo?{clip:{...topVideo},track:{...State.videoTracks[topVideo.vtrack||0]}}:null;
-  const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+  if (ocrFrame && !stack.clips.length) throw new Error('播放點沒有可辨識的畫面');
+  if (ocrFrame && !hasCanvas && stack.videos.length > 1) throw new Error('多軌合成畫面尚未就緒，請稍後重試');
+  const captureHeld = callback => ocrFrame ? callback(ocrFrame) : Media.withPresentedFrame(time, callback);
+  const canvas = useDecodedLayers ? ocrFrame.takeComposite() : document.createElement('canvas');
+  if (useDecodedLayers) {
+    if (canvas.width !== width || canvas.height !== height) throw new Error('合成預覽畫布尺寸已變更');
+  } else {
+    canvas.width = width;
+    canvas.height = height;
+  }
   const ctx=canvas.getContext('2d');
-  ctx.fillStyle='#000';ctx.fillRect(0,0,width,height);
+  if (!useDecodedLayers) { ctx.fillStyle='#000'; ctx.fillRect(0,0,width,height); }
   let presenter='black',sourceFrame=null;
-  if(!hasCanvas&&!Media.inGap()&&Media.mpvPresenting()){
-    if(!nativePath||!readBase64) throw new Error('原生播放器截圖沒有儲存目錄');
+  if(!hasCanvas&&!Media.inGap()&&(ocrFrame?ocrFrame.source==='mpv':Media.mpvPresenting())){
+    if(!ocrFrame&&(!nativePath||!readBase64)) throw new Error('原生播放器截圖沒有儲存目錄');
     // FPS-SYNC：凍結的 TC／圖片計畫必須對應同一張 native 畫格。
     // 呈現 owner 等該時間確認後才取圖，讀入像素前持續停住 presenter；
     // 換來源或較新的 seek 會撤銷取圖資格，不得保存遲到的舊圖。
-    await Media.withPresentedFrame(time,async({adapter,isCurrent})=>{
+    await captureHeld(async({adapter,isCurrent})=>{
       const check=()=>{if(!isCurrent()||State.projectCanvas!==canvasSetting) throw Object.assign(new Error('截圖已被較新的播放或畫布設定取代'),{name:'AbortError'});};
       check();
-      const result=await adapter.screenshot(nativePath);
+      const result=ocrFrame ? await adapter.captureOcrFrame() : await adapter.screenshot(nativePath);
       check();
       if(!result||result.ok===false) throw new Error('原生播放器截圖失敗');
       if(Object.hasOwn(result,'projectCanvas') &&
@@ -717,27 +729,41 @@ export async function capturePreviewFrame({nativePath,readBase64}={}){
       // Native JPEG already contains ASS, including subtitles in canvas padding.
       // Rebuilding a mixed-image stack from its cropped content would lose those
       // subtitles. The ready compositor path above captures the complete canvas.
-      if(canvasSetting && result.contentRect && stack.mixedImages)
+      if(!ocrFrame && canvasSetting && result.contentRect && stack.mixedImages)
         throw new Error('合成預覽尚未就緒，請待合成畫面顯示後再截圖');
-      const b64=typeof result.b64==='string'?result.b64:await readBase64(nativePath);
+      const b64=typeof result.b64==='string'?result.b64:await readBase64?.(nativePath);
       check();
       if(!b64) throw new Error('無法讀取原生播放器截圖');
-      const image=await loadCaptureImage('data:image/jpeg;base64,'+b64);
+      const image=await loadCaptureImage((ocrFrame?'data:image/png;base64,':'data:image/jpeg;base64,')+b64);
       check();
       sourceFrame=image;
+      // A video-only capture has no ASS in its padding. Extract the actual
+      // picture so images on a lower track remain visible around it.
+      if (ocrFrame && result.contentRect && stack.mixedImages) {
+        const { x, y, width: w, height: h } = result.contentRect;
+        if (result.canvasSize?.width !== image.naturalWidth || result.canvasSize?.height !== image.naturalHeight)
+          throw new Error('原生截圖與畫布尺寸不一致，請重新擷取');
+        sourceFrame = document.createElement('canvas');
+        sourceFrame.width = w;
+        sourceFrame.height = h;
+        sourceFrame.getContext('2d').drawImage(image, x, y, w, h, 0, 0, w, h);
+      }
       const rect=stageBox({canvasW:width,canvasH:height,projectW:image.naturalWidth||image.width,projectH:image.naturalHeight||image.height});
       ctx.drawImage(image,rect.x,rect.y,rect.w,rect.h);presenter='mpv';
     });
   }else if(hasCanvas||!Media.inGap()){
     if(hasCanvas){
-      const rect=stageBox({canvasW:preview.width,canvasH:preview.height,projectW:width,projectH:height});
-      ctx.drawImage(preview,rect.x,rect.y,rect.w,rect.h,0,0,width,height);presenter='webcodecs';
-    }else if(video&&(video.currentSrc||video.getAttribute('src'))
+      if (!useDecodedLayers) {
+        const rect=stageBox({canvasW:preview.width,canvasH:preview.height,projectW:width,projectH:height});
+        ctx.drawImage(preview,rect.x,rect.y,rect.w,rect.h,0,0,width,height);
+      }
+      presenter='webcodecs';
+    }else if((!ocrFrame||ocrFrame.source==='html5')&&video&&(video.currentSrc||video.getAttribute('src'))
       &&getComputedStyle(video).visibility!=='hidden'&&getComputedStyle(video).display!=='none'){
       // 無影片來源的圖片／純音訊時間軸保留黑底合成，不要求不存在的影片畫格。
       // displayTime 可先反映尚在解碼的 seek；等可見 HTML presenter 證明目標格，
       // 才能把實際像素與上方凍結的時間、圖片計畫配成同一張截圖。
-      await Media.withPresentedFrame(time,({isCurrent})=>{
+      await captureHeld(({isCurrent})=>{
         if(!isCurrent()) throw Object.assign(new Error('截圖已被較新的播放操作取代'),{name:'AbortError'});
         if(video.readyState<2) throw new Error('HTML 播放器尚未提供截圖畫格');
         const rect=stageBox({canvasW:width,canvasH:height,projectW:video.videoWidth||width,projectH:video.videoHeight||height});
@@ -748,6 +774,7 @@ export async function capturePreviewFrame({nativePath,readBase64}={}){
       });
     }
   }
+  if (ocrFrame && presenter === 'black' && (stack.videos.length || !images.length)) throw new Error('播放點沒有就緒的影片畫格');
   // 畫布與 ownership 在第一個 await 前一起凍結。held frame 的圖片與幾何已在
   // physical canvas 裡，不能再拿目前時間軸的新圖片重疊一次。
   if(presenter==='webcodecs'&&composition&&(composition.imagesComposited||stack.mixedImages)) return {canvas,time,fps,dropFrame,presenter};
@@ -765,7 +792,8 @@ export async function capturePreviewFrame({nativePath,readBase64}={}){
     const below=images.filter(layer=>(layer.clip.vtrack||0)<=(videoLayer.clip.vtrack||0));
     for(const layer of below) await paintImage(layer);
     const {box,frame:track,alpha}=imageLayerPlan({stageW:width,stageH:height,track:videoLayer.track,
-      clip:videoLayer.clip,natW:videoLayer.clip.natW||width,natH:videoLayer.clip.natH||height,time});
+      clip:videoLayer.clip,natW:videoLayer.clip.natW||sourceFrame?.naturalWidth||sourceFrame?.width||width,
+      natH:videoLayer.clip.natH||sourceFrame?.naturalHeight||sourceFrame?.height||height,time});
     ctx.save();ctx.beginPath();ctx.rect(track.x,track.y,track.w,track.h);ctx.clip();
     if(presenter==='webcodecs'){
       // Video-only compositor already placed its picture; preserve that rectangle.

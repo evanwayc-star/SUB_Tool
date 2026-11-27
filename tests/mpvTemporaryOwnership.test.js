@@ -308,6 +308,7 @@ describe('mpv 暫存檔所有權', () => {
       audioNormalizationJobs:new Map(),mediaProbe:null,ffmpegExecution:owner(),deliveryCapabilities:owner(),
       clipAudioCache:{waitForIdle:async()=>{}},clipFrameCache:{waitForIdle:async()=>{}},
       speechCompressionRuntime:owner(),speechAudioReader:owner(), screenTextRuntime: owner(),mediaIngestCoordinator:owner(),mediaWaveformCoordinator:owner(),vocalWaveformRuntime:owner(),
+      frameTextRuntime:{close:async()=>{}},
       nativeAudioMeter:{stop:vi.fn().mockResolvedValue()},
       QueueManager:{prepareForShutdown:async()=>{},cancelShutdown:async()=>{}},
       screenshotOutput:{close:async()=>{},resume:async()=>{}},directoryOutput:{close:async()=>{},resume:async()=>{}},fileCommitCoordinator:{close:async()=>{},resume:async()=>{}},mpvHost:host,

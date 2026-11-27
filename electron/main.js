@@ -17,7 +17,7 @@ const fsp = require('fs/promises');
 const os = require('os');
 const url = require('url');
 const net = require('net');
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const crypto = require('crypto');
 const QueueStore = require('./queue-store');
 const QueueHistory = QueueStore.QueueHistory;
@@ -49,7 +49,9 @@ const {
 } = require('./speech-audio-compressor');
 const { createSpeechAudioReader, validateSpeechAudioRequest } = require('./speech-audio-reader');
 const { createScreenTextRuntime } = require('./screen-text-runtime');
+const { createFrameTextRuntime } = require('./frame-text-runtime');
 const { createScreenTextSettings } = require('./screen-text-settings');
+const { createSpeechCloud } = require('./speech-cloud');
 const { createAudioNormalizationRuntime } = require('./audio-normalization-runtime');
 const { createNativeAudioMeter } = require('./native-audio-meter');
 const { motherSourceFingerprint } = require('./mother-source-evidence');
@@ -69,7 +71,6 @@ const {
   detectNativeTool,
   mpvEmbeddingSupported,
   previewVideoEncoderArgs,
-  videoEncoderCandidates,
 } = require('./ffmpeg-execution-engine');
 
 // 自訂 scheme 的 privileges 必須在 app ready 前註冊；實際 handler 於 ready 後安裝。
@@ -150,18 +151,16 @@ function safeWinSend(win, ch, ...args) {
 }
 
 /* ---- 偵測平台可用的硬體視訊編碼器（VideoToolbox／NVENC／QSV／AMF），否則退回 libx264 ---- */
-function detectVideoEncoder() {
-  if (!FFMPEG) return 'libx264';
-  const test = (name) => {
-    try {
-      const r = spawnSync(FFMPEG, ['-hide_banner', '-loglevel', 'error',
-        '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=5:duration=0.2',
-        '-c:v', name, '-f', 'null', '-'], { windowsHide: true, timeout: 8000 });
-      return r.status === 0;
-    } catch (e) { return false; }
-  };
-  for (const enc of videoEncoderCandidates(process.platform)) { if (test(enc)) return enc; }
-  return 'libx264';
+let encoderDetection = null;
+function ensureVideoEncoder() {
+  if (!encoderDetection) {
+    encoderDetection = deliveryCapabilities.selectVideoEncoder().then(name => (VENC = name), () => {
+      // A cancelled shutdown can resume the capability owner and probe again.
+      encoderDetection = null;
+      return 'libx264';
+    });
+  }
+  return encoderDetection;
 }
 /* 依選定編碼器回傳「轉檔預覽影片」用的視訊參數（品質導向、yuv420p 由呼叫端的 -vf 負責） */
 
@@ -327,7 +326,6 @@ if (!gotTheLock) {
     FFMPEG = FFMPEG_DETECTION.path;
     FFPROBE = FFPROBE_DETECTION.path;
     mediaProbe = createMediaProbe({ executable: FFPROBE });
-    VENC = detectVideoEncoder();
     CACHE = path.join(app.getPath('userData'), 'mediacache');
     fileAuthority.grantInternalDirectory(CACHE);
     WAVEFORM_RECOVERY = path.join(app.getPath('userData'), 'waveform-recovery');
@@ -354,6 +352,7 @@ if (!gotTheLock) {
       // 無法確認舊工作身份時 export lease 會保留並 fail closed；不可憑 owner 內的舊 PID 直接 taskkill。
       console.error('[Export watchdog] 無法復原上次中斷的匯出：', e);
     }
+    void ensureVideoEncoder();
     try { QueueManager.restoreJobs(); } catch (e) { console.error('[Queue] 無法恢復匯出佇列：', e); }
     createWindow();
     showExportRecoveryWarnings(recoveryWarnings);
@@ -377,6 +376,7 @@ app.on('before-quit', (event) => {
         speechCompressionRuntime.cancelAllAndWait(),
         speechAudioReader.cancelAllAndWait(),
         screenTextRuntime.cancelAllAndWait(),
+        frameTextRuntime.close(),
         vocalWaveformRuntime.cancelAllAndWait(),
         nativeAudioMeter.stop(),
         mediaIngestCoordinator.cancelAllAndWait(),
@@ -502,9 +502,9 @@ ipcMain.handle('ffmpeg:stopExport', (event, requestedJobId) => {
   const latestJobId = activeJobIds[activeJobIds.length - 1];
   return latestJobId ? QueueManager.stopJob(latestJobId) : false;
 });
-ipcMain.handle('app:status', () => ({
+ipcMain.handle('app:status', async (_event, waitForEncoder) => ({
   isDesktop: true, ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE,
-  ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: VENC,
+  ffmpegPath: FFMPEG, ffprobePath: FFPROBE, venc: waitForEncoder === true ? await ensureVideoEncoder() : VENC,
   platform: process.platform, arch: process.arch,
   ffmpegDetection: FFMPEG_DETECTION, ffprobeDetection: FFPROBE_DETECTION,
 }));
@@ -821,6 +821,7 @@ function ensureExportQueueDir() {
    交付由獨立 watchdog 持有，可重建的 proxy／ingest 則由 Electron main 直接持有。 */
 const ffmpegExecution = createFFmpegExecution({
   getFFmpegPath: () => FFMPEG,
+  getFFprobePath: () => FFPROBE,
   getUserDataDir: () => app.getPath('userData'),
   getQueueDir: () => EXPORT_QUEUE_DIR,
   getSharedOutputLock: () => SHARED_OUTPUT_LOCK,
@@ -835,9 +836,12 @@ const ffmpegExecution = createFFmpegExecution({
   },
 });
 const runFF = (args, options) => ffmpegExecution.execute(args, { ...options, executionKind: 'direct' });
-const deliveryEncoder = { name: () => VENC, hwdecArgs, bitrateArgs: vencArgsBitrate, proresArgs };
+const deliveryEncoder = { ready: ensureVideoEncoder, name: () => VENC, hwdecArgs, bitrateArgs: vencArgsBitrate, proresArgs };
 const deliveryCapabilities = createDeliveryCapabilities({
   getFFmpegPath: () => FFMPEG,
+  checkSpace: spec => require('./delivery-space').inspectDeliverySpace(spec, EXPORT_QUEUE_DIR, {
+    pending: (QueueManager?.jobs() || []).filter(job => job.status === 'queued' || job.status === 'running').map(job => job.payload),
+  }),
   encoder: deliveryEncoder,
   getDiscPaths: () => require('./disc-authoring').nativeDiscPaths(app.isPackaged
     ? path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'disc')
@@ -911,7 +915,9 @@ const mediaIntakeRuntime = createMediaIntakeRuntime({
   fileAuthority,
   ffmpegExecution,
   getEncoder: () => VENC,
+  readyEncoder: ensureVideoEncoder,
   describeVideo: async src => (await mediaProbe.describe(src,{reusePreview:true})).video,
+  describeProxyPart: file => mediaProbe.describe(file),
   describeAudio: async src => (await mediaProbe.describe(src,{reusePreview:true})).audio,
   createTempPath: tmpPath,
   sendProgress: (target, payload) => safeSend(target, 'task-progress', payload),
@@ -930,6 +936,11 @@ const speechAudioCompressor = createSpeechAudioCompressor({
 });
 const speechCompressionRuntime = createSpeechCompressionRuntime({ compressor: speechAudioCompressor });
 const screenTextSettings = createScreenTextSettings({ configDir: getConfigDir, safeStorage });
+const frameTextRuntime = createFrameTextRuntime({
+  resourcesDir: app.isPackaged ? path.join(process.resourcesPath, 'frame-ocr') : undefined,
+});
+const speechCloud = createSpeechCloud({configDir:getConfigDir, safeStorage,
+  request:(url, init) => session.defaultSession.fetch(url, { ...init, credentials:'omit' })});
 const screenTextRuntime = createScreenTextRuntime({
   executable: () => path.join(app.isPackaged ? path.join(process.resourcesPath, 'card-vision')
     : path.join(__dirname, 'card-vision', 'bin', `${process.platform}-${process.arch}`),
@@ -1469,7 +1480,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   }
 
   // 證據在第一個能力探測等待前凍結；失敗不留下半份 queue artifact。
-  await deliveryCapabilities.assertReady(authorizationPayload, { signal: preparationSignal });
+  const spaceNote = await deliveryCapabilities.assertReady(authorizationPayload, { signal: preparationSignal });
   preparationSignal?.throwIfAborted();
   if (e.sender.isDestroyed?.()) throw new Error('交付視窗已關閉，請重新送出');
   try {
@@ -1493,7 +1504,7 @@ ipcMain.handle('ffmpeg:exportVideo', async (e, payload) => {
   
   // 佇列顯示與 runFF 必須共用同一個實際交付時長：音訊 plan 的尾端若較長，
   // ffmpeg 會以它延長成品，不能讓等待中的列仍顯示較短的前端宣告值。
-  const savedPayload = { ...payload, assText: null, outPath };
+  const savedPayload = { ...payload, assText: null, outPath, spaceNote: typeof spaceNote === 'string' ? spaceNote : '' };
   const job = { id: jobId, status: JOB_STATUS.QUEUED, createdAt: Date.now(), payload: savedPayload, assRef, senderId: e.sender.id };
   try {
     preparationSignal?.throwIfAborted();
@@ -1578,7 +1589,8 @@ ipcMain.handle('audio:reverse-clip', (e, request) => {
 ipcMain.handle('ffmpeg:proxy', async (e, { path: src, duration }) => {
   requireReadablePath('ffmpeg:proxy', src);
   return mediaIntakeRuntime.produceTemporaryFile(tmpPath('mp4'), async (out, owner) => {
-    const video = (await mediaProbe.describe(src)).video;
+    const [description] = await Promise.all([mediaProbe.describe(src), VENC || ensureVideoEncoder()]);
+    const video = description.video;
     const args = buildIngestArgs({ src, needsProxy: true, proxyPath: out, encoder: VENC, isStream: false, video });
     // faststart reopens the output by name and corrupts a seekable fd: output;
     // this legacy IPC returns only after completion, unlike streamIngest.
@@ -1736,10 +1748,31 @@ ipcMain.handle('speech:audioRead', (e, request) => {
 ipcMain.handle('speech:audioCancel', (e, { requestId } = {}) =>
   speechAudioReader.cancel(e.sender, requestId));
 
+function speechCloudSender(event) {
+  if (!isMainWindowSender(event) || event.senderFrame !== event.sender.mainFrame || _isAppQuitting)
+    throw new Error('無法在此視窗使用語音雲端服務');
+  return event.sender;
+}
+ipcMain.handle('speech:keys-status', event => {
+  speechCloudSender(event);
+  return speechCloud.status();
+});
+ipcMain.handle('speech:keys-save', (event, keys) => {
+  speechCloudSender(event);
+  return speechCloud.save(keys);
+});
+ipcMain.handle('speech:cloud-request', (event, input) => speechCloud.send(speechCloudSender(event), input));
+ipcMain.handle('speech:cloud-cancel', (event, id) => speechCloud.cancel(speechCloudSender(event), id));
 ipcMain.handle('ocr:settings-get', event => {
   if (!isMainWindowSender(event)) throw new Error('無法在此視窗讀取畫面文字辨識設定');
   return screenTextSettings.get();
 });
+ipcMain.handle('ocr:frame', (event, request) => {
+  if (!isMainWindowSender(event) || _isAppQuitting) throw new Error('無法在此視窗開始單格辨識');
+  return frameTextRuntime.recognize(event.sender, request);
+});
+ipcMain.handle('ocr:frame-cancel', (event, requestId) =>
+  isMainWindowSender(event) && frameTextRuntime.cancel(event.sender, requestId));
 ipcMain.handle('ocr:settings-save', (event, settings) => {
   if (!isMainWindowSender(event) || _isAppQuitting) throw new Error('無法在此視窗儲存畫面文字辨識設定');
   return screenTextSettings.save(settings);
@@ -1748,6 +1781,11 @@ ipcMain.handle('ocr:recognize', (event, request) => {
   if (!isMainWindowSender(event) || _isAppQuitting) throw new Error('無法在此視窗開始畫面文字辨識');
   requireReadablePath('ocr:recognize', request?.path);
   return screenTextRuntime.recognize(event.sender, request);
+});
+ipcMain.handle('ocr:plan', (event, request) => {
+  if (!isMainWindowSender(event) || _isAppQuitting) throw new Error('無法在此視窗預覽辨識範圍');
+  requireReadablePath('ocr:plan', request?.path);
+  return screenTextRuntime.recognize(event.sender, request, true);
 });
 ipcMain.handle('ocr:cancel', (event, requestId, keepPartial) =>
   isMainWindowSender(event) && screenTextRuntime.cancel(event.sender, requestId, keepPartial === true));
@@ -2010,13 +2048,10 @@ ipcMain.handle('ffmpeg:ingest', async (e, request) => {
   const owner = mediaIntakeOwner(e, request);
   const { path: src, duration, needsProxy, audio, queue } = request;
   requireReadablePath('ffmpeg:ingest', src);
-  const run = lease => mediaIntakeRuntime.ingest(
-    { src, duration, needsProxy, audio },
-    mediaIntakeSession(e, lease, owner),
-  );
+  const run = lease => mediaIntakeRuntime.ingest({ src, duration, needsProxy, audio, failedProxy: request.failedProxy }, mediaIntakeSession(e, lease, owner));
   /* queue=false 是同視窗新的主素材，會淘汰其舊主素材及尚未開始的背景工作；queue=true
      則排在連 streamIngest 的完整 completion 後面，絕不與它同時寫 cache。 */
-  return queue ? mediaIngestCoordinator.enqueue(run, owner) : mediaIngestCoordinator.replace(run, owner);
+  return queue ? mediaIngestCoordinator.enqueue(run, owner, request.interactive === true) : mediaIngestCoordinator.replace(run, owner);
 });
 
 ipcMain.handle('ffmpeg:cancelIntake', async (e, request) => {
@@ -2081,10 +2116,8 @@ ipcMain.handle('ffmpeg:streamIngest', async (e, request) => {
   const owner = mediaIntakeOwner(e, request);
   const { path: src, duration, audio } = request;
   requireReadablePath('ffmpeg:streamIngest', src);
-  return mediaIngestCoordinator.replace(lease => mediaIntakeRuntime.stream(
-    { src, duration, audio },
-    mediaIntakeSession(e, lease, owner),
-  ), owner);
+  return mediaIngestCoordinator.replace(lease =>
+    mediaIntakeRuntime.stream({ src, duration, audio, failedProxy: request.failedProxy }, mediaIntakeSession(e, lease, owner)), owner);
 });
 ipcMain.handle('ffmpeg:releaseStream', (e, streamLeaseId) =>
   mediaIntakeRuntime.releaseStream(streamLeaseId, { sender: e.sender }));
@@ -2256,6 +2289,11 @@ ipcMain.handle('mpv:cancelPresent', () => mpvHost.cancelPresent());
 ipcMain.handle('mpv:screenshot', (event, filePath) => {
   if (!fileAuthority.canWriteScreenshot(filePath)) throw new Error('未授權的截圖輸出路徑');
   return screenshotOutput.captureNative(mpvHost);
+});
+ipcMain.handle('mpv:captureOcrFrame', event => {
+  if (!isMainWindowSender(event) || event.senderFrame !== event.sender.mainFrame || _isAppQuitting)
+    throw new Error('無法在此視窗擷取播放畫格');
+  return screenshotOutput.captureNative(mpvHost, { videoOnly: true });
 });
 ipcMain.handle('mpv:play', (_event, options) => mpvHost.play(options));
 ipcMain.handle('mpv:pause', (_event, options) => mpvHost.pause(options));

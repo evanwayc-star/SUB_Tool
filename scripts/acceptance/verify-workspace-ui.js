@@ -186,7 +186,7 @@ async function inspect(client, dir) {
   await client.send('Emulation.setFocusEmulationEnabled', { enabled: true });
   const press = async (key, code, windowsVirtualKeyCode, modifiers = 0) => {
     const params = { key, code, windowsVirtualKeyCode, modifiers };
-    await client.send('Input.dispatchKeyEvent', { ...params, type: 'keyDown', ...(key === ' ' ? { text: ' ' } : {}) });
+    await client.send('Input.dispatchKeyEvent', { ...params, type: 'keyDown', ...([' ','Enter'].includes(key) ? { text: key==='Enter'?'\r':' ' } : {}) });
     await client.send('Input.dispatchKeyEvent', { ...params, type: 'keyUp' });
   };
   const clickToolbar = async action => {
@@ -199,8 +199,8 @@ async function inspect(client, dir) {
   };
   await client.evaluate(`document.getElementById('fpsSel').focus()`);
   await press('Tab', 'Tab', 9);
-  const tabFocus = await client.evaluate(`Boolean(document.activeElement?.closest('.transport'))`);
-  assert(tabFocus, 'Tab 必須略過最上方操作按鈕，進入播放控制');
+  const tabFocus = await client.evaluate(`({inToolbar:!!document.activeElement?.closest('.menubar'),control:document.activeElement?.outerHTML.slice(0,160)})`);
+  assert(!tabFocus.inToolbar, '一般 Tab 保留原本略過頂欄操作按鈕的順序：'+tabFocus.control);
   await clickToolbar('settings');
   const keyboard = await client.evaluate(`({ opened: !!document.getElementById('settingsModal'), focusInside: !!document.activeElement.closest('#settingsModal'), role: document.getElementById('settingsModal')?.querySelector('[role="dialog"]')?.getAttribute('aria-modal') })`);
   assert(keyboard.opened && keyboard.focusInside && keyboard.role === 'true', '滑鼠開啟設定後，焦點須進入對話框');
@@ -217,15 +217,27 @@ async function inspect(client, dir) {
   })()`);
   assert(keyboard.toolbarFocusReleased, '關窗及嘗試回復焦點後，工具列須保持無選中外框');
   await client.evaluate('window.SUB.History.reset()');
-  await clickToolbar('project-settings');
-  const applyRect = await client.evaluate(`(() => {
-    const preset = document.getElementById('projectCanvasPreset');
-    preset.value = '1080x1920';
-    preset.dispatchEvent(new Event('change', { bubbles: true }));
-    const { left, top, width, height } = document.getElementById('projectCanvasApply').getBoundingClientRect();
-    return { left, top, width, height };
-  })()`);
-  await dispatchClick(client, applyRect);
+  await client.evaluate("document.querySelector('.sub-row.primary').focus()");
+  const originalId=await client.evaluate('document.activeElement.dataset.id');
+  await press('F10','F10',121);
+  for(let i=0;i<32;i++){
+    if(await client.evaluate("document.activeElement.dataset.act==='project-settings'"))break;
+    await press('ArrowRight','ArrowRight',39);
+  }
+  assert(await client.evaluate("document.activeElement.dataset.act==='project-settings'"),'F10 與方向鍵可進入畫布設定');
+  await press('Enter','Enter',13);
+  await waitFor(()=>client.evaluate("document.activeElement.id==='projectCanvasMode'"),'畫布設定取得鍵盤焦點');
+  await press('Tab','Tab',9);
+  assert.equal(await client.evaluate('document.activeElement.id'),'projectCanvasPreset');
+  await press('End','End',35);
+  await press('ArrowUp','ArrowUp',38);
+  assert.equal(await client.evaluate('document.activeElement.value'),'1080x1920');
+  for(let i=0;i<6;i++){
+    if(await client.evaluate("document.activeElement.id==='projectCanvasApply'"))break;
+    await press('Tab','Tab',9);
+  }
+  assert.equal(await client.evaluate('document.activeElement.id'),'projectCanvasApply');
+  await press('Enter','Enter',13);
   const canvasState = () => client.evaluate(`(() => {
     const { width, height } = document.getElementById('videoSub').getBoundingClientRect();
     return { projectCanvas: window.SUB.State.projectCanvas, width, height,
@@ -233,6 +245,9 @@ async function inspect(client, dir) {
   })()`);
   await waitFor(async () => (await canvasState()).projectCanvas?.height === 1920, '套用直式專案畫布');
   const portrait = await canvasState();
+  await waitFor(()=>client.evaluate("document.activeElement.dataset.act==='project-settings'"),'關閉對話框還原工具列焦點');
+  await press('Escape','Escape',27);
+  assert.equal(await client.evaluate('document.activeElement.dataset.id'),originalId,'Esc 回到原字幕列');
   assert.deepEqual(portrait.projectCanvas, { width: 1080, height: 1920 });
   assert(!portrait.modalOpen && Math.abs(portrait.width / portrait.height - 9 / 16) < 0.01, '預覽字幕層須貼齊直式畫布');
   await press('z', 'KeyZ', 90, 2);

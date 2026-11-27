@@ -30,6 +30,39 @@ function fixture() {
 }
 
 describe('畫面文字辨識 Rust/VLM 原生工作', () => {
+  it('離線預覽不傳金鑰，回傳實際影格、尚待送出的張次及最多複檢數', async () => {
+    const { runtime, child, message } = fixture();
+    const pending = runtime.recognize(sender(), request(), true);
+    await Promise.resolve();
+    expect(JSON.parse(child.stdin.read().toString())).toMatchObject({operation:'plan', apiKey:''});
+    const metrics = {windows:6, cachedWindows:2, pendingWindows:4, pendingImageAppearances:80, reviewMaxWindows:2};
+    message({type:'plan', metrics, previewJpeg:'/9j/AA==', previewTime:2.5});
+    child.emit('close', 0);
+    await expect(pending).resolves.toMatchObject({metrics, previewTime:2.5});
+  });
+
+  it('只用快取不提供金鑰，可讀回實際零費用', async () => {
+    const { runtime, child, message } = fixture();
+    const pending = runtime.recognize(sender(), {...request(), maxNewRequests:0});
+    await Promise.resolve();
+    expect(JSON.parse(child.stdin.read().toString())).toMatchObject({maxNewRequests:0, apiKey:''});
+    message({type:'result', cues:[], processedEnd:6, metrics:{newRequests:0, estimatedCostUsd:0}});
+    child.emit('close', 0);
+    await expect(pending).resolves.toMatchObject({metrics:{newRequests:0, estimatedCostUsd:0}});
+  });
+
+  it('雲端錯誤仍帶回前段字幕與最後一次請求數，避免下個素材少扣額度', async () => {
+    const { runtime, child, message } = fixture();
+    const pending = runtime.recognize(sender(), request());
+    await Promise.resolve();
+    message({type:'progress', progress:.2, metrics:{windows:3, newRequests:1}});
+    message({type:'checkpoint', cues, processedEnd:4});
+    message({type:'error', message:'HTTP 429', metrics:{newRequests:2}});
+    child.emit('close', 1);
+    await expect(pending).resolves.toMatchObject({cancelled:true, cues, processedEnd:4,
+      error:'HTTP 429', metrics:{windows:3, newRequests:2}});
+  });
+
   it('跨程序缺省請求使用旗艦1920及每秒10張，私有遷移記號不傳入原生程式', async () => {
     const { runtime, child, message } = fixture();
     const pending = runtime.recognize(sender(), { path:request().path, start:2, end:6, requestId:'defaults', qualityDefaultsVersion:1 });
@@ -143,13 +176,14 @@ describe('畫面文字辨識 Rust/VLM 原生工作', () => {
     }
   });
 
-  it('保留期間換頁會捨棄資料，清除 sender 事件訂閱', async () => {
+  it.each([[{}, 'about:blank', false, true], [{isMainFrame:true, isSameDocument:false}]])(
+    '保留期間換頁會捨棄資料，清除 sender 事件訂閱', async (...navigation) => {
     const { runtime, child, message } = fixture(), owner = sender();
     const pending = runtime.recognize(owner, request());
     await Promise.resolve();
     message({ type: 'checkpoint', cues, processedEnd: 4 });
     runtime.cancel(owner, 'screen-1', true);
-    owner.emit('did-start-navigation', {}, 'about:blank', false, true);
+    owner.emit('did-start-navigation', ...navigation);
     child.emit('close', null);
     await expect(pending).rejects.toThrow('取消');
     expect(owner.listenerCount('did-start-navigation')).toBe(0);
@@ -212,11 +246,12 @@ describe('畫面文字辨識 Rust/VLM 原生工作', () => {
   });
 
   it('樹狀終止失敗不放行下一工作，也不把退出清理宣告成功', async () => {
-    const { runtime, child, terminateChild } = fixture(), owner = sender();
+    const { runtime, child, message, terminateChild } = fixture(), owner = sender();
     terminateChild.mockRejectedValue(new Error('無法確認影音子程序已停止'));
     const pending = runtime.recognize(owner, request());
     await Promise.resolve();
     runtime.cancel(owner, 'screen-1', true);
+    message({ type:'checkpoint', requested:true, cues, processedEnd:4 });
     child.emit('close', null);
     await expect(pending).rejects.toThrow('無法確認');
     await expect(runtime.recognize(owner, request())).rejects.toThrow('進行中');

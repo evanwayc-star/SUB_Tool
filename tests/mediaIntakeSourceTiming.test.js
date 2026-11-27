@@ -413,7 +413,9 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
     try {
       const descriptor = await probe.describe(source);
       expect(descriptor.duration).toBeCloseTo(3, codec === 'aac' ? 1 : 2);
-      const request = { src: source, duration: descriptor.duration, needsProxy: true, audio: descriptor.audio };
+      // A restored estimate must not shorten the Proxy's actual video.
+      const duration = mode === 'stream' && origin === 5 ? 1 : descriptor.duration;
+      const request = { src: source, duration, needsProxy: true, audio: descriptor.audio };
       const work = await runtime[mode](request); await work.completion;
       const result = work.response || work;
       const waveform = pcm(result.wave), channel = pcm(result.channels[0].file);
@@ -429,12 +431,90 @@ describe.skipIf(!fs.existsSync(FFMPEG) || !fs.existsSync(FFPROBE))('母素材來
       expect(waveform.length / 4 / 4000).toBeCloseTo(3, codec === 'aac' ? 1 : 2);
       const proxy = await probe.describe(result.proxy);
       expect(proxy.duration).toBeCloseTo(3, 2);
+      if (mode === 'stream') {
+        expect(result.previewMix).toBe(true);
+        const preview = pcm(result.proxy);
+        if (audioDelay) expect(energy(preview, 0.001, 0.012)).toBeLessThan(.0002);
+        else expect(energy(preview, 0.001, 0.012, 440)).toBeGreaterThan(.075);
+        expect(energy(preview, 1.1, 1.8, 440)).toBeGreaterThan(.08);
+      }
       const reopened = createMediaIntakeRuntime(options);
       try { expect(await reopened.ingest(request)).toEqual({ cached: true,
         proxy: result.proxy, wave: result.wave, channels: result.channels }); }
       finally { await reopened.close(); }
       const oldKey = require('../electron/mother-source-evidence.js').motherSourceFingerprintSync(source, { namespace: 'source-v2', digestLength: 16 });
       expect(cacheKeyFor(source)).not.toBe(oldKey);
+    } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
+  }, 30000);
+
+  it('完整聲道完成前，由成長中的 HTTP Proxy 讀到對齊的畫格與兩軌脈衝，完成後仍可 seek', async () => {
+    const dir = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), 'subtool-intake-source-clock-'));
+    roots.push(dir);
+    const source = path.join(dir, 'pulse.mkv'), cache = path.join(dir, 'cache');
+    const pulse = "between(mod(t,1),0.2,0.52)";
+    run(['-y', '-itsoffset', '5', '-f', 'lavfi', '-i',
+      "testsrc2=s=640x360:r=25:d=6,drawbox=x=300:y=160:w=40:h=40:c=black:t=fill,drawbox=x=300:y=160:w=40:h=40:c=white:t=fill:enable='" + pulse + "'",
+      ...[440, 660].flatMap(hz => ['-itsoffset', '5', '-f', 'lavfi', '-i',
+        `aevalsrc='0.3*sin(2*PI*${hz}*t)*${pulse}':s=48000:d=6`]),
+      '-map', '0:v', '-map', '1:a', '-map', '2:a', '-c:v', 'libx264', '-c:a', 'pcm_s16le', source]);
+    const authority = new FileAuthority({ internalDirectories: [cache] }); authority.grantTrustedFile(source, { read: true });
+    const execution = createFFmpegExecution({ getFFmpegPath: () => FFMPEG, getUserDataDir: () => dir });
+    const probe = createMediaProbe({ executable: FFPROBE });
+    const runtime = createMediaIntakeRuntime({ fileAuthority: authority, cacheRoot: cache, tempRoot: dir, allowSidecarCache: false,
+      ffmpegExecution: { execute(args, options) {
+        const index = args.indexOf('-i');
+        return execution.execute([...args.slice(0, index), '-readrate', '1', ...args.slice(index)], options);
+      } } });
+    function pixel(file, time) {
+      return run(['-ss', String(time), '-i', file, '-vf', 'crop=2:2:320:180,format=gray',
+        '-frames:v', '1', '-f', 'rawvideo', 'pipe:1'])[0];
+    }
+    try {
+      const info = await probe.describe(source);
+      const work = await runtime.stream({ src: source, needsProxy: true, duration: info.duration, audio: info.audio });
+      const result = work.response;
+      expect(result.previewMix).toBe(true);
+      let completed = false;
+      work.completion.then(() => { completed = true; });
+      const response = await fetch(result.streamUrl, { headers: { Range: 'bytes=0-' } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('Content-Length')).toBeNull();
+      const reader = response.body.getReader();
+      let chunks = Buffer.alloc(0), offset = 0, fragments = 0;
+      try {
+        while (fragments < 22) {
+          const part = await reader.read();
+          expect(part.done).toBe(false);
+          chunks = Buffer.concat([chunks, part.value]);
+          while (offset + 8 <= chunks.length) {
+            const bytes = chunks.readUInt32BE(offset);
+            if (bytes < 8 || offset + bytes > chunks.length) break;
+            if (chunks.toString('ascii', offset + 4, offset + 8) === 'mdat') fragments++;
+            offset += bytes;
+          }
+        }
+        expect(completed).toBe(false);
+      } finally { await reader.cancel(); }
+      const prefix = path.join(dir, 'first-fragments.mp4');
+      fs.writeFileSync(prefix, chunks.subarray(0, offset));
+      const preview = pcm(prefix);
+      expect(pixel(prefix, .08)).toBeLessThan(15);
+      expect(pixel(prefix, .32)).toBeGreaterThan(240);
+      expect(energy(preview, .02, .15)).toBeLessThan(.001);
+      for (const hz of [440, 660]) expect(energy(preview, .25, .45, hz)).toBeCloseTo(.15, 2);
+      expect(energy(preview, .58, .74)).toBeLessThan(.001);
+      await work.completion;
+      expect((await probe.describe(result.proxy)).duration).toBeCloseTo(6, 2);
+      expect(pixel(result.proxy, 2.32)).toBeGreaterThan(240);
+      expect(pixel(result.proxy, 2.64)).toBeLessThan(15);
+      const sought = run(['-ss', '2.3', '-i', result.proxy, '-t', '0.45', '-map', '0:a', '-ar', '4000', '-ac', '1', '-f', 'f32le', 'pipe:1']);
+      for (const hz of [440, 660]) expect(energy(sought, .02, .15, hz)).toBeCloseTo(.15, 2);
+      expect(energy(sought, .30, .42)).toBeLessThan(.001);
+      for (const [i, hz] of [440, 660].entries()) {
+        const mono = pcm(result.channels[i].file);
+        expect(energy(mono, 2.25, 2.45, hz)).toBeCloseTo(.3, 2);
+        expect(energy(mono, 2.25, 2.45, i ? 440 : 660)).toBeLessThan(.002);
+      }
     } finally { await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait(); }
   }, 30000);
 

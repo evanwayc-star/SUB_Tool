@@ -129,7 +129,8 @@ describe('字幕樣式面板選取守衛', () => {
     expect(panel.classList.contains('selection-disabled')).toBe(false);
     expect(panel.getAttribute('aria-disabled')).toBe('false');
     expect(StylePanelController.styleTarget()?.cue?.id).toBe('cue-1');
-    expect(document.getElementById('tsTitle').textContent).toBe('第 1 句樣式');
+    const sizeGroup = document.getElementById('tsSize').closest('.ts-group');
+    expect(sizeGroup.querySelector('#tsTitle')?.textContent).toBe('第 1 句樣式');
   });
 
   it('選取鎖定軌字幕時樣式面板唯讀且輸入事件不能修改樣式', () => {

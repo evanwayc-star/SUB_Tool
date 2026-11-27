@@ -70,7 +70,7 @@ function createScreenshotOutput({ fileAuthority, tempDir, fsModule = fs, coordin
     nativeCaptures.delete(owner.directory);
   }
 
-  function captureNative(host) {
+  function captureNative(host, { videoOnly = false } = {}) {
     if (closed) return Promise.resolve(null);
     return track(async () => {
       if (typeof tempDir !== 'string' || !path.isAbsolute(tempDir) || typeof host?.screenshot !== 'function') {
@@ -78,7 +78,7 @@ function createScreenshotOutput({ fileAuthority, tempDir, fsModule = fs, coordin
       }
       captureOutputAuthority(path.join(tempDir, '.native-shot-check'), nativeRoot);
       const directory = (fsModule.mkdtempSync || fs.mkdtempSync)(path.join(tempDir, 'native-shot-'));
-      const file = path.join(directory, 'frame.jpg');
+      const file = path.join(directory, videoOnly ? 'frame.png' : 'frame.jpg');
       const owner = { directory, directoryIdentity: null, file, authority: null, fileIdentity: null };
       nativeCaptures.set(directory, owner);
       let handle, result, failure;
@@ -96,7 +96,7 @@ function createScreenshotOutput({ fileAuthority, tempDir, fsModule = fs, coordin
         owner.fileIdentity = await handle.stat({ bigint: true });
         await handle.close(); handle = null;
         assertOutputAuthority(authority, file);
-        const screenshot = await host.screenshot(file);
+        const screenshot = await host.screenshot(file, { videoOnly });
         if (!screenshot || screenshot.ok === false) throw new Error('原生播放器截圖失敗');
         assertOutputAuthority(authority, file);
         handle = await fsModule.promises.open(file, 'r');

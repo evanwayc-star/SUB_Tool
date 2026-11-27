@@ -57,7 +57,9 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 
 畫面文字辨識的供應商、模型及取樣設定另存 `getConfigDir()/screen-text-settings.json`；其中 `encryptedKeys` 只保存 Electron `safeStorage` 密文，renderer 讀回金鑰就緒狀態。沒有已存金鑰時，才使用對應的 `OPENAI_API_KEY` 或 `GEMINI_API_KEY`／`GOOGLE_API_KEY` 環境變數。明文只隨本次工作經 stdin 傳入核心，不放在程序 argv、專案或快取。辨識快取位於同設定目錄的 `card-vision-cache`。
 
-`qualityDefaultsVersion` 僅存於上述私有設定，標記已完成一次品質預設遷移，不傳至 renderer 或原生辨識請求。遷移與儲存沿用設定檔交易，保留加密金鑰、來源語言與自訂模型；完成遷移後保留使用者的新選擇。[目前品質預設](使用說明.md#辨識畫面文字)
+語音金鑰分開存於 `getConfigDir()/speech-credentials.json`。舊版 `localStorage` 金鑰會在開啟辨識視窗時遷移，確認系統加密副本可讀後才移除舊值。renderer 只讀到各供應商的就緒狀態。
+
+`qualityDefaultsVersion` 只存在畫面辨識私有設定，用以遷移內建模型。設定檔交易會保留密文、語言、自訂模型與已選取的取樣品質。[目前品質預設](使用說明.md#辨識畫面文字)
 
 ## 3. Preload／IPC 介面
 
@@ -73,8 +75,9 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 |---|---|
 | 來源與載入 | `probe(path)`、`mediaSourceKey(path)`。`ingest(opts)`／`streamIngest(opts)` 傳來源、duration、音訊配置、sessionId、requestId。`prepareSourceWaveform(opts)` 以 `sourceWaveformContinuous` 判斷連續能力。`releaseStream` 只釋放該 sender 的 reader。 |
 | 聲道與效果 | `audioSourceFingerprint` 對應 `audio:source-fingerprint`，`vocalWaveFingerprint` 對應 `audio:vocal-wave-fingerprint`。`normalizeAudio`／`analyzeAudioLoudness` 各帶 requestId。`audioEffectPeaks` 讀顯示資料，`releaseAudioEffect` 歸還 lease。 |
-| 辨識 | `speechAudioRead` 讀授權母素材，按 stream／channel 與來源時間取得 16 kHz mono Float32，每段最多 600 秒。`speechAudioCancel` 限同 sender／request。`compressSpeechAudio` 接 44–20,000,000 bytes WAV 與壓縮 requestId，取消涵蓋 MP3 讀取及清理。 |
-| 畫面文字 | `getScreenTextSettings`／`saveScreenTextSettings` 讀寫私有辨識設定。`recognizeScreenText` 傳授權母素材的來源範圍與非機密設定；main 選擇自有 Rust 引擎、FFmpeg／ffprobe、金鑰與快取路徑。`cancelScreenText` 及 `onScreenTextProgress` 以 sender／requestId 配對，取消必須等待本次原生程序關閉。 |
+| 辨識 | `speechAudioRead` 可在一個授權母檔的同區間混合指定音流與聲道，輸出 16 kHz mono。`speechAudioCancel` 限同 sender／request。語音雲端請求走主視窗的 `speech:cloud-request`，main 依供應商驗證 HTTPS 目的地並帶入系統加密金鑰。取消、重新導覽與 renderer 結束會停止該請求。 |
+| 畫面文字 | `planScreenText` 用正式解碼器在本機取得畫格、視窗及快取數。`recognizeScreenText` 送出授權母素材範圍及非機密設定。工具、金鑰及快取路徑由 main 決定。保留前段時透過 stdin 要求最新連續 checkpoint，確認 worker 已停止後才接受新工作。 |
+| 播放點單格 OCR | `recognizeFrameText({requestId, pngBase64, languages})` 接收 renderer 凍結、遮罩後的單張 PNG。main 驗證尺寸與語言後交給本機 worker，語言空陣列代表自動。`cancelFrameText` 按工作編號與 sender 取消，退出程式時等 worker 關閉。[模型準備與驗收](開發與驗證.md#1-指令) |
 | 交付 | `beginDeliveryTargetRequest` → `prepareDeliveryTargets` → 各列 `exportVideo`，之後 `finishDeliveryTargetRequest` 或取消該 ticket。`stopExport(jobId)` 只停該交付，媒體取消另走 `cancelMediaIntake`。 |
 
 ### 主頁面：mpv
@@ -102,7 +105,9 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 
 **工作歸屬**。main 綁定 sender，renderer 每個工作區使用非空 sessionId，每個工作使用 requestId，兩者上限 128 字元。合併排程或取消都要核對這組歸屬。`ingest({queue:true})` 排隊，`queue:false` 或 `streamIngest` 只取代同 sender 的待跑／在途工作。取消指定 request 不動同 session 其他工作。取消整個 session 也收其串流讀者。重試換 request，整 session 已取消則換 sessionId，重新核對片段與原母素材。狀態列左側是交付／操作，右側是 intake。`done:true` 只表示結束，須檢查 `outcome`。進度、終態及 IPC 回覆可能交錯。[取消與競態](../tests/mediaIntakeRace.test.js)
 
-**波形先於 Proxy**。同一來源先保存原音波形，確認完整 WAV 後才開始 Proxy／聲道 intake。mpv 可先直讀母素材。新 bridge 傳 `continuous:true`、整份來源時長與音訊配置，舊 bridge 保留分段 `.swc`。一般／串流載入均傳 duration，核對原波形證據，重用完成 WAV 時不額外產生 MIX。個別聲道用實際 stream／channel，單聲道 AAC 明確標準 Mono。多來源 MIX 的每個原始聲道等權，短 stream 尾端補零。[來源時序回歸](../tests/mediaIntakeSourceTiming.test.js)
+**播放與波形調度**。mpv 可先直讀母素材。一般背景聲道轉檔沿用已完成 WAV；合成或倒帶需要畫面時可優先排入只算影片的工作。無法直讀原片的串流使用同一支 FFmpeg 同時產生可播的畫面、48 kHz FLAC MIX 與所需獨立聲道。新 bridge 傳 `continuous:true`、整份來源時長與音訊配置，舊 bridge 保留分段 `.swc`。個別聲道用實際 stream／channel，單聲道 AAC 明確標準 Mono。多來源 MIX 的每個原始聲道等權，短 stream 尾端補零。[來源時序回歸](../tests/mediaIntakeSourceTiming.test.js)
+
+**長片續算**。8 分鐘以上的背景 Proxy 以 120 秒為單位保存 H.264，續算時驗來源、配方、分段 SHA-256 與來源呈現時間。合併用第一個實際畫格 PTS 決定每段的間隔，整段來源音訊保持連續。成長串流取消時由已關閉的 writer 取出完整 fMP4 前綴，以下一個視訊 fragment 的時間決定重編起點。重開時先供應已驗前綴的畫面與 MIX，背景接好剩餘畫格及聲道，最後才發布並回收中間檔。[逐格與音訊回歸](../tests/mediaIntakePortableCacheNative.test.js)
 
 | 階段 | 持有者、輸入與完成證據 |
 |---|---|
@@ -126,6 +131,8 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 **查詢與清理**。`cacheInfo` 無素材直接回空，有素材才以 worker 查 sidecar。檔案尺寸與 checkpoint 描述標為 `verified:false`，查詢失敗另回報。`cacheClearAll(src)` 只委派 `clearSource(src)`，保留活躍讀者／writer，遇忙回報 `incomplete:true`。先在同根隔離目錄，核來源及完整內容再刪，身分不符保留或安全還原。最多 20,000 項、2,048 目錄、48 層，釋放 bytes 只計實際刪除。`cacheRemoved` 依 dev／ino 核銷原登記。[資訊與清理測試](../tests/mediaIntakeCacheInfo.test.js)
 
 **串流**。60 秒仍不可播時以 `STREAM_READINESS_TIMEOUT` 拒絕並等 writer 結束。已回 URL 只代表可讀。背景完成才准下一個 writer。每個 HTTP Range 讀取與 `streamLeaseId` 綁定原根、世代、Proxy 及 sender。釋放 reader、換專案或退出收回對應 HTTP 工作。writer 結束不釋放其他有效 reader。`INGEST_SUPERSEDED` 另核 renderer 本地撤銷狀態。音訊先保留實際 PTS，再對齊影片時鐘、補前置靜音或裁負時間。不能先按 stream 各自歸零。[來源時鐘](../electron/media-source-clock.js)
+
+沒有 mpv 且 Chromium 需要轉檔時，新建的成長中 Proxy 夾帶來源時間對齊的 48 kHz 單聲道 FLAC。畫面與暫時 MIX 共用同一個影片元素。初始 `GET Range: bytes=0-` 持續傳送新增片段，完成檔與指定區段可用 206 讀取。所有來源聲道有效增益一致時可以先聽混音。個別聲道靜音或配線增益不同時，等獨立聲道就緒後按原設定播放。完整聲道接管時先斷開暫時 MIX。無音訊素材與既有無聲 Proxy 可沿用。[成長中畫格與 PCM](../tests/mediaIntakeSourceTiming.test.js) · [播放交接](../tests/mediaFallbackAudioEffects.test.js)
 
 ### 固定畫面與反向音訊快取
 
@@ -155,6 +162,8 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 
 `delivery-runner.js` 以凍結快照核權限、測試本次實際 encoder，probe **母素材**後由 `export-plan.js` 生成 argv。交付明確使用 `queued-delivery`，缺 queueDir／jobId／outPath 即拒絕。短編碼能力探針檢實際畫格，光碟另測工具。成品依下列規格驗證。
 
+- **磁碟與成品檢查**。`delivery-space.js` 分別估算輸出磁碟、光碟暫存及同磁碟排隊工作，單份 WAV 空間明確不足時拒絕。`delivery-verification.js` 在發布一般影音前核對實際容器、片長、編碼、音軌及聲道，影片另核對畫格總數，WAV 核對 PCM 長度。
+
 - **格與聲道**。在絕對交付格網上合成，使用 PTS、半開 In／Out、速度與 offset，VFR 倒放／固定格用實際來源區間。隔行採場格網、補末場再 TFF。H.264／ProRes 先依畫布合成再補邊到 targetW／targetH，最後疊輸出 TC。舊工作只傳 targetH 依畫布比例推寬。各 bus 獨立混音並補到交付片長，保留較長尾音。[時間契約](FPS_時碼一致性.md)
 - **權限與覆寫**。main 捕獲使用者所選根的 canonical path、dev／ino，核對來源與目的實體項（含 8.3）。批次以同 sender＋request＋ticket 核發目的預檢收據，已存在目標需完整內容 SHA 與實際同意。入列、probe 後、轉交及發布前重核。變動時保留原目的檔與可復原 stage。舊版缺可信目錄或目的檔證據要由使用者重新選擇，重選目錄不會同時授權覆寫新檔。[目的檔確認](../tests/deliveryConsent.test.js)
 - **原生程序**。停止先落盤 stopped journal，再停止 native，直到 runner 結束皆屬 stopping。有 PID 的 error／exit 仍等 close 或受控傳輸收尾。接收最後 IPC 結果才裁定。Windows watchdog 採 detached，父程序被終止後仍處理 disconnect、FFmpeg、stage／lease。正常退出等 completion。補充 bitrate probe 失敗只回空值，不追溯更改已提交結果。
@@ -182,7 +191,7 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 | RGB、full-range、HDR、旋轉／交錯或資訊不足 | 相容色彩／幾何流程，再用實際 encoder |
 | QSV、AMF、VideoToolbox、CPU | 相容路徑，不用 CUDA 縮放 |
 
-只有明確硬體／濾鏡相容性錯誤才逐級回退，最後為 libx264。先等舊 writer close、驗來源、用新 generation。已交付串流 URL 後不換輸出，磁碟、權限、毀損或取消應照實失敗。背景 intake 首次讓播放器先讀一秒。串流與重試無此等待。同 encoder 比對 GPU／CPU 的 PTS、GOP、色彩、聲道與實際像素。[Windows 真實 GPU 回歸](../tests/proxyGpuNative.test.js)
+桌面在背景試編碼，取得實際畫格後才選用硬體編碼器。冷快取 Proxy 可在探測來源影像時並行等候結果，快取命中可直接交給播放器。需要轉檔時依佇列優先序派工。只有明確硬體／濾鏡相容性錯誤才逐級回退，最後為 libx264。先等舊 writer close、驗來源、用新 generation。已交付串流 URL 後維持當次輸出，磁碟、權限、毀損或取消會回報給呼叫端。同 encoder 比對 GPU／CPU 的 PTS、GOP、色彩、聲道與實際像素。[Windows 真實 GPU 回歸](../tests/proxyGpuNative.test.js)
 
 #### MOD-FHD 交付規格
 

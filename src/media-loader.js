@@ -31,7 +31,7 @@ import { AudioEngine } from './audio-engine.js';
 import { emit } from './events.js';
 import { escapeHTML, baseName, pickFiles } from './util.js';
 import { activateHtml5Transport, activateMpvTransport, getPlayerAdapter } from './media-player-adapter.js';
-import { Wave, WAVE_DECODE_MAX } from './waveform-decoder.js';
+import { Wave, canDecodeWaveform } from './waveform-decoder.js';
 import { sourceChannelLabels, AudioPipeline } from './audio-routing-engine.js';
 import { getExactFps } from './time.js';
 import { MediaIntakeJobs } from './media-intake-jobs.js';
@@ -64,7 +64,7 @@ export function detectFpsWeb(owns=()=>true,{initializeGrid=true,gridRevision=get
   };
   try{ if(owns()) video.requestVideoFrameCallback(cb); }catch(e){}
 }
-export async function loadDesktopMedia(ctx, p, projectRestore=null){
+export async function loadDesktopMedia(ctx, p, projectRestore=null, failedProxy=null){
     if(projectRestore?.owns && !projectRestore.owns()) return;
     const gridRevision=getFpsRevision();
     ctx._resetForFirstVideo(projectRestore ? { keepVideoTracks: true } : {});
@@ -211,7 +211,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     const primaryCurrent=()=>!loadedPrimary||(clipSourceFingerprint(loadedPrimary)===loadedFingerprint&&ctx._sourceStillReferenced(loadedPrimary));
     const recovery=ctx._registerIntakeRecovery(p,()=>loadedPrimary
       ?ctx._bgAudioIngest(p,audio,dur,loadedPrimary,{needsProxy:true,restorePreview:true})
-      :ctx.loadDesktopMedia(p,projectRestore),()=>State.mediaPath===p&&primaryCurrent()&&(!projectRestore?.owns||projectRestore.owns()));
+      :ctx.loadDesktopMedia(p,projectRestore,failedProxy),()=>State.mediaPath===p&&primaryCurrent()&&(!projectRestore?.owns||projectRestore.owns()));
     const provisional=(DESK.sourceWaveformContinuous===true||DESK.streamIngest)
       && DESK.prepareSourceWaveform && DESK.mediaSourceKey && audio.length && Number.isFinite(dur) && dur>0
         ? provisionalWaveform.begin({path:p,name:State.mediaName,audio,duration:dur,owns}) : null;
@@ -239,7 +239,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       };
       ctx._ingestDoneHandler=handler;
       window.addEventListener('desk:ingest-done',handler);
-      try{ res=await MediaIntakeJobs.streamIngest({ path:p, duration:dur, audio }); }
+      try{ res=await MediaIntakeJobs.streamIngest({ path:p, duration:dur, audio, ...(failedProxy?{failedProxy}:{}) }); }
       catch(e){ provisional?.cancel(); stopListening(); if(!owns()) return; recovery.fail(e);console.error(e); showToast('讀取失敗：'+e.message,'error'); setStatus('讀取失敗',''); return; }
       if(!owns()){
         provisional?.cancel();
@@ -271,6 +271,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       }
       if(!owns()||metadata==='cancelled'){ provisional?.cancel(); stopListening(); discardUnpublishedStream(); return; }
       if(metadata!=='ready'){
+        if(res.cached&&res.proxy)failedProxy=res.proxy;
         provisional?.cancel();
         stopListening();
         discardUnpublishedStream();
@@ -279,7 +280,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
       }
       State.duration=maxKnownSourceDuration(dur,video.duration);
       video.muted=true;
-      const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:res.streamUrl}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
+      const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:res.streamUrl,previewKind:res.cached?'proxy':'stream'}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
       loadedPrimary=primary;loadedFingerprint=clipSourceFingerprint(primary);
       const ownsPrimary=()=>owns()&&primaryCurrent();
       // 讓播放器先接手。獨立波形完成後再驗證並交接，避免為同一片段重抽音訊。
@@ -291,6 +292,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
         .catch(error=>{if(ownsPrimary())console.warn('來源波形交接失敗:',error);});
       AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
       ctx.activeSource='video';
+      if(res.previewMix)ctx._startPreviewMix(primary);
       // 混音器立即顯示「準備中」推桿
       ctx.pendingChannels=ctx._expandChannels(audio).map(label=>({label,ready:false}));
       ctx.usingWebAudio=true; ctx.syncMuteState(); emit('media:audioTracks');
@@ -380,7 +382,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     // (B2) 舊版 bridge 無 streamIngest 時必須先取得可播放的完整 Proxy。
     try{
     let res;
-    try{ res=await MediaIntakeJobs.ingest({ path:p, duration:dur, needsProxy:true, audio }); }
+    try{ res=await MediaIntakeJobs.ingest({ path:p, duration:dur, needsProxy:true, audio, ...(failedProxy?{failedProxy}:{}) }); }
     catch(e){ if(!owns()) return; recovery.fail(e);console.error(e); showToast('讀取/轉檔失敗：'+e.message,'error'); setStatus('讀取/轉檔失敗',''); return; }
     if(!owns()) return;
     if(res.cached) setMediaProcessingStatus('已讀取影音快取','ok');
@@ -392,6 +394,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     const metadata=await waitForOwnedMediaMetadata(video,{owns,timeoutMs:10000});
     if(!owns()||metadata==='cancelled') return;
     if(metadata!=='ready'){
+      if(res.cached&&res.proxy)failedProxy=res.proxy;
       recovery.fail(new Error('轉檔結果無法讀取影片 metadata，未載入'));
       showToast('轉檔結果無法讀取影片 metadata，未載入','error'); setStatus('讀取失敗',''); return;
     }
@@ -404,7 +407,7 @@ export async function loadDesktopMedia(ctx, p, projectRestore=null){
     if(!owns()) return;
     State.duration=maxKnownSourceDuration(dur,getPlayerAdapter().sourceDuration(video.duration,mediaUrl));
     video.muted=true;
-    const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
+    const primary=ctx._registerPrimary({ name:State.mediaName, path:p, web:{url:video.src,previewKind:'proxy'}, dur:State.duration||0, fps:info?.video?.fps||0 },projectRestore);
     loadedPrimary=primary;loadedFingerprint=clipSourceFingerprint(primary);
     const ownsPrimary=()=>owns()&&primaryCurrent();
     AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
@@ -575,7 +578,9 @@ export async function _loadViaMpv(ctx, p, info, projectRestore=null, intakeToken
       fps:info?.video?.fps||0,
     },projectRestore);
     if(sourceUrl) adapter.registerSourceClock(sourceUrl,info?.video);
-    ctx._deferredPrimaryProxy=needsProxy?null:{path:p,duration:dur,audio,primary};
+    // An explicit composition can request picture-only work while the
+    // waveform-first background job is still reading a long source.
+    ctx._deferredPrimaryProxy={path:p,duration:dur,primary};
     AudioPipeline.registerSource(primary,probeAudioChannelDescriptors(audio));
 
     emit('mpv:refreshSubs'); // 把目前字幕餵給 mpv
@@ -667,19 +672,14 @@ export async function loadVideoFile(ctx, file, projectRestore=null){
         setStatus('已載入原生影音','ok');
       }
       // 探測是否有多音軌
-      await ctx.probeAndMaybeExtract(file,{owns:ownsPrimary});
+      await ctx.probeAndMaybeExtract(file,{owns:ownsPrimary,audioStreamCount:sourceInfo?.audioPresentationTimestampOffsets?.length});
       if(!ownsPrimary()) return;
-      // 產生波形：小檔整檔解碼；大檔（如長片）改用播放時即時擷取，避免記憶體爆掉
-      if(file.size <= WAVE_DECODE_MAX){
+      // 解碼與來源時鐘校正都可能保留 PCM，長片改在播放時逐桶擷取。
+      if(canDecodeWaveform(file,State.duration,sourceInfo?.audioChannels)){
         Wave.fromFile(file,primary,{owns:ownsPrimary}).catch(()=>{ if(ownsPrimary()) Wave.initLive(); });
       }else{
         Wave.initLive();
-        // Fix #18：區分 500MB-1.6GB（可播放但波形受限）與更大檔案的提示
-        if(file.size <= FFMPEG_MAX_BYTES){
-          showToast('檔案較大（>500MB）：波形將逐步產生。如需完整波形，可另載入音訊檔。');
-        }else{
-          showToast('檔案較大：波形將於播放時逐步產生（或可另載入音訊檔）');
-        }
+        showToast('此素材將於播放時逐步產生波形，以節省記憶體。');
       }
     }else{
       // 非原生格式：ffmpeg 轉檔給預覽 + 抽音軌

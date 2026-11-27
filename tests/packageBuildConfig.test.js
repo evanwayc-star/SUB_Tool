@@ -7,6 +7,31 @@ import { describe, expect, it } from 'vitest';
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const discTools = JSON.parse(readFileSync(new URL('../electron/disc-tools.json', import.meta.url), 'utf8'));
 const retiredOcrFiles = ['screen-text-worker.py', 'ocr-requirements.txt'];
+const electronSourceFilter = ['**/*', '!ffmpeg/**', ...retiredOcrFiles.map(file => '!' + file),
+  '!card-vision/**', '!frame-ocr/scripts/**', '!frame-ocr/paddle/**', '!mpv/**', '!disc/**'];
+const ortBrowserExclusions = packageJson.build.win.files.filter(rule => typeof rule === 'string' && rule.startsWith('!'));
+
+it('單格離線 OCR worker 可在封裝外載入 WASM、語言與文字系統模型', () => {
+  expect(packageJson.build.asarUnpack).toContain('electron/frame-text-worker.js');
+  expect(packageJson.build.extraResources.map(item=>item.to)).toEqual(expect.arrayContaining([
+    'frame-ocr/tesseract.js-core','frame-ocr/@tesseract.js-data','frame-ocr/scripts','frame-ocr/paddle',
+  ]));
+});
+
+it('ORT 僅剔除 Vite 已內嵌的瀏覽器發行檔、外部後端副本與 source maps，保留離線 OCR', () => {
+  expect(ortBrowserExclusions.every(rule => rule.startsWith('!node_modules/onnxruntime-web/dist/'))).toBe(true);
+  const excluded = file => ortBrowserExclusions.some(rule => path.posix.matchesGlob(file, rule.slice(1)));
+  const ortDist = 'node_modules/onnxruntime-web/dist/';
+  for (const artifact of ['ort.node.min.js.map', 'ort.webgl.min.js', 'ort.webgpu.bundle.min.mjs',
+    'ort-wasm-simd-threaded.jsep.wasm', 'ort-wasm-simd-threaded.asyncify.mjs', 'ort-wasm-simd-threaded.jspi.wasm']) {
+    expect(excluded(ortDist + artifact), artifact).toBe(true);
+  }
+  for (const artifact of ['ort.node.min.js', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm']) {
+    expect(excluded(ortDist + artifact), artifact).toBe(false);
+    expect(packageJson.build.asarUnpack).toContain(ortDist + artifact);
+  }
+  for (const platform of ['win', 'mac']) expect(packageJson.build[platform].files).toContain('dist/**/*');
+});
 
 it('桌面安裝包只將目前平台的 Rust 辨識執行檔與授權文字複製到 resources/card-vision', () => {
   expect(packageJson.build.extraResources).toContainEqual({
@@ -94,10 +119,11 @@ describe('Windows 安裝檔設定', () => {
     expect(packageJson.build.win.files).toEqual([
       'dist/**/*',
       'shared/**/*.cjs',
+      ...ortBrowserExclusions,
       {
         from: 'electron',
         to: 'electron',
-        filter: ['**/*', '!ffmpeg/**', ...retiredOcrFiles.map(file => '!' + file), '!card-vision/**', '!mpv/**', '!disc/**'],
+        filter: electronSourceFilter,
       },
       {
         from: 'electron/ffmpeg',
@@ -128,10 +154,11 @@ describe('Apple Silicon 安裝檔設定', () => {
     expect(packageJson.build.mac.files).toEqual([
       'dist/**/*',
       'shared/**/*.cjs',
+      ...ortBrowserExclusions,
       {
         from: 'electron',
         to: 'electron',
-        filter: ['**/*', '!ffmpeg/**', ...retiredOcrFiles.map(file => '!' + file), '!card-vision/**', '!mpv/**', '!disc/**'],
+        filter: electronSourceFilter,
       },
       {
         from: 'electron/ffmpeg/darwin-arm64',

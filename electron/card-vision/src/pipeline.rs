@@ -1,15 +1,17 @@
 //! v3.0 Multi-language, multi-slot, frame-accurate (`±1~2 frames`) subtitle extraction & batch queue pipeline.
 
 use crate::credentials::{Provider, load_api_key_with_source, redact_secrets};
-use crate::eval::evaluate_srt;
+use crate::eval::evaluate_srt_in_range;
 use crate::llm::{
     AUTO_GLOSSARY_SYSTEM_PROMPT, JsonRequest, LINE_REPAIR_SUFFIX, Part, TRANSLATE_SYSTEM_PROMPT,
     auto_glossary_schema, build_proofread_system_prompt, build_vision_system_prompt,
     generate_json_retry, parse_vision_events, proofread_schema, translate_schema, vision_schema,
 };
-use crate::pricing::{TokenUsage, USD_TO_TWD, compute_cost, estimate_run_cost};
+use crate::pricing::{TokenUsage, USD_TO_TWD};
 use crate::srt::{SourceLang, SubtitleCue, clean_cue_text, write_srt};
-use crate::stitcher::{WindowVisionRecord, char_similarity, normalize_text, stitch_dual_tracks};
+use crate::stitcher::{
+    ContentMode, WindowVisionRecord, char_similarity, normalize_text, stitch_dual_tracks,
+};
 use crate::video::{
     FrameTrack, WindowSpec, build_adaptive_sample_plan, probe_video, scan_full_fps_zones,
     stream_missing_windows,
@@ -35,7 +37,7 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub const VERSION: &str = "3.0.0-rust";
-pub const VISION_ENGINE_VERSION: &str = "subtool-vision-quality-v1";
+pub const VISION_ENGINE_VERSION: &str = "subtool-vision-quality-v2";
 const VISION_PROMPT_VERSION: &str = "variety-multislot-v3";
 const PROOFREAD_VERSION: &str = "src-proofread-v3";
 const AUTO_GLOSSARY_VERSION: &str = "auto-glossary-v1";
@@ -63,6 +65,9 @@ pub struct RunConfig {
     pub workers: u32,
     pub translate_enabled: bool,
     pub smart_accuracy: bool,
+    pub content_mode: ContentMode,
+    pub region: Option<crate::video::Region>,
+    pub plan_only: bool,
     pub start: Option<f64>,
     pub duration: Option<f64>,
     pub auto_eval: bool,
@@ -70,6 +75,12 @@ pub struct RunConfig {
 
 #[derive(Clone, Debug)]
 pub enum BackendEvent {
+    Metrics(Value),
+    Plan {
+        metrics: Value,
+        preview: Vec<u8>,
+        time: f64,
+    },
     Checkpoint {
         cues: Vec<SubtitleCue>,
         processed_end: f64,
@@ -88,8 +99,6 @@ pub enum BackendEvent {
         job_index: usize,
         done: u32,
         total: u32,
-        cost_usd: f64,
-        cost_twd: f64,
     },
     TranslateProgress {
         job_index: usize,
@@ -106,14 +115,14 @@ pub enum BackendEvent {
         job_index: usize,
         ok: bool,
         output_dir: PathBuf,
-        cost_usd: f64,
-        cost_twd: f64,
+        cost_usd: Option<f64>,
+        cost_twd: Option<f64>,
     },
     BatchFinished {
         completed: usize,
         total: usize,
-        total_usd: f64,
-        total_twd: f64,
+        total_usd: Option<f64>,
+        total_twd: Option<f64>,
     },
 }
 
@@ -198,7 +207,7 @@ fn sha256_prefix20(input: &str) -> String {
 fn flagship_model_for(provider: Provider) -> &'static str {
     match provider {
         Provider::OpenAI => "gpt-5.4",
-        Provider::Gemini => "gemini-2.5-pro",
+        Provider::Gemini => "gemini-3.8-flash",
     }
 }
 
@@ -212,7 +221,7 @@ pub fn spawn_batch_pipeline(
     thread::spawn(move || {
         let total = jobs.len();
         let mut completed = 0_usize;
-        let mut batch_usd = 0.0_f64;
+        let mut batch_usd = Some(0.0);
 
         for (idx, cfg) in jobs.into_iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
@@ -228,23 +237,24 @@ pub fn spawn_batch_pipeline(
             match execute_single_job(&app_dir, idx, total, &cfg, &cancel, &tx) {
                 Ok(job_usd) => {
                     completed += 1;
-                    batch_usd += job_usd;
+                    batch_usd = batch_usd.zip(job_usd).map(|(batch, job)| batch + job);
                     let _ = tx.send(BackendEvent::JobFinished {
                         job_index: idx,
                         ok: true,
                         output_dir: out_dir,
                         cost_usd: job_usd,
-                        cost_twd: job_usd * USD_TO_TWD,
+                        cost_twd: job_usd.map(|usd| usd * USD_TO_TWD),
                     });
                 }
                 Err(err) => {
+                    batch_usd = None;
                     let _ = tx.send(BackendEvent::Log(format!("[Error] {err}")));
                     let _ = tx.send(BackendEvent::JobFinished {
                         job_index: idx,
                         ok: false,
                         output_dir: out_dir,
-                        cost_usd: 0.0,
-                        cost_twd: 0.0,
+                        cost_usd: None,
+                        cost_twd: None,
                     });
                     if cancel.load(Ordering::Relaxed) {
                         break;
@@ -257,7 +267,7 @@ pub fn spawn_batch_pipeline(
             completed,
             total,
             total_usd: batch_usd,
-            total_twd: batch_usd * USD_TO_TWD,
+            total_twd: batch_usd.map(|usd| usd * USD_TO_TWD),
         });
     });
     rx
@@ -289,6 +299,7 @@ fn vision_fingerprint(
         "clip_end": (clip_end * 10_000.0).round() / 10_000.0,
         "sample_fps": cfg.fps,
         "sample_count": sample_count,
+        "region": cfg.region,
         "smart_accuracy": cfg.smart_accuracy,
         "window_seconds": WINDOW_SECONDS,
         "overlap_seconds": OVERLAP_SECONDS,
@@ -313,17 +324,23 @@ fn load_or_run_frame_track(
     let scan_cache_dir = output_dir.join("cache").join("frame_track");
     fs::create_dir_all(&scan_cache_dir).map_err(|e| format!("建立追蹤快取失敗：{e}"))?;
     let key = sha256_prefix20(&format!(
-        "v3|{}|{:.4}|{:.4}|{:.3}",
+        "v4|{}|{:.4}|{:.4}|{:.3}|{}|{:?}",
         video.path.display(),
         raw_start,
         raw_end,
-        video.fps
+        video.fps,
+        video.stream_index,
+        video.region
     ));
     let track_file = scan_cache_dir.join(format!("track_{key}.json"));
     if track_file.is_file()
         && let Ok(raw) = fs::read_to_string(&track_file)
         && let Ok(track) = serde_json::from_str::<FrameTrack>(&raw)
-        && track.frame_count() > 0
+        && track.matches_source(
+            raw_start,
+            raw_end,
+            crate::video::choose_track_fps(video.fps),
+        )
     {
         let _ = tx.send(BackendEvent::Log(format!(
             "[Track] 載入本機 {:.2} FPS 全幀率分區追蹤快取（共 {} 格影格）",
@@ -382,6 +399,7 @@ pub fn clamp_cues(cues: Vec<SubtitleCue>, start: f64, end: f64) -> Vec<SubtitleC
 }
 
 struct CheckpointPlan {
+    mode: ContentMode,
     windows: Vec<WindowSpec>,
     pts: Vec<f64>,
     indices: Vec<usize>,
@@ -391,6 +409,39 @@ struct CheckpointPlan {
     sample_fps: f64,
 }
 
+type WindowRecords = BTreeMap<usize, WindowVisionRecord>;
+type Snapshot = (Vec<SubtitleCue>, f64);
+#[derive(Default)]
+struct CheckpointState {
+    active: Option<(
+        std::sync::Weak<CheckpointPlan>,
+        std::sync::Weak<Mutex<WindowRecords>>,
+    )>,
+    saved: Option<Snapshot>,
+}
+// One input request owns one native process. Weak references let completed jobs release decoded records.
+static CHECKPOINTS: Mutex<CheckpointState> = Mutex::new(CheckpointState {
+    active: None,
+    saved: None,
+});
+
+pub fn current_checkpoint() -> Option<Snapshot> {
+    let state = CHECKPOINTS.lock().unwrap();
+    let active = state
+        .active
+        .as_ref()
+        .and_then(|(plan, records)| Some((plan.upgrade()?, records.upgrade()?)));
+    if let Some((plan, records)) = active {
+        drop(state);
+        let result = plan.snapshot(&records.lock().unwrap());
+        if result.is_some() {
+            return result;
+        }
+        return CHECKPOINTS.lock().unwrap().saved.clone();
+    }
+    state.saved.clone()
+}
+
 impl CheckpointPlan {
     fn new(
         windows: &[WindowSpec],
@@ -398,6 +449,7 @@ impl CheckpointPlan {
         end: f64,
         sample_fps: f64,
         track: Option<&FrameTrack>,
+        mode: ContentMode,
     ) -> Self {
         let count = windows.last().map(|w| w.global_end + 1).unwrap_or(0);
         let mut pts = vec![0.0; count];
@@ -414,6 +466,7 @@ impl CheckpointPlan {
             }
         }
         Self {
+            mode,
             windows: windows.to_vec(),
             pts,
             indices,
@@ -449,6 +502,7 @@ impl CheckpointPlan {
             self.start,
             end,
             self.sample_fps,
+            self.mode,
             1,
             Some(&self.indices),
             self.track.as_ref(),
@@ -461,6 +515,7 @@ impl CheckpointPlan {
 
     fn emit(&self, records: &BTreeMap<usize, WindowVisionRecord>, tx: &Sender<BackendEvent>) {
         if let Some((cues, processed_end)) = self.snapshot(records) {
+            CHECKPOINTS.lock().unwrap().saved = Some((cues.clone(), processed_end));
             let _ = tx.send(BackendEvent::Checkpoint {
                 cues,
                 processed_end,
@@ -574,6 +629,58 @@ fn review_frame_width(initial_width: u32) -> u32 {
     initial_width.max(ESCALATE_FRAME_WIDTH)
 }
 
+fn read_window_cache(
+    target_windows: &[WindowSpec],
+    cache_dir: &Path,
+    provider: Provider,
+    model: &str,
+) -> (BTreeMap<usize, WindowVisionRecord>, Vec<WindowSpec>) {
+    let mut cached_map: BTreeMap<usize, WindowVisionRecord> = BTreeMap::new();
+    let mut missing: Vec<WindowSpec> = Vec::new();
+
+    for w in target_windows {
+        let p = cache_dir.join(format!("win_{:05}.json", w.window_index));
+        if p.is_file()
+            && let Ok(raw) = fs::read_to_string(&p)
+            && let Ok(rec) = serde_json::from_str::<WindowVisionRecord>(&raw)
+            && rec.window_index == w.window_index
+            && rec.global_start == w.global_start
+            && rec.global_end == w.global_end
+            && rec.actual_times == w.sample_times
+            && matches!(rec.detected_language.as_str(), "ko" | "ja" | "zh" | "en")
+            && rec.model == model
+            && rec.provider == provider.as_str()
+            && rec.events.iter().all(|ev| {
+                ev.start_frame <= ev.end_frame
+                    && ev.end_frame < w.sample_times.len()
+                    && !ev.text.trim().is_empty()
+                    && matches!(
+                        ev.slot.as_str(),
+                        "bottom" | "center" | "top_left" | "top_right" | "floating"
+                    )
+            })
+        {
+            cached_map.insert(w.window_index, rec);
+            continue;
+        }
+        missing.push(w.clone());
+    }
+
+    (cached_map, missing)
+}
+
+fn window_metrics(
+    stage: &str,
+    model: &str,
+    windows: &[WindowSpec],
+    pending: &[WindowSpec],
+    cached: usize,
+) -> Value {
+    json!({"stage":stage,"model":model,"windows":windows.len(),"cachedWindows":cached,"pendingWindows":pending.len(),
+        "imageAppearances":windows.iter().map(|w|w.track_indices.len()).sum::<usize>(),
+        "pendingImageAppearances":pending.iter().map(|w|w.track_indices.len()).sum::<usize>()})
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_vision_windows(
     job_index: usize,
@@ -595,33 +702,22 @@ fn run_vision_windows(
     cache_dir: &Path,
     usage_log: &Path,
     stage_label: &str,
-    base_cost_offset_usd: f64,
+    mode: ContentMode,
     cancel: &Arc<AtomicBool>,
     tx: &Sender<BackendEvent>,
 ) -> Result<(BTreeMap<usize, WindowVisionRecord>, TokenUsage), String> {
     fs::create_dir_all(cache_dir).map_err(|e| format!("建立快取目錄失敗：{e}"))?;
 
-    let mut cached_map: BTreeMap<usize, WindowVisionRecord> = BTreeMap::new();
-    let mut missing: Vec<WindowSpec> = Vec::new();
-    let mut stage_usage = TokenUsage::default();
-
-    for w in target_windows {
-        let p = cache_dir.join(format!("win_{:05}.json", w.window_index));
-        if p.is_file()
-            && let Ok(raw) = fs::read_to_string(&p)
-            && let Ok(rec) = serde_json::from_str::<WindowVisionRecord>(&raw)
-            && rec.window_index == w.window_index
-            && rec.global_start == w.global_start
-            && rec.global_end == w.global_end
-            && rec.actual_times == w.sample_times
-        {
-            stage_usage.add(&rec.usage);
-            cached_map.insert(w.window_index, rec);
-            continue;
-        }
-        missing.push(w.clone());
-    }
-
+    let (cached_map, missing) = read_window_cache(target_windows, cache_dir, provider, model);
+    let stage_usage = TokenUsage::default();
+    let metrics = window_metrics(
+        stage_label,
+        model,
+        target_windows,
+        &missing,
+        cached_map.len(),
+    );
+    let _ = tx.send(BackendEvent::Metrics(metrics));
     let total_targets = target_windows.len() as u32;
     let cached_count = cached_map.len() as u32;
     let checkpoint_plan = if stage_label == "Vision" {
@@ -631,6 +727,7 @@ fn run_vision_windows(
             clip_end,
             sample_fps,
             frame_track,
+            mode,
         )))
     } else {
         None
@@ -644,14 +741,10 @@ fn run_vision_windows(
     )));
 
     if missing.is_empty() {
-        let c = compute_cost(model, &stage_usage);
-        let usd = base_cost_offset_usd + c.usd;
         let _ = tx.send(BackendEvent::VisionProgress {
             job_index,
             done: total_targets,
             total: total_targets,
-            cost_usd: usd,
-            cost_twd: usd * USD_TO_TWD,
         });
         return Ok((cached_map, stage_usage));
     }
@@ -661,6 +754,10 @@ fn run_vision_windows(
     let (job_tx, job_rx) = mpsc::sync_channel::<(WindowSpec, Vec<Vec<u8>>)>(num_workers * 2);
     let shared_rx = Arc::new(Mutex::new(job_rx));
     let shared_results = Arc::new(Mutex::new(cached_map));
+    if let Some(plan) = &checkpoint_plan {
+        CHECKPOINTS.lock().unwrap().active =
+            Some((Arc::downgrade(plan), Arc::downgrade(&shared_results)));
+    }
     let shared_usage = Arc::new(Mutex::new(stage_usage));
     let shared_done = Arc::new(Mutex::new(cached_count));
     let shared_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -752,9 +849,9 @@ fn run_vision_windows(
                                 model: model_c.clone(),
                             };
                             let win_file = cache_c.join(format!("win_{:05}.json", win.window_index));
-                            if let Ok(v) = serde_json::to_value(&rec) {
-                                let _ = atomic_write_json(&win_file, &v);
-                            }
+                            let persist_result = serde_json::to_value(&rec)
+                                .map_err(|e| e.to_string())
+                                .and_then(|value| atomic_write_json(&win_file, &value));
                             {
                                 let _g = log_c.lock().unwrap();
                                 append_jsonl(
@@ -776,15 +873,19 @@ fn run_vision_windows(
                             {
                                 let mut records = res_c.lock().unwrap();
                                 records.insert(win.window_index, rec);
-                                if let Some(plan) = &checkpoint_c { plan.emit(&records, &tx_c); }
+                                // Old clients receive progressively spaced fallbacks. A stop request reads the exact prefix on demand.
+                                if (records.len().is_power_of_two() || win.window_index == 0)
+                                    && let Some(plan) = &checkpoint_c
+                                {
+                                    plan.emit(&records, &tx_c);
+                                }
                             }
-                            let stage_cost = {
-                                let mut u = usage_c.lock().unwrap();
-                                u.add(&usage);
-                                compute_cost(&model_c, &u)
-                            };
-                            let cum_usd = base_cost_offset_usd + stage_cost.usd;
-                            let cum_twd = cum_usd * USD_TO_TWD;
+                            if let Err(error) = persist_result {
+                                *err_c.lock().unwrap() = Some(format!("辨識已完成，但視窗快取寫入失敗：{error}；重試可能再次計費。"));
+                                cancel_c.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            usage_c.lock().unwrap().add(&usage);
                             let done_now = {
                                 let mut d = done_c.lock().unwrap();
                                 *d += 1;
@@ -794,11 +895,9 @@ fn run_vision_windows(
                                 job_index,
                                 done: done_now,
                                 total: total_targets,
-                                cost_usd: cum_usd,
-                                cost_twd: cum_twd,
                             });
                             let _ = tx_c.send(BackendEvent::Log(format!(
-                                "[{stage_c}] {done_now}/{total_targets} 完成 | 批次 #{:03} ({t_first:.1}s-{t_last:.1}s) 擷取 {ev_count} 筆事件 | 累計 ${cum_usd:.4} (NT${cum_twd:.1})",
+                                "[{stage_c}] {done_now}/{total_targets} 完成 | 批次 #{:03} ({t_first:.1}s-{t_last:.1}s) 擷取 {ev_count} 筆事件",
                                 win.window_index
                             )));
                         }
@@ -851,22 +950,30 @@ fn run_vision_windows(
         },
     );
     drop(job_tx);
+    let mut worker_panicked = false;
     for h in handles {
-        let _ = h.join();
+        worker_panicked |= h.join().is_err();
     }
 
+    if let Some(plan) = &checkpoint_plan {
+        plan.emit(&shared_results.lock().unwrap(), tx);
+        CHECKPOINTS.lock().unwrap().active = None;
+    }
     if let Some(err) = shared_err.lock().unwrap().take() {
         return Err(err);
     }
     stream_res?;
+    if worker_panicked
+        || shared_results.lock().unwrap().len() != target_windows.len()
+            && !cancel.load(Ordering::Relaxed)
+    {
+        return Err("畫面辨識工作未回傳全部視窗，已完成的視窗可供續跑。".into());
+    }
     if cancel.load(Ordering::Relaxed) {
         return Err("任務已中止（已完成視窗快取已保存）。".to_string());
     }
 
-    let out_map = Arc::try_unwrap(shared_results)
-        .unwrap()
-        .into_inner()
-        .unwrap();
+    let out_map = std::mem::take(&mut *shared_results.lock().unwrap());
     let out_usage = Arc::try_unwrap(shared_usage).unwrap().into_inner().unwrap();
     Ok((out_map, out_usage))
 }
@@ -965,9 +1072,6 @@ fn proofread_source_cues(
                     && it["text"].is_string()
             })
         {
-            if let Ok(u) = serde_json::from_value::<TokenUsage>(saved["usage"].clone()) {
-                total_usage.add(&u);
-            }
             parsed_batch = Some(
                 arr.iter()
                     .map(|it| {
@@ -1008,7 +1112,8 @@ fn proofread_source_cues(
                         && it["text"].is_string()
                 })
             {
-                let _ = atomic_write_json(&cache_file, &json!({"items": arr, "usage": usage}));
+                atomic_write_json(&cache_file, &json!({"items": arr, "usage": usage}))
+                    .map_err(|e| format!("校字完成，但快取寫入失敗：{e}；重試可能再次計費。"))?;
                 total_usage.add(&usage);
                 parsed_batch = Some(
                     arr.iter()
@@ -1223,23 +1328,29 @@ fn resolve_dominant_language(cfg_lang: SourceLang, records: &[WindowVisionRecord
 fn execute_single_job(
     app_dir: &Path,
     job_index: usize,
-    total_jobs: usize,
+    _total_jobs: usize,
     cfg: &RunConfig,
     cancel: &Arc<AtomicBool>,
     tx: &Sender<BackendEvent>,
-) -> Result<f64, String> {
+) -> Result<Option<f64>, String> {
     let started = Instant::now();
+    let cost_start = crate::llm::cost_snapshot();
     let (api_key_opt, key_source) = load_api_key_with_source(cfg.provider);
-    let api_key = api_key_opt.ok_or_else(|| {
-        format!(
-            "尚未設定 {} API 金鑰（目前狀態：{}），請展開「引擎與進階設定」加密儲存金鑰。",
-            cfg.provider.display_name(),
-            key_source
-        )
-    })?;
+    let api_key = if cfg.plan_only {
+        String::new()
+    } else {
+        api_key_opt.ok_or_else(|| {
+            format!(
+                "尚未設定 {} API 金鑰（{}）。",
+                cfg.provider.display_name(),
+                key_source
+            )
+        })?
+    };
 
     fs::create_dir_all(&cfg.output_dir).map_err(|e| format!("建立輸出資料夾失敗：{e}"))?;
-    let video = probe_video(&cfg.video_path)?;
+    let mut video = probe_video(&cfg.video_path)?;
+    video.region = cfg.region;
 
     let raw_start = cfg.start.unwrap_or(0.0).max(0.0);
     if raw_start >= video.duration
@@ -1286,64 +1397,80 @@ fn execute_single_job(
         plan.track_indices,
         plan.windows,
     );
-    let clip_duration = clip_end - clip_start;
 
-    let est = estimate_run_cost(
-        clip_duration,
-        cfg.provider,
-        &cfg.vision_model,
-        &cfg.translate_model,
-        cfg.fps as f64,
-        WINDOW_SECONDS,
-        OVERLAP_SECONDS,
-        cfg.frame_width,
-        &cfg.detail,
-        cfg.translate_enabled,
-        cfg.smart_accuracy,
-    );
-
-    let _ = tx.send(BackendEvent::Log(format!(
-        "=== 綜藝畫面字幕擷取系統 v{VERSION}［任務 {}/{}］===\n\
-         影片：{} ({}x{}, {:.2} fps)\n\
-         範圍：{:.1}s ~ {:.1}s（共 {:.1}s，事件抽樣 {} 幀，{} 批視窗，追蹤步進 {:.0}ms）\n\
-         來源語言：{} | 引擎：{} ({}) | 選配翻譯：{}\n\
-         預估費用：約 ${:.4} USD（約 NT${:.1}）",
-        job_index + 1,
-        total_jobs,
-        video
-            .path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        video.width,
-        video.height,
-        video.fps,
-        clip_start,
-        clip_end,
-        clip_duration,
-        global_pts.len(),
-        windows.len(),
-        1000.0 / track_fps,
-        cfg.source_lang.label(),
-        cfg.provider.display_name(),
-        cfg.vision_model,
-        if cfg.translate_enabled {
-            cfg.translate_model.as_str()
-        } else {
-            "關閉（純擷取原文 SRT）"
-        },
-        est.total_usd,
-        est.total_twd,
-    )));
-
-    // Stage 2: Event-keyframe VLM recognition & dual-track (`card` vs `dialogue`) classification
     let (fp, fp_config) =
         vision_fingerprint(&video.path, clip_start, clip_end, global_pts.len(), cfg)?;
     let cache_dir = cfg.output_dir.join("cache").join("vision").join(&fp);
+    if cfg.plan_only {
+        let (cached, missing) =
+            read_window_cache(&windows, &cache_dir, cfg.provider, &cfg.vision_model);
+        let mut metrics = window_metrics(
+            "Vision",
+            &cfg.vision_model,
+            &windows,
+            &missing,
+            cached.len(),
+        );
+        metrics["uniqueFrames"] = json!(global_pts.len());
+        metrics["reviewMaxWindows"] = json!(if cfg.smart_accuracy { windows.len() } else { 0 });
+        if cfg.smart_accuracy && missing.is_empty() {
+            let records = cached.into_values().collect::<Vec<_>>();
+            let review_specs = find_hard_windows(&records)
+                .into_iter()
+                .map(|(index, ..)| windows[index].clone())
+                .collect::<Vec<_>>();
+            let model = flagship_model_for(cfg.provider);
+            let width = review_frame_width(cfg.frame_width);
+            let review_dir = cache_dir.join(format!(
+                "escalated_{model}_{width}_{ESCALATE_REVIEW_POLICY}"
+            ));
+            let (_, pending) = read_window_cache(&review_specs, &review_dir, cfg.provider, model);
+            metrics["reviewWindows"] = json!(review_specs.len());
+            metrics["pendingReviewWindows"] = json!(pending.len());
+        }
+        let mut first = windows[0].clone();
+        first.track_indices.truncate(1);
+        first.sample_times.truncate(1);
+        first.global_end = first.global_start;
+        let (w, h) = video.extraction_size(cfg.frame_width)?;
+        let scale = (640.0 / w as f64).min(612.0 / h as f64).min(1.0);
+        let mut preview = Vec::new();
+        stream_missing_windows(
+            &video,
+            &[first],
+            clip_start,
+            clip_end,
+            track_fps,
+            ((w as f64 * scale).floor() as u32).max(2),
+            JPEG_QUALITY,
+            cancel,
+            |_, mut frames| {
+                preview = frames.remove(0);
+                Ok(())
+            },
+        )?;
+        if preview.is_empty() {
+            return Err("無法取得辨識來源預覽。".into());
+        }
+        // An exceptionally tall 2-pixel-wide ROI can hit the minimum even width before the height limit.
+        let image = image::load_from_memory(&preview).map_err(|e| e.to_string())?;
+        if image.width() > 640 || image.height() > 640 {
+            let thumb = image.thumbnail(640, 640);
+            preview.clear();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut preview, 90)
+                .encode_image(&thumb)
+                .map_err(|e| e.to_string())?;
+        }
+        let _ = tx.send(BackendEvent::Plan {
+            metrics,
+            preview,
+            time: global_pts[0],
+        });
+        return Ok(Some(0.0));
+    }
     fs::create_dir_all(&cache_dir).map_err(|e| format!("建立快取目錄失敗：{e}"))?;
     atomic_write_json(&cache_dir.join("config.json"), &fp_config)?;
     let usage_log = cache_dir.join("vision_usage.jsonl");
-
     let vision_t0 = Instant::now();
     let empty_hints = HashMap::new();
     let (mut base_map, base_vision_usage) = run_vision_windows(
@@ -1366,7 +1493,7 @@ fn execute_single_job(
         &cache_dir,
         &usage_log,
         "Vision",
-        0.0,
+        cfg.content_mode,
         cancel,
         tx,
     )?;
@@ -1375,9 +1502,7 @@ fn execute_single_job(
         .iter()
         .filter_map(|w| base_map.remove(&w.window_index))
         .collect();
-    let base_vision_cost = compute_cost(&cfg.vision_model, &base_vision_usage);
     let mut escalated_usage = TokenUsage::default();
-    let mut escalated_cost_usd = 0.0;
 
     // Stage 2b: Independently review every hard window, even after a flagship initial scan.
     let flagship_model = flagship_model_for(cfg.provider);
@@ -1430,11 +1555,10 @@ fn execute_single_job(
                 &esc_cache_dir,
                 &usage_log,
                 "Escalate",
-                base_vision_cost.usd,
+                cfg.content_mode,
                 cancel,
                 tx,
             )?;
-            escalated_cost_usd = compute_cost(flagship_model, &esc_u).usd;
             escalated_usage = esc_u;
 
             for rec in &mut ordered_records {
@@ -1454,6 +1578,7 @@ fn execute_single_job(
         clip_start,
         clip_end,
         cfg.fps as f64,
+        cfg.content_mode,
         1,
         Some(&sample_track_indices),
         frame_track.as_ref(),
@@ -1461,8 +1586,7 @@ fn execute_single_job(
 
     // Stage 3b: Multi-language post-OCR proofreader
     let mut proof_usage = TokenUsage::default();
-    let mut proof_cost_usd = 0.0;
-    if cfg.smart_accuracy {
+    if cfg.smart_accuracy && cfg.content_mode == ContentMode::Variety {
         if !card_cues.is_empty() {
             let (refined, u1) = proofread_source_cues(
                 &card_cues,
@@ -1493,7 +1617,6 @@ fn execute_single_job(
             proof_usage.add(&u2);
             dialogue_cues = refined;
         }
-        proof_cost_usd = compute_cost(flagship_model, &proof_usage).usd;
     }
 
     let mut final_cues = card_cues.clone();
@@ -1508,18 +1631,21 @@ fn execute_single_job(
         processed_end: clip_end,
     });
 
+    // Both modes can reuse identical visual evidence. Keep their derived SRTs and summaries separate.
+    let artifacts = match cfg.content_mode {
+        ContentMode::Faithful => cfg.output_dir.join("faithful"),
+        ContentMode::Variety => cfg.output_dir.clone(),
+    };
     let stem = video
         .path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "video".to_string());
-    let cards_srt_path = cfg.output_dir.join(format!("{stem}.cards.{lang_code}.srt"));
-    let dialogue_srt_path = cfg
-        .output_dir
-        .join(format!("{stem}.dialogue.{lang_code}.srt"));
+    let cards_srt_path = artifacts.join(format!("{stem}.cards.{lang_code}.srt"));
+    let dialogue_srt_path = artifacts.join(format!("{stem}.dialogue.{lang_code}.srt"));
 
     atomic_write_json(
-        &cfg.output_dir.join("cards.source.json"),
+        &artifacts.join("cards.source.json"),
         &serde_json::to_value(&card_cues).unwrap_or_default(),
     )?;
     if !card_cues.is_empty() {
@@ -1532,7 +1658,7 @@ fn execute_single_job(
     }
     if !dialogue_cues.is_empty() {
         atomic_write_json(
-            &cfg.output_dir.join("dialogue.source.json"),
+            &artifacts.join("dialogue.source.json"),
             &serde_json::to_value(&dialogue_cues).unwrap_or_default(),
         )?;
         write_srt(&dialogue_srt_path, &dialogue_cues)?;
@@ -1546,7 +1672,7 @@ fn execute_single_job(
     }
 
     let _ = tx.send(BackendEvent::TracksReady {
-        output_dir: cfg.output_dir.clone(),
+        output_dir: artifacts.clone(),
     });
 
     let mut eval_ko_val = Value::Null;
@@ -1559,12 +1685,13 @@ fn execute_single_job(
         && !card_cues.is_empty()
     {
         let ref_ko = rd.join("cards.ko.srt");
-        if ref_ko.is_file() && lang_code == "ko" {
-            let m = evaluate_srt(
+        if ref_ko.is_file() && lang_code == "ko" && clip_start < 300.0 {
+            let m = evaluate_srt_in_range(
                 &cards_srt_path,
                 &ref_ko,
-                Some(&cfg.output_dir.join("eval_ko_report.md")),
-                Some(&cfg.output_dir.join("eval_ko_metrics.json")),
+                Some(&artifacts.join("eval_ko_report.md")),
+                Some(&artifacts.join("eval_ko_metrics.json")),
+                Some((clip_start, clip_end.min(300.0))),
             )?;
             let summary_line = format!(
                 "字元準確 {:.1}% · 同步 {:.1}%",
@@ -1588,7 +1715,7 @@ fn execute_single_job(
 
     // Optional Stage 4: Taiwanese Traditional Chinese translation (off by default per user workflow!)
     let mut trans_usage = TokenUsage::default();
-    let mut trans_cost_usd = 0.0;
+    let vision_total_usd = crate::llm::estimated_usd_since(cost_start);
     let mut zh_cards_out: Option<PathBuf> = None;
     let mut zh_dialogue_out: Option<PathBuf> = None;
 
@@ -1608,7 +1735,7 @@ fn execute_single_job(
                 cfg.provider,
                 &cfg.translate_model,
                 &api_key,
-                &cfg.output_dir,
+                &artifacts,
                 cancel,
                 tx,
             )
@@ -1625,13 +1752,13 @@ fn execute_single_job(
                 cfg.provider,
                 &cfg.translate_model,
                 &api_key,
-                &cfg.output_dir,
+                &artifacts,
                 &effective_glossary,
                 cancel,
                 tx,
             )?;
             trans_usage.add(&u_c);
-            let p = cfg.output_dir.join(format!("{stem}.cards.zh-Hant.srt"));
+            let p = artifacts.join(format!("{stem}.cards.zh-Hant.srt"));
             write_srt(&p, &zh_c)?;
             zh_cards_out = Some(p);
         }
@@ -1644,26 +1771,24 @@ fn execute_single_job(
                 cfg.provider,
                 &cfg.translate_model,
                 &api_key,
-                &cfg.output_dir,
+                &artifacts,
                 &effective_glossary,
                 cancel,
                 tx,
             )?;
             trans_usage.add(&u_d);
-            let p = cfg.output_dir.join(format!("{stem}.dialogue.zh-Hant.srt"));
+            let p = artifacts.join(format!("{stem}.dialogue.zh-Hant.srt"));
             write_srt(&p, &zh_d)?;
             zh_dialogue_out = Some(p);
         }
 
-        trans_cost_usd = compute_cost(&cfg.translate_model, &trans_usage).usd;
         let _ = tx.send(BackendEvent::TracksReady {
-            output_dir: cfg.output_dir.clone(),
+            output_dir: artifacts.clone(),
         });
     }
 
-    let vision_total_usd = base_vision_cost.usd + escalated_cost_usd + proof_cost_usd;
-    let total_usd = ((vision_total_usd + trans_cost_usd) * 100_000.0).round() / 100_000.0;
-    let total_twd = (total_usd * USD_TO_TWD * 100.0).round() / 100.0;
+    let total_usd = crate::llm::estimated_usd_since(cost_start);
+    let total_twd = total_usd.map(|usd| (usd * USD_TO_TWD * 100.0).round() / 100.0);
     let elapsed = (started.elapsed().as_secs_f64() * 100.0).round() / 100.0;
 
     let summary = json!({
@@ -1674,6 +1799,8 @@ fn execute_single_job(
         "track_fps": track_fps,
         "provider": cfg.provider.as_str(),
         "vision_model": cfg.vision_model,
+        "content_mode":cfg.content_mode,"region":cfg.region,"stream_index":video.stream_index,
+        "request_metrics":crate::llm::live_metrics(json!({"estimatedCostUsd": total_usd})),
         "smart_accuracy": cfg.smart_accuracy,
         "translate_enabled": cfg.translate_enabled,
         "cards_cue_count": card_cues.len(),
@@ -1689,7 +1816,7 @@ fn execute_single_job(
             "base_usage": base_vision_usage,
             "escalated_usage": escalated_usage,
             "proofread_usage": proof_usage,
-            "estimated_cost_usd": (vision_total_usd * 100_000.0).round() / 100_000.0,
+            "estimated_cost_usd": vision_total_usd,
         },
         "translate_usage": trans_usage,
         "eval_ko": eval_ko_val,
@@ -1699,10 +1826,14 @@ fn execute_single_job(
         },
         "elapsed_seconds": elapsed,
     });
-    atomic_write_json(&cfg.output_dir.join("run_summary.json"), &summary)?;
+    atomic_write_json(&artifacts.join("run_summary.json"), &summary)?;
 
+    let cost_label = match (total_usd, total_twd) {
+        (Some(usd), Some(twd)) => format!("估計費用 ${usd:.4} USD（約 NT${twd:.1}）"),
+        _ => "費用未知".into(),
+    };
     let _ = tx.send(BackendEvent::Log(format!(
-        "=== 影片處理完成！耗時 {elapsed:.1}s | 字卡 {} 段・對白 {} 段 | 費用 ${total_usd:.4} USD（約 NT${total_twd:.1}）===",
+        "=== 影片處理完成！耗時 {elapsed:.1}s | 字卡 {} 段・對白 {} 段 | {cost_label} ===",
         card_cues.len(),
         dialogue_cues.len()
     )));
@@ -2103,7 +2234,7 @@ mod tests {
                 sample_times: (start..=end).map(|i| i as f64 * 0.5).collect(),
             })
             .collect();
-        let plan = CheckpointPlan::new(&windows, 0.0, 20.0, 2.0, None);
+        let plan = CheckpointPlan::new(&windows, 0.0, 20.0, 2.0, None, ContentMode::Faithful);
         let mut records = BTreeMap::new();
         records.insert(2, record(2, 26, 39));
         assert!(plan.snapshot(&records).is_none());
@@ -2223,6 +2354,9 @@ mod tests {
             workers: 1,
             translate_enabled: false,
             smart_accuracy: true,
+            content_mode: ContentMode::Variety,
+            region: None,
+            plan_only: false,
             start: Some(0.0),
             duration: Some(1.0),
             auto_eval: false,
@@ -2259,6 +2393,8 @@ mod tests {
             base.actual_times = window.sample_times.clone();
             base.model = cfg.vision_model.clone();
             base.events[0].text = "자료제공".into();
+            base.usage.input_tokens = 1234;
+            base.usage.output_tokens = 56;
             assert_eq!(find_hard_windows(&[base.clone()]).len(), 1);
             let file = format!("win_{:05}.json", window.window_index);
             atomic_write_json(&cache.join(&file), &serde_json::to_value(&base).unwrap()).unwrap();
@@ -2284,6 +2420,30 @@ mod tests {
         for (file, value) in review_records {
             atomic_write_json(&current.join(file), &value).unwrap();
         }
+        let (tx, rx) = mpsc::channel();
+        let preview_cfg = RunConfig {
+            plan_only: true,
+            ..cfg.clone()
+        };
+        execute_single_job(root, 0, 1, &preview_cfg, &cancel, &tx).unwrap();
+        let (metrics, preview) = rx
+            .try_iter()
+            .find_map(|e| match e {
+                BackendEvent::Plan {
+                    metrics, preview, ..
+                } => Some((metrics, preview)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(metrics["cachedWindows"], plan.windows.len());
+        assert_eq!(metrics["pendingWindows"], 0);
+        assert_eq!(metrics["pendingImageAppearances"], 0);
+        assert_eq!(metrics["pendingReviewWindows"], 0);
+        let pic = image::load_from_memory(&preview).unwrap().to_rgb8();
+        assert!(pic.width() <= 640 && pic.height() <= 640);
+        assert!(pic.get_pixel(45, 64).0.iter().all(|v| *v < 10));
+        assert!(!output.join("cards.source.json").exists());
+        assert_eq!(crate::llm::new_requests(), 0);
         for _ in 0..2 {
             let (tx, rx) = mpsc::channel();
             execute_single_job(root, 0, 1, &cfg, &Arc::new(AtomicBool::new(false)), &tx)
@@ -2301,6 +2461,7 @@ mod tests {
             assert_eq!(results.len(), 1);
             assert!(results[0].0.is_empty());
             assert_eq!(results[0].1, 1.0);
+            assert_eq!(crate::llm::live_metrics(json!({}))["inputTokens"], 0);
             let cues: Value =
                 serde_json::from_slice(&fs::read(output.join("cards.source.json")).unwrap())
                     .unwrap();
@@ -2401,6 +2562,9 @@ mod tests {
             workers: 2,
             translate_enabled: false,
             smart_accuracy: true,
+            content_mode: ContentMode::Variety,
+            region: None,
+            plan_only: false,
             start: Some(start),
             duration: Some(end - start),
             auto_eval: false,

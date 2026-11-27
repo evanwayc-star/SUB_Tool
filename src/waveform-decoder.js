@@ -12,6 +12,16 @@ import { sourceDisplayPeaks } from './source-waveform-progress.js';
 import { audioMotherPath } from '../shared/audio-loudness.cjs';
 
 export const WAVE_DECODE_MAX = 5e8;    // 超過此大小不整檔解碼波形，改即時擷取
+let pendingFileDecode = null;
+
+// decodeAudioData resamples to the output context. Clock alignment can temporarily
+// retain both the decoded PCM and a second, source-aligned AudioBuffer.
+export function canDecodeWaveform(file,duration,channels,sampleRate=AudioEngine.ctx?.sampleRate || 48000){
+  if(!(duration>0) || !Number.isFinite(duration) || !(file?.size>=0) || file.size>WAVE_DECODE_MAX) return false;
+  const channelCount=Number.isInteger(channels)&&channels>0?channels:8;
+  const pcmBytes=Math.ceil(duration*sampleRate)*channelCount*Float32Array.BYTES_PER_ELEMENT;
+  return file.size+2*pcmBytes <= 256*1024*1024;
+}
 
 function pcmWaveHeader(arrayBuffer){
   const view=new DataView(arrayBuffer);
@@ -133,6 +143,7 @@ export const Wave = {
    * Float32Array 序列化；檔案重新載入後會由 ingest / decode 重新補齊。
    */
   sourceWaveforms:new Map(), // key -> {key,runtimeSourceId,mix,channels:Map,vocals,selection}
+  liveElementSources:new Map(),
 
   _sourceKey(source){
     if(source&&typeof source==='object'){
@@ -237,6 +248,7 @@ export const Wave = {
     const nextMixPath=mixPath!==undefined?mixPath||null:state.mix.path;
     if(state.mix.path&&nextMixPath!==state.mix.path) this._cancelSourceVocals(state,{clear:true});
     if(nextMixPath!==state.mix.path||(mixPeaks?.length&&mixPeaks!==state.mix.peaks)){
+      this.liveElementSources.delete(state.runtimeSourceId);
       // A new file or supplied peaks supersedes any in-flight decode for the old entry.
       state.mix={path:nextMixPath,peaks:nextMixPath===state.mix.path?state.mix.peaks:null,loading:null};
     }
@@ -285,9 +297,11 @@ export const Wave = {
   setSourceMixPeaks(source,peaks,{mixPath,channels}={}){
     const state=this.registerSourceWaveforms(source,{mixPath,mixPeaks:peaks,channels});
     if(!state) return peaks||null;
-    this.live=false;
     const runtime=this._runtimeSourceKey(source);
-    if(!this.peaks||runtime===Media.activeSource||(!Media.activeSource&&runtime==='video')) this.peaks=peaks;
+    if(!this.peaks||runtime===Media.activeSource||(!Media.activeSource&&runtime==='video')){
+      this.live=false;
+      this.peaks=peaks;
+    }
     return peaks||null;
   },
   getSourceMixPeaks(source){ return this._sourceState(source,false)?.mix?.peaks || null; },
@@ -750,6 +764,7 @@ export const Wave = {
   forgetSourceWaveforms(source){
     const state=this._sourceState(source,false);
     if(!state) return;
+    this.liveElementSources.delete(state.runtimeSourceId);
     this._cancelSourceVocals(state,{clear:true});
     for(const entry of state.channels.values())this._stopChannelLoad(entry);
     for(const [key,value] of this.sourceWaveforms){ if(value===state) this.sourceWaveforms.delete(key); }
@@ -801,13 +816,21 @@ export const Wave = {
     const retained=new Set(keep.map(source=>this._sourceState(source)).filter(Boolean));
     if(!retained.size) this._generation+=1;
     for(const state of new Set(this.sourceWaveforms.values())) if(!retained.has(state)){
+      this.liveElementSources.delete(state.runtimeSourceId);
       this._cancelSourceVocals(state,{clear:true});
       for(const entry of state.channels.values())this._stopChannelLoad(entry);
     }
     for(const [key,state] of this.sourceWaveforms) if(!retained.has(state)) this.sourceWaveforms.delete(key);
     this.sources=[]; this.srcIdx=-1; emit('media:srcSel');
   },
-  async fromFile(file,source='video',{owns=()=>true}={}){
+  fromFile(file,source='video',options={}){
+    // A batch can import many files before the first decode releases its PCM.
+    const decode=()=>this._decodeFile(file,source,options);
+    const work=pendingFileDecode?pendingFileDecode.then(decode,decode):decode();
+    pendingFileDecode=work;
+    return work.finally(()=>{ if(pendingFileDecode===work) pendingFileDecode=null; });
+  },
+  async _decodeFile(file,source,{owns=()=>true}){
     const currentSource=()=>{
       if(!source||typeof source!=='object') return source;
       if(Media.externalAudioSources.includes(source)) return source;
@@ -822,7 +845,7 @@ export const Wave = {
     Media.ensureCtx();
     const buf=await readFile(file);
     if(!sourceIsCurrent()) return false;
-    const ab=await AudioEngine.decodeSourceAudioData(buf.slice(0),{file,owns:sourceIsCurrent});
+    const ab=await AudioEngine.decodeSourceAudioData(buf,{file,owns:sourceIsCurrent});
     if(!sourceIsCurrent()) return false;
     // 波形使用完整來源時間；時間軸長度由 trim/offset 的 owner 決定。
     if(source&&typeof source==='object') Media.recomputeTimelineDuration?.();
@@ -843,17 +866,31 @@ export const Wave = {
     emit('media:waveform',{controls:true});
     if(!Media.audioPanelState().notice&&!Media.audioPanelState().extraction) $('atHint').textContent='播放以逐步產生波形（或載入音訊檔）';
   },
+  prepareLiveSource(source,duration){
+    if(!(duration>0) || !Number.isFinite(duration)) return;
+    const state=this._sourceState(source,true);
+    if(state && !state.mix.peaks) this.liveElementSources.set(state.runtimeSourceId,{state,duration});
+  },
   captureLive(){ // 由 rafLoop 於播放時呼叫
-    if(!this.live||!this.peaks)return;
-    const t=Media.liveWaveSourceTime(); if(t==null) return;
-    const buf=AudioEngine.readTimeDomain({source:'video'}); if(!buf) return;
+    if(this.live&&this.peaks) this._captureBuckets(this.peaks,Media.liveWaveSourceTime(),'video');
+    if(!this.liveElementSources.size) return;
+    for(const [id,time] of Media.liveElementWaveTimes(this.liveElementSources)){
+      if(time==null) continue;
+      const {state,duration}=this.liveElementSources.get(id);
+      state.mix.peaks ||= new Float32Array(2*Math.ceil(duration*this.resolution));
+      this._captureBuckets(state.mix.peaks,time,id);
+    }
+  },
+  _captureBuckets(peaks,t,source){
+    if(t==null) return;
+    const buf=AudioEngine.readTimeDomain({source}); if(!buf) return;
     let mn=0,mx=0; for(let i=0;i<buf.length;i++){const v=buf[i]; if(v<mn)mn=v; if(v>mx)mx=v;}
     const b=Math.floor(t*this.resolution);
-    const n=this.peaks.length/2;
+    const n=peaks.length/2;
     // 寫入目前時間附近的桶（analyser 視窗約涵蓋數桶）
     for(let k=b;k<=b+2 && k<n;k++){
-      if(mn<this.peaks[k*2])this.peaks[k*2]=mn;
-      if(mx>this.peaks[k*2+1])this.peaks[k*2+1]=mx;
+      if(mn<peaks[k*2])peaks[k*2]=mn;
+      if(mx>peaks[k*2+1])peaks[k*2+1]=mx;
     }
   },
   /* 純計算版（不改 this.peaks）：影片序列的每段 clip 各自持有 peaks 時使用 */

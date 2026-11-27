@@ -15,18 +15,65 @@ function requireRequestId(id) {
 }
 
 function validateSpeechAudioRequest(request) {
-  if (!request || typeof request !== 'object' || Array.isArray(request)) throw new TypeError('缺少辨識音訊片段參數');
+  if (!request || typeof request !== 'object' || Array.isArray(request))
+    throw new TypeError('缺少辨識音訊片段參數');
   const { path, start, duration, sourceStream = 0, sourceChannel = null, processed = false, requestId } = request;
-  if (typeof path !== 'string' || !path.trim() || path.length > 32767 || path.includes('\0')) throw new TypeError('缺少有效的音訊來源路徑');
+  if (typeof path !== 'string' || !path.trim() || path.length > 32767 || path.includes('\0'))
+    throw new TypeError('缺少有效的音訊來源路徑');
   requireRequestId(requestId);
-  if (typeof start !== 'number' || !Number.isFinite(start) || start < 0
-    || start > Number.MAX_SAFE_INTEGER / SAMPLE_RATE - MAX_READ_SECONDS) throw new RangeError('辨識音訊開始時間必須是有效的非負秒數');
-  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0 || duration > MAX_READ_SECONDS
-    || Math.round(duration * SAMPLE_RATE) < 1) throw new RangeError('辨識音訊片段必須至少一個 sample 且不超過 600 秒');
-  if (!Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream > 255) throw new TypeError('無效的來源音訊串流');
-  if (sourceChannel !== null && (!Number.isInteger(sourceChannel) || sourceChannel < 0 || sourceChannel > 127)) throw new TypeError('無效的來源音訊聲道');
+  if (
+    typeof start !== 'number' ||
+    !Number.isFinite(start) ||
+    start < 0 ||
+    start > Number.MAX_SAFE_INTEGER / SAMPLE_RATE - MAX_READ_SECONDS
+  )
+    throw new RangeError('辨識音訊開始時間必須是有效的非負秒數');
+  if (
+    typeof duration !== 'number' ||
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    duration > MAX_READ_SECONDS ||
+    Math.round(duration * SAMPLE_RATE) < 1
+  )
+    throw new RangeError('辨識音訊片段必須至少一個 sample 且不超過 600 秒');
+  if (!Number.isInteger(sourceStream) || sourceStream < 0 || sourceStream > 255)
+    throw new TypeError('無效的來源音訊串流');
+  if (sourceChannel !== null && (!Number.isInteger(sourceChannel) || sourceChannel < 0 || sourceChannel > 127))
+    throw new TypeError('無效的來源音訊聲道');
   if (typeof processed !== 'boolean') throw new TypeError('辨識音訊 processed 必須是布林值');
-  return Object.freeze({ path, start, duration, sourceStream, sourceChannel, processed, requestId });
+  const mix = request.mixChannels;
+  if (
+    mix !== undefined &&
+    (!Array.isArray(mix) ||
+      !mix.length ||
+      mix.length > 256 ||
+      mix.some(
+        (row) =>
+          !row ||
+          !Number.isInteger(row.sourceStream) ||
+          row.sourceStream < 0 ||
+          row.sourceStream > 255 ||
+          (row.sourceChannel !== null &&
+            (!Number.isInteger(row.sourceChannel) || row.sourceChannel < 0 || row.sourceChannel > 127))
+      ))
+  )
+    throw new TypeError('無效的辨識混音聲道');
+  return Object.freeze({
+    path,
+    start,
+    duration,
+    sourceStream,
+    sourceChannel,
+    processed,
+    requestId,
+    ...(mix
+      ? {
+          mixChannels: Object.freeze(
+            mix.map(({ sourceStream, sourceChannel }) => Object.freeze({ sourceStream, sourceChannel }))
+          )
+        }
+      : {})
+  });
 }
 
 function buildSpeechAudioArgs(request, media) {
@@ -34,20 +81,110 @@ function buildSpeechAudioArgs(request, media) {
   const audio = media?.audio?.[chunk.sourceStream];
   if (!audio) throw new RangeError('辨識來源音訊串流不存在');
   const channels = audio.channels;
-  if (!Number.isInteger(channels) || channels < 1 || channels > 128
-    || (chunk.sourceChannel !== null && chunk.sourceChannel >= channels)) throw new RangeError('辨識來源音訊聲道不存在或超過上限');
+  if (
+    !Number.isInteger(channels) ||
+    channels < 1 ||
+    channels > 128 ||
+    (chunk.sourceChannel !== null && chunk.sourceChannel >= channels)
+  )
+    throw new RangeError('辨識來源音訊聲道不存在或超過上限');
   const frames = Math.round(chunk.duration * SAMPLE_RATE);
-  const seek = sourceClockSeek(chunk.start, chunk.processed ? null : (media.video || audio));
+  const seek = sourceClockSeek(chunk.start, chunk.processed ? null : media.video || audio);
+  if (chunk.mixChannels) {
+    const groups = new Map();
+    for (const { sourceStream, sourceChannel } of chunk.mixChannels) {
+      const count = media.audio[sourceStream]?.channels;
+      if (
+        !Number.isInteger(count) ||
+        count < 1 ||
+        count > 128 ||
+        (sourceChannel !== null && sourceChannel >= count)
+      )
+        throw new RangeError('辨識來源混音聲道不存在');
+      const group = groups.get(sourceStream) || new Set();
+      if (sourceChannel === null) for (let ch = 0; ch < count; ch++) group.add(ch);
+      else group.add(sourceChannel);
+      groups.set(sourceStream, group);
+    }
+    const total = [...groups.values()].reduce((sum, group) => sum + group.size, 0);
+    const filters = [],
+      labels = [];
+    for (const [stream, channels] of groups) {
+      const pan = [...channels].map((ch) => `${1 / total}*c${ch}`).join('+'),
+        label = `[m${stream}]`;
+      filters.push(
+        `[0:a:${stream}]pan=mono|c0=${pan},${sourceAudioClockFilter(seek, SAMPLE_RATE)},apad=whole_len=${frames},atrim=end_sample=${frames}${label}`
+      );
+      labels.push(label);
+    }
+    filters.push(labels.join('') + `amix=inputs=${labels.length}:normalize=0[out]`);
+    return [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-xerror',
+      '-ss',
+      String(seek.seek),
+      '-i',
+      chunk.path,
+      '-filter_complex',
+      filters.join(';'),
+      '-map',
+      '[out]',
+      '-t',
+      String(frames / SAMPLE_RATE),
+      '-ac',
+      '1',
+      '-ar',
+      String(SAMPLE_RATE),
+      '-c:a',
+      'pcm_f32le',
+      '-f',
+      'f32le',
+      'pipe:1'
+    ];
+  }
   // 使用來源 channel 的等權平均，不讓 FFmpeg 的 layout 降混規則或專案 bus 決定辨識內容。
-  const mono = chunk.sourceChannel === null
-    ? Array.from({ length: channels }, (_, index) => `${1 / channels}*c${index}`).join('+')
-    : `c${chunk.sourceChannel}`;
-  const filter = [`pan=mono|c0=${mono}`, sourceAudioClockFilter(seek, SAMPLE_RATE),
-    `apad=whole_len=${frames}`, `atrim=end_sample=${frames}`].join(',');
-  return ['-hide_banner', '-loglevel', 'error', '-nostdin', '-xerror',
-    '-ss', String(seek.seek), '-i', chunk.path, '-t', String(frames / SAMPLE_RATE),
-    '-map', `0:a:${chunk.sourceStream}`, '-vn', '-sn', '-dn', '-af', filter,
-    '-ac', '1', '-ar', String(SAMPLE_RATE), '-c:a', 'pcm_f32le', '-f', 'f32le', 'pipe:1'];
+  const mono =
+    chunk.sourceChannel === null
+      ? Array.from({ length: channels }, (_, index) => `${1 / channels}*c${index}`).join('+')
+      : `c${chunk.sourceChannel}`;
+  const filter = [
+    `pan=mono|c0=${mono}`,
+    sourceAudioClockFilter(seek, SAMPLE_RATE),
+    `apad=whole_len=${frames}`,
+    `atrim=end_sample=${frames}`
+  ].join(',');
+  return [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-nostdin',
+    '-xerror',
+    '-ss',
+    String(seek.seek),
+    '-i',
+    chunk.path,
+    '-t',
+    String(frames / SAMPLE_RATE),
+    '-map',
+    `0:a:${chunk.sourceStream}`,
+    '-vn',
+    '-sn',
+    '-dn',
+    '-af',
+    filter,
+    '-ac',
+    '1',
+    '-ar',
+    String(SAMPLE_RATE),
+    '-c:a',
+    'pcm_f32le',
+    '-f',
+    'f32le',
+    'pipe:1'
+  ];
 }
 
 function abortError() { return Object.assign(new Error('辨識音訊讀取已取消'), { name: 'AbortError', code: 'ABORT_ERR' }); }

@@ -115,6 +115,7 @@ const actionCategories = [
       'search': '打開搜尋框',
       'screenshot': '儲存畫面截圖',
       'screenshot_tc': '儲存畫面截圖帶時間碼',
+      'playhead_ocr': '辨識播放點畫面文字（本機 OCR）',
       'undo': '復原',
       'redo': '重做',
       'save_project': '儲存專案',

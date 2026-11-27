@@ -6,6 +6,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { SCREEN_TEXT_MODELS, SCREEN_TEXT_DEFAULT_MODELS } = require('../../shared/screen-text-options.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -194,9 +195,34 @@ function assertLayout(value) {
     assert.deepEqual(wide.modelOptions,['gpt-5.4-mini','gpt-5.4','__custom__']);
     assert.ok(!wide.customVisible && wide.customDisabled,'預設模型應隱藏並停用自訂欄位');
     await capture(client,screenshots.wide);
+    await clickControl(client,'.ocr-settings-layout details summary');
+    await clickControl(client,'#ocrPlan');
+    await waitFor(()=>client.evaluate("document.getElementById('ocrPreviewImage').naturalWidth > 0"),'未輸入金鑰也能在本機預覽');
+    const estimate=await client.evaluate("document.getElementById('ocrPlanInfo').textContent");
+    assert.match(estimate,/不同畫格.*待送.*本次新增 0 請求/u);
+    await clickControl(client,'#ocrCropFrame');
+    await waitFor(()=>client.evaluate("document.getElementById('ocrPlanInfo').textContent.includes('拖曳')"),'原圖完成');
+    await client.evaluate("document.getElementById('ocrPreviewImage').scrollIntoView({block:'center'});true");
+    const frame=await elementRect(client,'#ocrPreviewImage');
+    const x=frame.left+frame.width*.1,y=frame.top+frame.height*.5;
+    await client.send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',buttons:1,clickCount:1,x,y});
+    await client.send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',buttons:0,clickCount:1,x:x+frame.width*.6,y:y+frame.height*.3});
+    const region=await client.evaluate("Array.from(document.querySelectorAll('.ocr-region-fields input'),el=>el.valueAsNumber)");
+    assert.ok(region.every((value,i)=>Math.abs(value-[10,50,60,30][i])<1),JSON.stringify(region));
+    await clickControl(client,'#ocrUseRegion');
+    assert.ok(await client.evaluate("document.getElementById('ocrRegionFields').hidden"));
+    await clickControl(client,'.ocr-settings-layout details summary');
     await dispatchClick(client,await elementRect(client,'#ocrStart'));
     assert.match(await client.evaluate("document.getElementById('ocrError').textContent"),/API 金鑰/);
     assert.equal(await client.evaluate("Boolean(document.getElementById('ocrProgressBar'))"),false);
+
+    const cueCount=await client.evaluate('window.SUB.State.cues.length');
+    await clickControl(client,'.ocr-settings-layout details summary');
+    await typeText(client,'#ocrBudget','0');await clickControl(client,'#ocrStart');
+    const cacheOnly=await waitFor(()=>client.evaluate("document.getElementById('ocrError')?.textContent.includes('新增 API 請求上限') && document.getElementById('ocrError').textContent"),'未輸金鑰的零預算辨識抵達原生快取',20000);
+    assert.equal(await client.evaluate('window.SUB.State.cues.length'),cueCount);
+    assert.equal(await client.evaluate("document.getElementById('ocrBudget').value"),'0');
+    await client.evaluate("document.getElementById('ocrBudget').value='';true");
 
     await selectOption(client,'#ocrModel','gpt-5.4');
     await selectOption(client,'#ocrModel','__custom__');
@@ -210,10 +236,10 @@ function assertLayout(value) {
     await typeText(client,'#ocrApiKey','subtool-draft-only-never-send');
     await selectOption(client,'#ocrProvider','gemini');
     const gemini = await layout(client);
-    assert.deepEqual(gemini.modelOptions,['gemini-2.5-flash','gemini-2.5-pro','__custom__']);
-    assert.equal(gemini.model,'gemini-2.5-pro');
+    assert.deepEqual(gemini.modelOptions,[...SCREEN_TEXT_MODELS.gemini,'__custom__']);
+    assert.equal(gemini.model,SCREEN_TEXT_DEFAULT_MODELS.gemini);
     assert.equal(await client.evaluate("document.getElementById('ocrApiKey').value"),'');
-    await selectOption(client,'#ocrModel','gemini-2.5-pro');
+    await selectOption(client,'#ocrModel',SCREEN_TEXT_DEFAULT_MODELS.gemini);
     await selectOption(client,'#ocrModel','__custom__');
     await typeText(client,'#ocrCustomModel','gemini-acceptance-draft');
     await selectOption(client,'#ocrProvider','openai');
@@ -264,12 +290,12 @@ function assertLayout(value) {
     assert.equal(restored.width,'1024');
     assert.equal(restored.sourceLang,'ko');
     await capture(client,screenshots.credentials);
-    await selectOption(client,'#ocrModel','gemini-2.5-pro');
+    await selectOption(client,'#ocrModel',SCREEN_TEXT_DEFAULT_MODELS.gemini);
     const preset = await layout(client);
     assert.ok(!preset.customVisible && preset.customDisabled,'選回預設選項後自訂欄位不得參與驗證');
     // Never click Start once the dummy credential is stored.
     await dispatchClick(client,await elementRect(client,'#ocrCancel'));
-    console.log(JSON.stringify({executable,applicationUrl:target.url,wide,custom,narrow,scrolled,restored,encryptedSettings:true,screenshots},null,2));
+    console.log(JSON.stringify({executable,applicationUrl:target.url,wide,custom,narrow,scrolled,restored,estimate,region,cacheOnly,encryptedSettings:true,screenshots},null,2));
   } finally {
     client?.close();
     await stopElectron(child);

@@ -12,6 +12,13 @@ const deferred = () => {
 };
 
 describe('media ingest coordinator', () => {
+  it('前景需求等正在寫入的工作收尾，同優先級仍依提交次序執行',async()=>{
+    const coordinator=createMediaIngestCoordinator(),gate=deferred(),order=[];
+    await coordinator.enqueue(()=>({response:'ready',completion:gate.promise}));
+    const works=['background','reverse','composite'].map((name,i)=>coordinator.enqueue(()=>order.push(name),null,i>0));
+    expect(order).toEqual([]);gate.resolve();await Promise.all(works);
+    expect(order).toEqual(['reverse','composite','background']);
+  });
   it('取消舊專案的背景 Proxy 後等待 close，再啟動新專案，不執行舊排隊工作', async () => {
     const coordinator = createMediaIngestCoordinator();
     const owner = { sender: {}, sessionId: 'old-project', requestId: 'old-active' };

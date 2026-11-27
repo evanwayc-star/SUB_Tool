@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { observeFullSourceOpen } from './fixtures/full-source-reads.js';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -49,7 +50,7 @@ function sourceReadMeter(...sources) {
   const paths = new Set(sources.map(source => path.resolve(source)));
   const open = fsp.open;
   const reads = { opens: 0, calls: 0, bytes: 0 };
-  vi.spyOn(fsp, 'open').mockImplementation(async (file, ...args) => {
+  observeFullSourceOpen(async (file, ...args) => {
     const handle = await open(file, ...args);
     if (typeof file === 'string' && paths.has(path.resolve(file))) {
       reads.opens++;

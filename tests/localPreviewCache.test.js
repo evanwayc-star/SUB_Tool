@@ -7,6 +7,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 const require = createRequire(import.meta.url);
 const { FileAuthority } = require('../electron/file-authority.js');
 const { createMediaIntakeRuntime } = require('../electron/media-intake-runtime.js');
+const { retireProxyCheckpoints } = require('../electron/preview-proxy-checkpoints.js');
 const roots = [], runtimes = [];
 const audio = [{ channels: 1 }, { channels: 1 }];
 const filesOf = meta => [meta.proxy, meta.wave, ...meta.channels.map(channel => channel.file)].filter(Boolean);
@@ -35,6 +36,49 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(runtimes.splice(0).map(runtime => runtime.close()));
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
+it.each(['完成', '換收據', '取消'])('讀取 Proxy 分段收據時能存檔，%s 後只回收仍符合的分段', async action => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subtool-local-preview-'));
+  roots.push(root);
+  const key = 'proxy-part-' + 'a'.repeat(64);
+  const folder = path.join(root, key, 'entry-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+  fs.mkdirSync(folder, { recursive: true });
+  const receipt = path.join(folder, 'ready'), content = path.join(folder, 'content.mp4');
+  fs.writeFileSync(receipt, JSON.stringify({ key }));
+  fs.writeFileSync(content, 'keep this checkpoint');
+  let reading, resume, current = true;
+  const started = new Promise(resolve => { reading = resolve; });
+  const gate = new Promise(resolve => { resume = resolve; });
+  const open = fs.promises.open.bind(fs.promises);
+  vi.spyOn(fs.promises, 'open').mockImplementation(async (file, ...args) => {
+    const handle = await open(file, ...args);
+    if (file === receipt) {
+      const read = handle.read.bind(handle);
+      handle.read = async (buffer, offset, length, position) => {
+        const result = await read(buffer, offset, Math.min(7, length), position);
+        reading();
+        await gate;
+        return result;
+      };
+    }
+    return handle;
+  });
+  const cleanup = retireProxyCheckpoints({ dir: root, assertRetryOwner() {} }, () => current);
+  try {
+    await Promise.race([started, cleanup.then(() => { throw new Error('未進入收據讀取'); })]);
+    const draft = path.join(root, 'draft.json');
+    await fs.promises.writeFile(draft, JSON.stringify({ text: 'editing' }));
+    expect(JSON.parse(await fs.promises.readFile(draft, 'utf8')).text).toBe('editing');
+    if (action === '取消') current = false;
+    else if (action === '換收據') fs.writeFileSync(receipt, JSON.stringify({ key, revision: 2 }));
+  } finally {
+    resume();
+    await cleanup;
+  }
+  expect(fs.existsSync(content)).toBe(action !== '完成');
+  expect(fs.existsSync(receipt)).toBe(action !== '完成');
+  if (action !== '完成') expect(fs.readFileSync(content, 'utf8')).toBe('keep this checkpoint');
 });
 
 it('正式預覽只建立素材旁 cache，不建立本機中央 cache',async()=>{
@@ -73,6 +117,19 @@ it('重新開啟可直接重用已完成同夾資產，不轉檔、不複製到�
   const result=await runtime.ingest({src:f.source,duration:1,audio,needsProxy:true});
   expect(result).toMatchObject({cached:true,proxy:f.saved.proxy,channels:f.saved.channels,wave:f.saved.wave});
   expect(f.execute).not.toHaveBeenCalled();expect(fs.existsSync(f.cacheRoot)).toBe(false);
+});
+
+it('只重建播放器指認的損毀 Proxy，舊的失敗通知不會重建較新的世代',async()=>{
+  const f=await fixture(),request={src:f.source,duration:1,audio:[],needsProxy:true,failedProxy:f.saved.proxy};
+  fs.writeFileSync(f.saved.proxy,Buffer.alloc(fs.statSync(f.saved.proxy).size));
+  f.execute.mockClear();
+  const result=await f.runtime.ingest(request);
+  expect(result.cached).toBe(false);expect(result.proxy).not.toBe(f.saved.proxy);
+  expect(result.channels).toEqual(f.saved.channels);expect(result.wave).toBe(f.saved.wave);
+  const args=f.execute.mock.calls[0][0];
+  expect(args.filter(arg=>/\.(m4a|wav)$/.test(arg))).toEqual([]);
+  expect(await f.runtime.ingest(request)).toMatchObject({cached:true,proxy:result.proxy});
+  expect(f.execute).toHaveBeenCalledOnce();
 });
 
 function setRecordedProfile(shared, profile) {

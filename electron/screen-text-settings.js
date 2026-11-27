@@ -6,7 +6,8 @@ const { createSettingsFile } = require('./settings-file');
 const { SCREEN_TEXT_MODELS, SCREEN_TEXT_DEFAULT_MODELS: DEFAULT_MODELS,
   SCREEN_TEXT_DEFAULTS: DEFAULTS } = require('../shared/screen-text-options.cjs');
 
-const QUALITY_DEFAULTS_VERSION = 1;
+const QUALITY_DEFAULTS_VERSION = 2;
+const retiredGemini = new Map([['gemini-2.5-flash', 'gemini-3.5-flash-lite'], ['gemini-2.5-pro', 'gemini-3.8-flash']]);
 
 function validateScreenTextOptions(input = {}) {
   const { provider = DEFAULTS.provider, sourceLang = DEFAULTS.sourceLang, sampleFps = DEFAULTS.sampleFps,
@@ -18,7 +19,18 @@ function validateScreenTextOptions(input = {}) {
   if (!Number.isFinite(sampleFps) || sampleFps < 0.1 || sampleFps > 10) throw new Error('每秒取樣數必須介於 0.1 與 10');
   if (![960, 1024, 1280, 1440, 1920].includes(frameWidth)) throw new Error('請選擇有效的畫面寬度');
   if (typeof smartAccuracy !== 'boolean') throw new Error('智慧精準強化設定無效');
-  return { provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy };
+  const options = { provider, model, sourceLang, sampleFps, frameWidth, smartAccuracy };
+  if (input.contentMode !== undefined) {
+    if (!['faithful', 'variety'].includes(input.contentMode)) throw new Error('畫面文字保留方式無效');
+    options.contentMode = input.contentMode;
+  }
+  if (input.region != null) {
+    const { x, y, width, height } = input.region;
+    if (![x, y, width, height].every(Number.isFinite) || x < 0 || y < 0 ||
+        width <= 0 || height <= 0 || x + width > 1 || y + height > 1) throw new Error('辨識區域必須位於畫面內');
+    options.region = { x, y, width, height };
+  }
+  return options;
 }
 
 function createScreenTextSettings({ configDir, safeStorage, env = process.env }) {
@@ -41,15 +53,18 @@ function createScreenTextSettings({ configDir, safeStorage, env = process.env })
 
   function readSettings() {
     const data = file.read();
-    if (data.qualityDefaultsVersion === QUALITY_DEFAULTS_VERSION) return data;
+    if (Number.isInteger(data.qualityDefaultsVersion) && data.qualityDefaultsVersion >= QUALITY_DEFAULTS_VERSION) return data;
     fs.mkdirSync(directory(), { recursive: true });
     return file.update(current => {
-      if (current.qualityDefaultsVersion === QUALITY_DEFAULTS_VERSION) return current;
+      if (Number.isInteger(current.qualityDefaultsVersion) && current.qualityDefaultsVersion >= QUALITY_DEFAULTS_VERSION) return current;
       const provider = current.provider ?? DEFAULTS.provider;
-      const builtIn = Object.values(SCREEN_TEXT_MODELS).some(models => models.includes(current.model));
-      const options = validateScreenTextOptions({ ...current,
-        model: current.model == null || builtIn ? DEFAULT_MODELS[provider] : current.model,
-        sampleFps: DEFAULTS.sampleFps, frameWidth: DEFAULTS.frameWidth, smartAccuracy: DEFAULTS.smartAccuracy });
+      const currentQuality = current.qualityDefaultsVersion === 1;
+      const builtIn = Object.values(SCREEN_TEXT_MODELS).some(models => models.includes(current.model)) || retiredGemini.has(current.model);
+      let model = current.model;
+      if (currentQuality && provider === 'gemini') model = retiredGemini.get(model) ?? model;
+      if (!currentQuality && (model == null || builtIn)) model = DEFAULT_MODELS[provider];
+      const options = validateScreenTextOptions({ ...current, model,
+        ...(!currentQuality && {sampleFps:DEFAULTS.sampleFps, frameWidth:DEFAULTS.frameWidth, smartAccuracy:DEFAULTS.smartAccuracy}) });
       return { ...options, qualityDefaultsVersion: QUALITY_DEFAULTS_VERSION, encryptedKeys: { ...current.encryptedKeys } };
     });
   }

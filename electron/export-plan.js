@@ -524,7 +524,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     const wav = _buildWavOutput(planned.busLabels, audioPlan, fc);
     return {
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'), '-map', wav.label,
-        '-map_chapters', '-1', '-ar', '48000', '-c:a', 'pcm_s24le', outPath],
+        '-map_chapters', '-1', '-ar', '48000', '-c:a', 'pcm_s24le', '-rf64', 'auto', outPath],
       label: `匯出 WAV PCM（${wav.channels} 軌）`,
       duration: D,
       plannedEncoder: 'pcm_s24le',
@@ -599,10 +599,29 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   });
   const videoInputIndices = list.map(c => uniqueVideoPaths.indexOf(c.path));
   let ii = uniqueVideoPaths.length; // 之後的逐聲道音訊檔輸入從此接續編號
+  const reverseFeeds = [];
 
   // 2) 黑底 + 逐視訊軌整條時間軸 → 由下而上 overlay（各軌可有 縮放/位置/透明度＝子母畫面 PiP）
-  fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${_videoBoundary(D)},format=yuv420p,setsar=1[base]`);
+  const canvasFormat = isPro ? 'yuv422p10le' : 'yuv420p';
+  const layerFormat = isPro ? 'yuva422p10le' : 'yuva420p';
+  const overlayFormat = isPro ? 'yuv422p10' : 'auto';
   const vtracks = (videoTracks && videoTracks.length) ? videoTracks : [{ vt: 0 }];
+  const onlyClip = list.length === 1 ? list[0] : null;
+  const onlyTrack = onlyClip && vtracks.find(track => (track.vt || 0) === (onlyClip.vtrack || 0));
+  const onlySource = onlyClip && env.sourceClock?.(onlyClip.path);
+  // The measured source origin and matching opaque pixel format make the full
+  // frame the canvas. Keep framesync's black clock for gaps or unknown geometry.
+  const directCanvas = (format === 'h264' || isPro) && onlyTrack && onlyTrack.visible !== false
+    && (onlyTrack.scale ?? 1) === 1 && (onlyTrack.opacity ?? 1) === 1
+    && onlyClip.type === 'video' && onlyClip.in === 0 && onlyClip.offset === 0 && onlyClip.out === D
+    && onlyClip.natW === W && onlyClip.natH === H && (onlyClip.scale ?? 1) === 1
+    && (onlyClip.posX ?? .5) === .5 && (onlyClip.posY ?? .5) === .5 && !onlyClip.fadeIn && !onlyClip.fadeOut
+    && !onlyClip.reverse && fixedFrameTime(onlyClip) == null && (onlyClip.speed ?? 1) === 1
+    && !assFileName && !timecodeWatermark && Number.isFinite(onlySource?.streamStart)
+    && onlySource.pixelFormat === canvasFormat && !onlySource.displayTransform
+    && onlySource.fieldOrder === 'progressive' && ['1:1','1/1'].includes(onlySource.sampleAspectRatio)
+    && onlySource.width === W && onlySource.height === H && Math.abs(onlySource.fps - exactDeliveryFrameRate(R)) < .001;
+  if (!directCanvas) fc.push(`color=c=black:s=${W}x${H}:r=${R}:d=${_videoBoundary(D)},format=${canvasFormat},setsar=1[base]`);
   let baseLabel = '[base]';
   vtracks.forEach((T, ti) => {
     // 隱藏只影響畫面；母素材與音訊 routing 仍保留，不能把 visible 當 mute。
@@ -615,9 +634,36 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     const SW = Math.max(2, Math.round(scale * W)), SH = Math.max(2, Math.round(scale * H)); // 此軌影格尺寸（PiP 時縮小）
     const trk = list.map((c, i) => ({ c, i, vIdx: videoInputIndices[i] })).filter(x => (x.c.vtrack || 0) === vt).sort((a, b) => a.c.offset - b.c.offset);
     if (!trk.length) return;
+    if (directCanvas) {
+      const origin = pathMinIn.get(onlyClip.path);
+      fc.push(`[${trk[0].vIdx}:v]${sourceVideoTimestampFilter(onlySource)}trim=end=${D-origin},settb=AVTB,setpts=PTS+(${origin})/TB-1,tpad=stop_mode=clone:stop_duration=${_filterNumber(D)},fps=${R}:round=up:start_time=0,setsar=1[vplain]`);
+      baseLabel = '[vplain]';
+      return;
+    }
     let trkLabel = `[trkBase${ti}]`, si = 0;
-    fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${_videoBoundary(D)},format=yuva420p,setsar=1${trkLabel}`);
+    const only = trk[0].c;
+    const singleCanvas = list.length === 1 && trk.length === 1 && scale === 1 && opacity === 1
+      && only.natW === W && only.natH === H && (only.scale ?? 1) === 1
+      && (only.posX ?? .5) === .5 && (only.posY ?? .5) === .5 && !only.fadeIn && !only.fadeOut;
+    if (singleCanvas) trkLabel = baseLabel;
+    const grid = exactDeliveryFrameRate(R);
+    const deliveryFrame = time => Math.ceil(time * grid - 1e-6);
+    // A long strip of sequential shots otherwise evaluates every overlay for
+    // every output frame. Split its transparent clock only at disjoint output
+    // frame boundaries. Individual clips keep their original PTS and cadence.
+    const groupSize = 32;
+    const grouped = trk.length >= groupSize * 2 && trk.every(({ c }, index) =>
+      !c.fadeIn && !c.fadeOut && c.offset >= 0 && c.offset + clipLength(c) <= D + 1e-9 && clipLength(c) * grid >= 1 - 1e-6
+      && (!index || c.offset >= trk[index - 1].c.offset + clipLength(trk[index - 1].c) - 1e-9));
+    const groupOutputs = [];
+    if (!singleCanvas && !grouped) fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${_videoBoundary(D)},format=${layerFormat},setsar=1${trkLabel}`);
     for (const { c, vIdx } of trk) {
+      if (grouped && si % groupSize === 0) {
+        const first = si ? deliveryFrame(c.offset) : 0;
+        const end = deliveryFrame(trk[si + groupSize]?.c.offset ?? D);
+        trkLabel = `[groupBase${ti}_${si}]`;
+        fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R},format=${layerFormat},setsar=1,trim=end_frame=${end-first},setpts=PTS+${first}${trkLabel}`);
+      }
       const L = `t${ti}s${si++}`;
       const clen = clipLength(c);
       const minIn = pathMinIn.get(c.path);
@@ -625,6 +671,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       const adjOut = c.out - minIn;
 
       let vchain = '';
+      let visualInput = vIdx;
       {
         /* 片段幾何必須與預覽共用 shared/image-geometry.cjs 的 imageBox()：
              方框＝scale×軌影格 → 素材 contain 縮進方框 → 素材【中心】對到 (posX,posY)。
@@ -655,6 +702,9 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           ? imageBoxForExport({ frameW: SW, frameH: SH, natW: +c.natW, natH: +c.natH,
                                 scale: clipScale, posX: pxClip, posY: pyClip })
           : null;
+        const clipSize = box ? `${Math.max(2, Math.round(box.w))}:${Math.max(2, Math.round(box.h))}`
+          : `${cw}:${ch}:force_original_aspect_ratio=decrease`;
+        const scaleFilter = `scale=${clipSize}`;
         const fields = preset && c.type !== 'image'
           ? `bwdif=mode=${isInterlaced ? 'send_field' : 'send_frame'}:parity=auto:deint=interlaced,` : '';
         const freezeTime = c.type === 'image' ? null : fixedFrameTime(c);
@@ -679,9 +729,29 @@ function buildDeliveryArgv(spec = {}, env = {}) {
           // 末端 clone 只補最後一次 sample。
           // fps 不指定 start_time，保留來源尚未有畫格的 leading gap；只採
           // [0,samples) 的整數格 PTS。反序後以透明尾段保留原缺口，不能借未來格。
-          videoTime = `trim=end=${adjOut},${fields}settb=AVTB,setpts=floor((PTS-${sourceFirst}/TB)/${_filterNumber(c.speed,1)})-1,tpad=stop_mode=clone:stop_duration=${1 / sampleRate},fps=${R}:round=up,trim=start_pts=0:end_pts=${samples},reverse,setpts=PTS-STARTPTS,settb=AVTB,setpts=PTS+${phase}/TB,format=yuva420p,tpad=stop_mode=add:color=black@0:stop_duration=${_filterNumber(clen)}`;
+          const cadence = `trim=end=${adjOut},${fields}settb=AVTB,setpts=floor((PTS-${sourceFirst}/TB)/${_filterNumber(c.speed,1)})-1,tpad=stop_mode=clone:stop_duration=${1 / sampleRate},fps=${R}:round=up`;
+          const placeReverse = `setpts=PTS-STARTPTS,settb=AVTB,setpts=PTS+${phase}/TB,format=${layerFormat},tpad=stop_mode=add:color=black@0:stop_duration=${_filterNumber(clen)}`;
+          const clock = env.sourceClock?.(c.path);
+          // Older snapshots lack natural dimensions. The descriptor can still
+          // establish the same square-pixel scale box for an unrotated source.
+          const sourceRatio = !clock?.displayTransform && clock?.width > 0 && clock?.height > 0
+            ? clock.width / clock.height : 0;
+          const w = box ? Math.max(2, Math.round(box.w)) : Math.min(cw, Math.round(ch * sourceRatio));
+          const h = box ? Math.max(2, Math.round(box.h)) : sourceRatio ? Math.min(ch, Math.round(cw / sourceRatio)) : 0;
+          const frameBytes = (2 * w * h + 2 * Math.ceil(w / 2) * (isPro ? h : Math.ceil(h / 2))) * (isPro ? 2 : 1);
+          const maxBytes = env.reverseBufferBytes || 64 * 1024 * 1024;
+          if (env.bufferedReverse && c.type !== 'image' && frameBytes && samples * frameBytes > maxBytes) {
+            const fd = 3 + reverseFeeds.length;
+            reverseFeeds.push({ fd, source: c.path, samples, sourceFirst, rate: sampleRate, speed: _finiteNumber(c.speed, 1),
+              cadence: sourceVideoTimestampFilter(clock) + cadence,
+              scaleFilter, pixelFormat: layerFormat, frameBytes, maxBytes });
+            visualInput = ii++;
+            inputs.push('-f','rawvideo','-pixel_format',layerFormat,'-video_size',`${w}x${h}`,
+              '-framerate',String(R),'-probesize','32','-analyzeduration','0','-i',`pipe:${fd}`);
+            videoTime = placeReverse;
+          } else videoTime = `${cadence},trim=start_pts=0:end_pts=${samples},${scaleFilter},reverse,${placeReverse}`;
         }
-        if (freezeTime == null) {
+        if (freezeTime == null && visualInput === vIdx) {
           const clock = env.sourceClock?.(c.path);
           videoTime = sourceVideoTimestampFilter(clock) + videoTime;
         }
@@ -692,30 +762,39 @@ function buildDeliveryArgv(spec = {}, env = {}) {
         const enabled = `enable='gte(t,${_videoBoundary(c.offset)})*lt(t,${_videoBoundary(c.offset + clen)})'`;
         const separateFadeCanvas = fades.length && si > 1;
         const clipBase = separateFadeCanvas ? `[t${ti}ib${si}]` : trkLabel;
-        if (separateFadeCanvas) fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${_videoBoundary(D)},format=yuva420p,setsar=1${clipBase}`);
+        if (separateFadeCanvas) fc.push(`color=c=black@0.0:s=${SW}x${SH}:r=${R}:d=${_videoBoundary(D)},format=${layerFormat},setsar=1${clipBase}`);
+        if (freezeTime != null || !c.reverse) videoTime += ',' + scaleFilter;
+        fc.push(`[${visualInput}:v]${videoTime},format=${layerFormat},setsar=1${placement}[${IM}]`);
         if (box) {
-          const bw = Math.max(2, Math.round(box.w)), bh = Math.max(2, Math.round(box.h));
-          fc.push(`[${vIdx}:v]${videoTime},scale=${bw}:${bh},format=yuva420p,setsar=1${placement}[${IM}]`);
-          vchain = `${clipBase}[${IM}]overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}:${enabled}:format=auto:eof_action=repeat,format=yuva420p,setsar=1`;
+          vchain = `${clipBase}[${IM}]overlay=x=${Math.round(box.x)}:y=${Math.round(box.y)}:${enabled}:format=${overlayFormat}:eof_action=repeat,format=${layerFormat},setsar=1`;
         } else {
-          fc.push(`[${vIdx}:v]${videoTime},scale=${cw}:${ch}:force_original_aspect_ratio=decrease,format=yuva420p,setsar=1${placement}[${IM}]`);
-          vchain = `${clipBase}[${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):${enabled}:format=auto:eof_action=repeat,format=yuva420p,setsar=1`;
+          vchain = `${clipBase}[${IM}]overlay=x=(W*${pxClip.toFixed(4)})-(w/2):y=(H*${pyClip.toFixed(4)})-(h/2):${enabled}:format=${overlayFormat}:eof_action=repeat,format=${layerFormat},setsar=1`;
         }
         // 淡入淡出在交付格網的透明片段上運算，不能跟著較低格率來源的 hold 量化。
         if (separateFadeCanvas) {
           const faded = `[t${ti}fade${si}]`;
           fc.push(`${vchain},${fades.join(',')}${faded}`);
-          vchain = `${trkLabel}${faded}overlay=x=0:y=0:format=auto:eof_action=pass,format=yuva420p,setsar=1`;
+          vchain = `${trkLabel}${faded}overlay=x=0:y=0:format=${overlayFormat}:eof_action=pass,format=${layerFormat},setsar=1`;
         } else if (fades.length) vchain += `,${fades.join(',')}`;
       }
 
       fc.push(`${vchain}[${L}]`);
       trkLabel = `[${L}]`;
+      if (grouped && (si % groupSize === 0 || si === trk.length)) {
+        const label = `[group${ti}_${si}]`;
+        fc.push(`${trkLabel}setpts=PTS-STARTPTS${label}`);
+        groupOutputs.push(label);
+      }
     }
-    if (opacity < 0.999) { const ol = `[trkO${ti}]`; fc.push(`${trkLabel}format=yuva420p,colorchannelmixer=aa=${opacity.toFixed(3)}${ol}`); trkLabel = ol; } // 透明度
+    if (singleCanvas) { baseLabel = trkLabel; return; }
+    if (grouped) {
+      trkLabel = `[groupTrack${ti}]`;
+      fc.push(`${groupOutputs.join('')}concat=n=${groupOutputs.length}:v=1:a=0,settb=1/(${R}),setpts=N${trkLabel}`);
+    }
+    if (opacity < 0.999) { const ol = `[trkO${ti}]`; fc.push(`${trkLabel}format=${layerFormat},lut=a=val*${opacity.toFixed(3)}${ol}`); trkLabel = ol; }
     const out = `[ov${ti}]`;
     // 位置：px/py 0..1 → 以 overlay 表達式對映（scale=1 時 W-w=0＝滿版；PiP 時定位縮小影格）
-    fc.push(`${baseLabel}${trkLabel}overlay=x=(W-w)*${px.toFixed(4)}:y=(H-h)*${py.toFixed(4)}:eof_action=pass:format=auto${out}`);
+    fc.push(`${baseLabel}${trkLabel}overlay=x=(W-w)*${px.toFixed(4)}:y=(H-h)*${py.toFixed(4)}:eof_action=pass:format=${overlayFormat}${out}`);
     baseLabel = out;
   });
   const vc = baseLabel;
@@ -861,6 +940,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
       : [aacBitrateForChannels(2)]);
   if (isAirline) {
     return {
+      reverseFeeds,
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
         '-map', vfinal, ...audioMaps, '-map_chapters', '-1', ...airline.videoArgs,
         ...airline.audioArgs, ...airline.muxArgs, outPath],
@@ -872,6 +952,7 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   }
   if (isDisc) {
     return {
+      reverseFeeds,
       args: ['-y', ...inputs, '-filter_complex', fc.join(';'),
         '-map', vfinal, ...audioMaps, '-map_chapters', '-1', '-r', outputRate, ...disc.videoArgs,
         ...disc.audioArgs, ...disc.muxArgs, outPath],
@@ -923,12 +1004,14 @@ function buildDeliveryArgv(spec = {}, env = {}) {
   const accel = isGpu ? 'GPU ' + plannedEncoder.replace('h264_', '').toUpperCase() : 'CPU ' + plannedEncoder;
   return {
     args,
+    reverseFeeds,
     label: `匯出 ${preset ? 'MOD-FHD 1080i 7.28Mbps' : isPro ? 'ProRes 422 HQ' : 'MP4 ' + (kbps / 1000).toFixed(1) + 'Mbps'}（${accel}）`,
     duration: D,
     plannedEncoder,
     isGpu,
     kbps: isPro ? null : kbps,
     audioBitrates: isPro ? null : audioBitrates,
+    streamChannels: plannedAudio ? plannedAudio.streamLabels.map(({ stream }) => stream.spec.channels) : [2],
     audioChannels: null,
   };
 }

@@ -72,4 +72,14 @@ function createDeliveryTemporaryInputs({ tempDir, rootAuthority } = {}) {
   return { create, evidence, cleanup };
 }
 
-module.exports = { createDeliveryTemporaryInputs, assertDeliveryInputEvidence };
+function windowsCommandLength(executable, args) {
+  const quotedLength = value => {
+    if (value.length > 0 && !/[ \t"]/.test(value)) return value.length;
+    // libuv quotes whitespace/empty args and doubles backslashes before a
+    // literal quote or the closing quote. String.length counts UTF-16 units.
+    return 2 + value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1').length;
+  };
+  return [executable, ...args].reduce((sum, value) => sum + quotedLength(value) + 1, 0);
+}
+
+module.exports = { createDeliveryTemporaryInputs, assertDeliveryInputEvidence, windowsCommandLength };

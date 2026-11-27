@@ -68,6 +68,25 @@ describe('project save ownership',()=>{
     State.clips=[];State.duration=0;History.reset();
   });
 
+  it('辨識原文與時間證據隨專案重開，詞表可復原及重做，舊專案清空詞表',async()=>{
+    const evidence={kind:'speech',provider:'openai',originalText:'原 詞',sourceId:'clip-a',sourceStart:1,
+      sourceEnd:2,speaker:'A',speakerScope:'request-1',timingEvidence:'word',words:[{text:'詞',start:1.1,end:1.5}]};
+    State.cues[0].recognition={...evidence, apiKey:'should-never-be-written'};
+    State.recognitionTerms=['台北','SUB Tool'];
+    History.record('套用詞表');
+    History.undo(); expect(State.recognitionTerms).toEqual([]);
+    History.redo(); expect(State.recognitionTerms).toEqual(['台北','SUB Tool']);
+    await Project.saveAs();
+    const saved=decode(desk.saveProject.mock.calls[0][1]);
+    expect(saved.cues[0].recognition).toEqual(evidence);
+    Project.apply(saved);
+    expect(State.cues[0].recognition).toEqual(evidence);
+    expect(State.recognitionTerms).toEqual(['台北','SUB Tool']);
+    delete saved.recognitionTerms;
+    Project.apply(saved);
+    expect(State.recognitionTerms).toEqual([]);
+  });
+
   it('Undo 後外部音訊尚在非同步重建時，History 與實際存檔仍保留期望來源',async()=>{
     const source={audioSourceId:'restore-me',name:'旁白',path:'C:/voice.wav',duration:8,in:0,out:8,offset:0};
     runtime.sources=[];State.externalAudioState=[source];Project.establishCleanBaseline();History.reset();
@@ -106,7 +125,7 @@ describe('project save ownership',()=>{
     const {State:web}=await import('../src/state.js');
     const browser=await import('../src/project.js');
     const storage=vi.spyOn(Storage.prototype,'setItem');
-    const dataWrites=()=>storage.mock.calls.filter(([key])=>key==='subtool_autosave_data');
+    const dataWrites=()=>storage.mock.calls.filter(([key])=>key.startsWith('subtool_project_draft_'));
     const tick=()=>vi.advanceTimersByTimeAsync(3*60*1000);
     try{
       await browser.Project.saveAs();
@@ -119,11 +138,10 @@ describe('project save ownership',()=>{
       await tick();
       await tick();
       expect(dataWrites()).toHaveLength(2);
-      expect(decode(dataWrites().at(-1)[1]).notes[0]).toMatchObject({time:1,text:'備份備註'});
+      expect(decode(JSON.parse(dataWrites().at(-1)[1]).payload).notes[0]).toMatchObject({time:1,text:'備份備註'});
       expect(browser.isProjectDirty()).toBe(true);
     }finally{
-      localStorage.removeItem('subtool_autosave_data');
-      localStorage.removeItem('subtool_autosave_name');
+      for(const [key] of dataWrites()) localStorage.removeItem(key);
       browser.resetProject();
       storage.mockRestore();
       downloaded.mockRestore();

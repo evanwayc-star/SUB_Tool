@@ -55,6 +55,19 @@ function previewCollection(source, location, key){
   const value = source[key];
   return location.collection ? value?.[location.collection] : value;
 }
+function previewTargetPresent(entry){
+  const list=previewCollection(State,entry.location,entry.location.live);
+  const target=entry.resolveTarget ? entry.resolveTarget() : entry.target;
+  if(!list) return false;
+  return (target!=null && list[entry.location.index]===target) || list.includes(target);
+}
+function previewTargetIndex(list,target,location){
+  // 大量字幕一起拖曳時，多數仍在按下滑鼠時的槽位。插入或重排後才依 ID 重找。
+  if(location.live==='cues' && target.id && list[location.index]?.id===target.id) return location.index;
+  if(location.live==='externalAudioState' && target.audioSourceId) return list.findIndex(item=>item.audioSourceId===target.audioSourceId);
+  if(target.id) return list.findIndex(item=>item.id===target.id);
+  return previewCollection(State,location,location.live).indexOf(target);
+}
 function projectEditPreviews(snapshot, collectionKeys={}){
   for (const preview of editPreviews) {
     if (!preview.current()) { editPreviews.delete(preview); continue; }
@@ -62,9 +75,7 @@ function projectEditPreviews(snapshot, collectionKeys={}){
       const list = previewCollection(snapshot, entry.location, collectionKeys[entry.location.saved] || entry.location.saved);
       if (!list) continue;
       const liveTarget=entry.resolveTarget ? entry.resolveTarget() : entry.target;
-      const index = liveTarget.audioSourceId && entry.location.live === 'externalAudioState'
-        ? list.findIndex(item => item.audioSourceId === liveTarget.audioSourceId)
-        : liveTarget.id ? list.findIndex(item => item.id === liveTarget.id) : previewCollection(State, entry.location, entry.location.live).indexOf(liveTarget);
+      const index=previewTargetIndex(list,liveTarget,entry.location);
       if (index < 0) continue;
       if (entry.added) { list.splice(index, 1); continue; }
       for (const { field, present, value } of entry.values) {
@@ -85,6 +96,37 @@ function audioProjectForSnapshot(){
   if(audioPreview && !audioPreview.owns()) audioPreview=null;
   return audioPreview ? audioPreview.initial() : State.audioProject;
 }
+
+// 字幕、樣式與逐字辨識結果都是純資料。即時編輯會原地修改巢狀欄位，
+// 因此必須核對內容，不能只依 cue 身分或 id 判斷它有沒有改過。
+function sameCueData(a,b){
+  if(a===b) return true;
+  if(!a||!b||typeof a!=='object'||typeof b!=='object') return false;
+  if(Array.isArray(a)) return Array.isArray(b)&&a.length===b.length&&a.every((item,i)=>sameCueData(item,b[i]));
+  if(Array.isArray(b)||Object.prototype.toString.call(a)!=='[object Object]'||Object.prototype.toString.call(b)!=='[object Object]') return false;
+  const keys=Object.keys(a);
+  return keys.length===Object.keys(b).length && keys.every(key=>Object.hasOwn(b,key)&&sameCueData(a[key],b[key]));
+}
+
+function snapshotCues(cues,previous){
+  let byId;
+  return cues.map((cue,i)=>{
+    let saved=previous[i];
+    if(saved?.id!==cue.id){
+      byId??=new Map(previous.map(item=>[item.id,item]));
+      saved=byId.get(cue.id);
+    }
+    return sameCueData(cue,saved)?saved:structuredClone(cue);
+  });
+}
+
+function sameHistorySnapshot(a,b){
+  const {cues:first,...otherFirst}=a, {cues:second,...otherSecond}=b;
+  // 未設定與 undefined 沿用既有 JSON 判準，拖曳回原點等操作不留下空步驟。
+  return first.length===second.length && first.every((cue,i)=>cue===second[i]||JSON.stringify(cue)===JSON.stringify(second[i]))
+    && JSON.stringify(otherFirst)===JSON.stringify(otherSecond);
+}
+
 const History = {
   stack:[], hi:-1, max:120,
   // Project 持有尚未重新連結的來源；History 與存檔必須取同一份純資料。
@@ -95,7 +137,7 @@ const History = {
   // 結束函式必須在本次 commit 的 record 之前呼叫；reset/restore 會撤銷所有舊擁有者。
   beginPreview(targets, owns=()=>true, cancel=null){
     const preview = { entries: [], cancel, current: () => editPreviews.has(preview) && owns()
-      && preview.entries.every(entry => previewCollection(State, entry.location, entry.location.live)?.includes(entry.resolveTarget ? entry.resolveTarget() : entry.target)) };
+      && preview.entries.every(previewTargetPresent) };
     const add = (target, fields=[], { added=false, resolveTarget=null, ownsField=null, projectField=null }={}) => {
       const location = previewLocation(target);
       if (!location) return;
@@ -129,13 +171,17 @@ const History = {
   // clipGeo：影片幾何；externalAudioState：外部音訊的可編輯純資料。
   // AudioElement、波形與快取檔都不入 undo，Media 會依這份純資料重用或重建 runtime asset。
   // Project 可補入尚未重新連結的持久資料；預覽排除規則仍只有這一個 owner。
-  committedSnapshot({clips=Seq.snapshot(), externalAudioState=State.externalAudioState||[]}={}){
-    return projectEditPreviews(structuredClone({cues:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
-      audioProject:normalizeAudioProject(audioProjectForSnapshot()),externalAudioState,
-      fps:State.fps,dropFrame:State.dropFrame,projectCanvas:State.projectCanvas??null,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clips}), {clipGeo:'clips'});
+  committedSnapshot({clips=Seq.snapshot(), externalAudioState=State.externalAudioState||[]}={},previousCues=null){
+    // 手勢投影會覆寫暫時欄位。只有無預覽的歷史步驟能共用先前的字幕。
+    const reuse=previousCues && !editPreviews.size;
+    const snapshot=structuredClone({cues:reuse?null:State.cues,tracks:State.tracks,notes:State.notes,trackCount:State.trackCount,videoTracks:State.videoTracks,
+      audioProject:normalizeAudioProject(audioProjectForSnapshot()),externalAudioState,recognitionTerms:State.recognitionTerms || [],
+      fps:State.fps,dropFrame:State.dropFrame,projectCanvas:State.projectCanvas??null,exportIn:State.exportIn??null,exportOut:State.exportOut??null,clips});
+    if(reuse) snapshot.cues=snapshotCues(State.cues,previousCues);
+    return projectEditPreviews(snapshot,{clipGeo:'clips'});
   },
-  snap(){
-    const {clips,...snapshot}=this.committedSnapshot({externalAudioState:externalAudioSnapshot()});
+  snap(previousCues=null){
+    const {clips,...snapshot}=this.committedSnapshot({externalAudioState:externalAudioSnapshot()},previousCues);
     const saved={...snapshot,clipGeo:clips};
     // 純資料仍留在 History；Media 以此快照身分持有網頁 File 的 runtime 資格。
     emit('audio:externalSnapshot',{snapshot:saved});
@@ -199,37 +245,9 @@ const History = {
     }
   },
   record(label){
-    const newSnap = this.snap();
-    if(this.hi >= 0) {
-      const old = this.stack[this.hi].snap;
-      // Fix #8：先做 O(1) 結構比對；只有結構相同時才 fallback 到深層 JSON 比對，
-      // 避免千條字幕的大型專案在每次操作後序列化整個 State。
-      const structSame = old.cues.length === newSnap.cues.length
-        && old.tracks.length === newSnap.tracks.length
-        && old.notes.length === newSnap.notes.length
-        && (old.clipGeo?.length || 0) === (newSnap.clipGeo?.length || 0)
-        && (old.videoTracks?.length || 0) === (newSnap.videoTracks?.length || 0)
-        && (old.audioProject?.buses?.length || 0) === (newSnap.audioProject?.buses?.length || 0)
-        && Object.keys(old.audioProject?.sourceMaps || {}).length === Object.keys(newSnap.audioProject?.sourceMaps || {}).length
-        && (old.audioProject?.exportLayout?.streams?.length || 0) === (newSnap.audioProject?.exportLayout?.streams?.length || 0)
-        && (old.externalAudioState?.length || 0) === (newSnap.externalAudioState?.length || 0)
-        && old.fps === newSnap.fps
-        && old.dropFrame === newSnap.dropFrame
-        && old.exportIn === newSnap.exportIn
-        && old.exportOut === newSnap.exportOut;
-      if(!structSame){ /* 結構有變動，直接記錄 */ }
-      else {
-        const len = newSnap.cues.length;
-        if(len > 300) {
-          const firstOld = old.cues[0], firstNew = newSnap.cues[0];
-          const lastOld = old.cues[len - 1], lastNew = newSnap.cues[len - 1];
-          if(firstOld?.start !== firstNew?.start || firstOld?.end !== firstNew?.end || firstOld?.text !== firstNew?.text ||
-             lastOld?.start !== lastNew?.start || lastOld?.end !== lastNew?.end || lastOld?.text !== lastNew?.text){
-            // 抽樣不同，必然有變動，直接記錄
-          } else if(JSON.stringify(newSnap) === JSON.stringify(old)) return;
-        } else if(JSON.stringify(newSnap) === JSON.stringify(old)) return;
-      }
-    }
+    const old=this.stack[this.hi]?.snap;
+    const newSnap=this.snap(old?.cues);
+    if(old && sameHistorySnapshot(newSnap,old)) return;
     if(this.hi<this.stack.length-1)this.stack=this.stack.slice(0,this.hi+1);
     this.stack.push({label,snap:newSnap});
     if(this.stack.length>this.max){ this.stack.shift(); }
@@ -241,9 +259,9 @@ const History = {
     if(owner?.epoch===historyEpoch && owner.entry===this.stack[this.hi]
       && owner.cues===State.cues && owner.tracks===State.tracks
       && owner.entry.label===label && this.hi===this.stack.length-1){
-      const snapshot=this.snap();
+      const snapshot=this.snap(owner.entry.snap.cues);
       if(owner.baseline && this.stack[this.hi-1]===owner.baseline
-        && JSON.stringify(snapshot)===JSON.stringify(owner.baseline.snap)){
+        && sameHistorySnapshot(snapshot,owner.baseline.snap)){
         this.stack.pop(); this.hi--; renderHistory(); return null;
       }
       owner.entry.snap=snapshot; renderHistory(); return owner;
@@ -267,6 +285,7 @@ const History = {
     State.videoTracks = (Array.isArray(d.videoTracks)&&d.videoTracks.length) ? d.videoTracks : [{name:'視訊軌 1',visible:true,locked:false}];
     State.audioProject=normalizeAudioProject(d.audioProject);
     State.projectCanvas=d.projectCanvas??null;
+    State.recognitionTerms=[...(d.recognitionTerms || [])];
     // 專案音訊路由與 bus M/S/音量不只是畫面資料：還會決定 Web Audio 的實際 gain。
     // 還原快照後通知協調層重新套用，避免 Ctrl+Z/Redo 看起來已變、聲音卻維持舊設定。
     emit('audio:projectRestored', { audioProject: State.audioProject });

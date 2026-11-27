@@ -10,8 +10,14 @@
 import { State, newTrack, syncTrackCount, newId, setSelection, IS_DESKTOP } from './state.js';
 import { AudioEngine } from './audio-engine.js';
 import { createRecognitionRangeSource } from './speech-recognition-source.js';
+import { openSpeechWaveSource } from './speech-wave-source.js';
+import { recognitionCheckpoints } from './speech-recognition-checkpoints.js';
+import { storedSpeechKey } from './speech-cloud.js';
 import { sourcePresentationMetadata } from './decode/source-frame-index.js';
-import { resolveRecognitionRange, sliceRecognitionClip } from './recognition-range.js';
+import { resolveRecognitionRange, sliceRecognitionClip, getRecognitionClipRange } from './recognition-range.js';
+import { openRecognitionReview, stageRecognitionReview } from './recognition-review.js';
+import { normalizeRecognitionTerms } from './recognition-terms.js';
+import { normalizeRecognitionEvidence, attachAlignmentEvidence } from './recognition-evidence.js';
 import { createProjectAudioInterpretation } from './project-audio.js';
 import { isStillClip } from '../shared/clip-visual.cjs';
 import { audioMotherPath } from '../shared/audio-loudness.cjs';
@@ -24,7 +30,8 @@ import { Project } from './project.js';
 import { openModal, closeModal, showToast, setStatus } from './ui.js';
 import { emit } from './events.js';
 import { decodeText, downloadBytes, escapeHTML, readFile, encodeUTF16LE } from './util.js';
-import { alignTranscriptToEvidence, parseTranscriptLines, resolveRecognitionAlignment, buildTranscriptAlignmentDiagnostic } from './transcript-alignment.js';
+import { parseTranscriptLines, buildTranscriptAlignmentDiagnostic } from './transcript-alignment.js';
+import { matchRecognitionTranscript } from './transcript-alignment-client.js';
 import {
   getAsrSession,
   setAsrSessionDialogOpen,
@@ -38,6 +45,7 @@ import {
   isAzureSpeechRegion,
   parseAzureSpeechCredential,
   combineRecognitionAudioBuffers,
+  encodeWav16kMono,
   transcribeAudioStream
 } from './speech-recognition-engine.js';
 
@@ -51,6 +59,7 @@ export {
 };
 
 const ASR_CONFIG_KEY = 'subtool_asr_config';
+const providerTimingAvailable = () => Date.now() < Date.UTC(2027, 1, 26);
 const ASR_PROVIDER_UI_META = Object.freeze({
   builtin: {
     badge: '本機離線',
@@ -106,25 +115,56 @@ function asrLanguage(value) {
   return ASR_LANGUAGES.has(value) ? value : 'auto';
 }
 
+let tabSpeechKeys = {};
+function storedAsrPreferences() {
+  try { return JSON.parse(localStorage.getItem(ASR_CONFIG_KEY)) || {}; }
+  catch { return {}; }
+}
+async function loadDesktopCredentials(bridge) {
+  const old = storedAsrPreferences();
+  const status = await bridge.speechKeyStatus();
+  const keys = {};
+  for (const [provider, {keyField}] of Object.entries(CLOUD_PROVIDER_META)) {
+    if (old[keyField] && !status[provider]) keys[provider] = old[keyField];
+  }
+  const ready = Object.keys(keys).length ? await bridge.saveSpeechKeys(keys) : status;
+  const latest = storedAsrPreferences();
+  let migrated = false;
+  for (const [provider, {keyField}] of Object.entries(CLOUD_PROVIDER_META)) {
+    if (old[keyField] && latest[keyField] === old[keyField] && ready[provider]) {
+      delete latest[keyField];
+      migrated = true;
+    }
+  }
+  if (migrated) localStorage.setItem(ASR_CONFIG_KEY, JSON.stringify(latest));
+  return ready;
+}
 export function getAsrConfig() {
-  let saved = {};
-  try {
-    saved = JSON.parse(localStorage.getItem(ASR_CONFIG_KEY)) || {};
-  } catch (_) {}
+  const saved = storedAsrPreferences();
+  const desktop = !!globalThis.window?.subtool?.speechKeyStatus;
+  if (!desktop) {
+    let migrated = false;
+    for (const {keyField} of Object.values(CLOUD_PROVIDER_META)) {
+      if (!saved[keyField]) continue;
+      tabSpeechKeys[keyField] = saved[keyField];
+      delete saved[keyField];
+      migrated = true;
+    }
+    if (migrated) {
+      try { localStorage.setItem(ASR_CONFIG_KEY, JSON.stringify(saved)); } catch { /* still usable this session */ }
+    }
+  }
   const taskMode = saved.taskMode === 'align' ? 'align' : 'transcribe';
   // Older versions stored zh even when the user had never chosen a language.
   const legacyLanguage = saved.language === 'zh' ? 'auto' : asrLanguage(saved.language);
   const legacyAlignment = taskMode === 'align' || saved.speechLanguage ? legacyLanguage : 'auto';
   return {
     taskMode,
+    openaiTiming:saved.openaiTiming === 'local' || !providerTimingAvailable() ? 'local' : 'provider',
     provider: Object.hasOwn(ASR_PROVIDER_UI_META, saved.provider) ? saved.provider : 'google',
     alignmentLanguage: asrLanguage(saved.alignmentLanguage ?? legacyAlignment),
     speechLanguage: asrLanguage(saved.speechLanguage ?? (taskMode === 'transcribe' ? legacyLanguage : 'auto')),
-    googleApiKey: saved.googleApiKey || '',
-    groqApiKey: saved.groqApiKey || '',
-    openaiApiKey: saved.openaiApiKey || '',
-    azureApiKey: saved.azureApiKey || '',
-    elevenlabsApiKey: saved.elevenlabsApiKey || '',
+    ...Object.fromEntries(Object.values(CLOUD_PROVIDER_META).map(({keyField}) => [keyField, desktop ? '' : tabSpeechKeys[keyField] || ''])),
     azureRegion: saved.azureRegion || DEFAULT_AZURE_SPEECH_REGION
   };
 }
@@ -133,8 +173,17 @@ export function getAsrConfig() {
  * 儲存 ASR 設定
  */
 export function saveAsrConfig(conf) {
+  const preferences = { ...conf };
+  const desktop = !!globalThis.window?.subtool?.speechKeyStatus;
+  const old = desktop ? storedAsrPreferences() : {};
+  tabSpeechKeys = {};
+  for (const {keyField} of Object.values(CLOUD_PROVIDER_META)) {
+    if (!desktop && preferences[keyField]) tabSpeechKeys[keyField] = preferences[keyField];
+    delete preferences[keyField];
+    if (desktop && old[keyField]) preferences[keyField] = old[keyField]; // Pending legacy migration.
+  }
   try {
-    localStorage.setItem(ASR_CONFIG_KEY, JSON.stringify(conf));
+    localStorage.setItem(ASR_CONFIG_KEY, JSON.stringify(preferences));
   } catch (_) {}
 }
 
@@ -484,6 +533,12 @@ export async function getClipRecognitionSource(clip, options = {}) {
   const bridge = typeof window !== 'undefined' ? window.subtool : null;
   if (typeof bridge?.speechAudioRead !== 'function' || typeof bridge?.speechAudioCancel !== 'function') {
     try {
+      const tracks=clip.recognitionTracks||[];
+      const original=clip.file||clip._file||clip.blob||tracks.find(track=>typeof track.file?.slice==='function')?.file;
+      if(!clip.preferCache&&!clip.audioBuffer&&tracks.every(track=>!track.buffer&&!track._audioEffect&&(!track.file||track.file===original))){
+        const bounded=await openSpeechWaveSource(original,options);
+        if(bounded)return bounded;
+      }
       return await getClipAudioBuffer(clip, options);
     } catch (error) {
       // Web Audio reports the same decoding failure for a silent video and a
@@ -518,10 +573,13 @@ export async function getClipRecognitionSource(clip, options = {}) {
   const originalPath = accepted.path || (sourceFile ? bridge.getFilePath?.(sourceFile) : null);
   // Whole-timeline work may include a video-only file between spoken clips.
   let originalStreams;
-  if (options.skipSilentVideo && !accepted.audioBuffer && !accepted.recognitionTracks.length && originalPath && bridge.probe) {
+  if (!accepted.audioBuffer && !accepted.recognitionTracks.length && originalPath && !accepted.preferCache && bridge.probe) {
     const info = await bridge.probe(originalPath);
     assertCurrent();
-    if (Array.isArray(info?.audio) && !info.audio.length) return null;
+    if (Array.isArray(info?.audio) && !info.audio.length) {
+      if(options.skipSilentVideo)return null;
+      throw new Error('選取的素材沒有可辨識的音訊串流');
+    }
     originalStreams = info?.audio;
   }
   const addBuffer = async (buffer, channel, { processed = false, sourceStream = 0, url } = {}) => {
@@ -622,6 +680,7 @@ export function insertAsrSubtitles(results, {
   allowPartialValidTimes = false,
   allowOverlap = false,
   preserveUntimedSegments = false,
+  recognition = null,
   preserveSelection = false,
   boundToPlacement = false,
   onSkippedSegment = null,
@@ -654,13 +713,23 @@ export function insertAsrSubtitles(results, {
 
     for (const seg of segments) {
       if (!seg.text || !seg.text.trim()) continue;
+      const evidence = normalizeRecognitionEvidence(seg.recognition || (recognition && {
+        ...recognition, sourceId:clip.audioSourceId || clip.id, originalText:seg.originalText ?? seg.text, heardText:seg.heardText,
+        ...(seg.timed !== false && Number.isFinite(seg.start) && Number.isFinite(seg.end) && {
+          sourceStart:sourceStart + seg.start, sourceEnd:sourceStart + seg.end }),
+        timingEvidence:seg.alignment?.timingEvidence || (seg.words?.length ? 'word' : seg.timed === false ? 'none' : 'segment'),
+        speaker:seg.speaker, speakerScope:seg.speaker != null ? seg.speakerScope ?? recognition.speakerScope : undefined,
+        transcriptLineIndex:seg.transcriptLineIndex, words:seg.words?.map(word => ({
+          ...word, start:sourceStart + word.start, end:sourceStart + word.end
+        }))
+      }));
       const planUntimed = () => plannedCues.push({
         start: 0,
         end: 0,
         text: seg.text.trim(),
         style: null,
         timed: false,
-        sourceSegment: seg
+        sourceSegment: seg, evidence
       });
       if (preserveUntimedSegments && seg.timed === false) {
         planUntimed();
@@ -722,7 +791,7 @@ export function insertAsrSubtitles(results, {
         text: seg.text.trim(),
         style: null,
         timed: true,
-        sourceSegment: seg
+        sourceSegment: seg, evidence
       });
     }
   }
@@ -776,6 +845,7 @@ export function insertAsrSubtitles(results, {
     style: cue.style,
     timed: cue.timed !== false,
     id: newId(),
+    ...(cue.evidence && {recognition:cue.evidence}),
     track: tracks.get(trackNameForSegment?.(cue.sourceSegment) || trackName).index,
     ...(trackNameForSegment && ['card','dialogue'].includes(cue.sourceSegment.kind) ? { kind:cue.sourceSegment.kind } : {})
   }));
@@ -802,6 +872,7 @@ export function insertAsrSubtitles(results, {
  * 開啟進行中的語音辨識／文本匹配進度視窗
  */
 export function openAsrMonitorDialog(session) {
+  if (openRecognitionReview('speech')) return;
   if (!session) return;
   setAsrSessionDialogOpen(true, session.id);
   const terminalStatus = ['completed', 'failed', 'cancelled'].includes(session.progress?.status);
@@ -1034,6 +1105,7 @@ export function openAsrMonitorDialog(session) {
  * 開啟語音辨識設定與執行對話框
  */
 export function openSpeechRecognitionDialog(preferredSource = null) {
+  if (openRecognitionReview('speech')) return;
   const ownsWorkspace=Project.captureWorkspaceOwnership();
   let transcriptImportRevision = 0;
   const activeSession = getAsrSession();
@@ -1079,12 +1151,22 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     return;
   }
   const conf = getAsrConfig();
+  const secureBridge = globalThis.window?.subtool?.speechKeyStatus ? window.subtool : null;
+  let secureKeys = {}, keyError = '';
+  const keyReady = secureBridge && loadDesktopCredentials(secureBridge).then(status => {
+    secureKeys = status;
+    if (ownsDialog()) {
+      const field = document.getElementById('asrApiKey');
+      if (field) field.placeholder = secureKeys[document.getElementById('asrProvider')?.value] ? '已安全儲存，留空即可沿用' : '輸入 API Key…';
+    }
+  }).catch(error => { keyError = error.message; });
   const keyDrafts = new Map(Object.entries(CLOUD_PROVIDER_META).map(([provider, meta]) => [provider, conf[meta.keyField]]));
   const initialProviderMeta = CLOUD_PROVIDER_META[conf.provider] || null;
   const initialTaskMode = conf.taskMode === 'align' ? 'align' : 'transcribe';
   const languages = {align:conf.alignmentLanguage, transcribe:conf.speechLanguage};
   const initialLanguage = languages[initialTaskMode];
-  const providerHintText = (provider, mode) => {
+  const providerHintText = (provider, mode, timing=conf.openaiTiming) => {
+    if(provider==='openai' && timing==='local')return 'OpenAI 辨識選定音訊的原文，本機 Whisper 提供時間。沒有可靠時間的句子會保留為未定時。';
     const meta = ASR_PROVIDER_UI_META[provider];
     return (mode === 'transcribe' && meta?.speechHint) || meta?.hint || '';
   };
@@ -1255,6 +1337,14 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
         </section>
       </div>
+      <div class="asr-field"><label for="asrResultMode">結果處理</label><select id="asrResultMode"><option value="apply">直接加入新字幕軌</option><option value="review">先複核，再加入新軌</option><option value="trial">辨識播放點附近 20 秒，先看候選</option></select></div>
+      <details class="asr-inline-details"><summary>試聽與專案詞表</summary><div class="asr-field">
+        <button type="button" id="asrListen" class="asr-compact-button">試聽選定聲道的 20 秒音訊</button><audio id="asrTrialAudio" controls hidden></audio><p id="asrTrialStatus" role="status"></p>
+        <label for="asrProjectTerms">專案人名與術語（每行一詞）</label><textarea rows="3" id="asrProjectTerms" maxlength="8000">${escapeHTML((State.recognitionTerms||[]).join('\n'))}</textarea>
+        <p class="asr-helper">支援提示的服務會收到詞表。正式辨識時保存到本專案。</p>
+      </div></details>
+      <div id="asrOpenAiTimingField" class="asr-field" hidden><label for="asrOpenAiTiming">OpenAI 時間依據</label><select id="asrOpenAiTiming"><option value="provider" ${providerTimingAvailable()?'':'disabled'}>供應商時間（聽寫可保留說話者）</option><option value="local" ${conf.openaiTiming==='local'?'selected':''}>GPT 原文＋本機 Whisper 對時</option></select>
+      <p class="asr-helper">${providerTimingAvailable()?'供應商時間使用的模型預定於 2027-02-26 停用。':'供應商時間使用的模型已於 2027-02-26 停用。'}選擇本機對時並開始辨識後，首次使用會下載 Whisper。結果沒有說話者標籤。</p></div>
       <input type="hidden" id="asrTargetSummary" value="自動建立「${initialTaskMode === 'align' ? '文本匹配' : '語音辨識'}」新軌">
 
       <section id="asrProgressContainer" class="asr-card asr-progress-card" role="region" aria-label="辨識進度" style="display:none;">
@@ -1283,13 +1373,31 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
   let alive=true;
   let workId=null;
   let releaseWorkSubscription=()=>{};
+  let sampleJob, sampleUrl;
+  const stopSample=()=>{
+    sampleJob?.abort();sampleJob=null;
+    if(sampleUrl){const audio=document.getElementById('asrTrialAudio');audio?.pause();audio?.removeAttribute('src');URL.revokeObjectURL(sampleUrl);sampleUrl=null;}
+    const audio=document.getElementById('asrTrialAudio'), status=document.getElementById('asrTrialStatus');
+    if(audio)audio.hidden=true;
+    if(status)status.textContent='';
+  };
+  const trialClip=source=>{
+    const bounds=getRecognitionClipRange(source);
+    if(!bounds)throw new Error('無法取得這段素材的有效時間');
+    const cursor=Number(Media.displayTime?.());
+    const start=cursor>=bounds.start&&cursor<bounds.end?cursor:bounds.start;
+    const speed=Number(source.speed)>0?Number(source.speed):1;
+    return sliceRecognitionClip(source,{start,end:Math.min(bounds.end,start+20/speed)});
+  };
   const ownsDialog=()=>alive&&ownsWorkspace()&&(modalSession?.isCurrent?.()??true);
   const closeOwned=()=>{
     if(!ownsDialog()) return;
+    stopSample();
     if(modalSession?.close) modalSession.close({committed:true}); else closeModal({committed:true});
     alive=false;releaseWorkSubscription();
   };
   const abortActiveRecognition = () => {
+    stopSample();
     alive=false;releaseWorkSubscription();
     const session = getAsrSession();
     if(!workId||session?.id!==workId) return;
@@ -1315,14 +1423,19 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
     closeOwned();
     showToast('語音辨識已在背景執行，可隨時點擊頂部「🎙 辨識中」按鈕查看進度。');
   };
+  let startPending = false;
+  const startOnce = action => async () => {
+    if (startPending || !ownsDialog()) return;
+    startPending = true;
+    try { await action(); } finally { startPending = false; }
+  };
 
   modalSession=openModal('音訊辨識與文本匹配', html, [
     { label: '取消', act: cancelRecognition },
     {
       label: initialTaskMode === 'align' ? '開始匹配' : '開始辨識',
       primary: true,
-      act: async () => {
-        if(!ownsDialog()) return;
+      act: startOnce(async () => {
         const taskModeEl = document.getElementById('asrTaskMode');
         const transcriptEl = document.getElementById('asrTranscript');
         const recognitionAudioSourceEl = document.getElementById('asrRecognitionAudioSource');
@@ -1350,6 +1463,8 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const rangeEl = document.getElementById('asrRecognitionRange');
         const rangeMode = rangeEl?.value || 'clip';
         const plan = recognitionRangePlan(rangeMode, clips);
+        const resultMode=document.getElementById('asrResultMode')?.value||'apply';
+        const projectTerms=normalizeRecognitionTerms((document.getElementById('asrProjectTerms')?.value||'').split(/\r?\n/));
         const recognitionSelection = (rangeMode === 'clip' && recognitionAudioSelectionByValue.get(recognitionAudioSourceEl?.value || 'all'))
           || ALL_RECOGNITION_SOURCE_CHANNELS;
 
@@ -1399,6 +1514,11 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           showValidationError(plan.error, rangeEl);
           return;
         }
+        if(resultMode==='trial'){
+          if(plan.clips.length!==1){showValidationError('短段試跑需要一個音訊來源，請選取片段。',rangeEl);return;}
+          try{plan.clips=[trialClip(plan.clips[0])];}
+          catch(error){showValidationError(error.message,rangeEl);return;}
+        }
         if (taskMode === 'align' && plan.clips.length !== 1) {
           showValidationError('文本匹配目前一次只能處理一個音訊來源；請只選取一個素材後再試。');
           return;
@@ -1408,6 +1528,12 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           return;
         }
 
+        if (keyReady && providerMeta) {
+          await keyReady;
+          if (!ownsDialog()) return;
+          if (!apiKey && secureKeys[provider]) apiKey = storedSpeechKey(provider);
+          if (!apiKey && keyError) { showValidationError(keyError, apiKeyEl); return; }
+        }
         if (providerMeta && !apiKey) {
           showValidationError(`請先輸入 ${providerMeta.name} API Key`, apiKeyEl);
           return;
@@ -1415,7 +1541,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const currentConf = getAsrConfig();
         let azureRegion;
         if (provider === 'azure') {
-          const knownRegion = apiKey === currentConf.azureApiKey && isAzureSpeechRegion(currentConf.azureRegion)
+          const knownRegion = (apiKey === currentConf.azureApiKey || apiKey === storedSpeechKey(provider)) && isAzureSpeechRegion(currentConf.azureRegion)
             ? currentConf.azureRegion : DEFAULT_AZURE_SPEECH_REGION;
           try {
             ({apiKey, region:azureRegion} = parseAzureSpeechCredential(apiKey, knownRegion));
@@ -1428,7 +1554,14 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
         currentConf.taskMode = taskMode;
         currentConf.provider = provider;
-        if (providerMeta) currentConf[providerMeta.keyField] = apiKey;
+        if(provider==='openai')currentConf.openaiTiming=document.getElementById('asrOpenAiTiming').value;
+        if (providerMeta && secureBridge && apiKey !== storedSpeechKey(provider)) {
+          try { secureKeys = await secureBridge.saveSpeechKeys({[provider]:apiKey}); }
+          catch (error) { showValidationError(error.message, apiKeyEl); return; }
+          if (!ownsDialog()) return;
+          apiKey = storedSpeechKey(provider);
+        }
+        if (providerMeta && !secureBridge) currentConf[providerMeta.keyField] = apiKey;
         if (alignMode) currentConf.alignmentLanguage = language;
         else currentConf.speechLanguage = language;
         saveAsrConfig(currentConf);
@@ -1479,12 +1612,25 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         };
 
         const acceptedClips=plan.clips;
+        stopSample();
+        const liveSources=()=>[...(State.clips||[]),...(Media.externalAudioSources||[]),...(State.externalAudioState||[])];
+        const liveClip=id=>liveSources().find(item=>item.id===id);
+        const shape=c=>c&&JSON.stringify([c.path||c.name,c.audioSourceId,c.offset??c.start,c.in??c.trimStart,c.out??c.trimEnd,c.speed||1,!!c.reverse,!!c.audioDetached,c.enabled??true,c.gain??1]);
+        const stamps=acceptedClips.map(c=>({id:c.id,shape:shape(liveClip(c.id))}));
+        const rangeStamp=()=>rangeMode==='clip'?'':JSON.stringify(recognitionRangePlan(rangeMode,clips).clips.map(c=>[c.id,shape(c),c.recognitionSelection]));
+        const acceptedRange=rangeStamp();
+        const changed=()=>stamps.some(item=>item.shape && item.shape!==shape(liveClip(item.id)))||rangeStamp()!==acceptedRange;
+        if(resultMode!=='trial' && JSON.stringify(projectTerms)!==JSON.stringify(State.recognitionTerms||[])){
+          State.recognitionTerms=projectTerms;recordHistory('修改專案辨識詞表');
+        }
         const releaseSources=retainRecognitionSources(acceptedClips);
         let work;
         try{ work = startAsrWork({
           taskMode,
           provider,
           language,
+          projectTerms,
+          openaiTiming:document.getElementById('asrOpenAiTiming')?.value,
           rangeMode,
           range:plan.range,
           clips:acceptedClips,
@@ -1501,30 +1647,28 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
           extractAudio: (clip, { signal, recognitionSelection: selectedAudio }) => (
             getClipRecognitionSource(clip, { signal, recognitionSelection: selectedAudio, skipSilentVideo:rangeMode !== 'clip' })
           ),
-          transcribe: ({ audioBuffer, inT, outT, spec, signal, onProgress }) => transcribeAudioStream({
+          transcribe: ({ clip, audioBuffer, inT, outT, spec, signal, onProgress }) => transcribeAudioStream({
             audioBuffer,
+            checkpoints: recognitionCheckpoints,
+            channelSelection: clip.recognitionSelection || spec.recognitionSelection,
             inT,
             outT,
             provider: spec.provider,
             taskMode: spec.taskMode,
             language: spec.language,
+            ...(spec.projectTerms.length ? {projectTerms:spec.projectTerms} : {}),
+            ...(spec.provider==='openai' ? {openaiTiming:spec.openaiTiming} : {}),
             ...(spec.provider !== 'builtin' ? {apiKey:spec.apiKey} : {}),
             ...(spec.provider === 'azure' ? {azureRegion:spec.azureRegion} : {}),
             signal,
             onProgress
           }),
-          resolveAlignment: ({ taskMode: mode, transcript: fixedTranscript, evidenceSegments }) => (
-            resolveRecognitionAlignment({
-              taskMode: mode,
-              transcript: fixedTranscript,
-              evidenceSegments,
-              alignTranscriptToEvidence
-            })
-          ),
+          resolveAlignment: matchRecognitionTranscript,
           buildDiagnostic: buildTranscriptAlignmentDiagnostic,
-          commit: (results, { taskMode: mode, timelineFps: frozenFps, timelineDropFrame: frozenDropFrame }) => {
+          commit: (results, { taskMode: mode, timelineFps: frozenFps, timelineDropFrame: frozenDropFrame, openaiTiming }) => {
+            if(!ownsWorkspace())throw new DOMException('辨識所屬的專案已切換','AbortError');
             const timelineRejectedLineNumbers = [];
-            const count = insertAsrSubtitles(results, mode === 'align' ? {
+            const options = mode === 'align' ? {
               trackName: '文本匹配',
               historyLabel: '📝 文本匹配生成字幕',
               requireValidTimes: true,
@@ -1537,10 +1681,65 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
                 }
               }
             } : {
+              preserveUntimedSegments:provider==='openai' && openaiTiming==='local',
               boundToPlacement:rangeMode !== 'clip',
               timelineFps: frozenFps,
               timelineDropFrame: frozenDropFrame
-            });
+            };
+            if(mode==='align')results=results.map(group=>({...group,segments:attachAlignmentEvidence(group.segments,group.evidenceSegments)}));
+            options.recognition={kind:mode==='align'?'alignment':'speech',provider,speakerScope:workId};
+            if(!results.some(group=>group.segments.some(segment=>segment.text?.trim())))return {count:0};
+            if(resultMode!=='apply'||changed()){
+              const count=stageRecognitionReview('speech',{groups:results,fps:frozenFps,dropFrame:frozenDropFrame,terms:projectTerms,changed,
+                apply:groups=>insertAsrSubtitles(groups,options),onResolve:()=>clearAsrSession(workId),
+                retry:()=>openSpeechRecognitionDialog(liveClip(acceptedClips[0].id)),
+                rerunLabel:mode==='align'?'用已有語音在本機重對附近幾行':provider==='builtin'?'用本機模型重跑這段':'僅重跑這段（雲端可能計費）',
+                rerun:async(group,index,signal)=>{
+                  const segments=group.segments, selected=segments[index];
+                  const base=Number(group.clip.in??group.clip.trimStart)||0;
+                  const duration=Number(group.clip.out??group.clip.trimEnd??group.clip.dur)-base;
+                  const timed=s=>s?.timed!==false && Number.isFinite(s?.start) && Number.isFinite(s?.end);
+                  const previous=segments.slice(0,index).findLast(timed), next=segments.slice(index+1).find(timed);
+                  const anchor=timed(selected)?selected.start:previous?.end??next?.start;
+                  if(!Number.isFinite(anchor))throw new Error('附近沒有已定時行，請以播放點選取一段音訊再試跑。');
+                  const start=Math.max(0,anchor-2),end=Math.min(duration,Math.max(anchor+2,timed(selected)?selected.end+2:next?.start??anchor+8),start+30);
+                  if(!(end>start))return null;
+                  if(mode==='align'){
+                    const first=Math.max(0,index-1), last=Math.min(segments.length-1,index+1);
+                    const from=Math.max(0,Math.min(start,timed(previous)?previous.start:start)-1);
+                    const to=Math.min(duration,Math.max(end,timed(next)?next.end:end)+1);
+                    const evidence=group.evidenceSegments.filter(s=>s.end>from && s.start<to);
+                    if(!evidence.length)throw new Error('附近沒有語音時間依據，請試聽來源或重新辨識這段。');
+                    const result=await matchRecognitionTranscript({taskMode:'align',transcript:segments.slice(first,last+1).map(s=>s.text).join('\n'),
+                      evidenceSegments:evidence,signal});
+                    const candidate=result.segments[index-first];
+                    return timed(candidate)?{...selected,...candidate,transcriptLineIndex:selected.transcriptLineIndex}:null;
+                  }
+                  const selection=group.clip.recognitionSelection||recognitionSelection;
+                  const source=await getClipRecognitionSource(group.clip,{signal,recognitionSelection:selection});
+                  if(!source)throw new Error('目前無法取得這段音訊。');
+                  try{
+                    const fresh=await transcribeAudioStream({audioBuffer:source,checkpoints:recognitionCheckpoints,channelSelection:selection,
+                      inT:base+start,outT:base+end,provider,language,taskMode:mode,openaiTiming,projectTerms,apiKey,azureRegion,signal});
+                    const candidates=fresh.filter(timed).map(s=>({...s,start:s.start+start,end:s.end+start}));
+                    const overlap=s=>Math.min(s.end,selected.end)-Math.max(s.start,selected.start);
+                    return candidates.sort((a,b)=>timed(selected)?overlap(b)-overlap(a):Math.abs(a.start-anchor)-Math.abs(b.start-anchor))[0]||null;
+                  }finally{await source.close?.();}
+                },
+                rebase:groups=>{
+                  const updated=[];
+                  for(const group of groups){
+                    const live=liveClip(group.clip.id);
+                    if(!live || (live.path||live.name)!==(group.clip.path||group.clip.name) || live.audioSourceId!==group.clip.audioSourceId)return null;
+                    const base=Number(group.clip.in??group.clip.trimStart)||0, start=Number(live.in??live.trimStart)||0;
+                    const end=Number(live.out??live.trimEnd??live.duration??live.dur);
+                    if(group.segments.some(s=>s.timed!==false&&(base+s.start<start-1e-6||base+s.end>end+1e-6)))return null;
+                    updated.push({clip:live,segments:group.segments.map(s=>s.timed===false?s:{...s,start:base+s.start-start,end:base+s.end-start})});
+                  }return updated;
+                }});
+              return {count,review:true};
+            }
+            const count=insertAsrSubtitles(results,options);
             return { count, timelineRejectedLineNumbers };
           }
         }); }catch(error){releaseSources();throw error;}
@@ -1554,6 +1753,10 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         try {
           const outcome = await work.promise;
           if (outcome.status !== 'completed') return;
+          if(outcome.review){
+            if(ownsDialog()){closeOwned();openRecognitionReview('speech');}else showToast(`有 ${outcome.count} 則候選字幕待複核`);
+            return;
+          }
           if(!ownsDialog()){
             showToast(`${taskMode==='align'?'文本匹配':'語音辨識'}完成，已生成 ${outcome.count} 句字幕。`);
             return;
@@ -1666,7 +1869,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         } finally {
           unsubscribe();
         }
-      }
+      })
     },
     { label: '縮小至背景', act: minimizeToBackground, id: 'asrMinimizeBtn', hidden: true }
   ], { width: '860px', closeOnBackdrop: false, onDismiss: abortActiveRecognition,onReplaced:abortActiveRecognition });
@@ -1817,6 +2020,7 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       let lastProvider = null;
       let lastMode = initialTaskMode;
       const updateProviderUI = () => {
+        document.getElementById('asrOpenAiTimingField').hidden=providerEl.value!=='openai';
         if (lastProvider && keyDrafts.has(lastProvider)) keyDrafts.set(lastProvider, apiKeyEl.value);
         if (languageEl) languages[lastMode] = languageEl.value;
         const p = providerEl.value;
@@ -1828,9 +2032,12 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         const uiMeta = ASR_PROVIDER_UI_META[p] || { badge: '', hint: '' };
 
         if (keyRow) keyRow.style.display = meta ? 'flex' : 'none';
-        if (apiKeyEl) apiKeyEl.value = keyDrafts.get(p) || '';
+        if (apiKeyEl) {
+          apiKeyEl.value = keyDrafts.get(p) || '';
+          apiKeyEl.placeholder = secureKeys[p] ? '已安全儲存，留空即可沿用' : '輸入 API Key…';
+        }
         if (providerBadge) providerBadge.textContent = uiMeta.badge;
-        if (providerHint) providerHint.textContent = providerHintText(p, taskMode);
+        if (providerHint) providerHint.textContent = providerHintText(p, taskMode, document.getElementById('asrOpenAiTiming').value);
 
         if (meta) {
           if (keyLabelEl) keyLabelEl.textContent = meta.keyLabel;
@@ -1857,11 +2064,37 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
 
       providerEl.onchange = updateProviderUI;
       taskModeEl?.addEventListener('change', updateProviderUI);
+      document.getElementById('asrOpenAiTiming')?.addEventListener('change', updateProviderUI);
       updateProviderUI();
     }
 
     const clipSelectEl = document.getElementById('asrClipSelect');
     const rangeEl = document.getElementById('asrRecognitionRange');
+    const resultModeEl=document.getElementById('asrResultMode');
+    const listen=document.getElementById('asrListen');
+    if(listen)listen.onclick=async()=>{
+      stopSample();
+      const status=document.getElementById('asrTrialStatus'), audio=document.getElementById('asrTrialAudio');
+      const job=new AbortController();sampleJob=job;
+      const selected=recognitionRangePlan(rangeEl.value,clips).clips;
+      if(selected.length!==1){status.textContent='請選取單一音訊來源試聽。';return;}
+      const clip=trialClip(selected[0]);
+      const selection=clip.recognitionSelection || recognitionAudioSelectionByValue.get(document.getElementById('asrRecognitionAudioSource')?.value)||'all';
+      status.textContent='正在準備本機試聽…';audio.hidden=true;
+      let source;
+      try{
+        source=await getClipRecognitionSource(clip,{signal:job.signal,recognitionSelection:selection});
+        if(!source)throw new Error('沒有可試聽的聲音');
+        const start=clip.in, end=Math.min(clip.out,source.duration);
+        const data=source.readRange?await source.readRange(start,end,{signal:job.signal}):source;
+        const blob=encodeWav16kMono(data,source.readRange?0:start,source.readRange?data.duration:end);
+        if(job.signal.aborted||!ownsDialog())return;
+        sampleUrl=URL.createObjectURL(blob);audio.src=sampleUrl;audio.hidden=false;
+        status.textContent=`試聽 ${Math.round((end-start)*10)/10} 秒，尚未送出辨識。`;
+        void audio.play().catch(()=>{});
+      }catch(error){if(!job.signal.aborted&&ownsDialog())status.textContent=error.message;}
+      finally{await source?.close?.();}
+    };
     const refreshScope = () => {
       if (!ownsDialog()) return;
       const mode = rangeEl.value;
@@ -1873,10 +2106,28 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
       const single = mode === 'clip';
       document.getElementById('asrClipSelectorRow').style.display = single && allAvailableClips.length > 1 ? 'flex' : 'none';
       document.getElementById('asrRecognitionAudioSourceRow').style.display = single && recognitionAudioSelectionByValue.size > 1 ? 'flex' : 'none';
-      document.getElementById('asrRangeHelp').textContent = plan.error || (single ? '' :
+      const trial=resultModeEl?.value==='trial';
+      const restriction=(taskModeEl?.value==='align'||trial)&&plan.clips.length!==1;
+      let sampleRange='';
+      if(trial&&!restriction&&!plan.error){
+        const bounds=getRecognitionClipRange(plan.clips[0]);
+        if(bounds){
+          const interval=getRecognitionClipRange(trialClip(plan.clips[0]));
+          sampleRange=`此次試跑 In ${secToEncore(interval.start,State.fps,State.dropFrame)}　Out ${secToEncore(interval.end,State.fps,State.dropFrame)}。`;
+        }
+      }
+      const primary=document.querySelector('#modalFoot button.primary');
+      if(primary&&!workId){primary.disabled=restriction||!!plan.error;
+        primary.textContent=resultModeEl?.value==='trial'?'辨識這段':taskModeEl?.value==='align'?'開始匹配':'開始辨識';}
+      document.getElementById('asrRangeHelp').textContent = plan.error || sampleRange || (restriction?'這個模式需要一個音訊來源，請選取單一片段。':single ? '' :
         '依序辨識範圍內的影片原音與已啟用的外部音訊，每個來源各自混合可聽聲道。');
     };
     if (rangeEl) rangeEl.onchange = refreshScope;
+    resultModeEl?.addEventListener('change',refreshScope);
+    taskModeEl?.addEventListener('change',refreshScope);
+    document.getElementById('asrRecognitionAudioSource')?.addEventListener('change',stopSample);
+    rangeEl?.addEventListener('change',stopSample);
+    clipSelectEl?.addEventListener('change',stopSample);
     if (clipSelectEl) {
       clipSelectEl.onchange = () => {
         if(!ownsDialog()) return;
@@ -1900,5 +2151,6 @@ export function openSpeechRecognitionDialog(preferredSource = null) {
         }
       };
     }
+    if(rangeEl)refreshScope();
   }, 0);
 }

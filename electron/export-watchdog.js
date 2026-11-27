@@ -1,4 +1,5 @@
 'use strict';
+const { pumpReverseFeeds } = require('./delivery-reverse');
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -8,7 +9,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { setImmediate } = require('timers');
 const { createExportArtifact, isDiscOutput } = require('./export-artifact');
-const { assertDeliveryInputEvidence } = require('./delivery-temporary-input');
+const { assertDeliveryInputEvidence, windowsCommandLength } = require('./delivery-temporary-input');
 const {
   acquireLease,
   updateLease,
@@ -44,6 +45,13 @@ function errorWithCode(code, message, cause) {
   const error = new Error(message);
   error.code = code;
   if (cause) error.cause = cause;
+  return error;
+}
+
+function inputLimitError(error, config) {
+  if (config.reverseFeeds?.length && ['EMFILE', 'ENFILE', 'E2BIG', 'ENOTSUP'].includes(error?.code))
+    return errorWithCode('DELIVERY_INPUT_LIMIT',
+      '系統無法同時開啟這些來源與倒放串流。請關閉其他交付工作或依時間範圍分批交付。', error);
   return error;
 }
 
@@ -440,6 +448,8 @@ async function startWatchdogRuntime(config, options = {}) {
   let child = null;
   let childClosed = false;
   let nativeChildError = null;
+  const reverseAbort = new AbortController();
+  let reverseCompletion = Promise.resolve();
   let terminationRequested = false;
   let cleanupReason = null;
   let finalizing = null;
@@ -516,6 +526,9 @@ async function startWatchdogRuntime(config, options = {}) {
     finalizing = (async () => {
       // The artifact settles all format-specific writers and private workspace
       // cleanup before this owner may remove output, release a lease or succeed.
+      reverseAbort.abort();
+      await reverseCompletion;
+      childError ||= nativeChildError;
       const artifactResult = await artifact.settle({ encoded: !cleanupReason && !childError && code === 0 });
       childError ||= artifactResult.error;
       cleanupReason ||= artifactResult.reason;
@@ -834,6 +847,8 @@ async function startWatchdogRuntime(config, options = {}) {
     assertDeliveryInputEvidence(config.inputEvidence || []);
     destinationBefore = destinationIdentity(config.outPath);
     const args = await artifact.prepare({ tempDir: artifactTempDir, nativeWorkRoot: nativeWorkspace?.path });
+    if (process.platform === 'win32' && windowsCommandLength(config.ffmpegPath,args) > 32767)
+      throw errorWithCode('DELIVERY_ARGUMENT_LIMIT', '交付來源路徑總長超過 Windows 命令限制。請縮短來源資料夾名稱或分段交付。');
     assertOutput();
     assertDestinationIdentity(config.outPath, destinationBefore);
     await assertDeliveryDestinationEvidenceAsync(outputAuthority, { signal: finalizerAbort.signal });
@@ -852,13 +867,13 @@ async function startWatchdogRuntime(config, options = {}) {
     child = spawn(config.ffmpegPath, args, {
       cwd: config.cwd || undefined,
       windowsHide: true,
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['ignore', 'ignore', 'pipe', ...(config.reverseFeeds || []).map(() => 'pipe')],
     });
     if (Number.isInteger(child.pid) && child.pid > 0) stageReservationMetadata = null;
   } catch (error) {
     starting = false;
     cleanupReason ||= 'ffmpeg-spawn-failed';
-    const startupError = finalizerAbort.signal.aborted && error === finalizerAbort.signal.reason ? null : error;
+    const startupError = finalizerAbort.signal.aborted && error === finalizerAbort.signal.reason ? null : inputLimitError(error, config);
     void finalize(null, null, startupError);
     return { done, requestCleanup, close, pipeName, token };
   }
@@ -869,8 +884,16 @@ async function startWatchdogRuntime(config, options = {}) {
     } catch {}
   });
   child.stderr.on('error', () => {});
+  if (config.reverseFeeds?.length && child.pid) {
+    reverseCompletion = pumpReverseFeeds(config.ffmpegPath, config.reverseFeeds, child.stdio.slice(3),
+      AbortSignal.any([reverseAbort.signal, finalizerAbort.signal])).catch(error => {
+      nativeChildError ||= error;
+      void requestCleanup('reverse-read-failed');
+    });
+  }
 
   child.on('error', error => {
+    error = inputLimitError(error, config);
     nativeChildError ||= error;
     // ChildProcess error also means kill/send failure. A spawned writer still
     // owns its staging file and lease until close, even after its exit event.

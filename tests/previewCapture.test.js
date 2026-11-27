@@ -5,7 +5,7 @@ import path from 'node:path';
 
 const adapters=vi.hoisted(()=>({
   Media:{mpvMode:true,displayTime:vi.fn(),inGap:vi.fn(),mpvPresenting:vi.fn(),previewFadeDarkness:vi.fn(),previewComposition:vi.fn(),captureMediaOwnership:vi.fn(()=>()=>true),withPresentedFrame:vi.fn()},
-  player:{screenshot:vi.fn(),setImageGuide:vi.fn()},
+  player:{screenshot:vi.fn(),captureOcrFrame:vi.fn(),setImageGuide:vi.fn()},
 }));
 vi.mock('../src/media.js',()=>({Media:adapters.Media,Wave:{sources:[]}}));
 vi.mock('../src/media-player-adapter.js',()=>({getPlayerAdapter:()=>adapters.player}));
@@ -105,6 +105,47 @@ beforeEach(()=>{
   const layer=document.getElementById('imageLayer');layer.innerHTML='';layer._imageHtml='';
 });
 afterAll(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
+
+it.each(['html5', 'mpv', 'webcodecs'])('OCR reads the verified %s presenter and excludes a retained canvas from another time', async source => {
+  State.clips = [{ id: 'v', type: 'video', in: 0, out: 4, offset: 0, vtrack: 0 }];
+  preview.style.display = 'block';
+  adapters.Media.previewComposition.mockReturnValue({ time: .25, width: 8, height: 8 });
+  adapters.player.captureOcrFrame.mockResolvedValue({ ok: true, b64: 'native-red' });
+  const decoded = document.createElement('canvas');
+  decoded.width = decoded.height = 8;
+  const ctx = contextFor(decoded);
+  ctx.fillStyle = '#0f0';
+  ctx.fillRect(0, 0, 8, 8);
+  const takeComposite = vi.fn(() => decoded);
+  const result = await capturePreviewFrame({ ocrFrame: { source, time: 1, adapter: adapters.player, isCurrent: () => true, takeComposite } });
+  expect(result.presenter).toBe(source);
+  expect(result.time).toBe(1);
+  expect(pixel(result, 4, 3)).toEqual(source === 'webcodecs' ? [0, 255, 0] : [255, 0, 0]);
+  expect(takeComposite).toHaveBeenCalledTimes(source === 'webcodecs' ? 1 : 0);
+  expect(adapters.player.captureOcrFrame).toHaveBeenCalledTimes(source === 'mpv' ? 1 : 0);
+  expect(adapters.player.screenshot).not.toHaveBeenCalled();
+  expect(adapters.Media.withPresentedFrame).not.toHaveBeenCalled();
+});
+
+it('reads the image track in a gap and rejects an empty playhead', async () => {
+  State.clips = [image()];
+  adapters.Media.inGap.mockReturnValue(true);
+  const options = { ocrFrame: { time: 1, source: 'synthetic', isCurrent: () => true } };
+  expect(pixel(await capturePreviewFrame(options), 4, 2)).toEqual([0, 255, 0]);
+  State.clips = [];
+  await expect(capturePreviewFrame(options)).rejects.toThrow('播放點沒有可辨識的畫面');
+});
+
+it('places just the unpadded clean native picture over an image on a lower track', async () => {
+  State.projectCanvas = { width: 8, height: 4 };
+  State.videoTracks = [{ visible: true }, { visible: true }];
+  State.clips = [image(), { id: 'upper', type: 'video', in: 0, out: 4, offset: 0, vtrack: 1 }];
+  adapters.player.captureOcrFrame.mockResolvedValue({ ok: true, b64: 'native-red',
+    projectCanvas: State.projectCanvas, canvasSize: { width: 8, height: 4 }, contentRect: { x: 3, y: 0, width: 2, height: 4 } });
+  const result = await capturePreviewFrame({ ocrFrame: { time: 1, source: 'mpv', adapter: adapters.player, isCurrent: () => true } });
+  expect(pixel(result, 1, 2)).toEqual([0, 255, 0]);
+  expect(pixel(result, 4, 2)).toEqual([255, 0, 0]);
+});
 
 it.each(['html5','mpv'])('captures %s into the custom square canvas with source aspect and black padding intact',async presenter=>{
   State.projectCanvas={width:8,height:8};

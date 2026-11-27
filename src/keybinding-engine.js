@@ -166,7 +166,7 @@ export function mergeImportedKeymap(defaults, imported) {
 // only the exact old defaults move; custom alternatives and disabled actions
 // stay owned by the user. Loading and importing share this one migration.
 function migrateDefaultBindings(defaults, source, merged, inherited) {
-  const actions = new Set();
+  const actions = new Set(['playhead_ocr']);
   for (const [newAction, action, oldBind] of [
     ['scroll_playhead', 'toggle_mixer', {key:'u'}],
     ['scroll_playhead', 'toggle_sub_mode', {key:'y'}],

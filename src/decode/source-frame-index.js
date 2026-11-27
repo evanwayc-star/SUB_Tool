@@ -40,6 +40,7 @@ function sourceIndex(url,{retryIncomplete=false}={}){
     const end=info.containerDurationUs>0?info.containerDurationUs:sampleEnd;
     return {samples:info.hasVideo===false?[]:ordered,metadata:Object.freeze({
       presentationTimestampOffset:-origin/1e6||0,duration:Math.max(0,end-origin)/1e6,
+      ...(info.audioChannels>0?{audioChannels:info.audioChannels}:{}),
       ...(Number.isFinite(info.audioPresentationTimestampOffset)
         ?{audioPresentationTimestampOffset:info.audioPresentationTimestampOffset}:{}),
       ...(info.audioPresentationTimestampOffsets?.length

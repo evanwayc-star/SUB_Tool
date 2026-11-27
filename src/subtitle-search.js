@@ -6,6 +6,7 @@ import { trackLocked } from './subtitle-model.js';
 
 let _searchTerms = [];
 let _searchMatches = [];
+let searchHitIds = new Set();
 let _searchIdx = -1;
 let _selectCueHandler = null;
 let searchDirty = true;
@@ -20,6 +21,7 @@ function refreshSearch(force=false){
   // Unicode 字形會產生不同結果，導致顯示命中卻無法取代，或漏掉命中。
   const pattern=_searchTerms.length ? new RegExp(_searchTerms.map(escRe).join('|'),'i') : null;
   _searchMatches=pattern ? State.cues.filter(c=>(c.track||0)===State.listTrack && pattern.test(String(c.text||''))).map(c=>c.id) : [];
+  searchHitIds=new Set(_searchMatches);
   const selected=_searchMatches.indexOf(State.selectedId);
   const retained=_searchMatches.indexOf(previous);
   _searchIdx=selected>=0 ? selected : retained>=0 ? retained : _searchMatches.length ? 0 : -1;
@@ -63,12 +65,12 @@ export function txtHTML(text){
 
 export function isSearchHit(id) {
   refreshSearch();
-  return _searchMatches.includes(id);
+  return searchHitIds.has(id);
 }
 
 export function searchUpdate(raw, selectCueCb){
   if(raw == null) raw = typeof document === 'undefined' ? '' : (document.getElementById('searchInput')?.value ?? '');
-  if(!raw){ _searchTerms=[]; _searchMatches=[]; _searchIdx=-1; emit('render:searchCount'); emit('render:subList'); return; }
+  if(!raw){ _searchTerms=[]; _searchMatches=[]; searchHitIds.clear(); _searchIdx=-1; emit('render:searchCount'); emit('render:searchHighlights'); return; }
   _searchTerms=raw.split('||').filter(s=>s.length>0);
   refreshSearch(true);
   if(_searchMatches.length){
@@ -80,7 +82,7 @@ export function searchUpdate(raw, selectCueCb){
   } else {
     _searchIdx = -1;
   }
-  emit('render:subList');
+  emit('render:searchHighlights');
   const cb = (typeof selectCueCb === 'function' ? selectCueCb : _selectCueHandler);
   if(_searchIdx>=0 && cb) cb(_searchMatches[_searchIdx],{seek:false});
   emit('render:searchCount');

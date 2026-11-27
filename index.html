@@ -16,7 +16,7 @@
   <div class="app" id="app">
 
     <!-- ===== 選單列 ===== -->
-    <div class="menubar">
+    <div class="menubar" role="toolbar" aria-label="專案工具列" aria-keyshortcuts="F10">
       <div class="brand">
         <img id="brandLogo" alt="SUB TOOL">
         <small id="appVersion"></small>
@@ -28,6 +28,7 @@
         <!-- 最近開啟：清單由主程序持有，這裡只顯示與送索引（見 electron/main.js project:recentList）。
              .menu 的開合由 app.js 既有的通用邏輯處理，不必另外接線。 -->
         <div class="menu" id="recentMenu"><button class="icon" id="recentBtn" tabindex="-1" title="最近開啟的專案"><span data-ui-icon="history" aria-hidden="true"></span> <span class="lbl">最近開啟</span></button><div class="items" id="recentItems"></div></div>
+        <button type="button" class="icon" id="browserDrafts" tabindex="-1" style="display:none" title="還原本機專案備份"><span data-ui-icon="history" aria-hidden="true"></span> <span class="lbl">還原備份</span></button>
         <button class="icon" data-act="save-project" tabindex="-1" title="儲存專案 (Ctrl+S)"><span data-ui-icon="save" aria-hidden="true"></span> <span class="lbl">儲存專案</span></button>
         <button class="icon" data-act="save-as-project" tabindex="-1" title="另存新檔"><span data-ui-icon="save-as" aria-hidden="true"></span> <span class="lbl">另存新檔</span></button>
       </div>
@@ -111,6 +112,7 @@
           <span class="preview-source" data-preview-source>尚未載入影片</span>
           <span class="preview-wait" data-preview-wait role="status" aria-live="polite" hidden></span>
           <span class="preview-preparation" data-preview-preparation hidden></span>
+          <button type="button" data-preview-return hidden>回到可播處</button>
         </div>
 
         <div class="transport">
@@ -191,8 +193,8 @@
                直書自成一格（前面有分隔線），排在對齊之後（v4.34.3）；陰影未列入指定順序，
                跟著框線走（同為「描邊」）。 -->
           <div class="ts-line">
-            <span class="ts-title" id="tsTitle">字幕樣式</span>
-            <div class="ts-group">
+            <div class="ts-group ts-size-group">
+              <span class="ts-title" id="tsTitle">字幕樣式</span>
               <span class="ts-label">大小</span>
               <div class="ts-btngrp">
                 <button class="ts-preset" data-ts-size="45">45</button>
@@ -324,6 +326,9 @@
           <button class="icon" data-act="notes" title="備註 (8)" aria-controls="notesPanel" aria-expanded="false"><span data-ui-icon="note" aria-hidden="true"></span> <span class="lbl">備註</span></button>
           <button class="icon" data-act="add-note" title="新增備註"><span data-ui-icon="plus" aria-hidden="true"></span></button>
           <div class="sep"></div>
+          <button type="button" class="icon desktop-only" id="playheadOcrToolbar" data-act="playhead-ocr"
+            style="display:none" title="辨識播放點文字 (Ctrl+E / ⌘E)" aria-label="OCR 辨識播放點文字" aria-haspopup="dialog">OCR</button>
+          <div class="sep desktop-only" style="display:none" aria-hidden="true"></div>
           <button class="icon" data-act="split-clip" title="在播放點切割選取素材；未選取音檔時切割影片段 (Ctrl+K)"><span data-ui-icon="scissors" aria-hidden="true"></span> <span class="lbl">切割</span></button>
           <div class="sep"></div>
           <button class="icon" data-act="unlink-clip-audio" title="將選取影片的原音解除連結，成為可獨立剪輯的音訊素材"><span data-ui-icon="unlink" aria-hidden="true"></span> <span class="lbl">影音分離</span></button>

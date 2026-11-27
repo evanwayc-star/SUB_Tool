@@ -6,8 +6,8 @@ const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
-const { motherSourceFingerprint, motherSourceFingerprintSync, portableSourceFingerprint,
-  sharedSourceFingerprintSync } = require('./mother-source-evidence');
+const sourceEvidence = require('./mother-source-evidence');
+const { motherSourceFingerprint, motherSourceFingerprintSync, sharedSourceFingerprintSync } = sourceEvidence;
 const { sourceChannelCount, flattenSourceChannels, channelFileName } = require('../shared/channel-layout.cjs');
 const { buildIngestArgs, previewPipelineCandidates, previewFallbackAllowed, PREVIEW_PROXY_PROFILE } = require('./ffmpeg-execution-engine');
 const { sourceAudioClockFilter, sourceClockSeek, timestampOffset } = require('./media-source-clock');
@@ -18,6 +18,8 @@ const { readSourceWaveformChunk, saveSourceWaveformChunk, inspectSourceWaveformC
   isSourceWaveformCachePath, validSourceWaveformPcm, MAX_SOURCE_WAVEFORM_BYTES } = require('./source-waveform-cache');
 const { openContinuousWaveformCache, inspectContinuousWaveformCache, describeContinuousWaveformCache, ownsWaveformRecoveryTree, isContinuousWaveformCachePath } = require('./continuous-waveform-cache');
 const { runContinuousSourceWaveform } = require('./continuous-source-waveform');
+const { encodeCheckpointedProxy, retireProxyCheckpoints } = require('./preview-proxy-checkpoints');
+const { streamPrefixStore } = require('./preview-stream-prefix');
 const { waveformDisplayCache } = require('./waveform-display-peaks');
 const { regular, fileSnapshot } = require('./waveform-file-evidence');
 const waveEvidenceFields = ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs', 'ctimeNs'];
@@ -783,7 +785,7 @@ function createMediaIntakeRuntime(options = {}) {
     return cacheCandidates(src, key).map(dir => inspectSourceCache(dir, [], key, portable, false, src));
   }
 
-  function inspectSourceCache(dir, audio, key, portable, bounded = false, src = null) {
+  function inspectSourceCache(dir, audio, key, portable, bounded = false, src = null, sharedKey = () => src && sharedSourceFingerprintSync(src)) {
     const hit = inspectCacheDirectory(dir, audio, bounded);
     if (hit.error) return hit;
     const mapped = portable && canonicalCachePath(dir) === canonicalCachePath(portable.dir);
@@ -796,7 +798,7 @@ function createMediaIntakeRuntime(options = {}) {
     if (hit.sourceContent?.format === SHARED_FILE_SOURCE_FORMAT) {
       // This record certifies one physical source file, never another file with
       // similar samples. Central copies additionally retain the local strict key.
-      const shared = src && sharedSourceFingerprintSync(src);
+      const shared = sharedKey();
       if (!shared || shared !== hit.sourceContent.sharedSourceKey
         || (!isSidecarCandidate(src, dir) && !hit.sourceKeys.includes(key))) {
         if (portableHits.get(key) === portable) portableHits.delete(key);
@@ -804,7 +806,7 @@ function createMediaIntakeRuntime(options = {}) {
       }
     }
     if (src && isSidecarCandidate(src, dir) && hit.sharedSourceKeys.length) {
-      const shared = sharedSourceFingerprintSync(src);
+      const shared = sharedKey();
       // A previously recorded shared witness is stronger than the local key.
       // Its mismatch must not silently upgrade an old SHA or complete waveform.
       // A fresh full-hash mapping can still read a read-only old receipt.
@@ -823,8 +825,13 @@ function createMediaIntakeRuntime(options = {}) {
     return hit;
   }
 
-  function readCache(src, audio, needsProxy) {
-    const key = cacheKeyFor(src), portable = portableHits.get(key);
+  function readCache(src, audio, needsProxy, key = cacheKeyFor(src), sourceSharedKey) {
+    const portable = portableHits.get(key);
+    let shared;
+    const sharedKey = sourceSharedKey || (() => {
+      if (shared === undefined) shared = sharedSourceFingerprintSync(src);
+      return shared;
+    });
     let partial = null;
     for (const dir of cacheCandidates(src, key)) {
       if (!canUseCacheCandidate(dir)) continue;
@@ -832,7 +839,7 @@ function createMediaIntakeRuntime(options = {}) {
       if (isSidecarCandidate(src, dir) && !sidecar) continue;
       const verify = () => { if (sidecar) captureOutputAuthority(path.join(sidecar.requestedPath, '.sidecar-root-check'), sidecar); };
       // 候選只是路徑提示；實際讀到的這份 metadata 仍須符合當次來源證據。
-      const hit = inspectSourceCache(dir, audio, key, portable, false, src);
+      const hit = inspectSourceCache(dir, audio, key, portable, false, src, sharedKey);
       if (hit.error) continue;
       if (coversAudioRequest(hit.meta, audio) && (!needsProxy || hit.meta.proxy)) {
         try { grantManagedCleanupRoot(dir, verify); return hit; } catch (_) { continue; }
@@ -846,7 +853,7 @@ function createMediaIntakeRuntime(options = {}) {
   async function preparePortableCache({ src, audio = [], needsProxy }, session, requireContent = false, { knownOnly = false,
     onProgress = payload => reportProgress(session, { jobId: 'ingest', ...payload }) } = {}) {
     if (!knownOnly) onProgress({ stage: 'cache-check', label: needsProxy ? '檢查 Proxy 與音訊快取' : '檢查素材快取', pct: null });
-    const sourceKey = cacheKeyFor(src);
+    const sourceKey = await cacheKeyForAsync(src);
     const current = () => !closed && !cancelled(session);
     const ensureCurrent = () => { if (!current()) throw new IngestSupersededError(); };
     const check = () => {
@@ -874,8 +881,8 @@ function createMediaIntakeRuntime(options = {}) {
       // are not. Recheck outside its catch before adopting any cached content.
       verify();
     };
-    check();
-    const direct = readCache(src, audio, needsProxy);
+    ensureCurrent();
+    const direct = readCache(src, audio, needsProxy, sourceKey, sharedKey);
     const knownContent = direct?.sourceContent?.size === fs.statSync(src).size ? direct.sourceContent : null;
     const directComplete = direct && coversAudioRequest(direct.meta, audio) && (!needsProxy || direct.meta.proxy);
     // 嚴格本機 key 已證明來源未變；完整舊快取不必先讀完整母素材，
@@ -994,7 +1001,7 @@ function createMediaIntakeRuntime(options = {}) {
       const reader = { current, onProgress: reportHash };
       if (!job || ![...job.readers].some(watcher => watcher.current())) {
         const readers = new Set([reader]);
-        const promise = portableSourceFingerprint(src, {
+        const promise = sourceEvidence.portableSourceFingerprint(src, {
           shouldContinue: () => [...readers].some(watcher => watcher.current()),
           onProgress: event => { for (const watcher of readers) if (watcher.current()) watcher.onProgress(event); },
         });
@@ -2225,10 +2232,9 @@ function createMediaIntakeRuntime(options = {}) {
     return !!session?.isCancelled?.();
   }
 
-  async function describeMissingProxy(src, audio, required = false) {
-    if (!options.describeVideo || (!required && readCache(src, audio || [], true)?.meta.proxy)) return null;
-    const sourceKey = cacheKeyFor(src);
-    const video = await options.describeVideo(src);
+  async function describeMissingProxy(src) {
+    const sourceKey = await cacheKeyForAsync(src);
+    const [video] = await Promise.all([options.describeVideo(src), options.readyEncoder?.()]);
     // probe 的描述與後續快取准入必須屬於同一母素材，不能認證等待期間被替換的新檔。
     if (cacheKeyFor(src) !== sourceKey) throw new Error('母素材在轉檔期間變更，請重新載入');
     if (!(video?.width > 0 && video?.height > 0)) throw new Error('無法確認 Proxy 母素材的視訊尺寸與色彩');
@@ -2327,7 +2333,10 @@ function createMediaIntakeRuntime(options = {}) {
           }, ms);
         };
         const range = request.headers.range;
-        if (!range) {
+        // Chromium opens video with Range: bytes=0-. A finite 206 containing
+        // only today's prefix becomes a permanent EOF in its demuxer. Follow
+        // the growing writer for this initial GET and serve bounded seeks below.
+        if (!range || (method === 'GET' && !job.done && range === 'bytes=0-')) {
           const headers = {
             'Content-Type': 'video/mp4',
             'Accept-Ranges': 'bytes',
@@ -2420,11 +2429,14 @@ function createMediaIntakeRuntime(options = {}) {
   }
 
   // cache coverage 與補建publication共用一個owner，batch/stream不能各自重抽已完成元件。
-  function planIntake({ src, needsProxy, audio, duration }, isStream, description = null, portable = null, previewPipeline = null) {
+  function planIntake({ src, needsProxy, audio, duration, failedProxy }, isStream, description = null, portable = null, previewPipeline = null) {
     const video = description?.video || null;
     const audioSources = Array.isArray(audio) ? audio : [];
-    const hit = readCache(src, audioSources, needsProxy);
     const sourceKey = cacheKeyFor(src);
+    const hit = readCache(src, audioSources, needsProxy, sourceKey);
+    // A player's failed path is only compared with the inspected publication.
+    // It never selects a file to open or remove, and a newer writer wins.
+    if (hit?.meta.proxy && hit.meta.proxy === failedProxy) hit.meta.proxy = null;
     if ((description && sourceKey !== description.sourceKey) || (portable && sourceKey !== portable.sourceKey)) {
       throw new Error('母素材在轉檔期間變更，請重新載入');
     }
@@ -2505,7 +2517,8 @@ function createMediaIntakeRuntime(options = {}) {
     const reuseChannels = expected.map((_, index) => sameAudioLayout
       && hit.meta.channels.some(channel => channel.file === hit.audioLayout[index].file));
     const reuseAudio = reuseWave && reuseChannels.every(Boolean);
-    const audioPlan = buildAudioIngestPlan(reuseAudio ? [] : audioSources);
+    const previewMix = isStream && buildProxy && audioSources.length > 0;
+    const audioPlan = buildAudioIngestPlan(reuseAudio && !previewMix ? [] : audioSources, { waveOnly: !!(reuseAudio && previewMix) });
     const channels = !audioSources.length ? (hit?.meta.channels || []).map(channel => ({ ...channel, file: reuseFile(channel.file) })) : expected.map((_, index) =>
       reuseChannels[index] ? { ...hit.audioLayout[index], file: reuseFile(hit.audioLayout[index].file) }
         : { ...audioPlan.channels[index], file: path.join(outputDir, audioPlan.channels[index].file) });
@@ -2515,7 +2528,18 @@ function createMediaIntakeRuntime(options = {}) {
       if (reuseChannels[index]) audioPlan.filters.push(`${pad}anullsink`);
       else { buildChannels.push(channels[index]); channelMaps.push(pad); }
     });
-    if (reuseWave && audioPlan.waveLabel) audioPlan.filters.push(`${audioPlan.waveLabel}anullsink`);
+    if (previewMix && audioPlan.waveLabel) {
+      // Downmix at original fidelity, before the waveform output resamples to 4 kHz.
+      let label = audioPlan.waveLabel;
+      if (!reuseWave) {
+        audioPlan.filters.push(`${label}asplit=2[wavefile][previewinput]`);
+        audioPlan.waveLabel = '[wavefile]';
+        label = '[previewinput]';
+      }
+      // Padding plus -shortest on the Proxy output lets the video determine
+      // its end even if the caller only knows an approximate duration.
+      audioPlan.filters.push(`${label}aresample=48000,apad=packet_size=480[previewmix]`);
+    } else if (reuseWave && audioPlan.waveLabel) audioPlan.filters.push(`${audioPlan.waveLabel}anullsink`);
     const proxy = reuseFile(hit?.meta.proxy) || (buildProxy ? path.join(outputDir, 'proxy.mp4') : null);
     let waveCopy = null;
     let wave = reuseWave ? reuseFile(!audioSources.length || sameAudioLayout ? hit?.meta.wave || null : null)
@@ -2537,6 +2561,7 @@ function createMediaIntakeRuntime(options = {}) {
       chMaps: channelMaps,
       waveLabel: reuseWave ? null : audioPlan.waveLabel,
       wavePath: wave,
+      previewMixLabel: previewMix ? '[previewmix]' : null,
       encoder: buildProxy ? getEncoder() : 'libx264',
       pipeline: buildProxy ? previewPipeline : null,
       isStream,
@@ -2545,7 +2570,7 @@ function createMediaIntakeRuntime(options = {}) {
     let committed = false;
     let streamGuard = null;
     return {
-      cached: false, dir, args, meta, buildProxy, assertSource,
+      cached: false, dir, args, meta, buildProxy, previewMix, assertSource,
       outputs: { proxy: buildProxy, audio: buildChannels.length > 0 || !!(!reuseWave && audioPlan.waveLabel) },
       readDirs: [...(copyCompleted ? [hit.dir] : []), ...(waveCopy ? [continuousWave.cacheDir] : [])],
       assertRetryOwner() {
@@ -2738,7 +2763,7 @@ function createMediaIntakeRuntime(options = {}) {
       checkSource(true);
       progress({ phase: 'generating', label: '素材旁的波形快取無法使用，改用本機快取', pct: 0, waveform: { reset: true, sourceKey } });
       if (activeRecipe.version === 2) {
-        const sha256 = await portableSourceFingerprint(src, { shouldContinue: () => !closed && !cancelled(session) });
+        const sha256 = await sourceEvidence.portableSourceFingerprint(src, { shouldContinue: () => !closed && !cancelled(session) });
         if (sha256 !== activeRecipe.sharedSourceKey) throw new Error('母素材在連續波形運算期間變更，請重新載入');
       }
       checkSource(true);
@@ -3190,7 +3215,7 @@ function createMediaIntakeRuntime(options = {}) {
     while (sourceCleanupTasks(request.src).length) await waitSourceCleanups(request.src);
     if (closed || cancelled(session)) throw new IngestSupersededError();
     let portable = await preparePortableCache(request, session);
-    let description = request.needsProxy && options.describeVideo ? await describeMissingProxy(request.src, request.audio) : null;
+    let description = null;
     while (sourceCleanupTasks(request.src).length) await waitSourceCleanups(request.src);
     if (closed || cancelled(session)) throw new IngestSupersededError();
     let pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: request.needsProxy });
@@ -3203,14 +3228,13 @@ function createMediaIntakeRuntime(options = {}) {
       plan = planIntake(request, false, description, portable, pipelines[index]);
     }
     if (plan.needsVideoDescription) {
-      description = await describeMissingProxy(request.src, request.audio, true);
+      description = await describeMissingProxy(request.src);
       while (sourceCleanupTasks(request.src).length) await waitSourceCleanups(request.src);
       if (closed || cancelled(session)) throw new IngestSupersededError();
       pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: request.needsProxy });
       plan = planIntake(request, false, description, portable, pipelines[index]);
     }
     if (plan.cached) {
-      plan.assertSource();
       reportCacheHit(session, plan.meta);
       if (closed || cancelled(session)) throw new IngestSupersededError();
       plan.assertSource();
@@ -3219,21 +3243,32 @@ function createMediaIntakeRuntime(options = {}) {
 
     let unprotect = protectPlan(plan, request.src);
     try {
-      await delay(1000);
       if (cancelled(session)) throw new IngestSupersededError();
       for (;;) {
         if (plan.prepare) await plan.prepare(() => !cancelled(session));
         if (closed || cancelled(session)) throw new IngestSupersededError();
         let stderr = '';
         try {
-          await ffmpegExecution.execute(plan.args, {
+          const executionOptions = {
             executionKind: 'direct', deferTerminal: true,
             onProgress: payload => reportProgress(session, { ...payload, stage: 'transcoding', outputs: plan.outputs }),
             onStderr: text => { stderr = (stderr + text).slice(-16000); },
             duration: request.duration, jobId: 'ingest', label: plan.label,
             onProcess: process => session.ownProcess?.(process),
             shouldSend: () => !cancelled(session),
-          });
+          };
+          const seconds = options.proxyCheckpointSeconds || 120;
+          if (plan.buildProxy && options.describeProxyPart && request.duration >= seconds * 4 && description?.video) {
+            const verify = () => {
+              if (closed || cancelled(session)) throw new IngestSupersededError();
+              plan.assertRetryOwner();
+            };
+            await encodeCheckpointedProxy({plan,request,video:description.video,sourceContent:portable.sourceContent,seconds,
+              describe:options.describeProxyPart,verify,
+              execute:(args,overrides)=>ffmpegExecution.execute(args,{...executionOptions,...overrides}),
+              progress:(finished,total,resumed)=>reportProgress(session,{jobId:'ingest',stage:'transcoding',outputs:plan.outputs,
+                label:`Proxy 分段 ${finished}/${total}（沿用 ${resumed} 段）`,pct:Math.floor(100*finished/total)})});
+          } else await ffmpegExecution.execute(plan.args, executionOptions);
           break;
         } catch (error) {
           if (closed || cancelled(session)) throw new IngestSupersededError();
@@ -3251,6 +3286,10 @@ function createMediaIntakeRuntime(options = {}) {
       }
       if (closed || cancelled(session)) throw new IngestSupersededError();
       plan.commit();
+      if (plan.buildProxy && options.describeProxyPart) {
+        await retireProxyCheckpoints(plan, () => !closed && !cancelled(session));
+      }
+      if (closed || cancelled(session)) throw new IngestSupersededError();
       reportCompletion(session, 'ingest', plan.label, null, plan);
       if (closed || cancelled(session)) throw new IngestSupersededError();
       plan.assertSource();
@@ -3263,7 +3302,7 @@ function createMediaIntakeRuntime(options = {}) {
     }
   }
 
-  async function stream({ src, duration, audio }, session = {}) {
+  async function stream({ src, duration, audio, failedProxy }, session = {}) {
     const port = await ensureStreamServer();
     if (closed || cancelled(session)) return { response: null, completion: null };
     while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
@@ -3274,10 +3313,10 @@ function createMediaIntakeRuntime(options = {}) {
       if (closed || cancelled(session)) return { response: null, completion: null };
       throw error;
     }
-    let description = options.describeVideo ? await describeMissingProxy(src, audio) : null;
+    let description = null;
     while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
     if (closed || cancelled(session)) return { response: null, completion: null };
-    const request = { src, duration, needsProxy: true, audio };
+    const request = { src, duration, needsProxy: true, audio, failedProxy };
     let pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: true });
     let index = 0;
     let plan = planIntake(request, true, description, portable, pipelines[index]);
@@ -3292,7 +3331,7 @@ function createMediaIntakeRuntime(options = {}) {
       plan = planIntake(request, true, description, portable, pipelines[index]);
     }
     if (plan.needsVideoDescription) {
-      description = await describeMissingProxy(src, audio, true);
+      description = await describeMissingProxy(src);
       while (sourceCleanupTasks(src).length) await waitSourceCleanups(src);
       if (closed || cancelled(session)) return { response: null, completion: null };
       pipelines = previewPipelineCandidates({ encoder: getEncoder(), video: description?.video, needsProxy: true });
@@ -3348,30 +3387,73 @@ function createMediaIntakeRuntime(options = {}) {
     let unprotect = protectPlan(plan, src);
     let writer = null;
     let readinessError = null;
+    let pinned;
+    const seconds = options.proxyCheckpointSeconds || 120;
     let preparationReady = false;
     let published = false;
     let attemptEpoch = 0;
     const stopUnreadyWriter = () => { try { writer?.kill?.(); } catch (error) {} };
     const runAttempts = async () => {
       for (;;) {
+        let prefixWriter;
         attemptEpoch++;
         preparationReady = false;
         if (plan.prepare) await plan.prepare(() => ownsStream());
         if (!ownsStream()) throw new IngestSupersededError();
         streamGuard = plan.streamGuard();
+        if (plan.buildProxy && options.describeProxyPart && description?.video && duration >= seconds*4) {
+          const prefixStore=streamPrefixStore(plan,portable.sourceContent,description.video,audio,duration);
+          const prefix=await prefixStore.recover();
+          if(!ownsStream())throw new IngestSupersededError();
+          if(prefix){
+            try { pinned=await prefixStore.pin(prefix); }
+            catch(error) {
+              if(!['ENOENT','CLIP_CACHE_CHANGED'].includes(error.code))throw error;
+              plan.assertRetryOwner();
+            }
+          }
+          if(pinned){
+            if(!ownsStream())throw new IngestSupersededError();
+            job.filePath=pinned.path;
+            streamGuard=pinned.verify;
+            // This URL is a complete, immutable prefix. The final proxy
+            // goes to the normal completion handoff with its own URL.
+            job.done=true;
+            const release=job.releaseCache;
+            job.releaseCache=()=>{pinned.remove();release();};
+          } else prefixWriter=prefixStore.writer(plan.meta.proxy,streamGuard,seconds);
+        }
         preparationReady = true;
         let stderr = '';
         try {
-          await ffmpegExecution.execute(plan.args, {
+          const executionOptions={
             executionKind: 'direct', deferTerminal: true,
-            onProgress: payload => reportProgress(session, { ...payload, stage: 'transcoding', outputs: plan.outputs }),
+            onProgress: payload => {
+              prefixWriter?.progress(payload.pct);
+              reportProgress(session, { ...payload, stage: 'transcoding', outputs: plan.outputs });
+            },
             onStderr: text => { stderr = (stderr + text).slice(-16000); },
             duration, jobId: id, label: plan.label,
             onProcess: process => { writer = process; session.ownProcess?.(process); if (readinessError) stopUnreadyWriter(); },
             shouldSend: () => !cancelled(session),
-          });
+          };
+          if(pinned) {
+            await encodeCheckpointedProxy({plan,request,video:description.video,sourceContent:portable.sourceContent,seconds,
+              prefix:pinned,describe:options.describeProxyPart,
+              verify:()=>{if(!ownsStream())throw new IngestSupersededError();plan.assertRetryOwner();},
+              execute:(args,overrides)=>ffmpegExecution.execute(args,{...executionOptions,...overrides}),
+              progress:(finished,total)=>reportProgress(session,{stage:'transcoding',jobId:id,outputs:plan.outputs,
+                label:`沿用前 ${pinned.end.toFixed(1)} 秒，補建 Proxy ${finished}/${total}`,
+                pct:Math.floor(100*(pinned.end+(duration-pinned.end)*finished/total)/duration)})});
+          } else await ffmpegExecution.execute(plan.args,executionOptions);
+          if(!ownsStream())throw new IngestSupersededError();
+          await prefixWriter?.finish(false);
           return;
         } catch (error) {
+          if(prefixWriter) {
+            try { await prefixWriter.finish(!readinessError&&!ownsStream()); }
+            catch(saveError){options.log?.('保存中斷的串流前段失敗',saveError);}
+          }
           if (!ownsStream()) throw new IngestSupersededError();
           if (published || job.requests?.size || readinessError || !plan.buildProxy || index + 1 >= pipelines.length
             || !previewFallbackAllowed(pipelines[index], error, stderr)) throw error;
@@ -3394,12 +3476,16 @@ function createMediaIntakeRuntime(options = {}) {
         }
       }
     };
-    const completion = runAttempts().then(() => {
+    const completion = runAttempts().then(async () => {
       job.done = true;
       if (readinessError) {
         reportCompletion(session, id, plan.label, readinessError, plan);
       } else if (!cancelled(session)) {
         plan.commit();
+        if (plan.buildProxy && options.describeProxyPart) {
+          await retireProxyCheckpoints(plan, () => !closed && !cancelled(session));
+        }
+        if (closed || cancelled(session)) return;
         reportCompletion(session, id, plan.label, null, plan);
       }
     }).catch(error => {
@@ -3426,7 +3512,7 @@ function createMediaIntakeRuntime(options = {}) {
         const observedGuard = streamGuard;
         let size = 0;
         let stat;
-        try { observedGuard(); stat = await fsp.stat(observedPlan.meta.proxy, { bigint: true }); } catch (error) {
+        try { observedGuard(); stat = await fsp.stat(job.filePath, { bigint: true }); } catch (error) {
           if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
         }
         if (!ownsStream()) return { response: null, completion };
@@ -3454,6 +3540,7 @@ function createMediaIntakeRuntime(options = {}) {
           streamUrl: `http://127.0.0.1:${port}/${id}`,
           streamLeaseId: id,
           sourceKey: portable.sourceKey,
+          previewMix: plan.previewMix,
           proxy: plan.meta.proxy,
           channels: plan.meta.channels,
           wave: plan.meta.wave,
@@ -3701,7 +3788,7 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
     }
   };
 
-  const submit = (work, owner, { replace = false } = {}) => new Promise((resolve, reject) => {
+  const submit = (work, owner, { replace = false, interactive = false } = {}) => new Promise((resolve, reject) => {
     if (closing) { reject(new IngestSupersededError()); return; }
     const revokedSession = owner?.sender && revoked.get(owner.sender)?.get(owner.sessionId);
     if (revokedSession && (revokedSession.all || revokedSession.requests.has(owner.requestId))) {
@@ -3714,8 +3801,12 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
     if (replace) {
       cancelMatching(candidate => owner?.sender ? ownsMediaIntake(candidate, { sender: owner.sender }) : true);
     }
-    const ticket = { work, resolve, reject, owner: owner ? { ...owner } : null };
+    const ticket = { work, resolve, reject, interactive: interactive || replace, owner: owner ? { ...owner } : null };
     if (replace) pending.unshift(ticket);
+    else if (interactive) {
+      const firstBackground = pending.findIndex(other => !other.interactive);
+      pending.splice(firstBackground < 0 ? pending.length : firstBackground, 0, ticket);
+    }
     else pending.push(ticket);
     void drain();
   });
@@ -3724,7 +3815,7 @@ function createMediaIngestCoordinator({ killProcess } = {}) {
     /** 有 owner 時只取代同 sender 的工作；內部無 owner 呼叫保留全域取代語意。 */
     replace: (work, owner) => submit(work, owner, { replace: true }),
     /** 將新轉檔工作依序加入排隊佇列 */
-    enqueue: (work, owner) => submit(work, owner),
+    enqueue: (work, owner, interactive = false) => submit(work, owner, { interactive }),
     /** 只取消原 sender／session／request；完成代表 native writer 與快取收尾已結束。 */
     cancel(scope) {
       if (scope.sender && scope.sessionId !== undefined) {

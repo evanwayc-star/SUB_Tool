@@ -607,7 +607,7 @@ export function renderAsrIndicator(button, session = null) {
   const taskLabel = session.taskMode === 'align' ? '文本匹配' : '語音辨識';
 
   const labelEl = button.querySelector('#asrMonitorLbl') || button.querySelector('.lbl');
-  const stateText = status === 'completed' ? '完成' : (status === 'failed' ? '失敗' : percentText);
+  const stateText = status === 'completed' ? (session.result?.review ? '待複核' : '完成') : (status === 'failed' ? '失敗' : percentText);
   if (labelEl) {
     labelEl.textContent = `🎙 ${taskLabel} ${stateText}`;
   }
@@ -631,7 +631,7 @@ export function bindScreenTextIndicator(button, initialSession, subscribe) {
     previous = session;
     const status = session?.status;
     const running = status === 'running' || status === 'cancelling';
-    const reviewable = status === 'partial' || status === 'completed' || status === 'failed';
+    const reviewable = status === 'partial' || status === 'review' || status === 'completed' || status === 'failed';
     button.classList.toggle('ocr-running', running);
     button.style.display = running || reviewable ? '' : 'none';
     if (!running && !reviewable) return;
@@ -639,7 +639,7 @@ export function bindScreenTextIndicator(button, initialSession, subscribe) {
     const percent = Number.isFinite(session.progress)
       ? Math.round(Math.max(0, Math.min(1, session.progress)) * 100) + '%'
       : '辨識中';
-    const state = { running:percent, cancelling:'取消中', partial:'待加入', completed:'完成', failed:'失敗' }[status];
+    const state = { running:percent, cancelling:'取消中', partial:'待加入', review:'待複核', completed:'完成', failed:'失敗' }[status];
     label.textContent = '畫面文字 ' + state;
     const action = reviewable ? '查看辨識結果' : '查看辨識進度';
     button.title = ['畫面文字辨識', session.clipName, state, session.message, action].filter(Boolean).join(' · ');

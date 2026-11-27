@@ -41,6 +41,8 @@ electron/mpv/
 electron/disc/
 electron/card-vision/target/
 electron/card-vision/bin/
+electron/frame-ocr/scripts/
+electron/frame-ocr/paddle/
 *.exe
 .config/
 tmp_profile/

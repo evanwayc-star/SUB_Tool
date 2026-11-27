@@ -40,7 +40,13 @@ struct Request {
     model: String,
     smart_accuracy: bool,
     frame_width: u32,
+    #[serde(default)]
     api_key: String,
+    #[serde(default)]
+    content_mode: stitcher::ContentMode,
+    region: Option<video::Region>,
+    operation: Option<String>,
+    max_new_requests: Option<u64>,
     cache_dir: PathBuf,
     ffmpeg_path: PathBuf,
     ffprobe_path: PathBuf,
@@ -127,7 +133,15 @@ fn execute(req: Request) -> Result<(), String> {
     {
         return Err("辨識範圍、取樣率或影像寬度無效。".into());
     }
-    if req.api_key.trim().is_empty()
+    let plan_only = match req.operation.as_deref() {
+        Some("plan") => true,
+        None | Some("recognize") => false,
+        _ => return Err("未知的畫面辨識操作。".into()),
+    };
+    if req.region.is_some_and(|r| !r.valid()) {
+        return Err("辨識區域超出畫面。".into());
+    }
+    if (!plan_only && req.max_new_requests != Some(0) && req.api_key.trim().is_empty())
         || req.api_key.len() > 4096
         || req.api_key.contains(['\r', '\n'])
     {
@@ -167,10 +181,13 @@ fn execute(req: Request) -> Result<(), String> {
         "size": metadata.len(), "modified": metadata.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|t| t.as_nanos().to_string()),
         "start": req.start, "end": req.end, "fps": req.samples_per_second,
         "language": req.source_lang, "provider": req.provider.as_str(), "model": req.model,
-        "smartAccuracy": req.smart_accuracy, "frameWidth": req.frame_width,
+        "smartAccuracy": req.smart_accuracy, "frameWidth": req.frame_width, "region":req.region,
     });
     let output = cache_identity_path(&req.cache_dir, &identity);
-    credentials::set_api_key(req.api_key)?;
+    if !plan_only {
+        credentials::set_api_key(req.api_key)?;
+    }
+    llm::set_request_limit(req.max_new_requests);
     video::configure_tools(req.ffmpeg_path, req.ffprobe_path)?;
     let detail = llm::vision_detail(req.provider, &req.model).into();
     let cfg = RunConfig {
@@ -187,6 +204,9 @@ fn execute(req: Request) -> Result<(), String> {
         workers: 2,
         translate_enabled: false,
         smart_accuracy: req.smart_accuracy,
+        content_mode: req.content_mode,
+        region: req.region,
+        plan_only,
         start: Some(req.start),
         duration: Some(req.end - req.start),
         auto_eval: false,
@@ -195,12 +215,22 @@ fn execute(req: Request) -> Result<(), String> {
     let stdin_cancel = Arc::clone(&cancel);
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-            if serde_json::from_str::<Value>(&line)
-                .ok()
-                .is_some_and(|v| v["type"] == "cancel")
-            {
-                stdin_cancel.store(true, Ordering::Relaxed);
-                break;
+            let Some(message) = serde_json::from_str::<Value>(&line).ok() else {
+                continue;
+            };
+            match message["type"].as_str() {
+                Some("checkpoint") => {
+                    let (cues, through) =
+                        pipeline::current_checkpoint().unwrap_or((Vec::new(), req.start));
+                    emit(
+                        json!({"type":"checkpoint","requested":true,"cues":cues,"processedEnd":through,"metrics":llm::live_metrics(json!({}))}),
+                    );
+                }
+                Some("cancel") => {
+                    stdin_cancel.store(true, Ordering::Relaxed);
+                    break;
+                }
+                _ => {}
             }
         }
     });
@@ -209,8 +239,27 @@ fn execute(req: Request) -> Result<(), String> {
     let mut final_result = None;
     let mut failure = None;
     let mut progress = 0.0_f64;
+    let mut metrics = json!({});
     for event in rx {
         match event {
+            BackendEvent::Metrics(value) => {
+                metrics = value;
+                emit(
+                    json!({"type":"progress","progress":progress,"message":"已規劃辨識視窗","metrics":llm::live_metrics(metrics.clone())}),
+                );
+            }
+            BackendEvent::Plan {
+                metrics,
+                preview,
+                time,
+            } => {
+                use base64::Engine;
+                verify_source()?;
+                final_result = Some(
+                    json!({"type":"plan","metrics":llm::live_metrics(metrics),"previewTime":time,
+                    "previewJpeg":base64::engine::general_purpose::STANDARD.encode(preview)}),
+                );
+            }
             BackendEvent::Checkpoint {
                 cues,
                 processed_end,
@@ -234,12 +283,14 @@ fn execute(req: Request) -> Result<(), String> {
                 if (processed_end - req.end).abs() > 0.001 {
                     return Err("辨識範圍超出可讀取的影片長度。".into());
                 }
-                final_result = Some(json!({"type":"result", "cues":cues, "processedEnd":req.end}));
+                final_result = Some(
+                    json!({"type":"result", "cues":cues, "processedEnd":req.end,"metrics":llm::live_metrics(metrics.clone())}),
+                );
             }
             BackendEvent::VisionProgress { done, total, .. } => {
                 progress = progress.max(0.05 + 0.80 * f64::from(done) / f64::from(total.max(1)));
                 emit(
-                    json!({"type":"progress", "progress":progress, "message":format!("畫面辨識 {done}／{total}")}),
+                    json!({"type":"progress", "progress":progress, "message":format!("畫面辨識 {done}／{total}"), "metrics":llm::live_metrics(metrics.clone())}),
                 );
             }
             BackendEvent::Log(message) => {
@@ -262,11 +313,18 @@ fn execute(req: Request) -> Result<(), String> {
                 };
                 emit(json!({"type":"progress", "progress":progress, "message":label}));
             }
-            BackendEvent::BatchFinished { completed, .. } => {
+            BackendEvent::BatchFinished {
+                completed,
+                total_usd,
+                ..
+            } => {
                 if completed == 1
-                    && let Some(result) = final_result
+                    && let Some(mut result) = final_result
                 {
                     verify_source()?;
+                    if !plan_only {
+                        result["metrics"]["estimatedCostUsd"] = json!(total_usd);
+                    }
                     emit(result);
                     return Ok(());
                 }
@@ -284,8 +342,31 @@ fn execute(req: Request) -> Result<(), String> {
     Err("辨識引擎提前結束。".into())
 }
 
+fn evaluate_cli(args: &[std::ffi::OsString]) -> Result<(), String> {
+    let usage = "用法：subtool-card-vision --evaluate <參考.srt> <辨識.srt> [起點秒 終點秒]";
+    if args.first().is_none_or(|arg| arg != "--evaluate") || !matches!(args.len(), 3 | 5) {
+        return Err(usage.into());
+    }
+    let range = if args.len() == 5 {
+        let seconds =
+            |v: &std::ffi::OsStr| v.to_str().and_then(|s| s.parse::<f64>().ok()).ok_or(usage);
+        Some((seconds(&args[3])?, seconds(&args[4])?))
+    } else {
+        None
+    };
+    let metrics =
+        eval::evaluate_srt_in_range(Path::new(&args[2]), Path::new(&args[1]), None, None, range)?;
+    emit(metrics);
+    Ok(())
+}
+
 fn main() {
     let result = (|| {
+        let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+        if !args.is_empty() {
+            return evaluate_cli(&args);
+        }
+
         let mut line = String::new();
         std::io::stdin()
             .lock()
@@ -296,7 +377,9 @@ fn main() {
         execute(request)
     })();
     if let Err(error) = result {
-        emit(json!({"type":"error", "message":redact_secrets(&error, &[])}));
+        emit(
+            json!({"type":"error", "message":redact_secrets(&error, &[]),"metrics":llm::live_metrics(json!({}))}),
+        );
         std::process::exit(1);
     }
 }

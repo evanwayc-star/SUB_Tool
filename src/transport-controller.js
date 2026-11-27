@@ -411,10 +411,10 @@ function stopFrameShuttle() {
 /* 「跳轉暫停」只在互動發生當下停止已在運作的 transport。
    反向 seek fallback 期間 Media.playing=false，但 _jklSpeed 仍非 0，
    所以不能只看 Media.playing，否則計時器會在滑鼠定位後繼續往回拉。 */
-function pauseForPointerSeek() {
+function pauseForPointerSeek(options) {
   if (!Media.playing && _jklSpeed === 0) return false;
   resetPlaybackSpeed();
-  if (Media.playing) Media.pause();
+  if (Media.playing) Media.pause({ seekOnPause: options?.seekOnPause !== false });
   return true;
 }
 
@@ -889,6 +889,7 @@ export {
   setJklSpeed,
   shuttleRewind,
   shuttlePause,
+  pauseForPointerSeek,
   shuttleForward,
   togglePlayPause,
   stepFrame,

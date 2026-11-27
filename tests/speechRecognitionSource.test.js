@@ -192,6 +192,49 @@ describe('bounded recognition source selection and lifetime', () => {
     const source = await getClipRecognitionSource({ file: { arrayBuffer: async () => new ArrayBuffer(2) } }, { decodeAudioData });
     expect(source).toBe(buffer); expect(decodeAudioData).toHaveBeenCalledTimes(1);
   });
+  it('discovers a second mother stream for an unprepared selected clip and mixes both in one native request',async()=>{
+    bridge.speechAudioMix=true;
+    bridge.probe=vi.fn(async()=>({audio:[{channels:1},{channels:1}]}));
+    bridge.speechAudioRead.mockImplementation(async request=>response(request.mixChannels?.length===2 ? .25 : 0,request.duration));
+    const clip={path:'C:/mother.mov',duration:1,recognitionTracks:[]};
+    for(const skipSilentVideo of [false,true]){
+      const source=await getClipRecognitionSource(clip,{skipSilentVideo});
+      expect((await source.readRange(0,1)).getChannelData(0)[10]).toBe(.25);
+      source.close();
+    }
+    expect(bridge.speechAudioRead).toHaveBeenCalledTimes(2);
+    expect(bridge.speechAudioRead).toHaveBeenCalledWith(expect.objectContaining({mixChannels:[
+      {sourceStream:0,sourceChannel:null},{sourceStream:1,sourceChannel:null}]}));
+  });
+
+  it('reads only selected WAV frames and rejects aliasing into the speech band',async()=>{
+    delete window.subtool;
+    const rate=48000,seconds=8;
+    const bytes=new ArrayBuffer(44+seconds*rate*4),view=new DataView(bytes);
+    view.setUint32(0,0x52494646);view.setUint32(4,bytes.byteLength-8,true);view.setUint32(8,0x57415645);
+    view.setUint32(12,0x666d7420);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,2,true);
+    view.setUint32(24,rate,true);view.setUint32(28,rate*4,true);view.setUint16(32,4,true);view.setUint16(34,16,true);
+    view.setUint32(36,0x64617461);view.setUint32(40,bytes.byteLength-44,true);
+    for(let i=0;i<rate*seconds;i++){
+      view.setInt16(44+i*4,Math.round(20000*Math.sin(i*2*Math.PI*1000/rate)),true);
+      view.setInt16(46+i*4,Math.round(20000*Math.sin(i*2*Math.PI*12000/rate)),true);
+    }
+    const file={size:bytes.byteLength,slice:vi.fn((a,b)=>({arrayBuffer:async()=>bytes.slice(a,b)})),
+      arrayBuffer:vi.fn(()=>{throw new Error('讀取整個 WAV');})};
+    for(const [channel,audible] of [[0,true],[1,false]]){
+      const clip={recognitionTracks:[{sourceStream:0,sourceChannel:0,file},{sourceStream:0,sourceChannel:1,file}]};
+      const source=await getClipRecognitionSource(clip,{recognitionSelection:{mode:'source-channels',
+        channels:[{sourceStream:0,sourceChannel:channel}]}});
+      const pcm=(await source.readRange(6,6.25)).getChannelData(0);
+      expect(pcm.length).toBe(4000);
+      const rms=Math.sqrt(pcm.reduce((sum,x)=>sum+x*x,0)/pcm.length);
+      if(audible)expect(rms).toBeCloseTo(20000/32768/Math.sqrt(2),3);
+      else expect(rms).toBeLessThan(.00043);
+      source.close();
+    }
+    expect(file.arrayBuffer).not.toHaveBeenCalled();
+    expect(file.slice.mock.calls.reduce((sum,[a,b])=>sum+b-a,0)).toBeLessThan(100000);
+  });
   it.each([false, true])('a replacement session waits for cancelled native read cleanup (cancel replacement: %s)', async cancelReplacement => {
     let finishOld, active = false;
     bridge.speechAudioRead.mockImplementation(request => {

@@ -41,6 +41,74 @@ function clipSourceTargetUs(t, clip){
   return sourceFrameTargetUs(Seq.toSource(t,clip),clip);
 }
 
+// The preview and project-sized snapshots use the same track clip, contain
+// geometry and fade. Only their destination pixel sizes differ.
+function paintLayer(ctx, base, { src, sw, sh, vt, clip, alpha }) {
+  const box = imageBoxOnStage({
+    stageW: base.w, stageH: base.h, track: vt, natW: sw, natH: sh,
+    scale: clip?.scale, posX: clip?.posX, posY: clip?.posY,
+  });
+  const frame = trackFrame({
+    stageW: base.w, stageH: base.h, scale: vt?.scale, posX: vt?.posX, posY: vt?.posY,
+  });
+  ctx.save();
+  try {
+    ctx.beginPath();
+    ctx.rect(base.x + Math.round(frame.x), base.y + Math.round(frame.y), Math.round(frame.w), Math.round(frame.h));
+    ctx.clip();
+    ctx.globalAlpha = clamp(alpha, 0, 1);
+    ctx.drawImage(src, base.x + Math.round(box.x), base.y + Math.round(box.y),
+      Math.max(1, Math.round(box.w)), Math.max(1, Math.round(box.h)));
+  } finally {
+    ctx.restore();
+  }
+}
+
+let projectFrameRequest = null;
+
+// Only an explicit capture borrows the decoded layers. Normal playback keeps
+// its viewport-sized render target and never allocates a project-sized canvas.
+export function reserveProjectFrame(time) {
+  const request = { time, frame: null };
+  projectFrameRequest = request;
+  return {
+    take() {
+      const snapshot = request.frame;
+      if (request !== projectFrameRequest || !snapshot?.composition || !Media.webCodecsTakeover() ||
+          Media.previewComposition() !== snapshot.composition) throw new Error('合成預覽畫格已變更，請重新擷取');
+      const canvas = document.createElement('canvas');
+      canvas.width = snapshot.width;
+      canvas.height = snapshot.height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const base = { x: 0, y: 0, w: canvas.width, h: canvas.height };
+      for (const layer of snapshot.layers) {
+        if (layer.imageUrl && (layer.src.currentSrc || layer.src.src) !== layer.imageUrl) throw new Error('圖片素材已變更');
+        paintLayer(ctx, base, layer);
+      }
+      return canvas;
+    },
+    release() {
+      request.frame = null;
+      if (projectFrameRequest === request) projectFrameRequest = null;
+    },
+  };
+}
+
+function rememberProjectFrame(time, stage, layers) {
+  const request = projectFrameRequest;
+  if (!request || time !== request.time) return;
+  const geometry = layer => ({ scale: layer?.scale, posX: layer?.posX, posY: layer?.posY });
+  request.frame = {
+    ...stage, composition: Media.previewComposition(),
+    layers: layers.filter(layer => layer.alpha > 0.003).map(({src, sw, sh, vt, clip, alpha, ts}) => ({
+      src, sw, sh, vt: geometry(vt), clip: geometry(clip), alpha,
+      imageUrl: ts == null && (src.currentSrc || src.src),
+    })),
+  };
+}
+
 /* 來源解析快取：同一來源的不可變索引／整檔 payload 共用，decoder 各自持有
    reader 與有界位元組視窗，避免不同來源游標互相淘汰仍在等待的讀取。 */
 const _demuxCache = new Map();
@@ -390,7 +458,12 @@ export const WCPreview = {
     const resized = (this.canvas.width !== bw || this.canvas.height !== bh);
     const stage=projectCanvasSize();
 
-    const t = Media.tlTime();
+    // FPS-SYNC: element clocks round to microseconds; NTSC project frame
+    // boundaries are fractional microseconds. Evaluate every layer against
+    // the requested boundary itself before publishing that capture.
+    const clock = Media.tlTime();
+    const t = projectFrameRequest && Math.abs(clock - projectFrameRequest.time) <= 1e-6
+      ? projectFrameRequest.time : clock;
     const plan=visualStackPlan(Seq.clipsAt(t),State.videoTracks);
     const acts=Media.inGap()?[]:plan.composited;
 
@@ -492,6 +565,7 @@ export const WCPreview = {
       this.ctx.fillStyle='#000';this.ctx.fillRect(0,0,bw,bh);
       this.mode='black'; this.lastPresentedUs=null;
       Media.setWebCodecsComposited(true,{time:t,...stage,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});this._setTakeover(true);
+      rememberProjectFrame(t, stage, []);
       Media.reportWebCodecsPresentation?.([t]);
       return;
     }
@@ -516,35 +590,8 @@ export const WCPreview = {
         const {width:pw,height:ph} = stage;
         base = stageBox({ canvasW: bw, canvasH: bh, projectW: pw, projectH: ph });
       }
-      /* 幾何一律走 image-compositor-engine.js 的 imageBoxOnStage()：軌影格（available-space 定位）
-         → 片段方框＝scale×影格 → 素材 contain 進方框 → 方框【中心】對到 (posX,posY)。
-         這正是匯出 filtergraph 的模型，兩邊共用同一份實作才談得上三路一致。
-
-         v5.7.0 前這裡是「素材直接 contain 進 base 再乘軌 scale、以 available-space 定位」，
-         少了「軌影格」這一層——素材比例與專案畫布不同、且該軌是 PiP 或非置中時，
-         預覽與匯出會差好幾十到上百 px（實測 4:3 影片放進 16:9 專案、軌 scale=0.5、
-         posX=1 時差 120px）。 */
-      const cl = L.clip || {};
-      const box = imageBoxOnStage({
-        stageW: base.w, stageH: base.h, track: L.vt,
-        natW: L.sw, natH: L.sh,
-        scale: cl.scale, posX: cl.posX, posY: cl.posY,
-      });
-      const dw = Math.max(1, Math.round(box.w)), dh = Math.max(1, Math.round(box.h));
-      /* 裁進軌影格：匯出是把片段疊到一張【軌影格大小】的透明底上，再把那張底疊到畫布，
-         所以超出軌影格的部分會被切掉。預覽不裁的話，PiP 軌上做了偏移／放大的片段
-         會溢出影格外，跟成品對不上（實測 4:3 素材在 0.5 PiP 軌上偏移時差 24px 寬、
-         54px 高）。 */
-      const fr = trackFrame({ stageW: base.w, stageH: base.h,
-        scale: L.vt?.scale, posX: L.vt?.posX, posY: L.vt?.posY });
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(base.x + Math.round(fr.x), base.y + Math.round(fr.y),
-               Math.round(fr.w), Math.round(fr.h));
-      ctx.clip();
-      ctx.globalAlpha = clamp(L.alpha, 0, 1);
       try{
-        ctx.drawImage(L.src, base.x + Math.round(box.x), base.y + Math.round(box.y), dw, dh);
+        paintLayer(ctx, base, L);
         painted++;
         if(L.ts != null){
           lastTs = L.ts; lastUrl = L.url;
@@ -559,8 +606,6 @@ export const WCPreview = {
           });
         }
       }catch(e){}
-      ctx.globalAlpha = 1;
-      ctx.restore();
     }
     if(presentedTimelineTimes.length!==requiredVideoLayers||painted<requiredLayers){
       if(!Media.webCodecsTakeover()||resized){
@@ -576,6 +621,7 @@ export const WCPreview = {
     const presentedTime=transformed ? t : (presentedTimelineTimes.at(-1)?.time??t);
     Media.setWebCodecsComposited(true,{time:presentedTime,...stage,imageIds:plan.mixedImages?plan.images.map(c=>c.id):[],imagesComposited:plan.mixedImages});
     this._setTakeover(true);
+    rememberProjectFrame(t, stage, layers);
     if(painted && lastTs != null){
       this.mode = 'wc'; this.lastPresentedUs = lastTs; this.lastSrcKey = lastUrl;
       Media.reportWebCodecsPresentation?.(presentedTimelineTimes);
