@@ -90,6 +90,7 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 |---|---|
 | 佇列 | [queue-preload.js](../electron/queue-preload.js) 的 `window.queueAPI`。只可管理工作、排程及定位允許的成品。`exactFrameRate` 是 `sendSync` 純值查詢，main 限存活佇列 sender／數字或字串。preload 最多快取 64 筆。`onUpdate` 替換舊 listener。 |
 | 比較 | [compare-preload.js](../electron/compare-preload.js) 的 `window.subtool` 只有 `onUpdateData`／`sendCommand`。載入期間只保留最新快照，舊命令保留原 revision。 |
+| 佇列二次確認 | 主程序為中斷轉檔或覆寫舊輸出開啟獨立的 sandbox 視窗。視窗聚焦時可點確認或單按 Enter，Esc 或關窗取消。每個父視窗一次只顯示一個請求，完成後主程序再核對原交付條件。[確認視窗實作](../electron/queue-confirmation.js) |
 
 部分訂閱只追加，只有明確回傳解除函式的入口才可呼叫它，例如 `onAudioNormalizeProgress`。
 

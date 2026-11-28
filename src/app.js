@@ -52,7 +52,7 @@ import { AudioRouting } from './audio-routing.js';
 import { RULER_H, ROW_H, tracksTop, tracksScrollTop, viewportW, layoutTimeline, drawRuler, niceStep, fmtTick, drawWave, renderTrackRows, renderCueBlocks, trackFromY, addTrack, removeTrack, moveSelectedToTrack, updatePlayhead, drawTimeline, setZoom, zoomFit, zoomFitVideo, refreshTrackGutterActive, refreshClipEffectBadges } from './timeline-renderer.js';
 import { renderSubList, renderCheckPanel, renderSubRow, selectCue, selectCueSingle, refreshSelectionUI, updateTlSel, deleteSelected, refreshStyleSummaries, updateSearchCount, refreshSearchHighlights, subtitleRow, applyCueStylePatch } from './subtitles.js';
 import { addCue, addCueRelative, deleteCue, sortCues, trimTrackSpaces, snapAllCuesToFrames, hasActiveCueEdit } from './subtitle-model.js';
-import { searchUpdate, searchNav, searchReplace, searchSelectAll, replaceOne, setSelectCueHandler } from './subtitle-search.js';
+import { searchUpdate, searchNav, searchReplace, searchSelectAll, setSelectCueHandler } from './subtitle-search.js';
 import { initRecentProjects } from './recent-projects.js';
 import { setIn, setOut, nudge, stepBoundary } from './keyboard.js';
 import { Project, isProjectDirty } from './project.js';
@@ -68,7 +68,7 @@ import { addNote, renderNotes, setNoteActive, updateNoteActive } from './notes.j
 import { createPreviewDrag } from './timeline-interaction-engine.js';
 import { setStatus, showToast, showOsd, openModal, closeModal, promptModal, closeMenus, openMenu } from './ui.js';
 import { renderAudioTracks, renderMixer, updateMeters } from './mixer.js';
-import { applyDurAdjPct, toASSFromState } from './subio.js';
+import { toASSFromState } from './subio.js';
 import { parseTimecodeInput, setupTimecodeInput } from './tcparse.js';
 import { imageBoxOnStage, fadeAlphaAtTimeline } from './image-compositor-engine.js'; // 圖片疊層幾何與淡入淡出：三路共用同一份規格
 import { initPresetLibrary } from './preset-library.js';
@@ -476,8 +476,11 @@ function initUI(){
   const searchInput=$('searchInput');
   searchInput.addEventListener('input',event=>{if(!event.isComposing)searchUpdate(searchInput.value);});
   searchInput.addEventListener('compositionend',()=>searchUpdate(searchInput.value));
-  $('searchInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ e.preventDefault(); searchNav(e.shiftKey ? -1 : 1); } });
-  $('replaceInput').addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229) return; if(e.key==='Enter'){ replaceOne(); } });
+  searchInput.addEventListener('keydown',e=>{
+    if(e.key==='Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing && e.keyCode!==229){
+      e.preventDefault();e.stopPropagation();if(!e.repeat)searchNav(-1);
+    }
+  });
   $('searchDialog').addEventListener('keydown',e=>{
     if(e.isComposing||e.keyCode===229||e.key!=='Escape')return;
     e.preventDefault();e.stopPropagation();doAction('search-clear');doAction('search-close');
@@ -493,6 +496,7 @@ function initUI(){
   if(stSel && tlSel) {
     const updateTl = () => {
       const txt = stSel.textContent;
+      stSel.title = tlSel.title = txt || '未選取';
       if(!txt || txt==='未選取') {
         tlSel.textContent = '未選取';
         tlSel.className = 'sel-none';
@@ -635,7 +639,6 @@ function initExtras(){
       });
     }
   });
-  $('durAdjPctInput')?.addEventListener('keydown',e=>{ if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();applyDurAdjPct();} });
   $('durAdjMode')?.addEventListener('keydown',e=>{if(e.key!=='Escape'||e.isComposing||e.keyCode===229)e.stopPropagation();});
   $('waveSrcSel')?.addEventListener('change',e=>{ Wave.selectSource(+e.target.value); e.target.blur(); });
   $('tcCur').addEventListener('dblclick',e=>{ e.preventDefault(); startTimeEdit(); });
@@ -857,7 +860,8 @@ async function initDesktop(){
           `MXF、proxy、多音軌抽取與影片匯出在修復前無法使用。`
         : `目前的桌面版缺少或無法啟動內建 <b>ffmpeg</b>。<br><br>`+
           `請重新安裝 SUB Tool；也可把 ffmpeg 加入 PATH，或設定環境變數 <code>FFMPEG_PATH</code>。<br><br>`+
-          `MXF、proxy、多音軌抽取與影片匯出在修復前無法使用。`);
+          `MXF、proxy、多音軌抽取與影片匯出在修復前無法使用。`,
+        [{label:'知道了', primary:true, enterDefault:true, act:closeModal}]);
     }
     setStatus(s.ffmpeg ? '就緒（桌面模式）— 可直接讀 MXF 與多音軌' : '桌面模式 — ffmpeg 無法使用',s.ffmpeg?'ok':'err');
   }catch(e){ setStatus('就緒（桌面模式）','ok'); }
@@ -1011,7 +1015,7 @@ async function initDesktop(){
       if (isProjectDirty()) {
         const dialog = openModal('儲存變更', '關閉前是否要儲存專案？', [
           // 等儲存真正完成（拿到路徑）才關閉；使用者取消存檔對話框則回到編輯畫面，避免資料遺失
-          {label: '儲存', primary: true, act: async () => {
+          {label: '儲存', primary: true, enterDefault: true, act: async () => {
             const pth = await Project.save();
             if (!dialog.isCurrent()) return;
             dialog.close({ committed: true });
@@ -1047,11 +1051,11 @@ async function initDesktop(){
 setTimeout(() => {
   const audioTracksCountInput = document.getElementById('projectAudioTracksCount');
   if (audioTracksCountInput) {
-    audioTracksCountInput.addEventListener('change', () => {
+    audioTracksCountInput.addEventListener('change', async () => {
       const val = parseInt(audioTracksCountInput.value, 10);
       if (val >= 1 && val <= 32) {
         if (typeof AudioRouting !== 'undefined' && AudioRouting.setBusCount) {
-          if (AudioRouting.setBusCount(val)) {
+          if (await AudioRouting.setBusCount(val)) {
             setStatus(`已將專案音軌數設定為 ${val}`, 'ok');
             if (typeof emit === 'function') emit('render:all');
             if (typeof renderMixer === 'function') renderMixer();

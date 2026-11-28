@@ -3,16 +3,16 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mountPlayheadOcrRegion } from '../src/playhead-ocr-region.js';
 
-let container, canvas, surface, overlay, change, submit, dispose, captured;
+let container, canvas, surface, overlay, change, dispose, captured;
 const image = {left:100, top:20, width:400, height:225};
 beforeEach(() => {
   document.body.innerHTML = '<div id="playheadOcrRegion"></div>';
   container = document.getElementById('playheadOcrRegion');
   canvas = document.createElement('canvas'); canvas.width = 1920; canvas.height = 1080;
   canvas.getBoundingClientRect = () => image;
-  change = vi.fn(); submit = vi.fn();
-  dispose = mountPlayheadOcrRegion(container, canvas, change, submit);
-  surface = canvas.closest('button'); overlay = container.querySelector('.playhead-ocr-selection');
+  change = vi.fn();
+  dispose = mountPlayheadOcrRegion(container, canvas, change);
+  surface = canvas.closest('.playhead-ocr-surface'); overlay = container.querySelector('.playhead-ocr-selection');
   captured = null;
   surface.setPointerCapture = id => { captured = id; };
   surface.hasPointerCapture = id => captured === id;
@@ -46,9 +46,9 @@ it.each([[140,45,260,95],[260,95,140,45],[260,45,140,95],[140,95,260,45]])(
     expect(captured).toBeNull();
     expect(change).toHaveBeenCalledExactlyOnceWith([{x:192,y:120,width:576,height:240}]);
     expect(document.activeElement).toBe(surface);
+    expect(surface.getAttribute('role')).toBe('group');
+    expect(surface.tabIndex).toBe(-1);
     surface.dispatchEvent(new MouseEvent('click',{bubbles:true,detail:1}));
-    expect(submit).not.toHaveBeenCalled();
-    surface.click(); expect(submit).toHaveBeenCalledExactlyOnceWith();
   });
 
 it('留白不能啟動框選，從圖內拖到外面只取畫格內完整像素', () => {
@@ -75,7 +75,6 @@ it.each(['pointercancel','lostpointercapture','blur'])('遇到 %s 時還原先�
   else pointer(type,310,120,{target:surface});
   pointer('pointerup',310,120);
   expect(captured).toBeNull(); expect(overlay.innerHTML).toBe(first); expect(change).toHaveBeenCalledTimes(2);
-  expect(submit).not.toHaveBeenCalled();
 });
 
 it('相交與相連的同列矩形會合併，重複加選與扣除再填回不累積碎片', () => {
@@ -92,23 +91,18 @@ it('相交與相連的同列矩形會合併，重複加選與扣除再填回不�
     drag(150,48,170,78,{shiftKey:true});
     expect(selection()).toEqual(whole);
   }
-  expect(submit).not.toHaveBeenCalled();
 });
 
 it('整張可直接辨識或扣除，中空處保留，空選區禁送；雙擊回到整張', () => {
   expect(overlay.hasAttribute('hidden')).toBe(true);
-  surface.click(); expect(submit).toHaveBeenCalledTimes(1);
   drag(140,45,260,95,{shiftKey:true}); expect(selection()).toBeNull();
   drag(140,45,260,95,{altKey:true});
   const pieces = selection();
   expect(pieces.reduce((area,r) => area + r.width * r.height,0)).toBe(1920*1080 - 576*240);
   expect(pieces.some(r => r.x <= 450 && 450 < r.x+r.width && r.y <= 200 && 200 < r.y+r.height)).toBe(false);
   drag(100,20,500,245,{altKey:true}); expect(selection()).toEqual([]);
-  surface.click(); expect(submit).toHaveBeenCalledTimes(1);
   surface.dispatchEvent(new MouseEvent('dblclick',{button:0,detail:2,bubbles:true}));
   expect(selection()).toBeNull(); expect(overlay.hasAttribute('hidden')).toBe(true);
-  expect(submit).toHaveBeenCalledTimes(1);
-  surface.click(); expect(submit).toHaveBeenCalledTimes(2);
 });
 
 it('交錯操作逐格符合布林選取、整數界線及不重疊輸出', () => {
@@ -144,14 +138,13 @@ it('鍵盤調整最近的框、保留其他選區，移動及重設都不啟動�
   drag(100,20,125,45,{shiftKey:true});
   key('ArrowRight',{altKey:true});
   expect(selection()).toEqual(expect.arrayContaining([{x:1,y:0,width:120,height:120},{x:499,y:359,width:960,height:361}]));
-  expect(submit).not.toHaveBeenCalled();
-  key('Home'); expect(selection()).toBeNull(); expect(submit).not.toHaveBeenCalled();
+  key('Home'); expect(selection()).toBeNull();
 });
 
 it('解除時釋放 capture、全域監聽和本次 DOM，其他 UI 保留', () => {
   const extra = document.createElement('p'); container.append(extra);
   pointer('pointerdown',140,45); dispose(); pointer('pointerup',260,95,{target:window}); surface.click();
-  expect(captured).toBeNull(); expect(change).not.toHaveBeenCalled(); expect(submit).not.toHaveBeenCalled();
+  expect(captured).toBeNull(); expect(change).not.toHaveBeenCalled();
   expect([...container.children]).toEqual([extra]);
 });
 

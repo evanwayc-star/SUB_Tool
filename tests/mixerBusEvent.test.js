@@ -7,6 +7,7 @@
    notifyBusChange 一次都沒被執行到——正是技術架構說明 §0.6
    「有產出不等於對」講的那種測了等於沒測。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { installDialogMethods } from './fixtures/native-dialog.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -289,10 +290,11 @@ describe('音訊軌初始化與呈現的所有權',()=>{
       AudioRouting.openOutputSettings();
       await new Promise(resolve=>setTimeout(resolve,0));
       document.getElementById('audioOutputBusCount').value='0';
-      const confirm = vi.spyOn(window,'confirm').mockReturnValueOnce(true);
+      installDialogMethods();
       document.getElementById('audioOutputBusApply').click();
-      expect(confirm).toHaveBeenCalledWith(expect.stringContaining('由 2 軌減少為 0 軌'));
-      confirm.mockRestore();
+      expect(document.querySelector('dialog[open] .mbody').textContent).toContain('由 2 軌減少為 0 軌');
+      document.querySelector('dialog [data-approve]').click();
+      await vi.waitFor(()=>expect(State.audioProject.buses).toHaveLength(0));
       expect(document.getElementById('audioOutputBusCount').value).toBe('0');
       expect(State.audioProject.buses).toHaveLength(0);
       expect(document.querySelectorAll('#atList .project-bus')).toHaveLength(0);

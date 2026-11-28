@@ -8,7 +8,7 @@ import { State, IS_DESKTOP, DESK } from './state.js';
 import { Media } from './media.js';
 import { AudioRouting } from './audio-routing.js';
 import { runVideoExportCommand } from './export-job-engine.js';
-import { showToast, openModal, closeModal, togglePanel, closePanel, openCacheDialog, keepPanelInViewport } from './ui.js';
+import { showToast, openModal, closeModal, togglePanel, closePanel, openCacheDialog, openSearchPanel } from './ui.js';
 import { showSettingsModal } from './settings.js';
 import { showProjectSettings } from './project-settings.js';
 import { openStatusErrorReport } from './status-error-report.js';
@@ -209,17 +209,8 @@ function createCommands() {
       closePanel('checkPanel');
     },
     'edit-subtitle-dictionary': openSubtitleDictionaryDialog,
-    'search-open': () => {
-      const sd = $('searchDialog');
-      if (sd) {
-        sd.style.display = 'flex';
-        keepPanelInViewport(sd);
-        emit('render:searchCount');
-        $('searchInput').focus();
-        emit('mpv:sync');
-      }
-    },
-    'search-close': () => { const sd = $('searchDialog'); if (sd) { sd.style.display = 'none'; emit('mpv:sync'); } },
+    'search-open': openSearchPanel,
+    'search-close': () => closePanel('searchDialog'),
     'search-next': searchNext,
     'search-prev': searchPrev,
     'search-clear': searchClear,

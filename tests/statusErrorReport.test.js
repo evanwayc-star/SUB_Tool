@@ -49,6 +49,18 @@ it('同一執行日誌的進度與 IPC 通知只保留一筆及完整 FFmpeg 診
   expect(rows[2].textContent.split('Assertion next_dts failed')).toHaveLength(2);
 });
 
+it('新增錯誤時保留已展開的診斷內容',async()=>{
+  const {openModal}=await import('../src/ui.js');
+  const {recordStatusError,openStatusErrorReport}=await import('../src/status-error-report.js');
+  recordStatusError('匯出失敗','診斷記錄 A');
+  openStatusErrorReport(openModal);
+  const details=document.querySelector('#statusErrorList details');
+  expect(details.open).toBe(false);
+  details.open=true;
+  recordStatusError('讀取失敗','診斷記錄 B');
+  expect([...document.querySelectorAll('#statusErrorList details')].map(view=>view.open)).toEqual([false,true]);
+});
+
 it('retains the latest 100 reports and avoids recording the same background state on every render',async()=>{
   const {setMediaIntakeStatus,openModal}=await import('../src/ui.js');
   const {recordStatusError,openStatusErrorReport}=await import('../src/status-error-report.js');

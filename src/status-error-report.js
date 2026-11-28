@@ -2,6 +2,7 @@ import { $ } from './dom.js';
 
 const entries=[];
 const limit=100;
+const detailEntries=new WeakMap();
 
 function renderReport(){
   const list=$('statusErrorList');
@@ -12,7 +13,9 @@ function renderReport(){
     list.replaceChildren(empty);
     return;
   }
-  const rows=entries.map(({at,message,detail,labels})=>{
+  const expanded=new Set(Array.from(list.querySelectorAll('details[open]'),view=>detailEntries.get(view)));
+  const rows=entries.map(entry=>{
+    const {at,message,detail,labels}=entry;
     const row=document.createElement('li');
     const time=document.createElement('time');
     time.dateTime=at.toISOString();
@@ -23,9 +26,15 @@ function renderReport(){
     const context=labels.filter(label=>label!==message);
     if(detail&&detail!==message)context.push(detail);
     if(context.length){
+      const details=document.createElement('details');
+      details.open=expanded.has(entry);
+      detailEntries.set(details,entry);
+      const heading=document.createElement('summary');
+      heading.textContent='技術詳情';
       const description=document.createElement('p');
       description.textContent=context.join('\n');
-      row.append(description);
+      details.append(heading,description);
+      row.append(details);
     }
     return row;
   });

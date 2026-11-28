@@ -152,7 +152,11 @@ export function mergeImportedKeymap(defaults, imported) {
     if (Array.isArray(source[action])) {
       const bindings = source[action].map(normalizeKeyBinding).filter(Boolean);
       if (source[action].length && !bindings.length) continue;
-      merged[action] = bindings;
+      merged[action] = bindings.filter(bind => {
+        if (bind.ctrl || bind.alt) return true;
+        const key = (bind.code || bind.key).toLowerCase();
+        return key !== 'tab' && (bind.shift || (key !== 'enter' && key !== 'numpadenter'));
+      });
       inherited.delete(action);
       applied++;
     }

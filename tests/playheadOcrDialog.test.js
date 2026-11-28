@@ -147,10 +147,17 @@ it('辨識中返回可立刻重選，舊請求結束或取消都不能覆蓋新�
   DESK.recognizeFrameText.mockImplementationOnce(()=>new Promise(resolve=>{oldResult=resolve;}));
   DESK.cancelFrameText.mockImplementationOnce(()=>new Promise(resolve=>{stopped=resolve;}));
   await openPlayheadOcr();
-  const [,,change,submit]=mountPlayheadOcrRegion.mock.lastCall;
+  const [,,change,drag]=mountPlayheadOcrRegion.mock.lastCall;
+  const submit=el('playheadOcrStart').onclick;
   const first=[{x:0,y:0,width:30,height:20}];
+  drag(true);
+  await submit();
+  expect(encodePlayheadOcrRegion).not.toHaveBeenCalled();
+  drag(false);
   change(first);
+  expect(el('playheadOcrStart').hasAttribute('data-enter-default')).toBe(true);
   const pending=submit();
+  expect(document.querySelector('[data-enter-default]')).toBeNull();
   await vi.waitFor(()=>expect(oldResult).toBeTypeOf('function'));
   el('playheadOcrBack').click();
   expect(el('playheadOcrRegion').hidden).toBe(false);
@@ -166,6 +173,7 @@ it('辨識中返回可立刻重選，舊請求結束或取消都不能覆蓋新�
   oldResult({text:'過期結果'});
   await pending;
   expect(el('playheadOcrText').value).toBe('第二次的結果');
+  expect([...document.querySelectorAll('[data-enter-default]')]).toEqual([el('playheadOcrConfirm')]);
   expect(encodePlayheadOcrRegion.mock.lastCall[1]).toEqual(next);
   expect(capturePlayheadOcrCanvas).toHaveBeenCalledTimes(1);
 });
@@ -174,7 +182,8 @@ it('空選區不送件，編碼中返回會丟棄舊資料並保留框選',async
   let finish;
   encodePlayheadOcrRegion.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
   await openPlayheadOcr();
-  const [,,change,submit]=mountPlayheadOcrRegion.mock.lastCall;
+  const [,,change]=mountPlayheadOcrRegion.mock.lastCall;
+  const submit=el('playheadOcrStart').onclick;
   change([]);
   expect(el('playheadOcrStart').disabled).toBe(true);
   await submit();

@@ -41,6 +41,22 @@ function planPayload(overrides = {}) {
 }
 
 describe('字幕比對視窗 view adapter', () => {
+  it('載入中與無軌時停用比對控制，有字幕軌後恢復', () => {
+    const { dom, callbacks, commands } = openCompareView();
+    const document = dom.window.document;
+    const controls = [...document.querySelectorAll('.header select, .header button, .header input')];
+    expect(controls.every(control => control.disabled)).toBe(true);
+    callbacks[0](planPayload({ tracks: [], selection: null, rows: [] }));
+    expect(document.getElementById('emptyState').textContent).toContain('匯入字幕軌');
+    expect(controls.every(control => control.disabled)).toBe(true);
+    document.getElementById('toggleTime').click();
+    expect(commands).toEqual([]);
+    callbacks[0](planPayload());
+    expect(controls.every(control => !control.disabled)).toBe(true);
+    document.getElementById('toggleTime').click();
+    expect(commands).toHaveLength(1);
+    dom.window.close();
+  });
   it('每組差異有可聚焦的文字說明，字幕控制也能讀到樣式差異屬性',()=>{
     const {dom,callbacks}=openCompareView();callbacks[0](planPayload());
     const document=dom.window.document,cell=document.querySelector('[data-cue-id="left"]');
@@ -51,7 +67,7 @@ describe('字幕比對視窗 view adapter', () => {
     expect(detail.tabIndex).toBe(0);detail.focus();expect(document.activeElement===detail).toBe(true);
     dom.window.close();
   });
-  it('字幕與樣式選單可由鍵盤存取，Escape 回到原字幕且不送出編輯', () => {
+  it('選單開啟時聚焦容器，Tab、Enter 和空白鍵不會修改樣式或定位字幕', () => {
     const { dom, callbacks, commands } = openCompareView();
     callbacks[0](planPayload());
     const document = dom.window.document;
@@ -59,7 +75,12 @@ describe('字幕比對視窗 view adapter', () => {
     expect(cell.tagName).toBe('BUTTON');
     cell.focus();
     cell.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true }));
-    expect(document.activeElement.id).toBe('miMatchStyle');
+    expect(document.activeElement.id).toBe('ctxMenu');
+    for (const key of ['Tab','Enter',' ']) {
+      const event = new dom.window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      document.activeElement.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
     document.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(document.activeElement).toBe(cell);
     expect(document.getElementById('ctxMenu').classList.contains('show')).toBe(false);
@@ -71,6 +92,32 @@ describe('字幕比對視窗 view adapter', () => {
     dom.window.close();
   });
 
+  it.each(['捲動字幕', '視窗失焦', '切換至軌道選單'])('%s 會撤銷原字幕的樣式操作', reason => {
+    const { dom, callbacks, commands } = openCompareView();
+    callbacks[0](planPayload());
+    const { document, MouseEvent, Event } = dom.window;
+    const menu = document.getElementById('ctxMenu');
+    const apply = document.getElementById('miMatchStyle');
+    const left = document.querySelector('[data-cue-id="left"]');
+    left.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    expect(document.activeElement).toBe(menu);
+    let expectedFocus = document.body;
+    if (reason === '捲動字幕') document.getElementById('container').dispatchEvent(new Event('scroll'));
+    else if (reason === '視窗失焦') dom.window.dispatchEvent(new Event('blur'));
+    else { expectedFocus = document.getElementById('selB'); expectedFocus.focus(); }
+    expect(menu.classList.contains('show')).toBe(false);
+    expect(document.activeElement).toBe(expectedFocus);
+    apply.click();
+    expect(commands).toEqual([]);
+
+    const right = document.querySelector('[data-cue-id="right"]');
+    right.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    apply.focus();
+    apply.click();
+    expect(commands).toEqual([{ type: 'match-style', revision: 4, targetCueId: 'right', sourceCueId: 'left' }]);
+    expect(document.activeElement).toBe(right);
+    dom.window.close();
+  });
   it('隱藏相同字幕後提供恢復提示，摘要區分總組數與可見組數', () => {
     const { dom, callbacks } = openCompareView();
     const payload=planPayload();payload.plan.rows[0].active={any:false};callbacks[0](payload);

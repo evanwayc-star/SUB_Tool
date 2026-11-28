@@ -97,7 +97,8 @@ describe('Mac 工具列 responsive 版面', () => {
     expect(html).toMatch(/id="tlToolbarOptions"[\s\S]*project-audio-count[\s\S]*<\/div>\s*<div class="spacer"><\/div>\s*<span id="tlSel">[\s\S]*class="zoom"/);
     expect(declarations('.tl-toolbar-options')).toContain('display:flex');
     expect(declarations('.tl-toolbar-options[hidden]')).toContain('display:none');
-    expect(declarations('.tl-toolbar #tlSel')).toContain('flex-shrink:0');
+    expect(declarations('.tl-toolbar #tlSel')).toContain('min-width:0');
+    expect(declarations('#stSel, #tlSel')).toContain('text-overflow:ellipsis');
     expect(declarations('.tl-toolbar .zoom')).toContain('flex-shrink:0');
   });
 

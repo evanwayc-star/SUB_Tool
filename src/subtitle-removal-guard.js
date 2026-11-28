@@ -39,7 +39,7 @@ export function requestSubtitleRemoval({ targets, title = '移除字幕', detail
   const session = openModal(title,
     `<p>${escapeHTML(detail || '這項操作會移除既有字幕。')}</p><p>將移除 <b>${removed.length}</b> 條既有字幕。確認後才會套用；取消保留原內容。</p>`,
     [{ label: '取消', act: () => session.close() },
-      { label: confirmLabel, primary: true, act: () => {
+      { label: confirmLabel, primary: true, enterDefault: true, act: () => {
         if (settled || !session.isCurrent()) return false;
         if (!owns() || !isCurrent()) {
           showToast('字幕或專案已變更，請重新執行並確認');

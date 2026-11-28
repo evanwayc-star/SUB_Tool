@@ -208,10 +208,10 @@ it('ordinary context menus keep their existing pointer focus behavior',()=>{
  expect(event.defaultPrevented).toBe(false);
 });
 
-it.each(['Enter','F2'])('%s opens a keyboard note time edit, commits once, and returns focus after sorting',entry=>{
+it('F2 opens a note time edit, commits once, and returns focus after sorting',()=>{
  State.notes.push({id:'second',time:2,text:'second',done:false});History.reset();Notes.renderNotes();
  const field=document.querySelector('[data-id="note"] .nt-time');field.focus();
- expect(document.activeElement).toBe(field);key(field,entry);
+ expect(document.activeElement).toBe(field);key(field,'Enter');expect(field.querySelector('input')).toBeNull();key(field,'F2');
  const input=field.querySelector('input');expect(input).not.toBeNull();expect(document.activeElement).toBe(input);
  input.value='00:00:03:12';key(input,'Enter');
  expect(State.notes.map(note=>[note.id,note.time])).toEqual([['second',2],['note',3.48]]);
@@ -219,9 +219,9 @@ it.each(['Enter','F2'])('%s opens a keyboard note time edit, commits once, and r
  expect(History.stack).toHaveLength(2);History.undo();expect(State.notes.find(note=>note.id==='note').time).toBe(1);
 });
 
-it.each(['Enter','F2'])('%s opens a keyboard note text edit and Enter commits without losing field focus',entry=>{
+it('F2 opens a note text edit and Enter commits without losing field focus',()=>{
  Notes.renderNotes();const field=document.querySelector('.nt-text');field.focus();
- expect(document.activeElement).toBe(field);key(field,entry);
+ expect(document.activeElement).toBe(field);key(field,'Enter');expect(field.contentEditable).not.toBe('true');key(field,'F2');
  expect(field.contentEditable).toBe('true');expect(field.getAttribute('role')).toBe('textbox');
  field.innerText='鍵盤編輯內容';key(field,'Enter');
  expect(State.notes[0].text).toBe('鍵盤編輯內容');expect(field.contentEditable).toBe('false');
@@ -232,17 +232,16 @@ it.each(['Enter','F2'])('%s opens a keyboard note text edit and Enter commits wi
 it.each(['time','text'])('Space on a read-only note %s reaches workspace playback without seeking or editing',async kind=>{
  const {Media}=await import('../src/media.js');const seek=vi.spyOn(Media,'seek').mockResolvedValue(true);
  const play=vi.spyOn(Media,'play').mockResolvedValue(true);Media.playing=false;
- const workspaceKey=vi.fn();window.addEventListener('keydown',workspaceKey);
  try{
   Notes.renderNotes();const field=document.querySelector('.nt-'+kind);field.focus();
   const event=new KeyboardEvent('keydown',{key:' ',bubbles:true,cancelable:true});field.dispatchEvent(event);
   await Promise.resolve();
-  expect(workspaceKey).toHaveBeenCalledOnce();expect(play).toHaveBeenCalledOnce();
+  expect(play).toHaveBeenCalledOnce();
   expect(event.defaultPrevented).toBe(true);expect(seek).not.toHaveBeenCalled();
   expect(document.querySelector('.nt-te')).toBeNull();expect(field.contentEditable).not.toBe('true');
   expect(document.activeElement).toBe(field);expect(State.notes[0]).toMatchObject({time:1,text:'original'});
   expect(History.stack).toHaveLength(1);
- }finally{window.removeEventListener('keydown',workspaceKey);seek.mockRestore();play.mockRestore();}
+ }finally{seek.mockRestore();play.mockRestore();}
 });
 
 it.each(['time','text'])('Space and composition stay inside an active note %s editor',kind=>{
@@ -271,7 +270,7 @@ it.each(['time','text'])('keyboard Escape cancels the %s draft, preserves a newe
 });
 
 it.each(['time','text'])('stale keyboard %s editor cannot write into a replacement workspace or steal its focus',kind=>{
- Notes.renderNotes();const field=document.querySelector('.nt-'+kind);field.focus();key(field,'Enter');
+ Notes.renderNotes();const field=document.querySelector('.nt-'+kind);field.focus();key(field,'F2');
  const editor=kind==='time'?field.querySelector('input'):field;expect(editor).not.toBeNull();
  if(kind==='text')expect(editor.contentEditable).toBe('true');
  if(kind==='time')editor.value='00:00:04:00';else editor.innerText='old draft';
@@ -297,9 +296,11 @@ it('Shift+F10 keeps note multi-selection and enters the existing actionable menu
  rows[0].dispatchEvent(new MouseEvent('click',{bubbles:true}));rows[1].dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:true}));
  const field=rows[1].querySelector('.nt-text');field.focus();key(field,'F10',{shiftKey:true});
  expect(document.querySelector('#ctxmenu.show .lbl').textContent).toBe('已選 2 條備註');
- expect(document.activeElement.getAttribute('role')).toBe('menuitem');
+ expect(document.activeElement.getAttribute('role')).toBe('menu');
  key(document.activeElement,'Escape');expect(document.activeElement).toBe(field);
- key(field,'F10',{shiftKey:true});key(document.activeElement,'ArrowDown');key(document.activeElement,'Enter');
+ key(field,'F10',{shiftKey:true});
+ const done=[...document.querySelectorAll('#ctxmenu .ci')].find(item=>item.textContent.includes('全部標記完成'));
+ key(document.activeElement,'Enter');expect(State.notes.map(note=>note.done)).toEqual([false,false]);done.click();
  expect(State.notes.map(note=>note.done)).toEqual([true,true]);expect(History.stack).toHaveLength(2);
  History.undo();expect(State.notes.map(note=>note.done)).toEqual([false,false]);
 });

@@ -133,34 +133,33 @@ it('覆蓋計畫與model共用規則，預查不分配ID或改資料，部分裁
  State.overwriteMode=true;State.overwriteKeep=false;const before=structuredClone(State.cues);expect(Model.planContainedCueRemovals([{...State.cues[0],end:3.5}])).toEqual([]);expect(State.cues).toEqual(before);expect(Model.planContainedCueRemovals([{...State.cues[0],end:5}])).toEqual([State.cues[1]]);expect(State.cues).toEqual(before);expect(History.stack).toHaveLength(1);
 });
 
-it.each(['取消','確定刪除'])('刪除確認的 Enter 尊重焦點「%s」，不搶先執行另一顆按鈕',label=>{
+it.each(['取消','確定刪除'])('刪除確認中 Enter 從「%s」執行此窗明示的刪除，長按時不重複確認',label=>{
  const before=structuredClone(State.cues);Subtitles.deleteSelected();
  const button=[...document.querySelectorAll('#modalFoot button')].find(item=>item.textContent===label);
- button.focus();expect(document.activeElement).toBe(button);
+ expect(document.querySelector('#modalFoot [data-enter-default]').textContent).toBe('確定刪除');
+ button.focus();
+ button.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',repeat:true,bubbles:true,cancelable:true}));
+ expect(visible()).toBe(true);expect(State.cues).toEqual(before);
  const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});button.dispatchEvent(event);
- expect(event.defaultPrevented).toBe(false);expect(State.cues).toEqual(before);expect(History.stack).toHaveLength(1);
- // jsdom does not perform the browser's native Enter activation of a button.
- button.click();expect(visible()).toBe(false);
- expect(State.cues).toEqual(label==='取消'?before:[before[1]]);
- expect(History.stack).toHaveLength(label==='取消'?1:2);
- if(label!=='取消'){History.undo();expect(State.cues).toEqual(before);}
+ expect(event.defaultPrevented).toBe(true);expect(visible()).toBe(false);
+ expect(State.cues).toEqual([before[1]]);expect(History.stack).toHaveLength(2);History.undo();expect(State.cues).toEqual(before);
 });
 
-it('對話框不儲存按鈕及其內層文字的 Enter 不改走主要儲存動作',()=>{
+it('樣式標為 primary 的儲存及有焦點的不儲存按鈕都不會自動執行',()=>{
  const save=vi.fn(),discard=vi.fn();let session;
  session=UI.openModal('未儲存變更','<p>選擇後續動作</p>',[
   {label:'儲存',primary:true,act:save},{label:'不儲存',act:()=>{discard();session.close({committed:true});}},
  ]);
  const button=document.querySelector('#modalFoot button:last-child');button.innerHTML='<span>不儲存</span>';button.focus();
  const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});button.firstChild.dispatchEvent(event);
- expect(event.defaultPrevented).toBe(false);expect(save).not.toHaveBeenCalled();expect(discard).not.toHaveBeenCalled();
+ expect(event.defaultPrevented).toBe(true);expect(save).not.toHaveBeenCalled();expect(discard).not.toHaveBeenCalled();
  button.click();expect(discard).toHaveBeenCalledOnce();expect(save).not.toHaveBeenCalled();expect(visible()).toBe(false);
 });
 
 it.each(['text','number'])('單行 %s 欄位的 Enter 保留主要確認，關窗後不外洩快捷鍵',type=>{
  const confirm=vi.fn(),outer=vi.fn();let session;
  session=UI.openModal('確認輸入',`<input id="modalKeyboardInput" type="${type}">`,[
-  {label:'確認',primary:true,act:()=>{confirm();session.close({committed:true});}},
+  {label:'確認',primary:true,enterDefault:true,act:()=>{confirm();session.close({committed:true});}},
  ]);
  window.addEventListener('keydown',outer);
  try{
@@ -174,19 +173,19 @@ it.each([
  '<select><option>第一項</option></select>', '<a href="#modal-target">說明</a>', '<details><summary>選項</summary></details>',
  ...['button','submit','reset','checkbox','radio','range','file','color'].map(type=>`<input type="${type}">`),
  '<input type="text" disabled>', '<button disabled>停用</button>',
-])('原生控制項 Enter 保留自身行為，不觸發主要確認：%s',html=>{
- const confirm=vi.fn(),outer=vi.fn();UI.openModal('原生控制項',html,[{label:'確認',primary:true,act:confirm}]);
+])('原生控制項 Enter 只執行明確設置的確認：%s',html=>{
+ const confirm=vi.fn(),outer=vi.fn();UI.openModal('原生控制項',html,[{label:'確認',primary:true,enterDefault:true,act:confirm}]);
  const control=document.querySelector('#modalBody summary, #modalBody input, #modalBody select, #modalBody a, #modalBody button');
  window.addEventListener('keydown',outer);
  try{
   const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});control.dispatchEvent(event);
-  expect(event.defaultPrevented).toBe(false);expect(confirm).not.toHaveBeenCalled();expect(outer).not.toHaveBeenCalled();expect(visible()).toBe(true);
+  expect(event.defaultPrevented).toBe(true);expect(confirm).toHaveBeenCalledOnce();expect(outer).not.toHaveBeenCalled();expect(visible()).toBe(true);
  }finally{window.removeEventListener('keydown',outer);}
 });
 
 it('多行欄位、組字 Enter、停用確認與 Escape 保留各自對話框語意',()=>{
  const confirm=vi.fn();UI.openModal('輸入','<textarea></textarea><div contenteditable="true">文字</div><input>',[
-  {label:'確認',primary:true,act:confirm},
+  {label:'確認',primary:true,enterDefault:true,act:confirm},
  ]);
  for(const control of document.querySelectorAll('#modalBody textarea, #modalBody [contenteditable]')){
   const event=new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true});control.dispatchEvent(event);

@@ -213,7 +213,7 @@ async function openCueEditModal(c){
     `<section class="cue-edit-section" aria-labelledby="cueEditLabel"><div class="cue-edit-heading"><span id="cueEditLabel">修改文字</span><span id="cueEditCount" class="cue-edit-count" title="不含空白與換行" aria-live="polite">${countText(orig)}</span></div>`+
     `<div id="cueEditTa" class="cue-edit-text" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="cueEditLabel" aria-describedby="cueEditHint cueEditCount"></div>`+
     `<p id="cueEditHint" class="cue-edit-hint">Enter 確認 · Shift+Enter 換行</p></section></div>`,
-    [{label:'確認',primary:true,act:doConfirm},{label:'取消',act:()=>session.close()}],
+    [{label:'確認',primary:true,enterDefault:true,act:doConfirm},{label:'取消',act:()=>session.close()}],
     { keepVideo:true, onDismiss:owner.cancel, onReplaced:owner.cancel }); // 對話框靠右停、遮罩透明、不隱藏 mpv → 編輯時看得到後面的畫面
   // seek 到這句的起點，讓後面顯示的正是這句對應的畫面（方便對著影像改字）
   try{ if(c.timed!==false && Number.isFinite(c.start)) requestPointerSeek(c.start); }catch(e){}
@@ -230,9 +230,10 @@ async function openCueEditModal(c){
       ta.addEventListener('keydown',e=>{
       if(!current()) return;
       if(e.isComposing || e.keyCode===229){ e.stopPropagation(); return; }
-      // Enter 系列一律擋住冒泡：確認/切分會同步關閉 modal，若讓事件繼續傳到 window 的
-      // 快捷鍵處理器，modal 已不在、同一下 Enter 會再觸發 toggle_play_pause 造成雙重動作
-      if(e.key==='Enter') e.stopPropagation();
+      if(e.key==='Enter'){
+        e.stopPropagation();
+        if(e.repeat && !e.shiftKey){e.preventDefault();return;}
+      }
       if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){
         e.preventDefault();
         const sel=window.getSelection();
@@ -266,7 +267,7 @@ async function openCueEditModal(c){
           const nr=subtitleRow(nc.id);
           if(nr)nr.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,view:window}));
         },30);
-      } else if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doConfirm();}
+      } else if(e.key==='Enter'&&!e.shiftKey&&!e.altKey){e.preventDefault();doConfirm();}
     });
     }
     const copyBtn=$('cueEditCopy');
@@ -419,7 +420,7 @@ let _tsSetTarget = null;
           `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">樣式名稱</div>`+
           `<input type="text" id="__presetName" value="${escapeHTML(defName)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
           [
-            { label: '儲存', primary: true, act: () => {
+            { label: '儲存', primary: true, enterDefault: true, act: () => {
               if(!session.isCurrent() || saving) return;
               const grp = ($('__presetGroup')?.value || '').trim();
               const nm = ($('__presetName')?.value || '').trim();
@@ -431,7 +432,7 @@ let _tsSetTarget = null;
               if(existing) {
                 const update=capturePresetUpdate(existing);
                 const confirmSession=openModal('名稱已存在', `<div style="padding:6px 2px">「${escapeHTML(nm)}」已經存在此資料夾中，您要覆蓋現有的樣式，還是換別的名字？</div>`, [
-                  {label:'覆蓋',primary:true,act:()=>doSave(confirmSession,()=>update({style}),nm)},
+                  {label:'覆蓋',primary:true,enterDefault:true,act:()=>doSave(confirmSession,()=>update({style}),nm)},
                   {label:'換別的名字',act:()=>{if(confirmSession.isCurrent() && !saving) promptSaveModal(grp,nm);}},
                   {label:'取消',act:()=>confirmSession.close()},
                 ]);
@@ -479,7 +480,7 @@ let _tsSetTarget = null;
       `把<b style="color:var(--accent)">${來源}的樣式</b>套用到「${escapeHTML(trk.name)}」的<b>全部 ${others.length+ (cue?1:0)} 句</b>。<br>`+
       (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會一併被覆蓋。<br>` : '')+
       `<span style="color:var(--text-faint)">位置與角度也會一起套用（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
-       [{label:'取消',act:()=>session.close()},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
+       [{label:'取消',act:()=>session.close()},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,enterDefault:true,act:()=>{
          if(!session.isCurrent()) return;
          if(!confirmation.isCurrent()){
            session.close();showToast('軌道或字幕範圍已變更，請重新確認全軌套用');return;
@@ -508,7 +509,7 @@ let _tsSetTarget = null;
       `（將排除座標與角度的變更）<br>`+
       (ovs ? `其中 <b style="color:var(--accent)">${ovs}</b> 句原本設過自己的樣式，會部分覆蓋。<br>` : '')+
       `<span style="color:var(--text-faint)">位置與角度會保持各句原本的設定（可 <b>Ctrl+Z</b> 復原）。</span></div>`,
-       [{label:'取消',act:()=>session.close()},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,act:()=>{
+       [{label:'取消',act:()=>session.close()},{label:`套用到全部 ${others.length+(cue?1:0)} 句`,primary:true,enterDefault:true,act:()=>{
          if(!session.isCurrent()) return;
          if(!confirmation.isCurrent()){
            session.close();showToast('軌道或字幕範圍已變更，請重新確認全軌套用');return;

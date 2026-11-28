@@ -36,6 +36,8 @@ import { emit, on } from './events.js';
 import { History } from './history.js';
 import { deliveryPresetAudioProblem, normalizeDeliveryPresetAudio } from '../shared/delivery-formats.cjs';
 import { openModal, closeModal, showToast } from './ui.js';
+import { requestConfirmation } from './confirmation-dialog.js';
+import { isTextEntry } from './dom.js';
 import { LAYOUTS, MAX_AUDIO_BUSES, DELIVERY_PRESETS, layoutWidth, AudioRoutingModel, resizeProjectAudioBuses } from './audio-routing-engine.js';
 
 
@@ -125,17 +127,34 @@ function confirmBusReduction(current,rawCount){
     .filter(route=>(route.busIds||[]).some(id=>removed.has(id))).length).filter(Boolean);
   const streams=(current.exportLayout?.streams||[]).filter(stream=>(stream.busIds||[]).some(id=>removed.has(id))).length;
   const labels=current.buses.slice(count).map((_,index)=>`A${count+index+1}`).join('、');
-  return window.confirm(`將把整個專案由 ${current.buses.length} 軌減少為 ${count} 軌。\n移除：${labels}\n影響 ${affected.length} 個來源、${affected.reduce((sum,n)=>sum+n,0)} 條來源配線及 ${streams} 個預設輸出編組。\n\n所有來源共用這些 A 軌。若只要減少某份交付的聲道，請保留專案音軌，改用匯出清單的「設定輸出音軌」。\n\n要繼續縮減整個專案嗎？`);
+  return requestConfirmation('減少專案音軌', `將把整個專案由 ${current.buses.length} 軌減少為 ${count} 軌。\n移除：${labels}\n影響 ${affected.length} 個來源、${affected.reduce((sum,n)=>sum+n,0)} 條來源配線及 ${streams} 個預設輸出編組。\n\n所有來源共用這些 A 軌。若只要減少某份交付的聲道，可在匯出清單選「設定輸出音軌」。`, '減少音軌');
 }
-function setEditorBusCount(editor,rawCount){
+async function setEditorBusCount(editor,rawCount,modalSession){
   const current=editor.current();
-  if(!confirmBusReduction(current,rawCount)||!editor.isActive()
+  if(!await confirmBusReduction(current,rawCount)||!modalSession.isCurrent()||!editor.isActive()
     ||JSON.stringify(editor.current())!==JSON.stringify(current)) return false;
   return editor.setBusCount(rawCount);
 }
-function setBusCount(rawCount){
+async function saveRouting(editor,modalSession,countInput,onBack){
+  if(countInput&&!countInput.reportValidity()) return;
+  const resize=countInput && countInput.valueAsNumber!==editor.current().buses.length;
+  if(resize){
+    if(!await setEditorBusCount(editor,countInput.valueAsNumber,modalSession)) return;
+    if(!modalSession.isCurrent()||!editor.isActive()) return;
+  }
+  const result=editor.commit();
+  if(!result.saved){
+    if(resize) activeRoutingModal?.rerender?.();
+    showToast(result.error);
+    return;
+  }
+  closeModal({committed:true});
+  onBack?.(result);
+}
+async function setBusCount(rawCount){
   const current=project();
-  if(!confirmBusReduction(current,rawCount)||State.audioProject!==current) return false;
+  const snapshot=JSON.stringify(current);
+  if(!await confirmBusReduction(current,rawCount)||State.audioProject!==current||JSON.stringify(current)!==snapshot) return false;
   const transition=resizeProjectAudioBuses(current,rawCount);
   if(!transition.changed) return false;
   State.audioProject=transition.project;
@@ -154,7 +173,7 @@ function routeTableHtml(routes,buses){
     })].join('');
     return `<tr data-stream="${route.sourceStream}" data-channel="${route.sourceChannel}">
       <td>${escapeHTML(displaySource(route))}</td>
-      <td><select class="audio-route-target" data-dirty="0">${opts}</select></td>
+      <td><select class="audio-route-target" data-dirty="0" aria-label="${escapeHTML(displaySource(route))} 的專案音訊軌">${opts}</select></td>
       <td class="audio-route-state">${route.enabled!==false&&selected?'已配線':'未配線'}</td>
     </tr>`;
   }).join('');
@@ -190,7 +209,7 @@ function openForRoutingSource(source, editor=null){
     `<div class="audio-route-dialog">
       <div class="audio-route-source"><b>${escapeHTML(source.name||'未命名音訊來源')}</b><span>來源音訊獨立對應至專案總輸出音軌</span></div>
       <div class="audio-bus-count"><label>專案音訊軌數
-        <input id="audioBusCount" type="number" min="0" max="${MAX_AUDIO_BUSES}" value="${count}">
+        <input id="audioBusCount" type="number" min="0" max="${MAX_AUDIO_BUSES}" required value="${count}">
       </label><button id="audioBusCountApply" type="button">套用</button>
         <button class="audio-count-preset" type="button" data-count="2">2</button>
         <button class="audio-count-preset" type="button" data-count="4">4</button>
@@ -204,23 +223,23 @@ function openForRoutingSource(source, editor=null){
       <div class="audio-route-help">例如：來源 Stream 1 · Ch 1–6 可分別指定到 A3–A8。不同影片各自保存自己的分配。</div>
       ${routeTableHtml(routes,p.buses)}
     </div>`,
-    [{label:'儲存配線',primary:true,act:()=>{
+    [{label:'儲存配線',primary:true,enterDefault:true,act:()=>{
       syncRouteDraftFromDialog(editor,sourceId);
-      const result=editor.commit();
-      if(!result.saved){ showToast(result.error); return; }
-      closeModal({committed:true});
+      return saveRouting(editor,modalSession,document.getElementById('audioBusCount'));
     }},{label:'取消',act:()=>closeModal()}],{width:'680px',rerender:()=>openForRoutingSource(source,editor)});
   setTimeout(()=>{
     if(!modalSession.isCurrent()||!editor.isActive()) return;
     const rerender=()=>openForRoutingSource(source,editor);
     const sync=()=>syncRouteDraftFromDialog(editor,sourceId);
     const countInput=document.getElementById('audioBusCount');
-    const applyCount=value=>{
+    const applyCount=async value=>{
       sync();
-      if(setEditorBusCount(editor,value)) rerender();
-      else if(countInput) countInput.value=editor.current().buses.length;
+      if(await setEditorBusCount(editor,value,modalSession)) rerender();
+      else if(countInput&&modalSession.isCurrent()&&editor.isActive()) countInput.value=editor.current().buses.length;
     };
-    document.getElementById('audioBusCountApply')?.addEventListener('click',()=>applyCount(countInput?.value));
+    document.getElementById('audioBusCountApply')?.addEventListener('click',()=>{
+      if(countInput.reportValidity()) void applyCount(countInput.valueAsNumber);
+    });
     document.querySelectorAll('.audio-count-preset').forEach(button=>button.addEventListener('click',()=>applyCount(button.dataset.count)));
     document.querySelectorAll('.audio-route-target').forEach(select=>select.addEventListener('change',()=>{ select.dataset.dirty='1'; sync(); }));
     document.getElementById('audioRouteAuto')?.addEventListener('click',()=>{
@@ -247,7 +266,7 @@ function openForSource(sourceKey){
   if(clip){ openForRoutingSource(clip); return; }
   showToast('找不到這個音訊來源');
 }
-function outputRowHtml(stream,index,buses=project().buses,delivery=false){
+function outputRowHtml(stream,index,buses=project().buses,delivery=false,streamLabel='輸出音軌'){
   const layout=LAYOUTS[stream.layout]?stream.layout:'mono';
   const width=layoutWidth(layout);
   const firstId=stream.busIds?.[0]||'';
@@ -265,9 +284,13 @@ function outputRowHtml(stream,index,buses=project().buses,delivery=false){
     const options=['<option value="">— 未指定 —</option>',...buses.map((bus,busIndex)=>
       `<option value="${escapeHTML(bus.id)}" ${String(bus.id)===selected?'selected':''}>${escapeHTML(`A${busIndex+1} · ${busName(bus,busIndex)}`)}</option>`)].join('');
     return `<label><span>${name}</span><select class="audio-output-bus" data-channel="${channel}" aria-label="輸出 ${index+1} ${name}">${options}</select></label>`;
-  }).join('')}</div>`:`<select class="audio-output-start">${busOpts}</select>`;
+  }).join('')}</div>`:`<select class="audio-output-start" aria-label="輸出 ${index+1} 的專案音軌">${busOpts}</select>`;
   const streamName=String(stream.name||'');
-  return `<tr data-stream-id="${escapeHTML(stream.id)}"><td><div class="audio-output-stream"><span class="audio-output-index">${index+1}</span><input class="audio-output-name" aria-label="Stream ${index+1} 名稱" value="${escapeHTML(streamName)}" placeholder="Stream 名稱"></div></td><td><select class="audio-output-layout" aria-label="輸出 ${index+1} 聲道格式">${layoutOpts}</select></td><td>${assignments}</td><td><button type="button" class="audio-output-remove" title="移除此輸出 stream">−</button></td></tr>`;
+  return `<tr data-stream-id="${escapeHTML(stream.id)}">
+    <td data-label="${streamLabel}"><div class="audio-output-stream"><span class="audio-output-index">${index+1}</span><input class="audio-output-name" aria-label="${streamLabel} ${index+1} 名稱" value="${escapeHTML(streamName)}" placeholder="${streamLabel}名稱"></div></td>
+    <td data-label="聲道格式"><select class="audio-output-layout" aria-label="輸出 ${index+1} 聲道格式">${layoutOpts}</select></td>
+    <td data-label="${delivery?'輸出聲道 ← 專案音軌':'專案音軌'}">${assignments}</td>
+    <td><button type="button" class="audio-output-remove" aria-label="移除${streamLabel} ${index+1}" title="移除此${streamLabel}">−</button></td></tr>`;
 }
 function outputStreamsFromDialog(buses, existingStreams){
   const streams=[];
@@ -291,7 +314,7 @@ function outputStreamsFromDialog(buses, existingStreams){
 }
 function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delivery=false,focusTarget=null}={}){
   if(!editor.isActive()) return;
-  const active=document.activeElement;
+  const active=isTextEntry(document.activeElement) ? document.activeElement : null;
   const activeRow=active?.closest('.audio-output-table tr[data-stream-id]');
   const focus=focusTarget || (activeRow ? {streamId:activeRow.dataset.streamId,
     selector:'.'+[...active.classList].find(name=>name.startsWith('audio-output-'))}
@@ -300,7 +323,10 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
   const wavDelivery=deliveryFormat==='wav';
   const mp3Delivery=deliveryFormat==='mp3';
   const streams=p.exportLayout.streams;
-  const rows=streams.map((stream,index)=>outputRowHtml(stream,index,p.buses,delivery)).join('')||'<tr><td colspan="4" class="audio-route-empty">尚無可輸出的專案音訊軌。</td></tr>';
+  const streamLabel=wavDelivery?'WAV 聲道群組':'輸出音軌';
+  const rows=streams.map((stream,index)=>outputRowHtml(stream,index,p.buses,delivery,streamLabel)).join('')||'<tr><td colspan="4" class="audio-route-empty">尚無可輸出的專案音訊軌。</td></tr>';
+  const previousPresets=activeRoutingModal?.editor===editor && document.querySelector('.audio-output-presets');
+  const presetsOpen=previousPresets ? previousPresets.open : !window.matchMedia?.('(max-width:620px)').matches;
   const presetButtons=DELIVERY_PRESETS.map(preset=>{
     let cls = 'audio-delivery-preset';
     if(preset.label.includes('ME')) cls += ' preset-me';
@@ -322,7 +348,7 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
     `<div class="audio-output-dialog">
       <div class="audio-route-help">${outputHelp}</div>
       ${delivery?`<div class="audio-bus-count">主專案可用音軌：<strong>${p.buses.length}</strong></div>`:`<div class="audio-bus-count"><label>專案音訊軌數
-        <input id="audioOutputBusCount" type="number" min="0" max="${MAX_AUDIO_BUSES}" value="${p.buses.length}">
+        <input id="audioOutputBusCount" type="number" min="0" max="${MAX_AUDIO_BUSES}" required value="${p.buses.length}">
       </label><button id="audioOutputBusApply" type="button">套用</button>
         <button class="audio-output-count-preset" type="button" data-count="2">2</button>
         <button class="audio-output-count-preset" type="button" data-count="4">4</button>
@@ -332,20 +358,17 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
         <button class="audio-output-count-preset" type="button" data-count="16">16</button>
         <button class="audio-output-count-preset" type="button" data-count="18">18</button>
       </div>`}
-      ${mp3Delivery ? chooseMp3Stream : `<div class="audio-delivery-presets"><span>${delivery?'輸出配置':'預設輸出配置'}</span><button id="audioOutputAllMono" type="button">全部專案音軌（Mono）</button>${presetButtons}</div>`}
-      <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>${wavDelivery?'WAV 聲道群組':'輸出音軌'}</th><th>聲道格式</th><th>${delivery?'輸出聲道 ← 專案音軌':'專案音軌'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${mp3Delivery ? chooseMp3Stream : `<details class="audio-output-presets"${presetsOpen?' open':''}><summary>${delivery?'輸出配置':'預設輸出配置'}</summary><div class="audio-delivery-presets"><button id="audioOutputAllMono" type="button">全部專案音軌（Mono）</button>${presetButtons}</div></details>`}
+      <div class="audio-output-table-wrap"><table class="audio-output-table"><thead><tr><th>${streamLabel}</th><th>聲道格式</th><th>${delivery?'輸出聲道 ← 專案音軌':'專案音軌'}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       ${mp3Delivery ? '' : `<div class="audio-output-actions"><button id="audioOutputAdd" type="button">新增${wavDelivery?' WAV 聲道群組':'輸出音軌'}</button></div>`}
     </div>`,
-    [{label:'儲存輸出設定',primary:true,act:()=>{
+    [{label:'儲存輸出設定',primary:true,enterDefault:true,act:()=>{
       const current=editor.current();
       const streams=outputStreamsFromDialog(current.buses,current.exportLayout.streams);
       const problem=mp3Delivery && deliveryPresetAudioProblem('mp3',{streams});
       if(problem){ showToast(problem); return; }
       editor.setStreams(streams);
-      const result=editor.commit();
-      if(!result.saved){ showToast(result.error); return; }
-      closeModal({committed:true});
-      if(onBack) onBack(result);
+      return saveRouting(editor,modalSession,document.getElementById('audioOutputBusCount'),onBack);
     }},{label:onBack?(delivery?'取消修改並返回匯出清單':'取消修改並返回配線'):'取消',act:()=>{
       if(onBack){ editor.cancel(); closeModal({committed:true}); onBack({saved:false}); }
       else closeModal();
@@ -354,7 +377,8 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
     if(!modalSession.isCurrent()||!editor.isActive()) return;
     if(focus){
       const row=focus.streamId?[...document.querySelectorAll('.audio-output-table tr[data-stream-id]')].find(node=>node.dataset.streamId===focus.streamId):null;
-      (row?.querySelector(focus.selector)||document.getElementById(focus.id))?.focus({preventScroll:true});
+      const field=row?.querySelector(focus.selector)||document.getElementById(focus.id);
+      if(isTextEntry(field)) field.focus({preventScroll:true});
     }
     const rerender=()=>{
       // 版面重畫會重新建立聲道選單；先保存畫面上的暫存選擇，
@@ -370,20 +394,20 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
       const stream=outputStreamsFromDialog(current.buses,current.exportLayout.streams).find(item=>item.id===event.target.value);
       if(!stream) return;
       editor.setStreams([stream]);
-      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery,focusTarget:{streamId:stream.id,selector:'.audio-output-layout'}});
+      openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
     });
-    document.getElementById('audioOutputBusApply')?.addEventListener('click',()=>{
+    const applyCount=async value=>{
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      if(setEditorBusCount(editor,countInput?.value)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
-      else if(countInput) countInput.value=editor.current().buses.length;
+      if(await setEditorBusCount(editor,value,modalSession)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
+      else if(countInput&&modalSession.isCurrent()&&editor.isActive()) countInput.value=editor.current().buses.length;
+    };
+    document.getElementById('audioOutputBusApply')?.addEventListener('click',()=>{
+      if(countInput.reportValidity()) void applyCount(countInput.valueAsNumber);
     });
     document.querySelectorAll('.audio-output-count-preset').forEach(button=>button.addEventListener('click',()=>{
       if(countInput) countInput.value=button.dataset.count||'';
-      const current=editor.current();
-      editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
-      if(setEditorBusCount(editor,button.dataset.count)) openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
-      else if(countInput) countInput.value=editor.current().buses.length;
+      void applyCount(button.dataset.count);
     }));
     document.getElementById('audioOutputAllMono')?.addEventListener('click',()=>{
       if(!editor.allMono()) return;
@@ -414,8 +438,7 @@ function openOutputSettingsEditor(editor,onBack=null,{deliveryFormat=null,delive
       const current=editor.current();
       editor.setStreams(outputStreamsFromDialog(current.buses,current.exportLayout.streams));
       if(mp3Delivery){
-        openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery,
-          focusTarget:{streamId:(rows[index+1]||rows[index-1])?.dataset.streamId,selector:'.audio-output-layout'}});
+        openOutputSettingsEditor(editor,onBack,{deliveryFormat,delivery});
         return;
       }
       document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]').forEach((streamRow,index)=>{

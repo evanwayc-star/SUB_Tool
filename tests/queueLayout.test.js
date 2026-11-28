@@ -1135,8 +1135,9 @@ describe('匯出佇列監控緊湊工作區', () => {
     document.querySelector('[data-job-id="done-1"] [data-action="show-output"]').click();
     /* 等待中的工作用【刪除】而不是【停止】——它根本還沒跑過，
        標成「已停止」沒有意義。刪除會問一次，因為那會連交付設定一起丟掉。 */
-    document.defaultView.confirm = () => true;
     document.querySelector('[data-job-id="queued-1"] [data-action="delete"]').click();
+    expect(queueAPI.clearJob).not.toHaveBeenCalled();
+    document.querySelector('[data-job-id="queued-1"] [data-remove="confirm"]').click();
     document.querySelector('[data-job-id="failed-1"] [data-action="retry"]').click();
 
     expect(queueAPI.showItemInFolder).toHaveBeenCalledWith(outPath);
@@ -1167,6 +1168,46 @@ describe('鍵盤：. 切回主視窗', () => {
     (target || document.body).dispatchEvent(ev);
     return ev;
   };
+
+  it('一般工作按鈕不接受 Enter；開啟刪除提示後只能確認當前這筆', async () => {
+    const jobs = ['first','second'].map(id => ({ id, status:'queued', payload:{} }));
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    const button = document.querySelector('[data-action="delete"]');
+    button.focus();
+    for (const key of ['Tab','Enter',' ']) expect(press(document,key,button).defaultPrevented).toBe(true);
+    expect(document.querySelector('[data-remove="confirm"]')).toBeNull();
+    button.click();
+    const confirm = document.querySelector('.remove-question');
+    expect(document.activeElement).toBe(confirm);
+    expect(press(document,' ',confirm).defaultPrevented).toBe(true);
+    press(document,'Enter',confirm,{repeat:true});
+    expect(queueAPI.clearJob).not.toHaveBeenCalled();
+    press(document,'Escape',confirm);
+    expect(document.querySelector('[data-remove="confirm"]')).toBeNull();
+    for (const remove of document.querySelectorAll('[data-action="delete"]')) remove.click();
+    press(document,'Enter',document.getElementById('pauseToggleBtn'));
+    expect(queueAPI.clearJob).not.toHaveBeenCalled();
+    press(document,'Enter',document.activeElement);
+    expect(queueAPI.clearJob).toHaveBeenCalledExactlyOnceWith('second');
+    expect(document.querySelector('[data-job-id="first"] [data-remove="confirm"]')).not.toBeNull();
+  });
+
+  it('同時開啟兩筆格式編輯時 Enter 僅套用目前的工作且不重送', async () => {
+    const jobs = ['first','second'].map(id => ({ id, status:'queued', payload:{format:'h264',videoKbps:8000} }));
+    const { document, queueAPI } = await openQueueWindow(jobs);
+    for (const button of document.querySelectorAll('[data-action="edit"]')) button.click();
+    const editor = document.querySelector('[data-job-id="first"] .job-editor');
+    const input = editor.querySelector('[data-f="kbps"]');
+    input.value = '7500'; input.focus();
+    press(document,'Enter',input,{isComposing:true});
+    press(document,'Enter',input,{keyCode:229});
+    press(document,'Enter',input,{repeat:true});
+    expect(press(document,' ',input).defaultPrevented).toBe(false);
+    expect(queueAPI.updateDelivery).not.toHaveBeenCalled();
+    press(document,'Enter',input);
+    press(document,'Enter',input);
+    expect(queueAPI.updateDelivery).toHaveBeenCalledExactlyOnceWith('first',expect.objectContaining({kbps:7500}));
+  });
 
   it('按 . 會把主視窗叫到前面', async () => {
     const { document, queueAPI } = await openQueueWindow([]);

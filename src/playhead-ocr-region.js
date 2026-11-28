@@ -73,12 +73,13 @@ function outlinePath(rects) {
   return lines.join('');
 }
 
-export function mountPlayheadOcrRegion(container, canvas, onChange, onSubmit) {
+export function mountPlayheadOcrRegion(container, canvas, onChange, onDragChange) {
   const {width, height} = canvas, frame = {x:0, y:0, width, height};
   const document = container.ownerDocument;
-  const stage = document.createElement('div'), surface = document.createElement('button');
+  const stage = document.createElement('div'), surface = document.createElement('div');
   stage.className = 'playhead-ocr-stage';
-  surface.type = 'button';
+  surface.tabIndex = -1;
+  surface.setAttribute('role', 'group');
   surface.className = 'playhead-ocr-surface';
   surface.style.setProperty('--frame-aspect', String(width / height));
   surface.setAttribute('aria-label', '編輯辨識範圍，按 Enter 開始辨識');
@@ -128,6 +129,7 @@ export function mountPlayheadOcrRegion(container, canvas, onChange, onSubmit) {
     if (!drag) return;
     const {id} = drag;
     drag = null;
+    onDragChange?.(false);
     if (surface.hasPointerCapture?.(id)) surface.releasePointerCapture(id);
     paint(selection);
   }
@@ -141,6 +143,7 @@ export function mountPlayheadOcrRegion(container, canvas, onChange, onSubmit) {
     surface.focus({preventScroll:true});
     surface.setPointerCapture?.(event.pointerId);
     drag = {id:event.pointerId, start, mode:event.altKey ? 'subtract' : event.shiftKey ? 'add' : 'replace'};
+    onDragChange?.(true);
   });
   listen(document.defaultView, 'pointermove', event => {
     if (!drag || event.pointerId !== drag.id) return;
@@ -183,11 +186,6 @@ export function mountPlayheadOcrRegion(container, canvas, onChange, onSubmit) {
     if (event.shiftKey) rect[size] = Math.max(1, clamp(rect[size] + delta, limit - rect[coord]));
     else rect[coord] = clamp(rect[coord] + delta, limit - rect[size]);
     commit({...edit, rect});
-  });
-  // Native Enter, Space and assistive activation emit detail zero. A pointer
-  // click (also the clicks preceding a double-click) must never start OCR.
-  listen(surface, 'click', event => {
-    if (event.detail === 0 && !drag && selection?.length !== 0) onSubmit();
   });
   return () => {
     listeners.abort();

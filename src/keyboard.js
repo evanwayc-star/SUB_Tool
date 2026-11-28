@@ -9,7 +9,7 @@
    
    所有播放控制、JKL 穿梭定時器與時碼導航邏輯，均封裝在 transport-controller 模組中。
    ============================================================================== */
-import { $ } from './dom.js';
+import { $, isTextEntry } from './dom.js';
 import { State, setSelection, deselect } from './state.js';
 import { Media } from './media.js';
 import { selectCueSingle, deleteSelected, cancelSwapMode, refreshSelectionUI, filteredSubtitleCues } from './subtitles.js';
@@ -20,7 +20,7 @@ import { Project } from './project.js';
 import { History, recordHistory } from './history.js';
 import { addNote } from './notes.js';
 import { emit } from './events.js';
-import { setStatus, closeModal, closeMenus } from './ui.js';
+import { setStatus, closeModal } from './ui.js';
 import { matchAction } from './keybinding-engine.js';
 import {
   jklClear,
@@ -51,7 +51,31 @@ import {
 } from './transport-controller.js';
 
 const _keysPressed = new Set();
-const ACTIVATION_CONTROL = 'button, a[href], summary, [role="button"], [role="menuitem"]';
+const ACTION_CONTROL = 'button, a[href], summary, [role="button"], [role="menuitem"], input[type="button"], input[type="submit"], input[type="reset"]';
+
+function consumeKey(event) {
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function activeModal() {
+  return document.querySelector('dialog[data-confirmation-dialog][open]') ||
+    document.getElementById('settingsModal') || document.querySelector('#modalBg.show');
+}
+
+function defaultButton(scope) {
+  const candidates = [...scope.querySelectorAll('button[data-enter-default]')].filter(button => {
+    if (button.matches(':disabled') || button.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]')) return false;
+    if (button.checkVisibility) return button.checkVisibility({visibilityProperty:true, opacityProperty:true});
+    for (let el = button; el; el = el.parentElement) {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+    }
+    return true;
+  });
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
 function exportBracketChord(e) {
   if (!['[',']'].includes(e.key) || !_keysPressed.has('[') || !_keysPressed.has(']')) return false;
   const { ctrlKey, metaKey, shiftKey, altKey } = e;
@@ -60,75 +84,68 @@ function exportBracketChord(e) {
     && matchAction(State.keymap, { ...modifiers, key:']', code:'BracketRight' }) === 'exp_out';
 }
 if (typeof window !== 'undefined') {
-  let toolbarOrigin=null;
-  const leaveToolbar=(restore=false)=>{
-    const origin=toolbarOrigin;
-    toolbarOrigin=null;
-    document.querySelector('.menubar')?.classList.remove('keyboard-nav');
-    if(!restore||!origin)return;
-    const row=origin.cueId && [...document.querySelectorAll('#sublist .sub-row')].find(e=>e.dataset.id===origin.cueId);
-    const target=origin.element?.isConnected && origin.element!==document.body ? origin.element : row;
-    if(target)target.focus({preventScroll:true});
-    if(document.activeElement!==target && row)row.focus({preventScroll:true});
-    if(!target)document.activeElement?.blur();
-  };
-  window.addEventListener('pointerdown',()=>leaveToolbar(),true);
-  window.addEventListener('keydown',e=>{
-    if(e.isComposing||e.keyCode===229||e.defaultPrevented||e.ctrlKey||e.metaKey||e.altKey||
-        document.querySelector('#modalBg.show,#settingsModal,.ctxmenu.show'))return;
-    const bar=document.querySelector('.menubar');
-    if(!bar)return;
-    const visible=elements=>[...elements].filter(el=>!el.disabled&&!el.closest('[hidden]')&&el.getClientRects().length);
-    const controls=()=>visible(bar.querySelectorAll('button:not(.items button),select'));
-    const handled=()=>{e.preventDefault();e.stopPropagation();};
-    if(e.key==='F10'&&!e.shiftKey){
-      handled();
-      if(toolbarOrigin){closeMenus();leaveToolbar(true);return;}
-      const first=controls()[0];
-      if(!first)return;
-      const origin=document.activeElement;
-      toolbarOrigin={element:origin,cueId:origin?.closest('.sub-row')?.dataset.id||State.selectedId};
-      bar.classList.add('keyboard-nav');first.focus();
+  window.addEventListener('keydown', event => {
+    const {key, target} = event;
+    if (!['Tab', 'Enter', ' ', 'Escape'].includes(key) || event.defaultPrevented) return;
+    if (event.isComposing || event.keyCode === 229) {
+      event.stopPropagation(); // Native IME handling continues without sending a command to the editor.
       return;
     }
-    if(!toolbarOrigin||!bar.contains(e.target))return;
-    const menu=e.target.closest('.menu'),open=menu?.classList.contains('open');
-    if(e.key==='Escape'){
-      handled();
-      if(open){closeMenus();menu.querySelector('button')?.focus();}
-      else leaveToolbar(true);
+    const modal = activeModal();
+    const menu = document.querySelector('#ctxmenu.show');
+    if (menu && (modal ? modal.id && menu.dataset.ownerId === modal.id : !menu.dataset.ownerId)) return;
+    if (key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      consumeKey(event);
       return;
     }
-    if(e.key==='Tab'){leaveToolbar();return;}
-    if(e.key===' ' && e.target.matches('button')){handled();e.target.click();return;}
-    if(menu&&['ArrowDown','ArrowUp'].includes(e.key)){
-      handled();
-      if(!open)menu.querySelector('button').click();
-      const items=visible(menu.querySelectorAll('.items button'));
-      if(items.length){
-        const index=items.indexOf(e.target);
-        const next=index<0?(e.key==='ArrowDown'?0:items.length-1):(index+(e.key==='ArrowDown'?1:-1)+items.length)%items.length;
-        items[next].focus();
+    if (key === 'Escape') {
+      if (modal?.matches('dialog[data-confirmation-dialog]')) event.stopPropagation(); // native dialog cancel
+      return;
+    }
+    if (key !== 'Enter' && key !== ' ') return;
+    const inModal = modal?.contains(target?.nodeType ? target : null);
+    const plain = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+    let scope = modal || target.closest?.('[data-enter-scope]');
+    // A floating tool keeps workspace playback. Only a visible confirmation claims Enter.
+    const panel = !scope && plain && key === 'Enter' && target.closest?.('.float-panel');
+    const panelDefault = panel && defaultButton(panel);
+    if (panelDefault) scope = panel;
+    if (scope) {
+      if (!modal || inModal) {
+        if (target.matches?.('#settingsModal .key-input')) return;
+        if (isTextEntry(target) && (key === ' ' || !plain || target.closest('textarea, [contenteditable]'))) return;
+      }
+      consumeKey(event);
+      if (key === 'Enter' && plain && !event.repeat &&
+          (!modal || inModal || target === document.body || target === window || target === document)) {
+        (panelDefault || defaultButton(scope))?.click();
       }
       return;
     }
-    if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){
-      handled();if(open)closeMenus();
-      const buttons=controls(),index=buttons.indexOf(menu?.querySelector('button')||e.target);
-      const next=e.key==='Home'?0:e.key==='End'?buttons.length-1:(index+(e.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;
-      buttons[next]?.focus();
+    if (isTextEntry(target)) return;
+    if (key === 'Enter' && plain) { consumeKey(event); return; }
+    if (target.closest?.(ACTION_CONTROL)) {
+      // Run the workspace binding once and suppress the browser's keyboard click, even for unbound Space.
+      handleWorkspaceKey(event);
+      consumeKey(event);
+    } else if (target.matches?.('input, select')) {
+      consumeKey(event);
     }
-  },true);
-  // Mouse activation hands transport shortcuts back to the workspace.
-  window.addEventListener('focusin', e => {
-    if (!toolbarOrigin && e.target.matches?.('.menubar button')) e.target.blur();
   }, true);
-  window.addEventListener('click', e => {
-    if ($('modalBg')?.classList?.contains('show') || document.getElementById('settingsModal')) return;
-    const control = e.target.closest?.(ACTIVATION_CONTROL);
-    // 滑鼠操作在 handler 重繪按鈕之前釋放焦點，避免 M/S 把焦點傳給新節點。
-    // Tab／Enter 仍可操作按鈕；文字編輯與真正的對話框不在這個範圍。
-    if (e.detail > 0 && control && !e.target.closest?.('input, select, textarea, [contenteditable="true"]')) control.blur();
+  window.addEventListener('keyup', event => {
+    if (event.key === ' ' && !event.isComposing && event.keyCode !== 229 &&
+        event.target.closest?.(ACTION_CONTROL)) event.preventDefault();
+  }, true);
+  window.addEventListener('focusin', event => {
+    if (event.target.matches?.('.menubar button')) event.target.blur();
+  }, true);
+  window.addEventListener('click', event => {
+    if (event.detail <= 0) return;
+    const control = event.target.closest?.(ACTION_CONTROL + ', input[type="checkbox"], input[type="radio"]');
+    if (!control || control !== document.activeElement || isTextEntry(event.target)) return;
+    const scope = control.closest('[role="dialog"], dialog, [data-enter-scope], .float-panel');
+    if (scope?.hasAttribute('tabindex')) scope.focus({preventScroll:true});
+    else control.blur();
   }, true);
   window.addEventListener('blur', () => _keysPressed.clear());
   window.addEventListener('keyup', e => {
@@ -138,22 +155,18 @@ if (typeof window !== 'undefined') {
     }
   });
 
-  window.addEventListener('keydown', e => {
-    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
-    _keysPressed.add(e.key.toLowerCase());
-    if (typeof $ === 'function' && $('modalBg')?.classList?.contains('show')) { if (e.key === 'Escape') closeModal(); return; }
-    // 快捷鍵設定是獨立於 modalBg 的自訂對話框：開啟期間全域快捷鍵一律不作用（避免 Enter/Space 在背後觸發播放）
-    if (document.getElementById('settingsModal')) return;
-    const control = e.target.closest?.(ACTIVATION_CONTROL);
-    // Space 是工作區播放快捷鍵，不因按鈕曾被點擊、Tab 聚焦或重繪而改變。
-    // Enter 留給聚焦按鈕的原生啟用；自訂按鍵仍由下方 keymap 決定。
-    if (e.key === 'Enter' && control) return;
-    if (e.isComposing || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
-    if (document.activeElement?.isContentEditable) {
-    // 任何 contenteditable 編輯中（字幕列表 .txt、修改字幕視窗、軌道名稱、備註等）
-    // 皆交由編輯器自身處理，全域快捷鍵不作用
+  window.addEventListener('keydown', handleWorkspaceKey);
+}
+
+function handleWorkspaceKey(e) {
+  if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+  _keysPressed.add(e.key.toLowerCase());
+  const modal = activeModal();
+  if (modal) {
+    if (modal.id === 'modalBg' && e.key === 'Escape') closeModal();
     return;
   }
+  if (e.target.matches?.('input, select, textarea') || isTextEntry(e.target)) return;
   // 影片段已選取：Del 刪除、Backspace 關閉前方空白、Esc 取消。
   // 上下鍵統一交給「媒體片段邊界」快捷鍵，讓已選取影片時也能跳到音訊片段邊界。
   if (State.selectedClipId != null) {
@@ -188,7 +201,7 @@ if (typeof window !== 'undefined') {
   switch (action) {
     case 'toggle_play_pause':
       e.preventDefault();
-      togglePlayPause();
+      if (!e.repeat) togglePlayPause();
       break;
     case 'rewind':
       e.preventDefault();
@@ -369,7 +382,6 @@ if (typeof window !== 'undefined') {
       else Media.splitClipAt(Media.displayTime());
       break;
   }
-});
 }
 
 export {

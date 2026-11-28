@@ -249,8 +249,6 @@ describe('兩輪比對不改變預設表的任何現行行為', () => {
           ? ev('Unidentified', { code: bind.code, ctrl: bind.ctrl, shift: bind.shift, alt: bind.alt })
           : ev(bind.key, { code: 'Key?', ctrl: bind.ctrl, shift: bind.shift, alt: bind.alt });
         const hit = matchAction(State.defaultKeymap, e);
-        /* 預設表本身就有共用同一組鍵的動作（enter 同時是 toggle_play_pause 與
-           confirm），所以只要求「有命中某個動作」，不要求命中自己。 */
         if (hit === null) unreachable.push(`${action}: ${formatBind(bind)}`);
       }
     }
@@ -260,6 +258,14 @@ describe('兩輪比對不改變預設表的任何現行行為', () => {
 
 describe('匯入合併', () => {
   const defaults = { play: [{ key: ' ' }], stop: [{ key: 'k' }], newAction: [{ key: 'n' }] };
+
+  it('舊綁定略過確認鍵與焦點巡覽，保留自訂修飾鍵及刻意清空的動作', () => {
+    const {keymap} = mergeImportedKeymap(defaults, {
+      play:[{key:' '},{key:'Enter'},{code:'NumpadEnter'},{key:'Enter',ctrl:true}],
+      stop:[{code:'Enter'},{key:'Tab',shift:true}], newAction:[],
+    });
+    expect(keymap).toEqual({play:[{key:' '},{key:'enter',ctrl:true}],stop:[],newAction:[]});
+  });
 
   it('認得的動作照收，不認得的忽略', () => {
     const { keymap, applied } = mergeImportedKeymap(defaults, {

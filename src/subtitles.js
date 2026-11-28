@@ -336,6 +336,7 @@ function setCheckResult(id, html){
 function renderCheckPanel(){
   const panel=$('checkPanel'); if(!panel||!panel.classList.contains('show'))return;
   const list=State.cues.filter(c=>(c.track||0)===State.listTrack);
+  panel.classList.toggle('empty-track', list.length === 0);
   const summary=$('checkSummary');
   if(summary){
     const trackName=State.tracks[State.listTrack]?.name||'目前字幕軌';

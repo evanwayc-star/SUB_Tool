@@ -64,7 +64,6 @@ async function inspectEmpty(client, dir) {
           return {
             action: button.dataset.act,
             reachable: document.elementFromPoint(x + width / 2, y + height / 2) === button,
-            tabIndex: button.tabIndex,
           };
         }),
       };
@@ -72,33 +71,36 @@ async function inspectEmpty(client, dir) {
     assert.deepEqual(state, {
       hintVisible: true, track: '尚無字幕軌', disabled: true,
       actions: [
-        { action: 'open-media', reachable: true, tabIndex: 0 },
-        { action: 'open-project', reachable: true, tabIndex: 0 },
+        { action: 'open-media', reachable: true },
+        { action: 'open-project', reachable: true },
       ],
     }, `空白工作區的選檔入口與字幕軌提示須可用（${width}×${height}）`);
     const shot = await client.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
     fs.writeFileSync(path.join(dir, 'workspace-empty-' + width + '.png'), Buffer.from(shot.data, 'base64'));
   }
   await client.evaluate(`(() => {
-    document.getElementById('fpsSel').focus();
-    // Record the keyboard-activated command without opening a Windows file picker during CDP testing.
-    window.addEventListener('click', event => {
-      window.emptyWorkspaceAction = event.target.closest('#noVideo button')?.dataset.act;
-      event.stopPropagation();
-    }, { capture: true, once: true });
+    document.activeElement.blur();
+    window.emptyWorkspaceActions = [];
+    // Capture at the launcher to keep a regression from opening a Windows file picker.
+    document.getElementById('noVideo').addEventListener('click', event => {
+      const button = event.target.closest('button');
+      if (button) {
+        window.emptyWorkspaceActions.push(button.dataset.act);
+        event.stopImmediatePropagation();
+      }
+    }, true);
   })()`);
-  for (const [key, code, windowsVirtualKeyCode] of [['Tab', 'Tab', 9], ['Enter', 'Enter', 13]]) {
-    const params = { key, code, windowsVirtualKeyCode };
+  for (const [key, code, windowsVirtualKeyCode, modifiers = 0] of [['Tab', 'Tab', 9], ['Tab', 'Tab', 9, 8], ['Enter', 'Enter', 13]]) {
+    const params = { key, code, windowsVirtualKeyCode, modifiers };
     await client.send('Input.dispatchKeyEvent', key === 'Enter'
       ? { ...params, type: 'keyDown', text: '\r', unmodifiedText: '\r' }
       : { ...params, type: 'rawKeyDown' });
-    await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode });
+    await client.send('Input.dispatchKeyEvent', { type: 'keyUp', ...params });
     if (key === 'Tab') {
-      const focused = await client.evaluate('document.activeElement.outerHTML.split(">")[0]');
-      assert(focused.includes('data-act="open-media"'), 'Tab 須進入空白預覽的開啟影音按鈕：' + focused);
+      assert(await client.evaluate('document.activeElement === document.body'), '空白工作區 Tab 與 Shift+Tab 應維持中性焦點');
     }
   }
-  assert.equal(await client.evaluate('window.emptyWorkspaceAction'), 'open-media', '空白預覽可透過 Tab 與 Enter 開啟影音');
+  assert.deepEqual(await client.evaluate('window.emptyWorkspaceActions'), [], '空白工作區 Enter 不應啟動選檔');
 }
 
 async function inspectOverlays(client, dir, press) {
@@ -173,8 +175,8 @@ async function inspect(client, dir) {
   assert(results.every(r => r.labelsVisible), '窄視窗的工具列仍須保留操作文字');
   const compact = results.at(-1).transport;
   assert(Math.abs(compact.playY - compact.timecodeY) < 6
-    && (compact.playerWidth <= 480 ? compact.toolsY > compact.seekY + 16 : Math.abs(compact.seekY - compact.toolsY) < 6)
-    && compact.seekY > compact.playY + 20, '窄預覽區使用兩列播放控制，480px 以下的監看工具再換列');
+    && Math.abs(compact.seekY - compact.toolsY) < 6
+    && compact.seekY > compact.playY + 20, '1024px 視窗中，播放與時碼共列，定位滑桿與監看工具共用次列');
   const menu = await client.evaluate(`(() => {
     document.querySelector('#recentMenu > button').click();
     const popup = document.querySelector('#recentMenu .items'), r = popup.getBoundingClientRect();
@@ -197,17 +199,14 @@ async function inspect(client, dir) {
     assert(rect.width > 0 && rect.height > 0, `工具列 ${action} 必須可見`);
     await dispatchClick(client, rect);
   };
-  await client.evaluate(`document.getElementById('fpsSel').focus()`);
-  await press('Tab', 'Tab', 9);
-  const tabFocus = await client.evaluate(`({inToolbar:!!document.activeElement?.closest('.menubar'),control:document.activeElement?.outerHTML.slice(0,160)})`);
-  assert(!tabFocus.inToolbar, '一般 Tab 保留原本略過頂欄操作按鈕的順序：'+tabFocus.control);
   await clickToolbar('settings');
   const keyboard = await client.evaluate(`({ opened: !!document.getElementById('settingsModal'), focusInside: !!document.activeElement.closest('#settingsModal'), role: document.getElementById('settingsModal')?.querySelector('[role="dialog"]')?.getAttribute('aria-modal') })`);
   assert(keyboard.opened && keyboard.focusInside && keyboard.role === 'true', '滑鼠開啟設定後，焦點須進入對話框');
-  // 初始焦點在搜尋欄位；Shift+Tab 應循環到儲存。
-  await press('Tab', 'Tab', 9, 8);
-  keyboard.tabWrapped = await client.evaluate(`document.activeElement === document.getElementById('settingsSaveBtn')`);
-  assert(keyboard.tabWrapped, 'Shift+Tab 必須在設定視窗內循環焦點');
+  await client.evaluate("document.getElementById('settingsSearch').focus()");
+  for (const modifiers of [8, 0]) {
+    await press('Tab', 'Tab', 9, modifiers);
+    assert(await client.evaluate("document.activeElement.id === 'settingsSearch'"), '設定搜尋中的 Tab 與 Shift+Tab 不應選到其他操作');
+  }
   await press('Escape', 'Escape', 27);
   keyboard.toolbarFocusReleased = await client.evaluate(`(() => {
     const settings = document.querySelector('.menubar [data-act="settings"]');
@@ -217,26 +216,13 @@ async function inspect(client, dir) {
   })()`);
   assert(keyboard.toolbarFocusReleased, '關窗及嘗試回復焦點後，工具列須保持無選中外框');
   await client.evaluate('window.SUB.History.reset()');
-  await client.evaluate("document.querySelector('.sub-row.primary').focus()");
-  const originalId=await client.evaluate('document.activeElement.dataset.id');
-  await press('F10','F10',121);
-  for(let i=0;i<32;i++){
-    if(await client.evaluate("document.activeElement.dataset.act==='project-settings'"))break;
-    await press('ArrowRight','ArrowRight',39);
-  }
-  assert(await client.evaluate("document.activeElement.dataset.act==='project-settings'"),'F10 與方向鍵可進入畫布設定');
-  await press('Enter','Enter',13);
-  await waitFor(()=>client.evaluate("document.activeElement.id==='projectCanvasMode'"),'畫布設定取得鍵盤焦點');
-  await press('Tab','Tab',9);
-  assert.equal(await client.evaluate('document.activeElement.id'),'projectCanvasPreset');
+  await clickToolbar('project-settings');
+  await waitFor(()=>client.evaluate("document.querySelector('#modalBg.show #projectCanvasApply')?.checkVisibility({opacityProperty:true,visibilityProperty:true})"),'畫布確認按鈕已顯示');
+  await client.evaluate("document.getElementById('projectCanvasPreset').focus()");
   await press('End','End',35);
   await press('ArrowUp','ArrowUp',38);
   assert.equal(await client.evaluate('document.activeElement.value'),'1080x1920');
-  for(let i=0;i<6;i++){
-    if(await client.evaluate("document.activeElement.id==='projectCanvasApply'"))break;
-    await press('Tab','Tab',9);
-  }
-  assert.equal(await client.evaluate('document.activeElement.id'),'projectCanvasApply');
+  await client.evaluate("document.querySelector('#modalFoot button:not(.primary)').focus()");
   await press('Enter','Enter',13);
   const canvasState = () => client.evaluate(`(() => {
     const { width, height } = document.getElementById('videoSub').getBoundingClientRect();
@@ -245,9 +231,7 @@ async function inspect(client, dir) {
   })()`);
   await waitFor(async () => (await canvasState()).projectCanvas?.height === 1920, '套用直式專案畫布');
   const portrait = await canvasState();
-  await waitFor(()=>client.evaluate("document.activeElement.dataset.act==='project-settings'"),'關閉對話框還原工具列焦點');
-  await press('Escape','Escape',27);
-  assert.equal(await client.evaluate('document.activeElement.dataset.id'),originalId,'Esc 回到原字幕列');
+  assert(!(await client.evaluate("!!document.activeElement.closest('.menubar button')")),'關窗後不應把焦點停在開啟畫布設定的按鈕');
   assert.deepEqual(portrait.projectCanvas, { width: 1080, height: 1920 });
   assert(!portrait.modalOpen && Math.abs(portrait.width / portrait.height - 9 / 16) < 0.01, '預覽字幕層須貼齊直式畫布');
   await press('z', 'KeyZ', 90, 2);
@@ -275,7 +259,7 @@ async function inspect(client, dir) {
     await press(key, code, vk);
     const state = await client.evaluate(`({ opened: document.getElementById('modalBg').classList.contains('show'),
       focused: !!document.activeElement.closest('.menubar button'), playCount: window.toolbarPlayCount })`);
-    assert.deepEqual(state, { opened: false, focused: false, playCount: keyboard.exports.length + 1 }, `${action} 關窗後的按鍵須播放一次`);
+    assert.deepEqual(state, { opened: false, focused: false, playCount: 1 }, `${action} 關窗後只有空白鍵啟動播放，Enter 保持待命`);
     keyboard.exports.push({ action, ...state });
   }
   fs.writeFileSync(path.join(dir, 'workspace-keyboard.json'), JSON.stringify({ menu, ...keyboard }, null, 2));
@@ -306,6 +290,7 @@ async function inspect(client, dir) {
       rhead.scrollLeft=0;
       return {
         listHeight:listRect.height,
+        cueTextWidth:row.querySelector('.txt').getBoundingClientRect().width,
         rowDisplay:getComputedStyle(row).display,
         listFits:list.scrollWidth<=list.clientWidth,
         headerCenterSpread:Math.max(...centers)-Math.min(...centers),
@@ -318,6 +303,9 @@ async function inspect(client, dir) {
     assert(layout.listHeight >= 70 && layout.rowDisplay === (sidebarWidth>900?'flex':'grid')
       && layout.listFits && layout.styleFits && layout.textFits,
     '不同寬度的側欄仍保留可讀字幕與樣式：' + JSON.stringify({ width, height, sidebarWidth, ...layout }));
+    if (sidebarWidth === 260) {
+      assert(layout.cueTextWidth >= sidebarWidth * 0.8, '窄側欄的字幕正文應使用至少八成欄寬');
+    }
     assert(layout.headerCenterSpread<=1 && layout.headerUnreachable.length===0
       && (sidebarWidth===260 ? layout.headerScrollDistance>0 : layout.headerScrollDistance===0),
     '表頭項目須同列置中，每個控制都可點擊；最窄側欄可橫捲至最後一項：'+JSON.stringify({sidebarWidth,...layout}));
@@ -326,6 +314,22 @@ async function inspect(client, dir) {
     sidebarLayouts.push({ width, height, sidebarWidth, ...layout });
   }
   fs.writeFileSync(path.join(dir,'workspace-sidebar.json'),JSON.stringify(sidebarLayouts,null,2));
+  const longSelection = await client.evaluate(`(async () => {
+    const source = document.getElementById('stSel'), badge = document.getElementById('tlSel');
+    const original = source.innerHTML;
+    const label = '已選影片段：' + '外景訪談_Interview_'.repeat(16) + '.mov';
+    source.textContent = label;
+    await new Promise(requestAnimationFrame);
+    const fit = document.documentElement.scrollWidth <= innerWidth &&
+      [source,badge].every(el => el.title === label && el.scrollWidth > el.clientWidth) &&
+      [...document.querySelectorAll('.zoom button')].every(el => {
+        const r = el.getBoundingClientRect();
+        return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+      });
+    source.innerHTML = original;
+    return fit;
+  })()`);
+  assert(longSelection, '長素材名稱須可查看完整提示，且縮放按鈕與主工作區維持在畫面內');
   await client.send('Emulation.setEmulatedMedia', { features:[{ name:'prefers-reduced-motion', value:'reduce' }] });
   const reducedMotion = await client.evaluate(`(() => {
     const selectors=['#playBtn','.transport .tp-btn','#tsBold'];

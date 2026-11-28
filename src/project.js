@@ -456,7 +456,7 @@ function showBrowserDrafts({startup=false}={}){
     }},{label:'刪除備份',act:()=>{
       const draft=selected();
       openModal('刪除本機備份',`<p>確定刪除「${escapeHTML(draft.name)}」的這份備份？</p>`,[
-        {label:'取消',act:()=>showBrowserDrafts()},{label:'刪除',act:()=>{
+        {label:'取消',act:()=>showBrowserDrafts()},{label:'刪除',primary:true,enterDefault:true,act:()=>{
           try { removeBrowserDraft(localStorage,draft); }
           catch { showToast('無法刪除備份','error'); }
           closeModal(); showBrowserDrafts();
@@ -527,7 +527,7 @@ function ensureProjectSaved(){
       `<p style="margin:0 0 10px;font-size:13px;color:var(--text-faint)">${IS_DESKTOP
         ? '開始編輯前建議先儲存專案。之後每 3 分鐘會備份有修改的內容。'
         : '未命名草稿也會每 3 分鐘備份在這個瀏覽器。你可以現在下載一份專案檔。'}</p>`,
-      [{label:'立即儲存',primary:true,act:async()=>{
+      [{label:'立即儲存',primary:true,enterDefault:true,act:async()=>{
         closeModal({committed:true});
         await Project.saveAs();
         resolve();
@@ -566,7 +566,7 @@ function confirmDiscardUnsaved(title = '開啟另一個專案'){
       [
         // 等儲存真正完成（拿到路徑）才繼續；使用者取消存檔對話框則留在原專案，
         // 與關閉視窗時的處理一致，避免「以為存好了其實沒有」。
-        {label:'儲存後開啟',primary:true,act:async()=>{
+        {label:'儲存後開啟',primary:true,enterDefault:true,act:async()=>{
           const pth=await Project.save();
           finish(!!pth&&!isProjectDirty());
         }},
@@ -1203,7 +1203,7 @@ function startNewProject() {
   const session=openModal('開新專案',
     `<p>確定清空目前專案？將移除 <b>${count}</b> 條既有字幕，以及備註和已載入的影音。</p>`,
     [{ label: '取消', act: () => session.close() },
-     { label: '確定清空', primary: true, act: () => {
+     { label: '確定清空', primary: true, enterDefault: true, act: () => {
        if(!session.isCurrent() || !ownsWorkspace() || !ownsSubtitles()) return;
        session.close({committed:true});
        return Project.startNewProject(async () => {

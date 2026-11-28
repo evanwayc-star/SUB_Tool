@@ -126,6 +126,7 @@ export function _syncMpvPanel(){
   // Only the dialog itself covers the native video, not its full-screen backdrop.
   if($('modalBg')?.classList.contains('show')) add($('modalBg').querySelector('.modal'));
   add(document.querySelector('#settingsModal .settings-modal-content'));
+  add(document.querySelector('dialog[data-confirmation-dialog][open]'));
   document.querySelectorAll('.float-panel.show').forEach(add);
   add($('searchDialog'));
   if($('ctxmenu')?.classList.contains('show')) add($('ctxmenu'));

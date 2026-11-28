@@ -13,13 +13,36 @@ const deferred = () => {
 beforeEach(async () => {
   vi.resetModules();
   vi.useFakeTimers();
-  document.body.innerHTML = '<div id="modalBg"><div class="modal"><div id="modalTitle"></div><div id="modalBody"></div><div id="modalFoot"></div></div></div><div id="toast"></div>';
+  document.body.innerHTML = '<div id="modalBg"><div class="modal" role="dialog" tabindex="-1"><div id="modalTitle"></div><div id="modalBody"></div><div id="modalFoot"></div></div></div><div id="toast"></div>';
   ui = await import('../src/ui.js');
   const {State}=await import('../src/state.js');State.mediaPath='C:/media/original.mp4';
 });
 afterEach(() => { vi.useRealTimers(); delete window.subtool; });
 
 describe('modal lifecycle ownership', () => {
+  it('搜尋會留在剛開啟的面板前方，切回面板時焦點跟著移動',()=>{
+    const search=document.createElement('div');
+    search.id='searchDialog';search.className='search-dialog';search.tabIndex=-1;search.style.display='none';
+    search.innerHTML='<input id="searchInput">';
+    const panel=document.createElement('div');
+    panel.id='notesPanel'; panel.className='float-panel';
+    panel.innerHTML='<div class="fp-head"></div>';
+    document.body.append(search,panel);
+    ui.bindOverlayDrag(search,search);
+    ui.bindOverlayDrag(panel,panel.firstElementChild);
+    ui.togglePanel(panel.id);
+    ui.openSearchPanel();
+    vi.runAllTimers();
+    expect(search.classList.contains('panel-front')).toBe(true);
+    expect(document.activeElement).toBe(search.firstElementChild);
+    panel.dispatchEvent(new MouseEvent('pointerdown',{bubbles:true}));
+    expect(document.querySelector('.panel-front')).toBe(panel);
+    expect(document.activeElement).toBe(panel);
+    ui.openSearchPanel();
+    ui.closePanel(search.id);
+    expect(panel.classList.contains('panel-front')).toBe(true);
+    expect(document.activeElement).toBe(panel);
+  });
   it('共用素材的快取視窗顯示 NAS 身分，清除前提醒其他工作站',async()=>{
     const {State}=await import('../src/state.js');
     State.mediaPath='Z:/movies/demo.mov';
@@ -29,7 +52,7 @@ describe('modal lifecycle ownership', () => {
     document.getElementById('cacheClear').click();
     expect(document.getElementById('modalBody').textContent).toContain('其他工作站');
   });
-  it('浮動面板開啟只聚焦中性容器，不預選按鈕或輸入框；關閉返回原操作',()=>{
+  it('浮動面板開啟只聚焦中性容器，關閉返回工作區',()=>{
     const trigger=document.createElement('button');trigger.setAttribute('aria-controls','notesPanel');
     const panel=document.createElement('div');panel.id='notesPanel';panel.className='float-panel';
     panel.innerHTML='<button>歸零</button><input aria-label="篩選">';
@@ -39,11 +62,11 @@ describe('modal lifecycle ownership', () => {
     expect(document.activeElement).toBe(panel);
     expect(trigger.getAttribute('aria-expanded')).toBe('true');
     ui.closePanel('notesPanel');
-    expect(document.activeElement).toBe(trigger);
+    expect(document.activeElement).toBe(document.body);
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
   });
   it('連續切換浮動面板只聚焦最後一個，關閉仍回到工作區來源',()=>{
-    const trigger=document.createElement('button');document.body.append(trigger);trigger.focus();
+    const trigger=document.createElement('textarea');document.body.append(trigger);trigger.focus();
     for(const id of ['notesPanel','historyPanel']){
       const panel=document.createElement('div');panel.id=id;panel.className='float-panel';document.body.append(panel);
     }
@@ -58,7 +81,7 @@ describe('modal lifecycle ownership', () => {
     ui.togglePanel('notesPanel');ui.closePanel('notesPanel');vi.runAllTimers();
     expect(document.activeElement).not.toBe(panel);
     ui.togglePanel('notesPanel');ui.openModal('較新的視窗','');
-    document.querySelector('.modal').tabIndex=-1;vi.runAllTimers();
+    vi.runAllTimers();
     expect(document.activeElement).toBe(document.querySelector('.modal'));
   });
   it('無素材時不查中央快取，清除停用且不發出清理 IPC',async()=>{
@@ -130,6 +153,15 @@ describe('modal lifecycle ownership', () => {
     next.focus();
     vi.runAllTimers();
     expect(document.activeElement).toBe(next);
+  });
+  it('連續更換視窗只會在關閉後回到原本正在輸入的欄位',()=>{
+    const editor=document.createElement('textarea');document.body.append(editor);
+    editor.value='未完成的文字';editor.focus();editor.setSelectionRange(2,4);
+    ui.openModal('檢視選項','');ui.openModal('檢視詳情','');
+    expect(document.activeElement).toBe(document.querySelector('.modal'));
+    ui.closeModal();vi.runAllTimers();
+    expect(document.activeElement).toBe(editor);
+    expect([editor.selectionStart,editor.selectionEnd]).toEqual([2,4]);
   });
   it('快取查詢失敗後可重新整理，清除期間不重複送出且錯誤留在視窗內可重試',async()=>{
     const {State}=await import('../src/state.js');State.mediaPath='C:/current.mov';

@@ -39,7 +39,7 @@ export function openSubtitleDictionaryDialog() {
       <p id="cpDictionaryError" role="alert" hidden></p>
     </div>`, [
     { label: '取消', act: () => session.close() },
-    { label: '儲存字庫', primary: true, act: save },
+    { label: '儲存字庫', primary: true, enterDefault: true, act: save },
   ]);
   const entries = $('cpDictionaryEntries');
   const other = $('cpDictionaryOther');

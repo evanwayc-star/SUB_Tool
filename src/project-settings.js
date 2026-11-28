@@ -42,7 +42,7 @@ export function showProjectSettings() {
     <p class="project-canvas-help">影片等比例置入，未填滿處留黑邊。字幕座標系統維持 1920 × 1080；套用時會暫停原生預覽。</p>
     </div>`, [
       { label: '取消', act: () => session.close() },
-      { label: '套用', primary: true, id: 'projectCanvasApply', act: async () => {
+      { label: '套用', primary: true, enterDefault: true, id: 'projectCanvasApply', act: async () => {
         if (applying) return;
         if (!owns()) {
           discard(); session.close(); return;

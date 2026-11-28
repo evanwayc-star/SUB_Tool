@@ -1,5 +1,6 @@
 ﻿// @vitest-environment jsdom
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { installDialogMethods } from './fixtures/native-dialog.js';
 
 const modalState = vi.hoisted(() => ({ generation: 0 }));
 const workspaceState = vi.hoisted(() => ({ generation: 0, listeners: new Set() }));
@@ -142,7 +143,7 @@ describe('匯出交付清單', () => {
   });
   it.each([
     ['.ev-format', 'prores'], ['.ev-res', '720'], ['.ev-fps', '24'], ['.ev-tc', true],
-  ])('變更 %s 後鍵盤焦點仍在同一份交付的對應欄位', async (selector, value) => {
+  ])('變更 %s 後保留選定值，焦點回到視窗', async (selector, value) => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector(selector)).not.toBeNull());
     const control = document.querySelector(selector);
@@ -151,7 +152,7 @@ describe('匯出交付清單', () => {
     else control.value = value;
     control.dispatchEvent(new Event('change', { bubbles: true }));
     const updated = document.querySelector(selector);
-    expect(document.activeElement === updated).toBe(true);
+    expect(document.activeElement.matches('button, select, input')).toBe(false);
     if (typeof value === 'boolean') expect(updated.checked).toBe(value);
     else expect(updated.value).toBe(value);
   });
@@ -181,20 +182,20 @@ describe('匯出交付清單', () => {
     expect(document.querySelector('.ev-res[data-idx="1"]').value).toBe('0');
   });
 
-  it('刪除後聚焦鄰近輸出；最後一份刪除後顯示新增指引並回到新增按鈕', async () => {
+  it('刪除或新增項目後不預選按鈕；清空清單會顯示新增指引', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-del')).not.toBeNull());
     document.getElementById('evAddRowBtn').click();
     let remove = document.querySelector('.ev-del[data-idx="1"]');
     remove.focus(); remove.click();
-    expect(document.activeElement === document.querySelector('.ev-del')).toBe(true);
+    expect(document.activeElement.matches('button, select')).toBe(false);
     remove = document.querySelector('.ev-del');
     remove.focus(); remove.click();
     expect(document.querySelector('.delivery-empty')?.textContent).toContain('新增輸出項目');
-    expect(document.activeElement === document.getElementById('evAddRowBtn')).toBe(true);
+    expect(document.activeElement.matches('button, select')).toBe(false);
     document.getElementById('evAddRowBtn').click();
     expect(document.querySelector('.delivery-empty')).toBeNull();
-    expect(document.activeElement === document.querySelector('.ev-format')).toBe(true);
+    expect(document.activeElement.matches('button, select')).toBe(false);
   });
 
   it('資料夾選取完成後保留目前欄位焦點與選取範圍，不搶回瀏覽按鈕', async () => {
@@ -212,7 +213,7 @@ describe('匯出交付清單', () => {
     expect([updated.selectionStart, updated.selectionEnd]).toEqual([2, 5]);
   });
 
-  it('音訊子視窗取消後回原交付列的音軌按鈕，不改另一份檔名', async () => {
+  it('音訊子視窗取消後保留交付列與檔名，不預選音軌按鈕', async () => {
     await showExportVideoDialog();
     await vi.waitFor(() => expect(document.querySelector('.ev-audio-btn')).not.toBeNull());
     document.getElementById('evAddRowBtn').click();
@@ -221,7 +222,7 @@ describe('匯出交付清單', () => {
     document.querySelector('.ev-audio-btn[data-idx="1"]').click();
     spies.openDeliveryOutputSettings.mock.lastCall[1]({ saved: false });
     await vi.waitFor(() => expect(document.querySelector('.ev-audio-btn[data-idx="1"]')).not.toBeNull());
-    expect(document.activeElement === document.querySelector('.ev-audio-btn[data-idx="1"]')).toBe(true);
+    expect(document.activeElement.matches('button, select')).toBe(false);
     expect(document.querySelector('.ev-name').value).toBe('保留名稱.mp4');
   });
 
@@ -256,6 +257,28 @@ describe('匯出交付清單', () => {
     });
     return spies.openModal.mock.calls.at(-1)[2].find(button => button.id === 'evSubmitBtn');
   }
+
+  it('取消覆寫會保留交付草稿，再送出並確認只排入一次', async () => {
+    installDialogMethods();
+    window.subtool.listDir.mockResolvedValue(['A.mp4']);
+    window.subtool.exportVideo.mockResolvedValue('job-A');
+    const submit = await prepareRows(['A.mp4']);
+    for (const choice of ['data-cancel', 'data-approve']) {
+      const pending = submit.act();
+      const dialog = await vi.waitFor(() => {
+        const overlay = document.querySelector('dialog[open]');
+        expect(overlay?.textContent).toContain('A.mp4');
+        return overlay;
+      });
+      expect([...dialog.querySelectorAll('[data-enter-default]')]).toEqual([dialog.querySelector('[data-approve]')]);
+      expect(dialog.querySelector('[data-approve]').getAttribute('aria-keyshortcuts')).toBe('Enter');
+      expect(window.subtool.exportVideo).not.toHaveBeenCalled();
+      expect(document.querySelector('.ev-name').value).toBe('A.mp4');
+      dialog.querySelector('['+choice+']').click();
+      await pending;
+    }
+    expect(window.subtool.exportVideo).toHaveBeenCalledOnce();
+  });
 
   it('進行中 I 點的交付 ASS 使用收尾快照且不更動 live 打點', async () => {
     State.tracks=[{name:'字幕',visible:true}];
@@ -690,6 +713,6 @@ describe('匯出交付清單', () => {
 
     document.querySelector('#evAddRowBtn').click();
     expect(document.querySelector('#evRowCount').textContent).toBe('2 項');
-    expect(document.activeElement).toBe(document.querySelector('.delivery-card:last-child .ev-format'));
+    expect(document.activeElement.matches('button, select')).toBe(false);
   });
 });

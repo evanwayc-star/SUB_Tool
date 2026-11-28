@@ -1,4 +1,4 @@
-import { $ } from './dom.js';
+import { $, setEnterDefault } from './dom.js';
 import { openModal, showToast } from './ui.js';
 import { escapeHTML } from './util.js';
 import { State } from './state.js';
@@ -459,6 +459,7 @@ function showMonitor(job) {
     $('ocrDiscardPartial').hidden = !partial;
     $('ocrKeepPartial').hidden = !partial;
     $('ocrKeepPartial').classList.toggle('primary', partial);
+    setEnterDefault($('ocrKeepPartial'), partial);
     primary.classList.toggle('primary', !partial);
     primary.id = partial ? 'ocrLater' : active ? 'ocrMinimize' : 'ocrClose';
     primary.textContent = partial ? '稍後決定' : active ? '縮小至背景' : '關閉';

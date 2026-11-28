@@ -3,13 +3,14 @@
    ==============================================================================
    狀態列 / Toast / OSD / 對話框 / 面板開合 / 快取管理對話框
    ============================================================================== */
-import { $ } from './dom.js';
+import { $, isTextEntry, setEnterDefault } from './dom.js';
 import { State } from './state.js';
 import { Media } from './media.js';
 import { emit, on } from './events.js';
 import { getNativePreviewRuntime } from './media-player-adapter.js';
 import { secToEncore } from './time.js';
 import { recordStatusError } from './status-error-report.js';
+import { cancelConfirmation } from './confirmation-dialog.js';
 
 /* 狀態列 / toast / modal */
 export function renderProjectIdentity({name}={}) {
@@ -156,22 +157,10 @@ let _modalDismiss = null;
 let _modalReplaced = null;
 let _modalGeneration = 0;
 let _modalCloseOnBackdrop = true;
-let _lastFocusedOutsideModal = null;
-
-if (typeof document !== 'undefined') {
-  document.addEventListener('focusin', e => {
-    const modalBg = $('modalBg');
-    if (modalBg && !modalBg.contains(e.target)) _lastFocusedOutsideModal = e.target;
-  });
-}
-
-function _focusables(modal = $('modalBg')?.querySelector('.modal')) {
-  if (!modal) return [];
-  return [...modal.querySelectorAll('button, [href], input, select, textarea, summary, [contenteditable="true"], [tabindex]')]
-    .filter(el => !el.matches(':disabled, [tabindex="-1"]') && el.offsetParent !== null && getComputedStyle(el).visibility === 'visible');
-}
 
 function openModal(title, html, buttons, opts = {}) {
+  emit('contextmenu:dismiss');
+  cancelConfirmation();
   const replaced = _modalReplaced;
   const generation = ++_modalGeneration;
   const session = {
@@ -195,8 +184,10 @@ function openModal(title, html, buttons, opts = {}) {
     foot.innerHTML = '';
     (buttons || [{ label: '關閉', primary: true, act: closeModal }]).forEach(b => {
       const btn = document.createElement('button');
+      btn.type = 'button';
       btn.textContent = b.label;
       if (b.primary) btn.className = 'primary';
+      if (b.enterDefault) setEnterDefault(btn, true);
       if (b.id) btn.id = b.id;
       if (b.className) btn.className = (btn.className ? btn.className + ' ' : '') + b.className;
       if (b.hidden) btn.style.display = 'none';
@@ -215,22 +206,22 @@ function openModal(title, html, buttons, opts = {}) {
   _modalKeepVideo = !!opts.keepVideo;
   bg.classList.toggle('dock-right', _modalKeepVideo || opts.dock === 'right');
   bg.classList.toggle('clear-bg', _modalKeepVideo);
-  _modalPrevFocus = _lastFocusedOutsideModal || document.activeElement;
+  if (!bg.classList.contains('show')) {
+    _modalPrevFocus = isTextEntry(document.activeElement) ? document.activeElement : null;
+  }
   bg.classList.add('show');
   if (bodyEl) {
     bodyEl.scrollTop = 0;
     bodyEl.scrollLeft = 0;
   }
-  setTimeout(() => {
-    if (!session.isCurrent()) return;
-    const first = _focusables(modalEl).find(el => !el.closest('.mhead'));
-    (first || modalEl)?.focus({preventScroll:true});
-  }, 0);
+  modalEl?.focus({preventScroll:true});
   if (Media.mpvMode) emit('mpv:sync');
   return session;
 }
 
 function closeModal(arg) {
+  emit('contextmenu:dismiss');
+  cancelConfirmation();
   const committed = !!(arg && arg.committed === true);
   const dismiss = _modalDismiss;
   const generation = ++_modalGeneration;
@@ -240,12 +231,13 @@ function closeModal(arg) {
   const prev = _modalPrevFocus;
   _modalPrevFocus = null;
   const bg = $('modalBg');
+  if (bg?.contains(document.activeElement)) document.activeElement.blur();
   if (bg) bg.classList.remove('show', 'dock-right', 'clear-bg');
   _modalKeepVideo = false;
   if (prev?.isConnected) {
     setTimeout(() => {
       const focused = document.activeElement;
-      if (generation === _modalGeneration && prev.isConnected && (focused === document.body || bg?.contains(focused))) {
+      if (generation === _modalGeneration && prev.isConnected && isTextEntry(prev) && focused === document.body) {
         prev.focus({preventScroll:true});
       }
     }, 0);
@@ -261,29 +253,6 @@ if (modalBg) {
   modalBg.addEventListener('mousedown', e => {
     if (e.target === $('modalBg') && !_modalKeepVideo && _modalCloseOnBackdrop) closeModal();
   });
-  modalBg.addEventListener('keydown', e => {
-    if (e.key === 'Tab') {
-      const f = _focusables();
-      if (f.length) {
-        const first = f[0], last = f[f.length - 1];
-        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-      }
-      return;
-    }
-    if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && !e.target.isContentEditable) {
-      if (e.isComposing || e.keyCode === 229) return;
-      // Enter belongs to the focused native control. In particular, focusing
-      // Cancel must never activate a destructive primary button instead.
-      if (e.target.closest('button, a[href], select, summary, :disabled, input[type="button"], input[type="submit"], input[type="reset"], input[type="checkbox"], input[type="radio"], input[type="range"], input[type="file"], input[type="color"]')) {
-        e.stopPropagation();
-        return;
-      }
-      e.preventDefault();
-      e.stopPropagation();
-      $('modalFoot')?.querySelector('button.primary')?.click();
-    }
-  }, true);
 }
 
 function promptModal(title, label, defVal = '', { placeholder = '', okLabel = '確定' } = {}) {
@@ -293,11 +262,9 @@ function promptModal(title, label, defVal = '', { placeholder = '', okLabel = '�
     const cancel = () => { if (!done) { done = true; resolve(null); } };
     const finish = v => { if (done) return; done = true; closeModal({ committed: true }); resolve(v); };
     openModal(title,
-      `<div style="font-size:13px;color:var(--text-dim);margin-bottom:8px">${esc(label)}</div>` +
-      `<input type="text" id="__promptInput" value="${esc(defVal)}" placeholder="${esc(placeholder)}" ` +
-      `style="width:100%;box-sizing:border-box;font-size:14px;padding:7px 9px;background:var(--panel2);` +
-      `border:1px solid var(--border2);border-radius:5px;color:var(--text)">`,
-      [{ label: okLabel, primary: true, act: () => { const v = ($('__promptInput')?.value || '').trim(); finish(v || null); } },
+      `<label class="prompt-label" for="__promptInput">${esc(label)}</label>` +
+      `<input class="prompt-input" type="text" id="__promptInput" value="${esc(defVal)}" placeholder="${esc(placeholder)}">`,
+      [{ label: okLabel, primary: true, enterDefault: true, act: () => { const v = ($('__promptInput')?.value || '').trim(); finish(v || null); } },
        { label: '取消', act: () => finish(null) }], { onDismiss: cancel, onReplaced: cancel });
     const input = $('__promptInput');
     setTimeout(() => { if (!done && input?.isConnected) { input.focus(); input.select(); } }, 30);
@@ -321,8 +288,22 @@ export function keepPanelInViewport(panel, left, top) {
   Object.assign(panel.style, { right:'auto', bottom:'auto', left:position.left+'px', top:position.top+'px' });
 }
 
+// Search can stay open alongside one tool panel. Keep hit testing and keyboard focus on the same surface.
+function raiseFloatingPanel(panel) {
+  if (panel.classList.contains('panel-front')) return;
+  document.querySelector('.panel-front')?.classList.remove('panel-front');
+  panel.classList.add('panel-front');
+}
+
 export function bindOverlayDrag(panel, handle, place = keepPanelInViewport) {
   let drag;
+  if (panel.matches('.float-panel, .search-dialog')) {
+    panel.addEventListener('focusin', () => raiseFloatingPanel(panel));
+    panel.addEventListener('pointerdown', () => {
+      raiseFloatingPanel(panel);
+      if (!panel.contains(document.activeElement)) panel.focus({preventScroll:true});
+    }, true);
+  }
   handle.addEventListener('pointerdown', event => {
     if (event.button !== 0 || event.target.closest('button, input, select, textarea, a[href]')) return;
     const { left, top } = panel.getBoundingClientRect();
@@ -349,8 +330,8 @@ function moveModalInViewport(modal, left, top) {
   if (position.left === rect.left && position.top === rect.top) return;
   modal.style.transform = `translate(${position.left - modal.offsetLeft}px, ${position.top - modal.offsetTop}px)`;
 }
-const titleBar = $('modalTitle');
 const modal = modalBg?.querySelector('.modal');
+const titleBar = modal?.querySelector('.mhead') || $('modalTitle');
 if (titleBar && modal) {
   bindOverlayDrag(modal, titleBar, moveModalInViewport);
   window.addEventListener('resize', () => {
@@ -404,16 +385,44 @@ function syncPanelTriggers(panel, open) {
   if (panel.id === 'checkPanel') $('checkPanelBtn')?.classList.toggle('sub-active', open);
 }
 
+export function openSearchPanel() {
+  const panel = $('searchDialog');
+  if (!panel) return;
+  if (panel.style.display === 'none' && isTextEntry(document.activeElement)) {
+    panelOrigins.set(panel, document.activeElement);
+  }
+  panel.style.display = 'flex';
+  syncPanelTriggers(panel, true);
+  raiseFloatingPanel(panel);
+  keepPanelInViewport(panel);
+  emit('render:searchCount');
+  $('searchInput')?.focus({preventScroll:true});
+  emit('mpv:sync');
+}
+
 export function closePanel(id, { restoreFocus = true } = {}) {
   const panel = $(id);
   if (!panel) return;
   const hadFocus = panel.contains(document.activeElement);
-  panel.classList.remove('show');
+  panel.classList.remove('show', 'panel-front');
+  if (id === 'searchDialog') panel.style.display = 'none';
   panelOpenTokens.delete(panel);
   syncPanelTriggers(panel, false);
   const origin = panelOrigins.get(panel);
   panelOrigins.delete(panel);
-  if (restoreFocus && hadFocus && origin?.isConnected) origin.focus({preventScroll:true});
+  if (hadFocus) {
+    document.activeElement.blur();
+    if (restoreFocus) {
+      const search = $('searchDialog');
+      const exposed = document.querySelector('.float-panel.show') || (search?.style.display === 'flex' ? search : null);
+      const originPanel = origin?.closest('.float-panel, .search-dialog');
+      if (origin?.isConnected && isTextEntry(origin) && (exposed ? exposed.contains(origin) : !originPanel)) {
+        origin.focus({preventScroll:true});
+      } else {
+        exposed?.focus({preventScroll:true});
+      }
+    }
+  }
   emit('mpv:sync');
 }
 
@@ -421,14 +430,15 @@ function togglePanel(id) {
   const p = $(id);
   if (!p) return;
   const willShow = !p.classList.contains('show');
-  const focused = document.activeElement === document.body ? _lastFocusedOutsideModal : document.activeElement;
-  const origin = panelOrigins.get(focused?.closest?.('.float-panel')) || focused;
+  const focused = document.activeElement;
+  const origin = panelOrigins.get(focused?.closest?.('.float-panel')) || (isTextEntry(focused) ? focused : null);
   document.querySelectorAll('.float-panel.show').forEach(x => closePanel(x.id, {restoreFocus:!willShow}));
   if (willShow) {
     const token = {};
     panelOrigins.set(p, origin);
     panelOpenTokens.set(p, token);
     p.classList.add('show');
+    raiseFloatingPanel(p);
     syncPanelTriggers(p, true);
     p.tabIndex = -1;
     emit('mpv:sync');
@@ -436,9 +446,9 @@ function togglePanel(id) {
       if (panelOpenTokens.get(p) !== token || !p.classList.contains('show')) return;
       _ensurePanelInRightArea(p);
       keepPanelInViewport(p);
-      if (!$('modalBg')?.classList.contains('show') && !$('settingsModal')) {
+      if (p.classList.contains('panel-front') && !$('modalBg')?.classList.contains('show') && !$('settingsModal')) {
         // 面板不是表單對話框，不預選歸零、刪除或篩選欄位。
-        // 中性容器保留 Esc 關閉及 Tab 導覽，Space 可直接控制播放。
+        // Space 控制播放，Esc 關閉面板。
         p.focus({preventScroll:true});
       }
       emit('mpv:sync');
@@ -537,7 +547,7 @@ async function openCacheDialog() {
         let clearing = false;
         const sourceLabel = `<p class="cache-path">${esc(displayedSource)}</p>`;
         const confirmation = openModal('清除快取？', `<div class="cache-dialog-content"><p>將清除${clearScope}。</p>` + sourceLabel + '<p class="cache-note">若此素材位於 NAS，其他工作站也會失去已清除的共享快取，下次開啟時可能需要重新轉檔。</p><p id="cacheActionStatus" role="status" hidden></p><p id="cacheActionError" class="cache-unavailable" role="alert" hidden></p></div>', [
-          { label: '確定清除', primary: true, id:'cacheClearConfirm', act: async () => {
+          { label: '確定清除', primary: true, enterDefault: true, id:'cacheClearConfirm', act: async () => {
             if (!confirmation.isCurrent() || clearing || cacheClearOperations.has(displayedSource)) return;
             if (!ownsSource()) {
               confirmation.close();

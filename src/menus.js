@@ -19,7 +19,7 @@ import { Project } from './project.js';
 import { addNotesFromCues } from './notes.js';
 import { requestSubtitleRemoval } from './subtitle-removal-guard.js';
 import { beginGeometryEdit } from './timeline-edit-transaction.js';
-import { emit } from './events.js';
+import { emit, on } from './events.js';
 import { AudioRouting } from './audio-routing.js';
 import { setManualPlaybackSpeed } from './keyboard.js';
 import { splitMenuLabel } from './menu-label.js';
@@ -39,11 +39,13 @@ import {
 
 /* ===== 右鍵選單 ===== */
 const ctx=$('ctxmenu');
+const ctxHome=ctx?.parentElement;
+let ctxHomeInert=false;
 let ctxReturnFocus=null,ctxSelection=null,ctxPreservesFocus=false,ctxActiveIndex=-1,ctxReturnAria=null,ctxItemSerial=0;
 let updateWaveMenu=null;
 function selectCtxItem(items,index){
   ctxActiveIndex=index;
-  items.forEach((item,i)=>{item.tabIndex=i===index?0:-1;item.classList.toggle('keyboard-active',ctxPreservesFocus&&i===index);});
+  items.forEach((item,i)=>item.classList.toggle('keyboard-active',ctxPreservesFocus&&i===index));
   if(ctxPreservesFocus) ctxReturnFocus?.setAttribute('aria-activedescendant',items[index].id);
   else items[index].focus({preventScroll:true});
 }
@@ -56,6 +58,11 @@ function hideCtx({restoreFocus=true}={}){
     if(value===null) previous.removeAttribute(name);else previous.setAttribute(name,value);
   }
   ctx.classList.remove('show'); ctx.innerHTML='';
+  if(ctx.dataset.ownerId){
+    delete ctx.dataset.ownerId;
+    ctx.inert=ctxHomeInert;
+    ctxHome.appendChild(ctx);
+  }
   if(was&&restoreFocus&&previous?.isConnected){
     previous.focus({preventScroll:true});
     if(selection?.input) previous.setSelectionRange?.(...selection.input);
@@ -93,6 +100,13 @@ function positionCtx(x,y){
 function showCtx(x,y,items,{preserveFocus=false}={}){
   if(ctx.classList.contains('show')) hideCtx();
   ctxReturnFocus=document.activeElement;
+  const owner=ctxReturnFocus?.closest('#modalBg.show, #settingsModal');
+  if(owner){
+    ctxHomeInert=ctx.inert;
+    owner.appendChild(ctx);
+    ctx.inert=false;
+    ctx.dataset.ownerId=owner.id;
+  }
   ctxPreservesFocus=preserveFocus;
   if(preserveFocus){
     const active=ctxReturnFocus,selection=window.getSelection();
@@ -106,20 +120,25 @@ function showCtx(x,y,items,{preserveFocus=false}={}){
   ctx.classList.add('show');
   positionCtx(x,y);
   ctx.tabIndex=-1;
-  const enabled=[...ctx.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')];
-  if(enabled.length) selectCtxItem(enabled,0);
-  else if(!preserveFocus) ctx.focus({preventScroll:true});
+  if(!preserveFocus) ctx.focus({preventScroll:true});
   window._ctxOpen=true;
   emit('mpv:sync'); // 定位完成後重算：選單若與影片重疊，讓 mpv 讓位（否則 mpv 為 OS 子視窗會蓋住選單）
   emit('render:videoSub');
 }
 if (typeof document !== 'undefined') {
+  on('contextmenu:dismiss',()=>{if(ctx?.classList.contains('show'))hideCtx({restoreFocus:false});});
+  document.addEventListener('focusin',e=>{
+    if(ctx?.classList.contains('show') && e.target!==ctxReturnFocus && !ctx.contains(e.target)) hideCtx({restoreFocus:false});
+  },true);
   document.addEventListener('mousedown',e=>{ if(e.button===2)return; if(ctx && !ctx.contains(e.target))hideCtx(); },true);
   document.addEventListener('keydown',e=>{
     if(!ctx?.classList.contains('show')||e.isComposing||e.keyCode===229) return;
-    if(e.target.closest?.('#modalBg.show, #settingsModal')){hideCtx({restoreFocus:false});return;}
-    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();hideCtx();return;}
-    if(e.key==='Tab'){e.stopPropagation();hideCtx();return;}
+    const modal=document.querySelector('dialog[data-confirmation-dialog][open]') || document.getElementById('settingsModal') || document.querySelector('#modalBg.show');
+    if(!ctxReturnFocus?.isConnected || (modal ? !modal.id || modal.id!==ctx.dataset.ownerId : ctx.dataset.ownerId)){
+      hideCtx({restoreFocus:false});return;
+    }
+    if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();hideCtx();return;}
+    if(e.key==='Tab'||e.key==='Enter'||e.key===' '){e.preventDefault();e.stopImmediatePropagation();return;}
     const items=[...ctx.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')];
     const index=ctxPreservesFocus?ctxActiveIndex:items.indexOf(document.activeElement);
     if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){
@@ -129,7 +148,6 @@ if (typeof document !== 'undefined') {
       selectCtxItem(items,next);
       return;
     }
-    if(e.key==='Enter'||e.key===' '){e.preventDefault();e.stopPropagation();(items[index]||items[0])?.click();return;}
     // 複製／貼上的游標仍屬於編輯器；開始輸入便結束選單，不還原過時的選取範圍。
     if(ctxPreservesFocus&&!ctx.contains(e.target)){hideCtx({restoreFocus:false});return;}
     e.stopPropagation();
@@ -752,7 +770,7 @@ export function showImageGeom(c){
     [{label:'符合視窗',act:()=>{ if(!current()) return; edit.preview(()=>fitClipToStage(c)); syncInputs(); emit('render:videoSub'); }},
      {label:'重設',act:()=>{ if(!current()) return; commit('重設大小與位置：'+(c.name||''),{scale:1,posX:0.5,posY:0.5}); }},
      {label:'取消',act:()=>session.close()},
-     {label:'套用',primary:true,act:()=>{
+     {label:'套用',primary:true,enterDefault:true,act:()=>{
         if(!current()) return;
         const v=(id,d)=>{ const n=+($(('ig'+id))?.value); return Number.isFinite(n)?n:d; };
         commit('大小與位置：'+(c.name||''),{
@@ -804,7 +822,7 @@ export function showClipFade(c){
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">淡入從透明漸顯、淡出漸隱到透明（露出下層／黑底），音訊同步淡變。<b>匯出時生效</b>。若此片段在上層視訊軌且與下層重疊，淡變即為<b>軌間溶接</b>。</div>`+
     `</div>`,
     [{label:'清除',act:()=>{ if(current() && setClipFade(c,0,0)) session.close({committed:true}); }},
-     {label:'套用',primary:true,act:()=>{
+     {label:'套用',primary:true,enterDefault:true,act:()=>{
         if(!current()) return;
         const vi = parseDurationInput($('cfInV').value);
         const vo = parseDurationInput($('cfOutV').value);
@@ -845,7 +863,7 @@ export function showClipSpeed(c){
     `<label><input id="clipSpeedReverse" type="checkbox" ${c.reverse?'checked':''}> 反轉影片</label>`+
     `<div style="color:var(--text-faint);font-size:12px;line-height:1.6;margin-top:8px">速度與持續時間連動，範圍 25–400%。變長時同軌後續片段會往右移。反轉影片時，未分離的原音同步反向播放；固定畫面仍不播放原音。</div></div>`,
     [{label:'取消',act:()=>session.close()},
-     {label:'套用',primary:true,act:async()=>{
+     {label:'套用',primary:true,enterDefault:true,act:async()=>{
        if(preparing||!session.isCurrent()||!owns()) return;
        const rate=Number($('clipSpeedPercent')?.value)/100;
        if(!Number.isFinite(rate)||rate<0.25||rate>4){ showToast('速度須介於 25% 至 400%'); return; }
@@ -888,7 +906,7 @@ export function showClipFreeze(c){
     `<div id="clipFreezeTime" style="margin-top:8px"></div>`+
     `<p style="color:var(--text-faint);font-size:12px">預設使用目前播放點對應的影格。整段保持此畫面，片段長度與位置保留；原音會靜音。可從右鍵選單解除固定。</p>`,
     [{label:'取消',act:()=>session.close()},
-     {label:'固定畫面',primary:true,act:async()=>{
+     {label:'固定畫面',primary:true,enterDefault:true,act:async()=>{
        if(preparing||!session.isCurrent()||!owns()) return;
        const index=Number($('clipFreezeFrame')?.value);
        if(!Number.isInteger(index)||index<1||index>maximum){showToast('請輸入來源範圍內的影格');return;}
@@ -930,7 +948,7 @@ export function showClipDuration(c){
     `可直接輸入時碼，或用上下方向鍵微調。起點不變，只調整這一段播多久。</div>`+
     `</div>`,
     [{label:'取消',act:()=>session.close()},
-     {label:'套用',primary:true,act:()=>{
+     {label:'套用',primary:true,enterDefault:true,act:()=>{
         if(!current()) return;
         const v = parseDurationInput($('cdVal').value);
         if(v===null || v<=0){ showToast('請輸入有效的持續時間'); return; }
@@ -959,7 +977,7 @@ export function showCrossfade(c){
     `<div style="color:var(--text-faint);font-size:12px;margin-top:8px">會把此片段移到<b>上一層視訊軌</b>並提前與前一段尾端重疊，兩段在重疊處淡出／淡入＝交叉溶接（匯出時合成）。</div>`+
     `</div>`,
     [{label:'取消',act:()=>session.close()},
-     {label:'建立溶接',primary:true,act:()=>{
+     {label:'建立溶接',primary:true,enterDefault:true,act:()=>{
          if(!current()) return;
          const T = parseDurationInput($('xfTV').value);
          if(T===null || T<=0){ showToast('請輸入有效的溶接時間'); return; }

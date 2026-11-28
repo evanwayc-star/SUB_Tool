@@ -159,12 +159,12 @@ it.each(['原目標', 'v1 原目標', '新目標', '原目錄移走後選新目�
         { canceled: false, filePath: ['新目標', '輸出衝突', '原目錄移走後選新目標'].includes(scenario) ? replacement :
           scenario === '移動後仍選舊實體目錄' ? path.join(`${oldDirectory}-moved`, 'original.mp4') : scenario === '來源別名' ? source : original };
     }),
-    showMessageBox: vi.fn(async (_window, options) => {
+    requestQueueConfirmation: vi.fn(async (_window, options) => {
       expect(options.detail).toBe(scenario === '來源別名' ? source : scenario === '移動後仍選舊實體目錄' ? path.join(`${oldDirectory}-moved`, 'original.mp4') : original);
       if (scenario === '確認時換檔') { fs.unlinkSync(original); fs.writeFileSync(original, 'changed during confirmation'); }
       if (scenario === '工作變更') queue.get(job.id).attempt = 99;
       if (scenario === '頁面導覽') sender.emit('did-start-navigation', {}, 'app://queue', false, true);
-      return { response: scenario === '取消覆寫' ? 1 : 0 };
+      return scenario !== '取消覆寫';
     }),
   };
   const mainSource = fs.readFileSync('electron/main.js', 'utf8');
@@ -180,7 +180,7 @@ it.each(['原目標', 'v1 原目標', '新目標', '原目錄移走後選新目�
     }),
   };
   vm.runInNewContext(mainSource.slice(expression.start, expression.end), { ipcMain: { handle: (_channel, handler) => { invoke = handler; } },
-    QueueManager: queue, queueWin: win, isRetryable: status => ['failed', 'stopped'].includes(status), dialog, path, AbortController,
+    QueueManager: queue, queueWin: win, requestQueueConfirmation:dialog.requestQueueConfirmation, isRetryable: status => ['failed', 'stopped'].includes(status), dialog, path, AbortController,
     expectedExportExtension, ExportLease:ipcLease, EXPORT_QUEUE_DIR: queueDir, SHARED_OUTPUT_LOCK: sharedLock });
   try {
     queue.restoreJobs(); queue.setPaused(false);
@@ -206,7 +206,7 @@ it.each(['原目標', 'v1 原目標', '新目標', '原目錄移走後選新目�
       await vi.waitFor(() => expect(queue.get(job.id).status).toBe('done'), { timeout: 10000 });
       expect(fs.readFileSync(['原目標','v1 原目標'].includes(scenario) ? original : replacement, 'utf8')).toBe('encoded delivery');
       if (scenario === '新目標') expect(fs.readFileSync(original, 'utf8')).toBe('original');
-      expect(dialog.showMessageBox).toHaveBeenCalledTimes(['原目標','v1 原目標'].includes(scenario) ? 1 : 0);
+      expect(dialog.requestQueueConfirmation).toHaveBeenCalledTimes(['原目標','v1 原目標'].includes(scenario) ? 1 : 0);
     } else {
       expect(result.status).toBe(['取消選檔', '取消覆寫'].includes(scenario) ? 'cancelled' : 'failed');
       if (scenario === '完全缺少目錄身分') {

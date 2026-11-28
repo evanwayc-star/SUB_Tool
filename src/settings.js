@@ -4,7 +4,7 @@
    【維護鐵律】本檔案已納入全專案終極防禦網。
    所有修改必須遵循專案的單向資料流與職責分離原則，嚴禁在此實作越權的 DOM 操作。
 ============================================================================== */
-import { $, sublist } from './dom.js';
+import { $, isTextEntry, sublist } from './dom.js';
 import { State, saveKeys, DESK, IS_DESKTOP } from './state.js';
 import { setStatus, showToast } from './ui.js';
 import { emit } from './events.js';
@@ -126,10 +126,6 @@ const actionCategories = [
 
 let tempKeymap = null;
 let activeSettingsClose = null;
-let lastSettingsOrigin = null;
-if (typeof document !== 'undefined') document.addEventListener('focusin', event => {
-  if (!event.target.closest?.('#settingsModal') && event.target !== document.body) lastSettingsOrigin = event.target;
-});
 
 function renderSettingsTable(tbody, isCurrent, onChange, onConflict) {
   tbody.innerHTML = '';
@@ -212,10 +208,14 @@ function renderSettingsTable(tbody, isCurrent, onChange, onConflict) {
         if (!isFixed) {
           input.addEventListener('keydown', (e) => {
             if (!isCurrent()) return;
-            // Tab 專供鍵盤導航，不能因巡覽設定表就改寫草稿。
-            if (e.key === 'Tab' || e.isComposing || e.keyCode === 229) return;
+            if (e.isComposing || e.keyCode === 229) return;
             e.preventDefault();
             e.stopPropagation();
+            if (e.key === 'Tab') return;
+            if ((e.key === 'Enter' || e.code === 'NumpadEnter') && !(e.shiftKey || e.ctrlKey || e.altKey || e.metaKey)) {
+              input.blur();
+              return;
+            }
           
           if (e.key === 'Escape') {
             input.blur();
@@ -273,15 +273,14 @@ function renderSettingsTable(tbody, isCurrent, onChange, onConflict) {
 export function showSettingsModal() {
   // Closing a previous instance also releases its document-level Escape listener.
   if (activeSettingsClose?.() === false) return;
+  emit('contextmenu:dismiss');
   const existing = document.getElementById('settingsModal');
   if (existing) existing.remove();
 
   tempKeymap = JSON.parse(JSON.stringify(State.keymap));
   let draftRevision = 0;
   let saving = false;
-  // 工具列的 action dispatcher 會先 blur 按鈕；保留其最後一次實際焦點。
-  const previousFocus = document.activeElement === document.body && lastSettingsOrigin?.isConnected
-    ? lastSettingsOrigin : document.activeElement;
+  const previousField = isTextEntry(document.activeElement) ? document.activeElement : null;
 
   const modal = document.createElement('div');
   modal.id = 'settingsModal';
@@ -293,7 +292,7 @@ export function showSettingsModal() {
         <div class="settings-search-controls"><input id="settingsSearch" type="search" placeholder="搜尋動作或按鍵，例如：播放、Ctrl+S" autocomplete="off" aria-controls="settingsTbody" aria-describedby="settingsResultCount"><button id="settingsSearchClear" class="btn" type="button" hidden>清除搜尋</button></div>
         <span id="settingsResultCount" role="status" aria-live="polite"></span>
       </div>
-      <p id="settingsKeyboardHelp" class="settings-keyboard-help">按 Tab 切換欄位，再按下要設定的按鍵。Delete／Backspace 清除，Escape 結束錄製；標示「固定」的項目無法修改。儲存後才生效。</p>
+      <p id="settingsKeyboardHelp" class="settings-keyboard-help">點選欄位後按下快捷鍵。Delete／Backspace 清除，Enter 或 Escape 結束錄製。「固定」項目無法修改。儲存後生效。</p>
       <div class="settings-table-container">
         <table class="settings-table">
           <thead>
@@ -315,7 +314,7 @@ export function showSettingsModal() {
         <button id="settingsImportBtn" class="btn" title="從 .json 檔載入快捷鍵設定（需按「儲存」才生效）">匯入設定</button></div>
         <div class="settings-save-actions">
         <button id="settingsCancelBtn" class="btn">取消</button>
-        <button id="settingsSaveBtn" class="btn primary">儲存</button></div>
+        <button id="settingsSaveBtn" class="btn primary" data-enter-default aria-keyshortcuts="Enter">儲存</button></div>
       </div>
       <input type="file" id="settingsImportFile" accept="application/json,.json" hidden>
     </div>
@@ -331,12 +330,13 @@ export function showSettingsModal() {
   const close = () => {
     // 已送出的儲存不能由關窗撤銷；等待結果才能丟棄草稿或開下一個視窗。
     if (saving) return false;
+    emit('contextmenu:dismiss');
     document.removeEventListener('keydown', onEsc, true);
     document.removeEventListener('focusin', containFocus, true);
     if (activeSettingsClose === close) activeSettingsClose = null;
     modal.remove();
     background.forEach(({element,inert})=>{element.inert=inert;});
-    if(previousFocus?.isConnected) previousFocus.focus({preventScroll:true});
+    if(previousField?.isConnected && isTextEntry(previousField)) previousField.focus({preventScroll:true});
     emit('mpv:sync');
     return true;
   };
@@ -365,18 +365,8 @@ export function showSettingsModal() {
     search.value='';filterRows();showError(message);
   });filterRows();};
   const dialog = modal.querySelector('[role="dialog"]');
-  const focusables = () => [...modal.querySelectorAll('button, input')]
-    .filter(element=>!element.disabled&&!element.closest('[hidden]')&&element.type!=='file'&&element.tabIndex!==-1);
-  const focusFirst = () => (focusables()[0]||dialog).focus({preventScroll:true});
-  const containFocus = event => { if(isCurrent()&&!modal.contains(event.target)) focusFirst(); };
+  const containFocus = event => { if(isCurrent()&&!modal.contains(event.target)) dialog.focus({preventScroll:true}); };
   document.addEventListener('focusin', containFocus, true);
-  modal.addEventListener('keydown',event=>{
-    if(event.key!=='Tab'||!isCurrent()) return;
-    const items=focusables(),first=items[0],last=items[items.length-1];
-    if(!items.length){event.preventDefault();dialog.focus();return;}
-    if(event.shiftKey&&(document.activeElement===first||!items.includes(document.activeElement))){event.preventDefault();last.focus();}
-    else if(!event.shiftKey&&(document.activeElement===last||!items.includes(document.activeElement))){event.preventDefault();first.focus();}
-  },true);
   const showError = message => {
     const error = modal.querySelector('#settingsError');
     error.textContent=message;error.hidden=!message;
@@ -479,13 +469,12 @@ export function showSettingsModal() {
     if (!isCurrent()) return;
     if (!saved) {
       showError('快捷鍵設定儲存失敗，請重試' + (error ? '：' + (error.message || error) : ''));
-      document.getElementById('settingsSaveBtn').focus();
       return;
     }
     State.keymap = keymap;
     close();
     setStatus('快捷鍵設定已儲存', 'ok');
   };
-  focusFirst();
+  dialog.focus({preventScroll:true});
 }
 

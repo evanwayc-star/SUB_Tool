@@ -66,7 +66,7 @@ it('覆蓋關閉時保留／裁切原生停用，滑鼠與 C 都不改草稿；�
   toggleSubMode();expect(State.overwriteKeep).toBe(!original);expect(State.overwriteMode).toBe(false);expect(button.disabled).toBe(true);
 });
 
-it.each(['player','subtitle'].flatMap(kind=>['貼上','取消'].map(action=>[kind,action])))('真正 %s 時碼的右鍵鍵盤%s保留 inline editor 與原游標，不先提交', async (kind,action) => {
+it.each(['player','subtitle'].flatMap(kind=>['貼上','取消'].map(action=>[kind,action])))('真正 %s 時碼的右鍵選單%s保留 inline editor 與原游標，不先提交', async (kind,action) => {
   await finishStatus();startup.resolve(null);await vi.advanceTimersByTimeAsync(100);
   State.fps=25;State.dropFrame=false;State.duration=20;
   const seek=vi.spyOn(Media,'seek').mockResolvedValue(true);
@@ -86,7 +86,12 @@ it.each(['player','subtitle'].flatMap(kind=>['貼上','取消'].map(action=>[kin
   input.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
   expect(document.activeElement).toBe(input);expect(input.isConnected).toBe(true);
   expect(seek).not.toHaveBeenCalled();
-  input.dispatchEvent(new KeyboardEvent('keydown',{key:action==='貼上'?'Enter':'Escape',bubbles:true,cancelable:true}));
+  input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  expect(input.value).toBe('1234');
+  if(action==='貼上'){
+    const paste=[...document.querySelectorAll('#ctxmenu [role="menuitem"]')].find(item=>item.textContent.includes('貼上'));
+    paste.click();
+  }else input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
   await Promise.resolve();await Promise.resolve();
   expect(input.isConnected).toBe(true);expect(document.activeElement).toBe(input);
   expect(input.value).toBe(action==='貼上'?'11:24':'1234');expect(seek).not.toHaveBeenCalled();
@@ -126,11 +131,12 @@ it.each([
   if (mode === 'note') { History.undo(); expect(State.notes[0].time).toBe(10); }
 });
 
-it.each(['searchInput', 'replaceInput'])('%s 舊式組字 Enter 不導覽或取代，一般 Enter 仍執行', async id => {
+it.each(['searchInput', 'replaceInput'])('%s 的組字 Enter 保留草稿，普通 Enter 只導覽下一筆', async id => {
   await finishStatus(); startup.resolve(null); await vi.advanceTimersByTimeAsync(100);
   const { History } = await import('../src/history.js');
   State.fps = 25; State.duration = 20;
   addCue(1, 2, '原文一', 0); addCue(3, 4, '原文二', 0); History.reset();
+  document.querySelector('[data-act="search-open"]').click();
   const search = document.getElementById('searchInput');
   search.value = '原文'; search.dispatchEvent(new Event('input', { bubbles: true }));
   const initialSelection = State.selectedId;
@@ -140,11 +146,9 @@ it.each(['searchInput', 'replaceInput'])('%s 舊式組字 Enter 不導覽或取�
   expect(State.cues.map(cue => cue.text)).toEqual(['原文一', '原文二']);
   expect(History.stack).toHaveLength(1);
   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-  if (id === 'searchInput') expect(State.selectedId).not.toBe(initialSelection);
-  else {
-    expect(State.cues.find(cue => cue.id === initialSelection).text).toBe('新文二');
-    expect(State.cues[0].text).toBe('原文一'); expect(History.stack).toHaveLength(2);
-  }
+  expect(State.selectedId).not.toBe(initialSelection);
+  expect(State.cues.map(cue => cue.text)).toEqual(['原文一', '原文二']);
+  expect(History.stack).toHaveLength(1);
 });
 
 it('字幕位移與時長欄只接受數字，方向由按鈕決定', async () => {
@@ -165,6 +169,10 @@ it.each([{ isComposing: true }, { keyCode: 229 }])('百分比欄組字 Enter 不
   const { History } = await import('../src/history.js');
   State.fps = 25; State.duration = 20;
   addCue(1, 2, '字幕', 0); History.reset();
+  document.querySelector('[data-act="shift-tc"]').click();
+  document.querySelector('.shift-tab[data-tab="dur"]').click();
+  const mode=document.getElementById('durAdjMode');
+  mode.value='pct';mode.dispatchEvent(new Event('change',{bubbles:true}));
   const input = document.getElementById('durAdjPctInput'); input.value = '200';
   const event = new KeyboardEvent('keydown', { key: 'Enter', ...composition, bubbles: true, cancelable: true });
   input.dispatchEvent(event);

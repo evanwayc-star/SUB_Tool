@@ -1,5 +1,5 @@
 import { State, IS_DESKTOP, DESK, setFps, snapFps, getFpsRevision, newTrack, syncTrackCount, newId, deselect } from './state.js';
-import { $ } from './dom.js';
+import { $, isTextEntry } from './dom.js';
 import { secToEncore, snapTimeToFrame, getExactFps, fmtClock } from './time.js';
 import { setStatus, showToast, openModal, closeModal } from './ui.js';
 import { History, recordHistory } from './history.js';
@@ -18,6 +18,7 @@ import { deliverySizeLabel, MP3_BITRATES, normalizeMp3Kbps, DELIVERY_FORMAT_OPTI
 import { createDeliveryList, deliveryResolution, projectTagFrom } from './delivery-list.js';
 import { deliveryEstimateDimensions } from '../shared/delivery-resolution.cjs';
 import { createDeliverySubmission, freezeExportSubmission, burnedSubtitleTrackNames, subtitleCuesForSubmission, exportSourceError, formatOverwriteConfirmation } from './delivery-submission.js';
+import { requestConfirmation } from './confirmation-dialog.js';
 import { escapeHTML, b64ToBytes, decodeText, readFile, pickFile } from './util.js';
 import { Media } from './media.js';
 import { measureSubtitleBackgroundLayouts } from './subtitle-background-layout.js';
@@ -51,7 +52,7 @@ function showFpsConvertDialog() {
     `</div>` +
     `<div id="fpsPreview" style="margin-top:14px;font-size:12px;color:var(--text-faint)"></div>`,
     [{
-      label: '轉換', primary: true, act: () => {
+      label: '轉換', primary: true, enterDefault: true, act: () => {
         if(!current()) return;
         const from = +$('fpsFrom').value, to = +$('fpsTo').value;
         if (from === to) { session.close(); return; }
@@ -186,7 +187,7 @@ function showExportDialog() {
       }
     },
     {
-      label: '匯出', primary: true, act: async () => {
+      label: '匯出', primary: true, enterDefault: true, act: async () => {
       if (!current()) return;
       const fmts = [...document.querySelectorAll('[data-fmt]')].filter(b => b.checked).map(b => b.dataset.fmt);
       const selectedTracks = showTrackChoices
@@ -313,7 +314,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       
       openModal('⚠️ 匯出警告：字幕潛在問題', html, [
         { label: '取消', act: closeModal },
-        { label: '繼續匯出', primary: true, act: () => {
+        { label: '繼續匯出', primary: true, enterDefault: true, act: () => {
           closeModal();
           if (ownsWorkspace()) showExportVideoDialog({ ...initialDraft, ownsWorkspace }, true);
         }}
@@ -504,7 +505,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     const c = $('evRowsContainer');
     if (!c) return;
     const active = c.contains(document.activeElement) ? document.activeElement : null;
-    const focusClass = active && [...active.classList].find(name => name.startsWith('ev-'));
+    const focusClass = isTextEntry(active) && [...active.classList].find(name => name.startsWith('ev-'));
     const focusIndex = active ? Number(active.dataset.idx) : -1;
     const selection = active?.tagName === 'INPUT' && active.type === 'text'
       ? [active.selectionStart, active.selectionEnd, active.selectionDirection] : null;
@@ -590,24 +591,22 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
       AudioRouting.openDeliveryOutputSettings(audioSpec, ({ saved, spec } = {}) => {
         if (!ownsWorkspace()) return;
         if (saved && spec) list.applyRow(idx, applyDeliveryAudioSpec(list.get(idx), spec));
-        void showExportVideoDialog({ deliverables: list.rows(), draft: data, ownsWorkspace, focusAudioRow: idx });
+        void showExportVideoDialog({ deliverables: list.rows(), draft: data, ownsWorkspace, scrollToRow: idx });
       }, { deliveryFormat });
     });
     if (focusClass) {
       const index = Math.min(focusIndex, list.count() - 1);
-      const target = c.querySelector(`.${focusClass}[data-idx="${index}"]`)
-        || (focusClass.startsWith('ev-custom-') ? c.querySelector(`.ev-res[data-idx="${index}"]`) : null)
-        || $('evAddRowBtn');
-      target.focus();
-      if (selection && target.tagName === 'INPUT' && target.type === 'text') target.setSelectionRange(...selection);
-    }
+      const target = c.querySelector(`.${focusClass}[data-idx="${index}"]`);
+      target?.focus();
+      if (selection && target?.type === 'text') target.setSelectionRange(...selection);
+    } else if (active) c.closest('.modal')?.focus({preventScroll:true});
   }
 
   const checkConflicts = () => submission.previewConflicts();
 
   const session = openModal('匯出影片', html, [
     { label: '取消', act: closeModal },
-    { label: '加入匯出序列', id: 'evSubmitBtn', primary: true, act: async () => {
+    { label: '加入匯出序列', id: 'evSubmitBtn', primary: true, enterDefault: true, act: async () => {
       const result = await submission.submit();
       if (session.isCurrent() && ownsWorkspace()) {
         if (result.status === 'invalid') showToast(result.reason);
@@ -628,7 +627,7 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     isCurrent: () => session.isCurrent() && ownsWorkspace(),
     subscribeInvalidation: listener => Project.onWorkspaceInvalidated(listener),
     desktop: DESK,
-    confirmOverwrite: paths => confirm(formatOverwriteConfirmation(paths)),
+    confirmOverwrite: paths => requestConfirmation('覆寫交付檔案', formatOverwriteConfirmation(paths), '覆寫檔案'),
     onChanged: ({ busy, warning, accepted }) => {
       const button = $('evSubmitBtn');
       if (button) {
@@ -653,15 +652,14 @@ async function showExportVideoDialog(initialDraft=null, skipValidation=false) {
     list.add(); updateRows(); checkConflicts();
     const newest = $('evRowsContainer')?.lastElementChild;
     if (typeof newest?.scrollIntoView === 'function') newest.scrollIntoView({ block: 'nearest' });
-    newest?.querySelector('.ev-format')?.focus();
   };
 
   setTimeout(() => {
     if (!session.isCurrent()) return;
     updateRows();
     checkConflicts();
-    if (Number.isInteger(initialDraft?.focusAudioRow)) {
-      document.querySelector(`.ev-audio-btn[data-idx="${initialDraft.focusAudioRow}"]`)?.focus();
+    if (Number.isInteger(initialDraft?.scrollToRow)) {
+      $('evRowsContainer')?.children[initialDraft.scrollToRow]?.scrollIntoView?.({block:'nearest'});
     }
   }, 20);
 }
@@ -729,7 +727,7 @@ function _askFpsModal(defaultValue = '29.97', detectedSubtoolAss = false, owns=(
     const session=openModal('選擇影格率 (FPS)',
       `<p style="margin:0 0 12px;font-size:13px;color:var(--text-faint)">${detectedSubtoolAss ? '已從 SUB Tool ASS 偵測原始影格率；可在此確認或改為其他值。' : '尚未載入影片，請先設定字幕的影格率。'}</p>` +
       `<label>FPS：<select id="importFpsSel" style="margin-left:6px">${opts}</select></label>`,
-      [{ label: '確定', primary: true, act: () => finish($('importFpsSel').value) },
+      [{ label: '確定', primary: true, enterDefault: true, act: () => finish($('importFpsSel').value) },
       { label: '取消', act: () => session.close() }],
       {onDismiss:cancel,onReplaced:cancel}
     );
@@ -791,7 +789,7 @@ export function _openImportModal(title, parsed, kind, owns=Project.captureWorksp
     styleControl + issueNotice +
     `<label style="display:block;padding-bottom:8px"><input type="checkbox" id="importAppend"> 附加（保留現有字幕）</label>`,
     [{
-      label: '匯入', primary: true, act: () => {
+      label: '匯入', primary: true, enterDefault: true, act: () => {
         if(!current()) return;
         if(draft && !draft.isCurrent()) { showToast('專案影格率已變更，請重新確認匯入'); return; }
         const selVal = $('importTkSel').value;

@@ -140,10 +140,11 @@ export function openRecognitionReview(kind) {
     <select id="recognitionReviewPosition" aria-label="字幕位置"><option value="">選擇位置…</option><option value="original">保留開始辨識時的位置</option>
     ${review.rebase ? '<option value="current">按目前來源位置重新對位</option>' : ''}</select></div>
     <label>顯示 <select id="recognitionReviewFilter"><option value="all">全部候選</option><option value="issues">待核對</option></select></label>
-    <div class="asr-diagnostic-actions"><button id="recognitionReviewBack" type="button">上一則</button><output id="recognitionReviewIndex"></output><button id="recognitionReviewNext" type="button">下一則</button></div>
-    <p><strong id="recognitionReviewReason"></strong>　<span id="recognitionReviewTime"></span></p>
-    <div class="asr-diagnostic-actions"><button type="button" id="recognitionReviewBefore">起點前一格</button><button type="button" id="recognitionReviewIn">定位起點</button><button type="button" id="recognitionReviewOut">定位末格</button><button type="button" id="recognitionReviewAfter">定位 Out 點</button><button type="button" id="recognitionReviewPlay">播放這句</button></div>
-    <label>字幕文字<textarea id="recognitionReviewText" rows="3"></textarea></label><details><summary>原始文字、時間依據與專案詞</summary><p id="recognitionReviewOriginal"></p><p id="recognitionReviewEvidence"></p><p id="recognitionReviewWords"></p></details>
+    <div class="review-paging"><button id="recognitionReviewBack" type="button">上一則</button><output id="recognitionReviewIndex"></output><button id="recognitionReviewNext" type="button">下一則</button></div>
+    <p class="review-timing"><strong id="recognitionReviewReason"></strong><span id="recognitionReviewTime"></span></p>
+    <label>字幕文字<textarea id="recognitionReviewText" rows="3" dir="auto"></textarea></label>
+    <div class="review-transport"><button type="button" id="recognitionReviewBefore">起點前一格</button><button type="button" id="recognitionReviewIn">定位起點</button><button type="button" id="recognitionReviewOut">定位末格</button><button type="button" id="recognitionReviewAfter">定位 Out 點</button><button type="button" id="recognitionReviewPlay">播放這句</button></div>
+    <details><summary>原始文字、時間依據與專案詞</summary><p id="recognitionReviewOriginal" dir="auto"></p><p id="recognitionReviewEvidence"></p><p id="recognitionReviewWords"></p></details>
     <details hidden><summary>同時段的${kind==='speech'?'畫面對白':'語音／文本匹配'}</summary><p id="recognitionReviewCompare"></p></details>
     <details hidden><summary>本次辨識用量</summary><p id="recognitionReviewUsage"></p></details>
     <button type="button" id="recognitionReviewRerun">僅重跑這段</button><div id="recognitionReviewSuggestion" hidden><p id="recognitionReviewSuggestedText"></p><button type="button" id="recognitionReviewUseSuggestion">採用這次建議</button></div>
@@ -155,7 +156,7 @@ export function openRecognitionReview(kind) {
     { label:'稍後複核', act:()=>modal.close() },
     { label:'捨棄候選', act:()=>review.forget() },
     ...(review.retry ? [{ label:'重設整段辨識', act:()=>{ review.forget();review.retry(); } }] : []),
-    { label:'加入新字幕軌', primary:true, act:apply },
+    { label:'加入新字幕軌', primary:true,enterDefault:true, act:apply },
   ], { width:'600px', keepVideo:true, onDismiss:close, onReplaced:close });
   review.dismiss=()=>{ if(modal.isCurrent()){close();modal.close({committed:true});} };
   if (!field('Text')) return true;

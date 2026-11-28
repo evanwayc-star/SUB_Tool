@@ -14,4 +14,19 @@ const tlTracks= typeof document !== 'undefined' ? $('tlTracks') : null;
 const rulerCv = typeof document !== 'undefined' ? $('rulerCanvas') : null;
 const sublist = typeof document !== 'undefined' ? $('sublist') : null;
 const imageLayer = typeof document !== 'undefined' ? $('imageLayer') : null;
+export function isTextEntry(element) {
+  if (!element || element.matches?.(':disabled, [readonly]')) return false;
+  if (element.tagName === 'TEXTAREA') return true;
+  if (element.tagName === 'INPUT') {
+    return ['text','search','url','tel','email','password','number','date','datetime-local','month','time','week'].includes(element.type);
+  }
+  if (element.isContentEditable || element.contentEditable === 'true' || element.contentEditable === 'plaintext-only') return true;
+  const editable = element.closest?.('[contenteditable]');
+  return !!editable && ['','true','plaintext-only'].includes(editable.getAttribute('contenteditable').toLowerCase());
+}
+export function setEnterDefault(button, enabled) {
+  button.toggleAttribute('data-enter-default', enabled);
+  if (enabled) button.setAttribute('aria-keyshortcuts', 'Enter');
+  else button.removeAttribute('aria-keyshortcuts');
+}
 export { $, video, tlScroll, tlLayer, tlTracks, rulerCv, sublist, imageLayer };

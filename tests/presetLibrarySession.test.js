@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { installDialogMethods } from './fixtures/native-dialog.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -31,7 +32,6 @@ beforeEach(async () => {
   api = { importDirectory:vi.fn(()=>directoryRead.promise), configLoad:async()=>({subPresets:[]}), configSave:vi.fn() };
   state = { tracks:[{}], cues:[], presetEdit:null };
   vi.doMock('../src/state.js', () => ({ State:state, DESK:api, IS_DESKTOP:true }));
-  vi.doMock('../src/dom.js', () => ({ $:id=>document.getElementById(id) }));
   vi.doMock('../src/media.js', () => ({ Media:{ mpvMode:false } }));
   vi.doMock('../src/media-player-adapter.js', () => ({ getNativePreviewRuntime:()=>({}) }));
   vi.doMock('../src/style-panel-controller.js', () => ({ StylePanelController:{
@@ -118,11 +118,14 @@ describe('常用樣式 module 的工作歸屬', () => {
     const original=[{name:'原名稱',group:'A',style:{fontSize:30}}];
     styles.savePresets(original);
     window.subtool = {configSave:vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true)};
-    vi.stubGlobal('confirm',()=>true);
+    installDialogMethods();
     click('#tsPresetMgr');
     if(action==='rename') { click('[data-pre-ren]'); document.getElementById('__presetNameRen').value='新名稱'; }
     if(action==='folder') { click('[data-pre-ren-grp]'); document.getElementById('__presetFolderRen').value='B'; }
-    const submit=()=>click(action==='delete' ? '[data-pre-del]' : action==='delete-folder' ? '[data-pre-del-grp]' : '#modalFoot .primary');
+    const submit=()=>{
+      click(action==='delete' ? '[data-pre-del]' : action==='delete-folder' ? '[data-pre-del-grp]' : '#modalFoot .primary');
+      if(action==='delete-folder') click('dialog [data-approve]');
+    };
     submit();
     await vi.waitFor(()=>expect(document.getElementById('toast').textContent).toContain('儲存失敗'));
     expect(styles.getPresets()).toEqual(original);
@@ -132,6 +135,23 @@ describe('常用樣式 module 的工作歸屬', () => {
     if(action==='rename') expect(styles.getPresets()[0].name).toBe('新名稱');
     if(action==='folder') expect(styles.getPresets()[0].group).toBe('B');
     if(action.startsWith('delete')) expect(styles.getPresets()).toEqual([]);
+  });
+
+  it('刪除資料夾確認期間切換視窗或資料來源，舊按鈕無法刪掉樣式', async () => {
+    installDialogMethods();
+    const original=[{name:'保持',group:'A',style:{fontSize:30}}];
+    await styles.savePresets(original);
+    click('#tsPresetMgr'); click('[data-pre-del-grp]');
+    const stale=document.querySelector('dialog[open] [data-approve]');
+    ui.openModal('另一個視窗','',[]);
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    stale.click(); await Promise.resolve();
+    expect(styles.getPresets()).toEqual(original);
+    click('#tsPresetMgr'); click('[data-pre-del-grp]');
+    const next=[...original,{name:'較新的樣式',group:'A',style:{fontSize:40}}];
+    await styles.savePresets(next);
+    click('dialog [data-approve]'); await Promise.resolve();
+    expect(styles.getPresets()).toEqual(next);
   });
 
   it('舊刪除失敗後已重開的管理清單同步還原索引，不誤套用別筆樣式', async () => {

@@ -236,6 +236,8 @@ it.each(['加入','捨棄'])('前段結果可稍後決定，從其他片段再�
   expect(recognizeClipText.mock.lastCall[1].signal.reason.keepScreenTextResults).toBe(true);
   finish({ count:3, commitPartial });
   await vi.waitFor(() => expect(element('ocrKeepPartial').hidden).toBe(false));
+  expect(element('ocrKeepPartial').getAttribute('aria-keyshortcuts')).toBe('Enter');
+  expect(element('modalFoot').querySelectorAll('[data-enter-default]')).toHaveLength(1);
   expect(element('ocrStatus').textContent).toContain('3 則');
   expect(element('ocrCancel').hidden).toBe(true);
   const staleKeep = element('ocrKeepPartial');

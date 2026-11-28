@@ -90,8 +90,19 @@ export function openHardLimiterDialog(audioSource) {
         .hl-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
         .hl-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
         .hl-row:last-child { margin-bottom: 0; }
-        .hl-title { font-size: 11px; font-weight: 700; color: #a1a1aa; letter-spacing: 0.05em; text-transform: uppercase; }
-        .hl-label { font-size: 12px; color: #a1a1aa; flex: 0 0 135px; }
+        .hl-title { font-size: 12px; font-weight: 700; color: var(--text-dim); }
+        .hl-label { font-size: 13px; color: var(--text-dim); flex: 0 0 135px; }
+        .hl-status-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+        #hlStatusBadge { flex:none; white-space:nowrap; }
+        .hl-metrics { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px; }
+        .hl-metrics>div { background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px;text-align:center; }
+        .hl-metric-label { color:var(--text-dim);font-size:12px;margin-bottom:2px; }
+        .hl-peak-mode { display:flex;align-items:center;flex-wrap:wrap;gap:4px 14px; }
+        @media(max-width:500px){
+          .hl-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+          .hl-row:has(.hl-ctrl),.hl-row:has(.hl-peak-mode) { display:grid;gap:4px; }
+          .hl-peak-mode .hl-chk-label { min-height:28px; }
+        }
         .hl-ctrl { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
         .hl-slider { --hl-progress: 0%; -webkit-appearance: none; appearance: none; flex: 1; min-width: 0; cursor: pointer; height: 24px; margin: 0; padding: 0; border: 0;
           background: linear-gradient(to right, #3b82f6 0 var(--hl-progress), #3f3f46 var(--hl-progress) 100%) center / calc(100% - 14px) 4px no-repeat; }
@@ -112,7 +123,7 @@ export function openHardLimiterDialog(audioSource) {
 
       <!-- 濾鏡當前狀態指示區（醒目膠囊） -->
       <div class="hl-card" id="hlStatusBanner" style="background:${hasApplied ? 'rgba(34,197,94,0.08)' : 'rgba(255,255,255,0.03)'};border-color:${hasApplied ? 'rgba(34,197,94,0.35)' : 'rgba(255,255,255,0.08)'};">
-        <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div class="hl-status-row">
           <div style="display:flex;align-items:center;gap:8px;">
             <span id="hlStatusIcon" style="font-size:16px;">${hasApplied ? '🟢' : '⚪'}</span>
             <div>
@@ -137,7 +148,7 @@ export function openHardLimiterDialog(audioSource) {
             <input type="checkbox" id="hlToggleEnable" ${isFilterEnabled ? 'checked' : ''}>
             開啟音訊平衡化濾鏡
           </label>
-          <span style="font-size:11px;color:#71717a;">未啟用時還原原音</span>
+          <span style="font-size:12px;color:var(--text-dim);">未啟用時還原原音</span>
         </div>
         <div class="hl-row">
           <span class="hl-title">預設集：</span>
@@ -163,27 +174,27 @@ export function openHardLimiterDialog(audioSource) {
           </div>
         </div>
 
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:6px;">
-          <div style="background:#09090b;border:1px solid #27272a;border-radius:6px;padding:6px 2px;text-align:center;">
-            <div style="font-size:10px;color:#71717a;margin-bottom:2px;">最大聲量</div>
+        <div class="hl-metrics">
+          <div>
+            <div class="hl-metric-label">最大聲量</div>
             <div id="hlAnalyzedMax" style="font-size:13px;font-weight:700;color:#f87171;font-family:monospace;">
               ${initialAnalysis && initialAnalysis.maxDb > -90 ? initialAnalysis.maxDb + ' dB' : '-- dB'}
             </div>
           </div>
-          <div style="background:#09090b;border:1px solid #27272a;border-radius:6px;padding:6px 2px;text-align:center;">
-            <div style="font-size:10px;color:#71717a;margin-bottom:2px;">平均聲量</div>
+          <div>
+            <div class="hl-metric-label">平均聲量</div>
             <div id="hlAnalyzedMean" style="font-size:13px;font-weight:700;color:#38bdf8;font-family:monospace;">
               ${initialAnalysis && initialAnalysis.meanDb > -90 ? initialAnalysis.meanDb + ' dB' : '-- dB'}
             </div>
           </div>
-          <div style="background:#09090b;border:1px solid #27272a;border-radius:6px;padding:6px 2px;text-align:center;">
-            <div style="font-size:10px;color:#71717a;margin-bottom:2px;">最小聲量</div>
+          <div>
+            <div class="hl-metric-label">最小聲量</div>
             <div id="hlAnalyzedMin" style="font-size:13px;font-weight:700;color:#34d399;font-family:monospace;">
               ${initialAnalysis && initialAnalysis.minDb > -90 ? initialAnalysis.minDb + ' dB' : '-- dB'}
             </div>
           </div>
-          <div style="background:#09090b;border:1px solid #27272a;border-radius:6px;padding:6px 2px;text-align:center;">
-            <div style="font-size:10px;color:#71717a;margin-bottom:2px;">動態範圍</div>
+          <div>
+            <div class="hl-metric-label">動態範圍</div>
             <div id="hlAnalyzedDR" style="font-size:13px;font-weight:700;color:#c084fc;font-family:monospace;">
               ${initialAnalysis ? initialAnalysis.dynamicRangeDb + ' dB' : '-- dB'}
             </div>
@@ -196,7 +207,7 @@ export function openHardLimiterDialog(audioSource) {
       <div class="hl-card">
         <div class="hl-row" style="margin-bottom:10px;">
           <span class="hl-title">聲音範圍與目標</span>
-          <div style="display:flex;gap:14px;font-size:11px;">
+          <div class="hl-peak-mode">
             <label class="hl-chk-label">
               <input type="radio" name="hlPeakMode" id="hlTruePeakRadio" value="true_peak" ${currentOptions.isTruePeak ? 'checked' : ''}> 真實峰值 (ITU 1770)
             </label>
@@ -276,7 +287,7 @@ export function openHardLimiterDialog(audioSource) {
 
   buttons.push({
     label: '套用',
-    primary: true,
+    primary: true, enterDefault: true,
     act: () => {
       if (!session.isCurrent()) return;
       // Enter 不會先觸發數字欄位的 change；提交前先同步仍在編輯的值。
@@ -289,7 +300,7 @@ export function openHardLimiterDialog(audioSource) {
     },
   });
 
-  const session = openModal(`音訊效果 — 強限制器／平衡化 (ITU 1770) — ${sourceName}`, html, buttons, {
+  const session = openModal(`音訊效果 · ${sourceName} — 強限制器／平衡化 (ITU 1770)`, html, buttons, {
     width: '560px', onDismiss:leavePanel, onReplaced:leavePanel,
   });
   const analysisPanel = document.getElementById('hlAnalysisStatus')?.closest('.hard-limiter-panel');

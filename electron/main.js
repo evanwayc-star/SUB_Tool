@@ -36,7 +36,8 @@ const { fileCommitCoordinator } = require('./file-commit-coordinator');
 const { createScreenshotOutput } = require('./screenshot-output');
 
 const { createIpcGuards, expectedExportExtension, mergeRendererConfig } = require('./ipc-guards');
-const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput, isRetryable } = require('./export-queue');
+const { createExportQueue, createExportAdmission, JOB_STATUS, reservesOutput, isRetryable, isLiveWork } = require('./export-queue');
+const { requestQueueConfirmation } = require('./queue-confirmation');
 const { createMpvHost } = require('./mpv-host');
 const { createMediaIntakeRuntime, createMediaIngestCoordinator, createSourceWaveformCoordinator, sourceAudioClockFilter } = require('./media-intake-runtime');
 const { createCompareWindow } = require('./compare-window');
@@ -1075,17 +1076,15 @@ function openQueueWindow() {
     if (liveCount === 0) return;
     e.preventDefault();
     const win = queueWin;
-    dialog.showMessageBox(win, {
-      type: 'warning',
-      buttons: ['繼續轉檔', '中斷並關閉'],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
+    const attempts = new Map(QueueManager.jobs().filter(job => isLiveWork(job.status)).map(job => [job.id, job.attempt]));
+    requestQueueConfirmation(win, {
+      cancel:'繼續轉檔', accept:'中斷並關閉',
       title: '仍有匯出工作進行中',
       message: `還有 ${liveCount} 個匯出工作正在轉檔`,
       detail: '這是最後一個視窗，關閉它會結束程式並中斷轉檔，已寫出的半成品會被清除。\n確定要關閉嗎？',
-    }).then(({ response }) => {
-      if (response !== 1) return; // 預設與 Esc 都落在「繼續轉檔」
+    }).then(approved => {
+      if (!approved || queueWin !== win || win.isDestroyed() || !queueWindowCloseEndsApp()) return;
+      if (QueueManager.jobs().some(job => isLiveWork(job.status) && (!attempts.has(job.id) || attempts.get(job.id) !== job.attempt))) return;
       _allowQueueWindowClose = true;
       try { if (win && !win.isDestroyed()) win.close(); } finally { _allowQueueWindowClose = false; }
     }).catch(error => {
@@ -1243,10 +1242,10 @@ ipcMain.handle('queue:retryWithOutputConfirmation', async (e, jobId) => {
     const evidence = await ExportLease.captureDestinationEvidenceAsync(ExportLease.captureOutputAuthority(target, root), {signal:confirmationAbort.signal});
     if (!owns()) return fail('工作或佇列視窗已變更，本次選擇未套用');
     if (evidence.destinationEvidence.identity !== null) {
-      const answer = await dialog.showMessageBox(win, { type: 'warning', title: '確認覆寫舊交付的輸出',
+      const approved = await requestQueueConfirmation(win, { title: '確認覆寫舊交付的輸出',
         message: '此舊交付缺少原始覆寫確認。是否覆寫目前選擇的檔案？',
-        detail: target, buttons: ['覆寫並重試', '取消'], defaultId: 1, cancelId: 1, noLink: true });
-      if (answer.response !== 0) return { status: 'cancelled', message: '已取消覆寫，原工作與字幕快照仍保留' };
+        detail:target, accept:'覆寫並重試', cancel:'取消' }, confirmationAbort.signal);
+      if (!approved) return { status: 'cancelled', message: '已取消覆寫，原工作與字幕快照仍保留' };
     }
     if (!owns()) return fail('工作或佇列視窗已變更，本次確認未套用');
     let oldDirectoryUnavailable = false;

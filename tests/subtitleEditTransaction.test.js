@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -79,6 +79,10 @@ beforeAll(async () => {
   const guard = ensureProjectSaved();
   document.querySelector('#modalFoot button:last-child').click();
   await guard;
+});
+
+afterEach(async () => {
+  if (document.getElementById('modalBg')?.classList.contains('show')) (await import('../src/ui.js')).closeModal();
 });
 
 beforeEach(() => {

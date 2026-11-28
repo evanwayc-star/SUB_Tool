@@ -117,15 +117,18 @@ it('二倍速片段的手選倍率獨立顯示，JKL 穿梭停止後一般播放
   }
 });
 
-it('其他區域的聚焦按鈕保留 Enter 原生啟用', async () => {
+it('Tab 及 Shift+Tab 保持焦點，Enter 不會啟用工作區按鈕或舊播放綁定', async () => {
   const button = document.getElementById('playBtn');
-  const click = vi.fn(); button.addEventListener('click', click, {once:true}); button.focus();
-  const event = key(button, 'Enter');
+  button.focus();
+  State.keymap.toggle_play_pause = [{key:'enter'}];
+  for (const shiftKey of [false, true]) {
+    expect(key(button, 'Tab', {shiftKey}).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(button);
+  }
+  expect(key(button, 'Enter').defaultPrevented).toBe(true);
+  expect(key(document.body, 'Enter', {code:'NumpadEnter'}).defaultPrevented).toBe(true);
   await Promise.resolve();
-  expect(event.defaultPrevented).toBe(false);
   expect(Media.play).not.toHaveBeenCalled();
-  // jsdom 不執行瀏覽器的原生鍵盤 click；確認它沒有被 keydown 取消後再模擬。
-  button.click(); expect(click).toHaveBeenCalledOnce();
 });
 
 it.each([
@@ -175,7 +178,7 @@ it('滑鼠點擊浮動面板按鈕先釋放焦點，按鈕重建後 Space 不會
   expect(document.activeElement).toBe(document.body);
   key(document.activeElement, ' '); await vi.runOnlyPendingTimersAsync();
   expect(Media.play).toHaveBeenCalledOnce();
-  // Tab 導覽或重繪接回的新按鈕也不能讓 Space 變成靜音。
+  // 重繪接回的新按鈕也不能讓 Space 變成靜音。
   Media.play.mockClear(); Media.playing = false;
   wrap.firstElementChild.focus();
   expect(key(document.activeElement, ' ').defaultPrevented).toBe(true);
@@ -186,19 +189,40 @@ it('滑鼠點擊浮動面板按鈕先釋放焦點，按鈕重建後 Space 不會
 it('按鈕上的播放仍遵守自訂綁定，不硬寫死 Space', async () => {
   const button = document.getElementById('playBtn'); button.focus();
   State.keymap.toggle_play_pause = [{key:'f8'}];
-  expect(key(button, ' ').defaultPrevented).toBe(false);
+  expect(key(button, ' ').defaultPrevented).toBe(true);
   await Promise.resolve(); expect(Media.play).not.toHaveBeenCalled();
   expect(key(button, 'F8').defaultPrevented).toBe(true);
   await Promise.resolve(); expect(Media.play).toHaveBeenCalledOnce();
 });
 
-it('滑鼠操作真正對話框按鈕保留焦點，Space 不穿透播放', async () => {
+it('滑鼠操作對話框按鈕後回到視窗，Space 不穿透播放', async () => {
   UI.openModal('確認', '<button id="dialogAction">確認</button>');
   const button = document.getElementById('dialogAction'); button.focus();
   button.dispatchEvent(new MouseEvent('click', {bubbles:true,detail:1}));
-  expect(document.activeElement).toBe(button);
-  expect(key(button, ' ').defaultPrevented).toBe(false);
+  expect(document.activeElement).toBe(button.closest('[role="dialog"]'));
+  expect(key(button, ' ').defaultPrevented).toBe(true);
   await Promise.resolve(); expect(Media.play).not.toHaveBeenCalled();
+});
+
+it('Enter 只確認最上層目前可用的動作，長按不會穿透至下一次確認', () => {
+  const apply = vi.fn(), cancel = vi.fn();
+  UI.openModal('第一步', '', [
+    {label:'取消',act:cancel},
+    {label:'繼續',enterDefault:true,act:()=>UI.openModal('第二步','',[
+      {label:'先前的動作',hidden:true,enterDefault:true,act:cancel},
+      {label:'確認',enterDefault:true,act:apply},
+    ])},
+  ]);
+  const firstCancel = document.querySelector('#modalFoot button');
+  firstCancel.focus();
+  key(firstCancel, 'Enter');
+  expect(document.getElementById('modalTitle').textContent).toBe('第二步');
+  key(document.activeElement, 'Enter', {repeat:true});
+  key(document.activeElement, ' ');
+  expect(apply).not.toHaveBeenCalled();
+  key(document.activeElement, 'Enter', {code:'NumpadEnter'});
+  expect(apply).toHaveBeenCalledOnce();
+  expect(cancel).not.toHaveBeenCalled();
 });
 
 it.each([['exp-dialog',false],['exp-dialog',true],['exp-video',false],['exp-video',true]])('滑鼠開啟 %s 並結束對話框（committed=%s）後，Space 播放而不再次啟用按鈕', async (action,committed) => {
@@ -217,7 +241,7 @@ it.each([['exp-dialog',false],['exp-dialog',true],['exp-video',false],['exp-vide
   expect(Media.play).toHaveBeenCalledOnce();
 });
 
-it.each([' ', 'Enter'])('上方操作按鈕不留焦點，%s 交回工作區', async value => {
+it.each([' ', 'Enter'])('上方操作按鈕不留焦點，僅 Space 可播放（%s）', async value => {
   const buttons = [...document.querySelectorAll('.menubar button')];
   expect(buttons.length).toBeGreaterThan(0);
   for (const button of buttons) {
@@ -231,7 +255,7 @@ it.each([' ', 'Enter'])('上方操作按鈕不留焦點，%s 交回工作區', a
   button.focus(); expect(document.activeElement).toBe(document.body);
   const event = key(document.activeElement, value); await Promise.resolve();
   expect(event.defaultPrevented).toBe(true);
-  expect(Media.play).toHaveBeenCalledOnce();
+  expect(Media.play).toHaveBeenCalledTimes(value === ' ' ? 1 : 0);
 });
 
 it('其他區域的滑鼠按鈕不繞過對話框、IME 或文字編輯的快捷鍵圍籬', async () => {
@@ -245,6 +269,24 @@ it('其他區域的滑鼠按鈕不繞過對話框、IME 或文字編輯的快捷
   await Promise.resolve(); expect(Media.play).not.toHaveBeenCalled();
 });
 
+it('調時面板的百分比套用可從模式選單與標題按 Enter，切換模式後立即失效',()=>{
+  const panel=document.getElementById('shiftPanel');
+  const page=document.getElementById('shiftPageDur'), row=document.getElementById('durAdjPctRow');
+  const mode=document.getElementById('durAdjMode'), apply=row.querySelector('button');
+  UI.togglePanel(panel.id);
+  const handler=vi.fn(event=>event.stopPropagation());
+  apply.addEventListener('click',handler);
+  try{
+    page.style.display='';row.style.display='';
+    key(mode,'Enter');key(panel,'Enter');key(panel,'Enter',{repeat:true});
+    row.style.display='none';key(mode,'Enter');
+    expect(handler).toHaveBeenCalledTimes(2);
+  }finally{
+    page.style.display='none';row.style.display='none';
+    apply.removeEventListener('click',handler);UI.closePanel(panel.id);
+  }
+});
+
 it('工作區仍可用 Space 播放，已被局部控制處理的事件不再播放', async () => {
   document.activeElement?.blur();
   key(document.body, ' '); await Promise.resolve();
@@ -255,22 +297,27 @@ it('工作區仍可用 Space 播放，已被局部控制處理的事件不再播
   expect(Media.play).not.toHaveBeenCalled();
 });
 
-it('選單方向鍵略過停用項目，Enter 執行目前項目並還原焦點', () => {
+it('右鍵選單沒有預選項目；方向鍵可瀏覽，Enter 與空白都不會執行', () => {
   const origin = document.getElementById('playBtn'); origin.focus();
   const first = vi.fn(), last = vi.fn();
   Menus.showCtx(20, 20, [{label:'一',act:first},{label:'不可用'},{sep:true},{label:'二',act:last}]);
   const items = [...document.querySelectorAll('#ctxmenu [role="menuitem"]')];
-  expect(document.activeElement).toBe(items[0]);
+  const menu = document.getElementById('ctxmenu');
+  expect(document.activeElement).toBe(menu);
+  expect(key(menu, 'Enter').defaultPrevented).toBe(true);
+  key(menu, 'ArrowDown'); expect(document.activeElement).toBe(items[0]);
   key(items[0], 'ArrowDown'); expect(document.activeElement).toBe(items[2]);
   key(items[2], 'Home'); expect(document.activeElement).toBe(items[0]);
   key(items[0], 'End'); expect(document.activeElement).toBe(items[2]);
-  key(items[2], 'Enter');
+  for (const value of ['Enter',' ']) expect(key(items[2], value).defaultPrevented).toBe(true);
+  expect(last).not.toHaveBeenCalled(); expect(first).not.toHaveBeenCalled();
+  items[2].click();
   expect(last).toHaveBeenCalledOnce(); expect(first).not.toHaveBeenCalled();
   expect(document.getElementById('ctxmenu').classList.contains('show')).toBe(false);
   expect(document.activeElement).toBe(origin); expect(Media.play).not.toHaveBeenCalled();
 });
 
-it('Escape 只關閉選單，不清除字幕選取；Tab 關閉選單後可繼續導航', () => {
+it('Escape 只關閉選單；Tab 及 Shift+Tab 保持原位', () => {
   State.cues = [{id:'cue',start:0,end:1,text:'保留',track:0}];
   setSelection({kind:'sub',ids:['cue'],primary:'cue'});
   const origin = document.getElementById('playBtn'); origin.focus();
@@ -280,9 +327,12 @@ it('Escape 只關閉選單，不清除字幕選取；Tab 關閉選單後可繼�
   expect(document.getElementById('ctxmenu').classList.contains('show')).toBe(false);
   expect(State.selectedId).toBe('cue'); expect(document.activeElement).toBe(origin);
   Menus.showCtx(20, 20, [{label:'編輯',act:vi.fn()}]);
-  const tab = key(document.activeElement, 'Tab');
-  expect(tab.defaultPrevented).toBe(false);
-  expect(document.getElementById('ctxmenu').classList.contains('show')).toBe(false);
+  const menu = document.getElementById('ctxmenu');
+  for (const shiftKey of [false,true]) {
+    expect(key(menu, 'Tab', {shiftKey}).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(menu);
+    expect(menu.classList.contains('show')).toBe(true);
+  }
 });
 
 it('輸入框右鍵保持游標；鍵盤進入選單後 Escape 還原原選取', () => {
@@ -294,4 +344,30 @@ it('輸入框右鍵保持游標；鍵盤進入選單後 Escape 還原原選取',
   key(document.activeElement, 'Escape');
   expect(document.activeElement).toBe(input); expect(input.selectionStart).toBe(1); expect(input.selectionEnd).toBe(4);
   expect(input.hasAttribute('aria-activedescendant')).toBe(false);expect(input.hasAttribute('aria-controls')).toBe(false);
+});
+
+it('對話框內的時碼右鍵選單接住 Enter 與 Escape，換窗同步移除舊選單', async () => {
+  const { setupTimecodeInput } = await import('../src/tcparse.js');
+  const menu = document.getElementById('ctxmenu'), home = menu.parentElement, apply = vi.fn();
+  const bg = document.getElementById('modalBg');
+  UI.openModal('修改持續時間', '<input id="testDuration" value="00:00:01:00">', [
+    { label:'套用', enterDefault:true, act:apply }
+  ]);
+  const input = document.getElementById('testDuration');
+  setupTimecodeInput(input); input.focus(); input.setSelectionRange(3,5);
+  const open = () => input.dispatchEvent(new MouseEvent('contextmenu', {bubbles:true,cancelable:true}));
+  open();
+  expect(menu.dataset.ownerId).toBe('modalBg');
+  expect(menu.parentElement).toBe(bg);
+  for (const value of ['Tab','Enter',' ']) expect(key(input,value).defaultPrevented).toBe(true);
+  expect(apply).not.toHaveBeenCalled();
+  key(input,'Escape');
+  expect(bg.classList.contains('show')).toBe(true);
+  expect(menu.parentElement).toBe(home);
+  expect(input.selectionStart).toBe(3); expect(input.selectionEnd).toBe(5);
+  open(); UI.openModal('下一步', '<p>校對結果</p>');
+  expect(menu.classList.contains('show')).toBe(false);
+  expect(menu.parentElement).toBe(home);
+  expect(menu.hasAttribute('data-owner-id')).toBe(false);
+  expect(apply).not.toHaveBeenCalled();
 });

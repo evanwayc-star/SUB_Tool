@@ -16,7 +16,7 @@
   <div class="app" id="app">
 
     <!-- ===== 選單列 ===== -->
-    <div class="menubar" role="toolbar" aria-label="專案工具列" aria-keyshortcuts="F10">
+    <div class="menubar" role="toolbar" aria-label="專案工具列">
       <div class="brand">
         <img id="brandLogo" alt="SUB TOOL">
         <small id="appVersion"></small>
@@ -168,7 +168,7 @@
               <button class="icon has-label" data-act="compare-track" title="比對字幕軌道"><span data-ui-icon="compare" aria-hidden="true"></span> 比對</button>
             </div>
             <div class="rhead-action-group" role="group" aria-label="搜尋與檢查">
-              <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)"><span data-ui-icon="search" aria-hidden="true"></span></button>
+              <button class="icon" data-act="search-open" title="搜尋 / 取代 (Ctrl+F)" aria-controls="searchDialog" aria-expanded="false"><span data-ui-icon="search" aria-hidden="true"></span></button>
               <button class="icon has-label" data-act="check-panel" id="checkPanelBtn" title="字幕檢查 (9)" aria-controls="checkPanel" aria-expanded="false"><span data-ui-icon="check" aria-hidden="true"></span> 檢查</button>
             </div>
           </div>
@@ -177,14 +177,14 @@
         <div class="track-style" id="trackStyle">
           <!-- 編輯常用樣式時才出現：期間面板一律改「整軌」（暫借目前軌道當畫布即時預覽），
                按完成才寫回該常用樣式並同步所有套用它的軌／句。 -->
-          <div class="ts-line ts-editbar" id="tsEditBar" hidden>
+          <div class="ts-line ts-editbar" id="tsEditBar" data-enter-scope tabindex="-1" hidden>
             <span class="ts-title">✎ 編輯常用樣式</span>
             <span id="tsEditName" class="ts-editname"></span>
             <span class="ts-editnote">面板改動會存回這組樣式，並同步所有套用它的字幕</span>
             <textarea id="tsEditPreviewText" style="font-size:12px; padding:4px 6px; border-radius:3px; border:1px solid var(--line,#3a4150); background:var(--panel2); color:var(--text); margin-left:10px; width:220px; height:48px; resize:vertical; vertical-align:middle; line-height:1.2;" title="在播放器上預覽的測試文字">田這是一段|範例字幕田
 田 ABC123|321CBA 田</textarea>
             <span style="flex:1"></span>
-            <button class="ts-preset" id="tsEditDone">完成</button>
+            <button class="ts-preset" id="tsEditDone" data-enter-default aria-keyshortcuts="Enter">完成</button>
             <button class="ts-preset" id="tsEditCancel">取消</button>
           </div>
           <!-- 欄位順序（使用者指定）：
@@ -402,7 +402,7 @@
   </div>
 
   <!-- 浮動搜尋視窗 -->
-  <div class="search-dialog" id="searchDialog" role="dialog" aria-labelledby="searchDialogTitle" style="display:none">
+  <div class="search-dialog" id="searchDialog" role="dialog" aria-labelledby="searchDialogTitle" data-enter-scope tabindex="-1" style="display:none">
     <div class="sd-head" id="searchDialogHead">
       <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
         <span id="searchDialogTitle">搜尋 / 取代</span>
@@ -412,7 +412,7 @@
     </div>
     <div class="sr-row"><input type="text" id="searchInput" aria-label="搜尋文字" placeholder="搜尋文字"><button class="mini"
         data-act="search-clear" title="清除搜尋"><span data-ui-icon="close" aria-hidden="true"></span></button><button class="mini" data-act="search-prev"
-        title="上一個"><span data-ui-icon="arrow-up" aria-hidden="true"></span></button><button class="mini" data-act="search-next" title="下一個"><span data-ui-icon="arrow-down" aria-hidden="true"></span></button><button class="mini"
+        title="上一個"><span data-ui-icon="arrow-up" aria-hidden="true"></span></button><button class="mini" data-act="search-next" data-enter-default aria-keyshortcuts="Enter" title="下一個（Enter）"><span data-ui-icon="arrow-down" aria-hidden="true"></span></button><button class="mini"
         data-act="search-select-all" title="全選所有符合的字幕">全選</button><span id="searchCount" role="status"></span></div>
     <div class="sr-row"><input type="text" id="replaceInput" aria-label="取代文字" placeholder="取代為…"><button class="mini"
         data-act="replace-one">取代</button><button class="mini" data-act="replace-all">全取代</button></div>
@@ -537,10 +537,10 @@
           <button class="icon" data-act="dur-adj-sub" title="依指定變化量縮短字幕時長" aria-label="縮短字幕時長">－</button>
           <button class="icon" data-act="dur-adj-add" title="依指定變化量延長字幕時長" aria-label="延長字幕時長">＋</button>
         </div>
-        <div class="shift-row" id="durAdjPctRow" style="display:none">
+        <div class="shift-row" id="durAdjPctRow" data-enter-scope tabindex="-1" style="display:none">
           <input type="number" id="durAdjPctInput" aria-label="時長百分比" min="1" max="999" value="100" placeholder="100"
             style="width:66px;text-align:center"> %
-          <button class="icon" data-act="dur-adj-pct">套用</button>
+          <button class="icon" data-act="dur-adj-pct" data-enter-default aria-keyshortcuts="Enter">套用</button>
         </div>
       </div>
     </div>

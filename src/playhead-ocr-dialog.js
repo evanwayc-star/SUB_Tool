@@ -1,4 +1,4 @@
-import { $ } from './dom.js';
+import { $, setEnterDefault } from './dom.js';
 import { Media } from './media.js';
 import { Project } from './project.js';
 import { DESK, State } from './state.js';
@@ -64,7 +64,6 @@ export async function openPlayheadOcr() {
     { label:'返回框選', id:'playheadOcrBack', hidden:true, act:() => {
       stopAttempt();
       choose();
-      start.focus({ preventScroll:true });
     } },
     { label:'重新框選', id:'playheadOcrReselect', hidden:true, act:() => choose() },
     { label:'建立字幕', id:'playheadOcrConfirm', hidden:true, primary:true, act:confirm },
@@ -102,12 +101,14 @@ export async function openPlayheadOcr() {
     start.style.display = '';
     back.style.display = reselect.style.display = button.style.display = 'none';
     button.disabled = true;
+    setEnterDefault(button, false);
+    setEnterDefault(start, true);
     updateSelection(selection);
     if (message) status.textContent = message;
   }
 
   async function recognize() {
-    if (phase !== 'select' || !current() || selection?.length === 0) return;
+    if (phase !== 'select' || !current() || start.disabled) return;
     phase = 'recognize';
     const job = { controller:new AbortController(), requestId:null };
     active = job;
@@ -117,7 +118,7 @@ export async function openPlayheadOcr() {
     region.hidden = options.hidden = true;
     start.style.display = 'none';
     back.style.display = '';
-    back.focus({ preventScroll:true });
+    setEnterDefault(start, false);
     status.textContent = selection ? '正在本機辨識框內文字…' : '正在本機辨識整張畫格…';
     try {
       const pngBase64 = await encodePlayheadOcrRegion(frame.canvas, selection, { signal:job.controller.signal, whiteSubtitles });
@@ -132,6 +133,7 @@ export async function openPlayheadOcr() {
       editor.hidden = false;
       back.style.display = 'none';
       reselect.style.display = button.style.display = '';
+      setEnterDefault(button, true);
       const target = `OCR 軌 · ${secToEncore(frame.time, fps, dropFrame)} · ${PLAYHEAD_OCR_DURATION_SECONDS} 秒`;
       status.textContent = originalText.trim() ? target : `沒有辨識到文字，可重新框選或手動輸入。${target}`;
       button.disabled = !input.value.trim();
@@ -165,7 +167,9 @@ export async function openPlayheadOcr() {
     const captured = await capture;
     if (!current()) return;
     frame = captured;
-    disposeRegion = mountPlayheadOcrRegion(region, frame.canvas, updateSelection, recognize);
+    disposeRegion = mountPlayheadOcrRegion(region, frame.canvas, updateSelection, dragging => {
+      start.disabled = dragging || selection?.length === 0;
+    });
     choose();
   } catch (error) {
     if (current()) status.textContent = error.message || '無法取得播放點畫格。';

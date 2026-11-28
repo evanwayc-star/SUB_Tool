@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>確認操作</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { color-scheme: dark; margin: 0; height: 100vh; display: flex; flex-direction: column; background: #161a22; color: #ebeff5; font: 14px/1.55 'Segoe UI', 'Microsoft JhengHei', sans-serif; }
+    main { flex: 1; min-height: 0; padding: 16px 20px; overflow: auto; scrollbar-color: #566379 transparent; scrollbar-width: thin; }
+    h1 { margin: 0; font-size: 18px; line-height: 1.4; }
+    p { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #detail { margin-top: 12px; padding: 8px 10px; background: #10131a; border: 1px solid #343b47; border-radius: 5px; color: #c8d3e1; font-size: 13px; user-select: text; }
+    #detail:empty { display: none; }
+    footer { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 10px 20px; border-top: 1px solid #343b47; background: #11151c; }
+    button { min-height: 32px; padding: 4px 12px; border: 1px solid #526071; border-radius: 5px; background: #242b36; color: inherit; font: inherit; cursor: pointer; }
+    #accept { border-color: #fc999f; background: #f39a9e; color: #301015; font-weight: 650; }
+    #accept::after { content: ' ↵' / ''; }
+    #accept:hover { background: #ffb5b9; }
+    button:hover { background: #343d4a; }
+    ::selection { background: #385477; color: white; }
+  </style>
+</head>
+<body>
+  <main><h1 id="title"></h1><p id="message"></p><p id="detail"></p></main>
+  <footer><button id="cancel" type="button" tabindex="-1"></button><button id="accept" type="button" tabindex="-1" aria-keyshortcuts="Enter"></button></footer>
+</body>
+</html>

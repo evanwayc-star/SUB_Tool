@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { installDialogMethods } from './fixtures/native-dialog.js';
 vi.hoisted(() => {
   document.body.innerHTML = '<div id="modalBg"><div class="modal"><div id="modalTitle"></div><div id="modalBody"></div><div id="modalFoot"></div></div></div><div id="historyList"></div>';
 });
@@ -19,6 +20,11 @@ import { createDeliveryAudioSpec, applyDeliveryAudioSpec, composeDeliveryAudioPl
 on('history:record', recordHistory);
 const button = label => [...document.querySelectorAll('#modalFoot button')].find(el => el.textContent === label);
 const click = selector => { document.querySelector(selector).click(); vi.runAllTimers(); };
+const resize = async selector => {
+  click(selector);
+  document.querySelector('dialog[open] [data-approve]')?.click();
+  await vi.runAllTimersAsync();
+};
 const act = label => { button(label).click(); vi.runAllTimers(); };
 const open = () => { AudioRouting.openOutputSettings(); vi.runAllTimers(); };
 const source = () => { AudioRouting.openForClip('master-clip'); vi.runAllTimers(); };
@@ -48,14 +54,15 @@ it('MP3 多組音軌由使用者指名，保存 Lt/Rt 的左右對應並保留�
   expect(State.audioProject).toEqual(original);
 });
 
-it('輸出聲道格式重畫後焦點留在同一組格式，新增與移除後仍有就近可操作的焦點', () => {
+it('輸出聲道格式重畫不預選控制項，新增後可直接輸入名稱', () => {
   open();
   const original = structuredClone(State.audioProject);
   const layout = document.querySelector('.audio-output-layout');
-  const streamId = layout.closest('tr').dataset.streamId;
+  document.querySelector('.audio-output-presets').open=false;
+
   layout.focus(); layout.value='stereo'; layout.dispatchEvent(new Event('change')); vi.runAllTimers();
-  expect(document.activeElement.classList.contains('audio-output-layout')).toBe(true);
-  expect(document.activeElement.closest('tr').dataset.streamId).toBe(streamId);
+  expect(document.querySelector('.audio-output-presets').open).toBe(false);
+  expect(document.activeElement.matches('button, select, input')).toBe(false);
   const add=document.getElementById('audioOutputAdd'); add.focus(); add.click(); vi.runAllTimers();
   const rows=[...document.querySelectorAll('.audio-output-table tbody tr[data-stream-id]')];
   expect(document.activeElement).toBe(rows.at(-1).querySelector('.audio-output-name'));
@@ -67,7 +74,7 @@ it('輸出聲道格式重畫後焦點留在同一組格式，新增與移除後�
 
 beforeEach(() => {
   vi.useFakeTimers();
-  vi.spyOn(window,'confirm').mockReturnValue(true);
+  installDialogMethods();
   closeModal({committed:true});
   State.cues=[]; State.tracks=[{name:'字幕',visible:true,locked:false}]; State.notes=[];
   State.clips=[{id:'master-clip',audioSourceId:'master',audioSrc:'video',primary:true,path:'C:/master.mov',name:'八聲道',in:0,out:3,offset:0,dur:3}];
@@ -81,48 +88,99 @@ beforeEach(() => {
 });
 afterEach(() => { closeModal(); vi.runAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
-it.each(['來源配線','專案編組','工具列'])('%s 縮減 A 軌先顯示跨來源影響，拒絕不改配線或 History', page => {
+it.each(['來源配線','專案編組','工具列'])('%s 縮減 A 軌先顯示跨來源影響，拒絕不改配線或 History', async page => {
   const initial=structuredClone(State.audioProject), history=structuredClone(History.stack);
-  window.confirm.mockReturnValue(false);
+  let toolbarChange;
   if(page==='來源配線'){ source(); click('.audio-count-preset[data-count="2"]'); }
   else if(page==='專案編組'){ open(); click('.audio-output-count-preset[data-count="2"]'); }
-  else expect(AudioRouting.setBusCount(2)).toBe(false);
-  expect(window.confirm).toHaveBeenCalledOnce();
-  const message=window.confirm.mock.calls[0][0];
+  else toolbarChange=AudioRouting.setBusCount(2);
+  const message=document.querySelector('dialog[open] .mbody').textContent;
   expect(message).toContain('整個專案'); expect(message).toContain('A3'); expect(message).toContain('A8');
   expect(message).toContain('2 個來源'); expect(message).toContain('7 條來源配線');
   expect(message).toContain('設定輸出音軌');
+  click('dialog [data-cancel]');
+  if(toolbarChange) expect(await toolbarChange).toBe(false);
+  await vi.runAllTimersAsync();
   expect(State.audioProject).toEqual(initial); expect(History.stack).toEqual(history);
 });
 
-it('拒絕縮減保留當前配線草稿，確認縮減後仍可取消整段編輯', () => {
+it('拒絕縮減保留當前配線草稿，確認縮減後仍可取消整段編輯', async () => {
   const initial=structuredClone(State.audioProject), history=structuredClone(History.stack);
   source(); route(0,State.audioProject.buses[7].id);
   const draft=structuredClone(State.audioProject), input=document.getElementById('audioBusCount');
-  window.confirm.mockReturnValueOnce(false); input.value='2'; click('#audioBusCountApply');
+  input.value='2'; click('#audioBusCountApply'); click('dialog [data-cancel]'); await vi.runAllTimersAsync();
   expect(input.value).toBe('8'); expect(State.audioProject).toEqual(draft);
-  click('.audio-count-preset[data-count="2"]');
+  await resize('.audio-count-preset[data-count="2"]');
   expect(State.audioProject.buses).toHaveLength(2);
   expect(State.audioProject.sourceMaps.second.channels[0].busIds).toEqual([]);
   act('取消'); expect(State.audioProject).toEqual(initial); expect(History.stack).toEqual(history);
 });
 
-it('縮減確認期間若專案被取代，不套用舊頁的縮減結果', () => {
+it('縮減確認期間若專案被取代，不套用舊頁的縮減結果', async () => {
   source();
-  let replacement;
-  window.confirm.mockImplementation(()=>{ resetAudioProject(); replacement=structuredClone(State.audioProject); return true; });
   click('.audio-count-preset[data-count="2"]');
+  resetAudioProject(); const replacement=structuredClone(State.audioProject);
+  click('dialog [data-approve]'); await vi.runAllTimersAsync();
   expect(State.audioProject).toEqual(replacement);
   expect(History.stack).toHaveLength(1);
 });
 
-it('多次 bus 預覽即時生效，取消恢復全來源配線且不留下 History', () => {
+describe.each([
+  ['來源配線',source,'audioBusCount','儲存配線'],
+  ['專案編組',open,'audioOutputBusCount','儲存輸出設定'],
+])('%s 輸入軌數後直接儲存',(_,show,countId,saveLabel)=>{
+  it('有效的增加保留原配線，只記錄一筆可撤回的變更',async()=>{
+    const initial=structuredClone(State.audioProject);
+    show();
+    document.getElementById(countId).value='10';
+    act(saveLabel);
+    await vi.runAllTimersAsync();
+    expect(State.audioProject.buses).toHaveLength(10);
+    expect(State.audioProject.sourceMaps).toEqual(initial.sourceMaps);
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+    expect(History.stack).toHaveLength(2);
+    History.undo(); expect(State.audioProject).toEqual(initial);
+  });
+  it('無效值留在原頁，縮減必須再次同意，取消後仍可儲存同一份草稿',async()=>{
+    const initial=structuredClone(State.audioProject);
+    show(); const field=document.getElementById(countId);
+    for(const invalid of ['','-1','2.5',String(Number(field.max)+1)]){
+      field.value=invalid; act(saveLabel);
+      expect(field.isConnected).toBe(true);
+      expect(document.querySelector('dialog[open]')).toBeNull();
+      expect(State.audioProject).toEqual(initial);
+    }
+    field.value='4'; act(saveLabel);
+    expect(document.querySelector('dialog[open] .mbody').textContent).toContain('減少為 4 軌');
+    click('dialog [data-cancel]'); await vi.runAllTimersAsync();
+    expect(field.isConnected).toBe(true); expect(field.value).toBe('4');
+    expect(State.audioProject).toEqual(initial); expect(History.stack).toHaveLength(1);
+    act(saveLabel); click('dialog [data-approve]'); await vi.runAllTimersAsync();
+    expect(State.audioProject.buses).toHaveLength(4);
+    expect(State.audioProject.sourceMaps.second.channels[0].busIds).toEqual([]);
+    expect(document.getElementById('modalBg').classList.contains('show')).toBe(false);
+    expect(History.stack).toHaveLength(2);
+  });
+});
+
+it('儲存等待縮減確認時換窗，舊確認不能套用或關閉新視窗',async()=>{
+  const initial=structuredClone(State.audioProject);
+  source(); document.getElementById('audioBusCount').value='2'; act('儲存配線');
+  const approve=document.querySelector('dialog[open] [data-approve]');
+  openModal('另一份工作','<p>仍在編輯</p>');
+  approve.click(); await vi.runAllTimersAsync();
+  expect(State.audioProject).toEqual(initial);
+  expect(document.getElementById('modalTitle').textContent).toBe('另一份工作');
+  expect(History.stack).toHaveLength(1);
+});
+
+it('多次 bus 預覽即時生效，取消恢復全來源配線且不留下 History', async () => {
   const initial=structuredClone(State.audioProject), history=structuredClone(History.stack);
   open();
-  click('.audio-output-count-preset[data-count="4"]');
+  await resize('.audio-output-count-preset[data-count="4"]');
   expect(State.audioProject.buses).toHaveLength(4);
   expect(Media.applyGains).toHaveBeenCalled();
-  click('.audio-output-count-preset[data-count="6"]');
+  await resize('.audio-output-count-preset[data-count="6"]');
   expect(State.audioProject.buses).toHaveLength(6);
   expect(History.stack).toEqual(history);
   act('取消');
@@ -146,10 +204,10 @@ it('多次 preview 只在保存建立一筆 History，Undo/Redo 恢復全部配�
   History.redo(); expect(State.audioProject).toEqual(saved);
 });
 
-it('Undo 在配線預覽中關閉視窗並撤銷草稿，舊儲存按鈕不能重新提交', () => {
+it('Undo 在配線預覽中關閉視窗並撤銷草稿，舊儲存按鈕不能重新提交', async () => {
   const initial=structuredClone(State.audioProject);
   State.cues.push({id:'cue',start:0,end:1,text:'編輯',track:0});History.record('字幕');
-  open();click('.audio-output-count-preset[data-count="4"]');
+  open();await resize('.audio-output-count-preset[data-count="4"]');
   const staleSave=button('儲存輸出設定');
   expect(State.audioProject.buses).toHaveLength(4);
   History.undo();
@@ -159,11 +217,11 @@ it('Undo 在配線預覽中關閉視窗並撤銷草稿，舊儲存按鈕不能�
   expect(State.audioProject).toEqual(initial);expect(History.stack).toHaveLength(2);expect(History.hi).toBe(0);
 });
 
-it('來源↔輸出往返共用一次編輯；子頁存檔仍可由父頁取消', () => {
+it('來源↔輸出往返共用一次編輯；子頁存檔仍可由父頁取消', async () => {
   const initial=structuredClone(State.audioProject);
   source(); route(0,State.audioProject.buses[7].id);
   expect(plan().buses[7].inputs.map(input=>input.sourceChannel)).toEqual([0,7]);
-  click('#audioRouteOutput'); click('.audio-output-count-preset[data-count="4"]');
+  click('#audioRouteOutput'); await resize('.audio-output-count-preset[data-count="4"]');
   act('儲存輸出設定');
   expect(document.querySelector('.audio-route-dialog')).not.toBeNull();
   expect(State.audioProject.buses).toHaveLength(4);
@@ -173,11 +231,11 @@ it('來源↔輸出往返共用一次編輯；子頁存檔仍可由父頁取消'
   expect(History.stack).toHaveLength(1);
 });
 
-it('子頁返回只還原該頁，父頁保存來源配線與後續輸出變更共一筆 History', () => {
+it('子頁返回只還原該頁，父頁保存來源配線與後續輸出變更共一筆 History', async () => {
   const initial=structuredClone(State.audioProject);
   source(); route(0,State.audioProject.buses[7].id);
   const parent=structuredClone(State.audioProject);
-  click('#audioRouteOutput'); click('.audio-output-count-preset[data-count="4"]');
+  click('#audioRouteOutput'); await resize('.audio-output-count-preset[data-count="4"]');
   act('取消修改並返回配線'); expect(State.audioProject).toEqual(parent);
   click('#audioRouteOutput'); click('.audio-delivery-preset[data-preset="8-fm"]');
   act('儲存輸出設定'); act('儲存配線');
@@ -189,10 +247,10 @@ it('子頁返回只還原該頁，父頁保存來源配線與後續輸出變更�
   History.redo(); expect(State.audioProject).toEqual(saved);
 });
 
-it.each(['direct','backdrop'])('巢狀視窗 %s 關閉會取消整段編輯', how => {
+it.each(['direct','backdrop'])('巢狀視窗 %s 關閉會取消整段編輯', async how => {
   const initial=structuredClone(State.audioProject);
   source(); click('#audioRouteClear'); click('#audioRouteOutput');
-  click('.audio-output-count-preset[data-count="4"]');
+  await resize('.audio-output-count-preset[data-count="4"]');
   if(how==='direct') closeModal(); // Escape 共用此正式入口。
   else document.getElementById('modalBg').dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
   expect(State.audioProject).toEqual(initial);
@@ -284,17 +342,17 @@ it.each([[7,6],[6,2]])('輸出聲道的自訂順序 [%i, %i] 開啟再儲存不�
   expect(State.audioProject).toEqual(initial);
 });
 
-it('已替換專案後舊視窗取消不能覆寫新專案', () => {
-  open(); click('.audio-output-count-preset[data-count="4"]');
+it('已替換專案後舊視窗取消不能覆寫新專案', async () => {
+  open(); await resize('.audio-output-count-preset[data-count="4"]');
   resetAudioProject(); const replacement=structuredClone(State.audioProject);
   closeModal(); expect(State.audioProject).toEqual(replacement);
 });
 
-it.each(['root','child'])('其他 Modal 取代 %s 配線頁會取消整段預覽', page => {
+it.each(['root','child'])('其他 Modal 取代 %s 配線頁會取消整段預覽', async page => {
   const initial=structuredClone(State.audioProject);
   if(page==='child'){ source(); click('#audioRouteClear'); click('#audioRouteOutput'); }
   else open();
-  click('.audio-output-count-preset[data-count="4"]');
+  await resize('.audio-output-count-preset[data-count="4"]');
   const detachedSave=button('儲存輸出設定');
   openModal('其他工作','replacement',[]);
   expect(State.audioProject).toEqual(initial);
@@ -314,9 +372,9 @@ it('同類配線頁快速替換時，舊延後 binding 不會重複套用新頁�
   expect(History.stack).toHaveLength(1);
 });
 
-it('輸出編輯直接重入來源配線時先撤回舊草稿，不把預覽當成新起點', () => {
+it('輸出編輯直接重入來源配線時先撤回舊草稿，不把預覽當成新起點', async () => {
   const initial=structuredClone(State.audioProject);
-  open(); click('.audio-output-count-preset[data-count="4"]');
+  open(); await resize('.audio-output-count-preset[data-count="4"]');
   source();
   expect(State.audioProject).toEqual(initial);
   route(0,State.audioProject.buses[7].id);
@@ -346,7 +404,7 @@ it('背景工作在預覽期間記錄 History 時只收已提交配線，保存�
   expect(State.clips[0].audioLimiterSpec.max).toBe(-6);
 });
 
-it('取消只撤回配線預覽，保留期間背景工作以及既有 Undo/Redo 步驟', () => {
+it('取消只撤回配線預覽，保留期間背景工作以及既有 Undo/Redo 步驟', async () => {
   const initial=structuredClone(State.audioProject);
   source(); click('#audioRouteClear');
   State.clips[0].audioLimiterSpec={max:-6,min:-12,inputBoost:0};
@@ -359,7 +417,7 @@ it('取消只撤回配線預覽，保留期間背景工作以及既有 Undo/Redo
   expect(State.clips[0].audioLimiterSpec.max).toBe(-6);
   History.undo();
   const future=structuredClone(History.stack);
-  open(); click('.audio-output-count-preset[data-count="4"]'); act('取消');
+  open(); await resize('.audio-output-count-preset[data-count="4"]'); act('取消');
   expect(History.stack).toEqual(future);
   History.redo();
   expect(State.audioProject).toEqual(initial);

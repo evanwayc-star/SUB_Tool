@@ -66,36 +66,42 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
     expect(document.getElementById('settingsModal')).toBeNull();
   });
 
-  it('Tab 和 Shift+Tab 導航不改寫快捷鍵草稿', async () => {
+  it('Tab 和 Shift+Tab 不移動錄製焦點或改寫快捷鍵草稿', async () => {
     showSettingsModal();
     const input = document.getElementById('settings-input-toggle_play_pause-0');
     input.focus();
     for (const shiftKey of [false, true]) {
       const event = new KeyboardEvent('keydown', {key:'Tab',shiftKey,bubbles:true,cancelable:true});
       input.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(input);
       expect(input.value).toBe('Space');
     }
     await document.getElementById('settingsSaveBtn').onclick();
     expect(State.keymap.toggle_play_pause).toEqual([{key:' '}]);
   });
 
-  it('設定視窗接管焦點、限制 Tab、阻止背景聚焦並在關閉後還原', () => {
+  it('錄製時 Enter 結束這次錄製，既有快捷鍵與設定草稿都保留', () => {
+    showSettingsModal();
+    const field = document.getElementById('settings-input-toggle_play_pause-0');
+    field.focus();
+    recordKey('Enter');
+    expect(document.activeElement).not.toBe(field);
+    expect(document.getElementById('settingsModal')).not.toBeNull();
+    expect(field.value).toBe('Space');
+  });
+
+  it('設定開啟聚焦視窗本身、阻止背景聚焦，關閉不預選工具按鈕', () => {
     const outside = document.createElement('button'); outside.textContent='設定入口'; document.body.appendChild(outside); outside.focus();
     showSettingsModal();
     const modal = document.getElementById('settingsModal');
     const dialog = modal.querySelector('[role="dialog"]');
     expect(dialog?.getAttribute('aria-modal')).toBe('true');
-    expect(modal.contains(document.activeElement)).toBe(true);
-    const first = modal.querySelector('input:not(:disabled)');
-    const last = document.getElementById('settingsSaveBtn');
-    last.focus();
-    last.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
-    expect(document.activeElement).toBe(first);
-    first.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));
-    expect(document.activeElement).toBe(last);
+    expect(document.activeElement).toBe(dialog);
+    expect([...modal.querySelectorAll('[data-enter-default]')]).toEqual([document.getElementById('settingsSaveBtn')]);
     outside.focus(); expect(modal.contains(document.activeElement)).toBe(true);
     document.getElementById('settingsCancelBtn').click();
-    expect(document.activeElement).toBe(outside); expect(outside.inert).not.toBe(true);
+    expect(document.activeElement).toBe(document.body); expect(outside.inert).not.toBe(true);
   });
 
   it('儲存失敗顯示在設定視窗內並保留草稿，可重試成功', async () => {
@@ -111,16 +117,16 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
     expect(document.getElementById('settingsModal')).toBeNull();
   });
 
-  it('工具列 action 先 blur 入口後開設定，關閉仍回到原按鈕且保留原 inert 狀態', () => {
+  it('工具列入口已失焦時，關閉設定回到工作區並保留原 inert 狀態', () => {
     const origin=document.createElement('button'),protectedPanel=document.createElement('section');
     origin.textContent='設定';protectedPanel.inert=true;document.body.append(origin,protectedPanel);
     origin.focus();origin.blur();showSettingsModal();
     document.getElementById('settingsCancelBtn').click();
-    expect(document.activeElement).toBe(origin);expect(protectedPanel.inert).toBe(true);
+    expect(document.activeElement).toBe(document.body);expect(protectedPanel.inert).toBe(true);
   });
 
   it.each(['Backspace', 'Delete'])('刪除第一組（%s）後，衝突標示對準仍在第二欄的綁定，後續編輯可儲存並重載', async deleteKey => {
-    State.defaultKeymap = { toggle_play_pause:[{key:' '},{key:'enter'}], rewind:[{key:'j'}] };
+    State.defaultKeymap = { toggle_play_pause:[{key:' '},{key:'p'}], rewind:[{key:'j'}] };
     State.keymap = structuredClone(State.defaultKeymap);
     const input = (action, index) => document.getElementById(`settings-input-${action}-${index}`);
     const press = (action, index, key) => input(action, index)
@@ -131,8 +137,8 @@ describe('快捷鍵設定視窗的匯入工作歸屬', () => {
       showSettingsModal();
       press('toggle_play_pause', 0, deleteKey);
       expect(input('toggle_play_pause', 0).value).toBe('');
-      expect(input('toggle_play_pause', 1).value).toBe('Enter');
-      press('rewind', 0, 'Enter');
+      expect(input('toggle_play_pause', 1).value).toBe('P');
+      press('rewind', 0, 'p');
       expect(input('toggle_play_pause', 1).classList.contains('flash-duplicate')).toBe(true);
       expect(input('toggle_play_pause', 0).classList.contains('flash-duplicate')).toBe(false);
       expect(input('rewind', 0).value).toBe('J');

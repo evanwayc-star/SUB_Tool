@@ -3,6 +3,7 @@ import { $ } from './dom.js';
 import { State, DESK, IS_DESKTOP } from './state.js';
 import { StylePanelController } from './style-panel-controller.js';
 import { openModal, closeModal, showToast } from './ui.js';
+import { requestConfirmation } from './confirmation-dialog.js';
 import { STYLE_DEFAULTS, BUILTIN_PRESETS, effStyle, getPresets, getAllPresets, isBuiltinPresetName, savePresets, styleMatchesPreset, validPresetList, presetIdentity, capturePresetUpdate } from './substyle.js';
 import { refreshStyleSummaries, applyCueStylePatch } from './subtitles.js';
 import { recordHistory } from './history.js';
@@ -126,6 +127,7 @@ export function initPresetLibrary({ styleChanged }){
     closeModal();
     $('tsEditBar').hidden=false; $('tsEditName').textContent=p.name;
     styleChanged();
+    $('tsEditBar').focus({preventScroll:true});
   }
   async function _presetEditEnd(save){
     const E=State.presetEdit; if(!E)return;
@@ -213,7 +215,7 @@ export function initPresetLibrary({ styleChanged }){
       };
       const session = openModal('資料夾改名',
         `<label>新名稱<input id="__presetFolderRen" value="${escapeHTML(oldG)}"></label>`,
-        [{label:'確定',primary:true,act:()=>finish(true)},{label:'取消',act:()=>finish(false)}],
+        [{label:'確定',primary:true,enterDefault:true,act:()=>finish(true)},{label:'取消',act:()=>finish(false)}],
         {onDismiss:openPresetMgr});
       return;
     }
@@ -221,8 +223,10 @@ export function initPresetLibrary({ styleChanged }){
     if(delGrpB){
       if(managerSaving === owner) return;
       const grp = delGrpB.dataset.preDelGrp;
-      if (confirm(`確定要刪除「${grp}」資料夾以及裡面所有的樣式嗎？\n\n（注意：刪除後無法復原）`)) {
-        const l = getPresets().filter(p => p.group !== grp);
+      const original = getPresets();
+      if (await requestConfirmation('刪除樣式資料夾', `將刪除「${grp}」和裡面的所有樣式。刪除後無法復原。`, '刪除資料夾')) {
+        if (!owner.isCurrent() || original !== getPresets()) return;
+        const l = original.filter(p => p.group !== grp);
         managerSaving = owner;
         const result = await savePresets(l, {rollbackOnFailure:true});
         if(managerSaving === owner) managerSaving = null;
@@ -349,7 +353,7 @@ export function initPresetLibrary({ styleChanged }){
         `<div style="font-size:13px;color:var(--text-dim);margin-bottom:4px">樣式名稱</div>`+
         `<input type="text" id="__presetNameRen" value="${escapeHTML(p.name)}" style="width:100%;margin-bottom:12px;padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--border2);border-radius:4px;">`,
         [
-          { label: '儲存', primary: true, act: async () => {
+          { label: '儲存', primary: true, enterDefault: true, act: async () => {
             if (!session.isCurrent() || saving) return;
             const nn = ($('__presetNameRen')?.value || '').trim();
             const ng = ($('__presetGroupRen')?.value || '').trim();

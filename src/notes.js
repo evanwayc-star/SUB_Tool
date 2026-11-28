@@ -149,7 +149,7 @@ function clearAllNotes(){
   const session=openModal('清除所有備註',
     `<p>確定要清除全部 <b>${State.notes.length}</b> 條備註嗎？</p>`,
     [{label:'取消',act:()=>session.close()},
-     {label:'確定清除',primary:true,act:()=>{
+     {label:'確定清除',primary:true,enterDefault:true,act:()=>{
        if(!session.isCurrent()) return;
        if(!ownsRemoval()){session.close();showToast('備註已變更，請重新確認');return;}
        session.close({committed:true});
@@ -182,7 +182,7 @@ function renderNotes(){
       kept.querySelector('.nt-done-cb').checked=!!n.done;
       if(!editingTime){
         const time=kept.querySelector('.nt-time'),label=secToEncore(n.time,State.fps,State.dropFrame);
-        time.textContent=label;time.setAttribute('aria-label',`備註時間 ${label}，Enter 或 F2 編輯`);
+        time.textContent=label;time.setAttribute('aria-label',`備註時間 ${label}，雙擊或 F2 編輯`);
       }
       if(!editingText){
         const text=kept.querySelector('.nt-text');text.innerHTML=escapeHTML(n.text);
@@ -199,8 +199,8 @@ function renderNotes(){
     row.dataset.id=n.id;
     row.innerHTML=
       `<input type="checkbox" class="nt-done-cb" ${n.done?'checked':''} title="完成" aria-label="備註完成狀態">`+
-      `<span class="nt-time" tabindex="0" role="button" title="點選前往時間；Enter 或 F2 編輯時間" aria-label="備註時間 ${escapeHTML(secToEncore(n.time,State.fps,State.dropFrame))}，Enter 或 F2 編輯">${escapeHTML(secToEncore(n.time,State.fps,State.dropFrame))}</span>`+
-      `<span class="nt-text" tabindex="0" role="button" title="Enter 或 F2 編輯備註文字" aria-label="編輯備註文字：${escapeHTML(n.text||'空白備註')}" contenteditable="false" spellcheck="false">${escapeHTML(n.text)}</span>`+
+      `<span class="nt-time" tabindex="-1" role="button" title="點選前往時間；雙擊或 F2 編輯時間" aria-label="備註時間 ${escapeHTML(secToEncore(n.time,State.fps,State.dropFrame))}，雙擊或 F2 編輯">${escapeHTML(secToEncore(n.time,State.fps,State.dropFrame))}</span>`+
+      `<span class="nt-text" tabindex="-1" role="button" title="雙擊或 F2 編輯備註文字" aria-label="編輯備註文字：${escapeHTML(n.text||'空白備註')}" contenteditable="false" spellcheck="false">${escapeHTML(n.text)}</span>`+
       `<button type="button" class="nt-del" title="刪除備註" aria-label="刪除備註">${uiIcon('trash')}</button>`;
 
     // 勾選（完成狀態）
@@ -239,8 +239,8 @@ function renderNotes(){
           }
         }
         edit.cancel();inp.remove(); timeEl.textContent=secToEncore(n.time,State.fps,State.dropFrame);
-        timeEl.setAttribute('role','button');timeEl.tabIndex=0;
-        timeEl.setAttribute('aria-label',`備註時間 ${timeEl.textContent}，Enter 或 F2 編輯`);
+        timeEl.setAttribute('role','button');timeEl.tabIndex=-1;
+        timeEl.setAttribute('aria-label',`備註時間 ${timeEl.textContent}，雙擊或 F2 編輯`);
         if(returnToField&&timeEl.isConnected)timeEl.focus();
       };
       inp.addEventListener('keydown',e=>{ e.stopPropagation(); if(e.isComposing||e.keyCode===229)return; if(e.key==='Enter'){e.preventDefault();fin(true,true);} else if(e.key==='Escape'){e.preventDefault();fin(false,true);} });
@@ -250,7 +250,7 @@ function renderNotes(){
     timeEl.addEventListener('dblclick',e=>{e.stopPropagation();beginTimeEdit();});
     timeEl.addEventListener('keydown',e=>{
       if(e.isComposing||e.keyCode===229||e.ctrlKey||e.metaKey||e.altKey||e.shiftKey)return;
-      if(e.key==='Enter'||e.key==='F2'){e.preventDefault();e.stopPropagation();if(!e.repeat)beginTimeEdit();}
+      if(e.key==='F2'){e.preventDefault();e.stopPropagation();if(!e.repeat)beginTimeEdit();}
     });
 
     // 備註文字：預設唯讀；雙擊進入編輯
@@ -279,7 +279,7 @@ function renderNotes(){
       if(txt.contentEditable==='true'){
         if(e.key==='Enter'){e.preventDefault();finishTextEdit(true);}
         else if(e.key==='Escape'){e.preventDefault();finishTextEdit(false);}
-      }else if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey&&['Enter','F2'].includes(e.key)){
+      }else if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey&&e.key==='F2'){
         e.preventDefault();if(!e.repeat)beginTextEdit();
       }
     });
@@ -367,7 +367,7 @@ function _showNoteCtx(x,y){
       const session=openModal(`刪除 ${cnt} 條備註`,
         `<p>確定要刪除選取的 <b>${cnt}</b> 條備註嗎？</p>`,
         [{label:'取消',act:()=>session.close()},
-         {label:'確定刪除',primary:true,act:()=>{
+         {label:'確定刪除',primary:true,enterDefault:true,act:()=>{
            if(!session.isCurrent()) return;
            if(!ownsRemoval()){session.close();showToast('備註已變更，請重新確認');return;}
            session.close({committed:true}); removeNotes(owner.targets);
@@ -391,7 +391,7 @@ function _batchEditNotes(owner){
     <textarea id="batchNoteInput" style="width:100%;height:100px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:8px;font-size:14px;resize:vertical;" placeholder="請輸入新的備註文字…">${escapeHTML(defText)}</textarea>
   `,[
     {label:'取消', act: ()=>session.close()},
-    {label:'儲存變更', primary:true, act: ()=>{
+    {label:'儲存變更', primary:true,enterDefault:true, act: ()=>{
       if(!session.isCurrent() || !owner.current()) return;
       const newText = document.getElementById('batchNoteInput').value;
       const result=edit.commit(newText);
@@ -421,7 +421,7 @@ function exportNotes(){
   const cb=(id,label,chk)=>`<label style="display:block;padding:3px 0;cursor:pointer"><input type="checkbox" id="${id}"${chk?' checked':''}> ${label}</label>`;
   const session=openModal('匯出備註',
     cb('expNoteEdius','Edius 格式',true)+cb('expNoteGeneral','一般格式',false),
-    [{label:'匯出',primary:true,act:async()=>{
+    [{label:'匯出',primary:true,enterDefault:true,act:async()=>{
       if(!current()) return;
       const e=document.getElementById('expNoteEdius')?.checked;
       const g=document.getElementById('expNoteGeneral')?.checked;

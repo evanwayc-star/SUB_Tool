@@ -120,7 +120,7 @@ vi.mock('../src/sequence.js', async importOriginal => ({
 
 vi.mock('../src/ui.js', () => ({renderCurrentTimecode:vi.fn(), showToast: mocks.showToast, promptModal: vi.fn() }));
 vi.mock('../src/history.js', () => ({ recordHistory: vi.fn() }));
-vi.mock('../src/events.js', () => ({ emit: mocks.emit }));
+vi.mock('../src/events.js', () => ({ emit: mocks.emit, on: vi.fn() }));
 vi.mock('../src/audio-routing.js', () => ({ AudioRouting: { openForSource: vi.fn(), openForClip: vi.fn() } }));
 vi.mock('../src/keyboard.js', () => ({ setManualPlaybackSpeed: vi.fn() }));
 vi.mock('../src/project.js', () => ({ Project: { captureWorkspaceOwnership: () => () => mocks.ownsWorkspace } }));
