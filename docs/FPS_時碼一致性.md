@@ -39,6 +39,10 @@
 
 `Media.displayTime()` 是播放器、seek bar、播放點、備註與監看 TC 的共同讀數。暫停取 transport 已吸附的權威值，播放取換回時間軸域的時鐘。`tcCur` 與 `seekBar` 同一 rAF 更新，In／Out 在按鍵當下取值。
 
+字幕從起點格顯示，到終點格消失。兩句首尾相接時，共用的邊界格顯示下一句。播放中的字幕疊層、列表藍色標記與時碼共用該次更新的時間，以精確專案格率取最近的整數格。影片間隙的字幕由網頁疊層畫在黑底上。
+
+例如 30 FPS 專案的 `00:06:35:15` 位於 395.500 秒。59.94 FPS 原片在該位置呈現的畫格始於 395.4951 秒。mpv 須保留這張來源畫格，並在暫停時依已定位的專案格顯示字幕。即使前後兩個專案格共用同一張來源畫格，逐格時字幕也能切換。
+
 `Media.seek()` 先投影目標以回應操作；截圖、定位完成與起播須另等 `presentedTime()` 或本次呈現請求的成功結果。
 
 #### 各 presenter 的完成證據
@@ -105,6 +109,8 @@ offset、切割、軌上跳轉、字幕、備註及交付都用時間軸秒數�
 | 影片交付 | 凍結 `timelineStart` 與該列輸出 FPS。格率預設依專案，可逐列覆寫。僅 29.97／59.94 可用 DF |
 | WAV | 無畫面及燒入 TC |
 
+燒錄字幕依該列的輸出格率與 In 點，在落入字幕區間的輸出格或交錯場上繪製。標準 ASS 字幕檔保留原有時間。已建立的舊佇列工作會沿用送出時的字幕快照；從專案重新送出即可套用新的取樣方式。
+
 改交付 FPS 保留片段、字幕、音訊的秒數。MKV 粗時基可使 23.976 素材隔幾格重複／跳格。依 probe 的 `time_base`／`r_frame_rate`，距名義格點最多半個來源 tick 時才補償，最多 0.5 ms；首個解碼格留原 PTS，後格不得更早。先補償再裁切／變速／反轉，保留 VFR 缺口與固定畫面的實際 PTS 選格。以 `exportCadenceNative.test.js` 逐格比較 MOV／MKV 相同像素。
 
 ## 3. 呈現生命週期
@@ -127,6 +133,7 @@ offset、切割、軌上跳轉、字幕、備註及交付都用時間軸秒數�
 | `sequence-time.js`、`sequence.js` | 影片及外音的速度／反轉時間映射與片段查詢 |
 | `clip-model.js` | 片段編輯交易及固定畫面預設來源格的 Out／EOF 限制 |
 | `subtitle-model.js` | 字幕端點的格網與至少一格准入 |
+| `subtitle-preview-index.js` | 依專案格查詢可見字幕與目前播放的字幕列 |
 | `tcparse.js` | 時碼輸入、分量上下鍵及組字按鍵保護 |
 | `subio.js` | FPS 轉換與批次時長，使用模型的合法上下限 |
 | `media-presentation-core.js` | 請求、取消、pending、播放意圖及畫格 hold |
@@ -134,6 +141,7 @@ offset、切割、軌上跳轉、字幕、備註及交付都用時間軸秒數�
 | `media-playback-runtime.js` | Media 內部片段接續、配線及音訊起播活動的共同 owner |
 | `audio-engine.js`、`audio-placement-playback.js` | 固定來源／時間軸目標的整組聲道準備、commit、取消及獨立 overlap voice |
 | `media-player-adapter.js` | HTML／mpv 操作、來源時鐘及延後定位 |
+| `sequence-time.js`、`electron/mpv-host.js` | 將專案字幕格映射到 mpv 字幕時鐘，對齊暫停時的已呈現畫格 |
 | `transport-controller.js` | 逐格、JKL、倒帶 session、字幕導航及按鍵當下的 In／Out |
 | `timeline-interaction-engine.js` | jump／drag 意圖；不私建播放器時鐘 |
 | `media-loader.js` | 載入與 mpv listener 的工作資格 |
@@ -179,6 +187,8 @@ offset、切割、軌上跳轉、字幕、備註及交付都用時間軸秒數�
 |---|---|
 | 有理數、DF、格網及長片時碼 | `time.test.js` |
 | 最新呈現、取消與播放意圖 | `mediaPresentationCore.test.js`、`mediaPresentationRuntime.test.js` |
+| 單格字幕、相鄰字幕交界及播放中的列表跟隨 | `subtitlePreviewIndex.test.js`、`subtitlePlaybackFollow.test.js` |
+| 正反向原生字幕像素、不同輸出格率與交錯場 | `mpvSubtitleTimingNative.test.js`、`exportCadenceNative.test.js` |
 | 時間域、逐格與 JKL | `timelineTransport.test.js`、`transportController.test.js` |
 | HTML／mpv 來源原點與真實像素 | `webSourceClock.test.js`、`desktopAudioSourceClock.test.js` |
 | PCM 原點及實際聲音位置 | `decodedSourceAudioClock.test.js`、`decodedSourceAudioClockNative.test.js` |

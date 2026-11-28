@@ -2,7 +2,7 @@
    their own owner and never share this cancellation button. */
 import { $ } from './dom.js';
 import { on } from './events.js';
-import { MediaIntakeJobs } from './media-intake-jobs.js';
+import { intakeCacheLabel, MediaIntakeJobs } from './media-intake-jobs.js';
 import { PREVIEW_PROXY_KBPS } from '../shared/preview-proxy.cjs';
 import { setMediaProcessingStatus, setMediaIntakeStatus, showToast } from './ui.js';
 
@@ -97,7 +97,7 @@ export function bindMediaIntakeView(cancel,updateProxyStatus=()=>{}){
       const waves=(recovery.saved?.locations||[]).map(location=>location.waveform).filter(wave=>wave&&Number.isSafeInteger(wave.completedSamples));
       const saved=waves.sort((a,b)=>b.completedSamples-a.completedSamples)[0];
       const summary=saved?` 保存紀錄：${(saved.completedSamples/4000).toFixed(1)} / ${(saved.totalSamples/4000).toFixed(1)} 秒，繼續時重驗。`:'';
-      setMediaIntakeStatus(`${name}：${recovery.message}${summary}`,recovery.status==='failed'?'err':'',null);
+      setMediaIntakeStatus(`${name}：${recovery.message}${summary}`,recovery.status==='failed'?'err':'',recovery.detail||null);
     }else setMediaIntakeStatus(null);
   };
   on('media:intakeJobs',render);
@@ -127,8 +127,10 @@ export function handleMediaIntakeProgress(data){
     if(data.stage==='source-channel-waveform'||data.stage==='source-waveform') return true;
     const pureProxy=data.outputs?.proxy===true&&data.outputs.audio===false;
     if(!succeeded||!pureProxy){
-      const label=data.outputs?.proxy&&data.outputs.audio?'音軌快取':data.label||'轉檔';
-      setMediaProcessingStatus(label+(succeeded?'完成':'失敗')+(!succeeded&&data.errorMsg?'：'+data.errorMsg:''),succeeded?'ok':'err');
+      const label=data.outputs?intakeCacheLabel(data.outputs):data.label||'轉檔';
+      if(succeeded)setMediaProcessingStatus(label+'完成','ok');
+      else if(data.outputs)setMediaProcessingStatus(label+'未完成','err',false,data.errorMsg);
+      else setMediaProcessingStatus(label+'失敗'+(data.errorMsg?'：'+data.errorMsg:''),'err');
     }
     if(!MediaIntakeJobs.snapshot().count&&$('stMedia')) $('stMedia').style.display='';
     if(succeeded) window.dispatchEvent(new CustomEvent('desk:ingest-done',{detail:data}));

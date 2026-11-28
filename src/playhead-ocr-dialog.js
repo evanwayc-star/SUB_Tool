@@ -9,6 +9,8 @@ import { mountPlayheadOcrRegion } from './playhead-ocr-region.js';
 import { commitPlayheadOcrCue, PLAYHEAD_OCR_DURATION_SECONDS } from './playhead-ocr-cue.js';
 import { FRAME_TEXT_LANGUAGES } from '../shared/screen-text-options.cjs';
 
+const selectableLanguages = ['chi_tra', 'chi_sim', 'eng', 'jpn', 'kor'];
+
 // Repeated captures in the same editing session usually share a language and subtitle style.
 let lastLanguages = [], lastWhiteSubtitles = false;
 
@@ -43,8 +45,8 @@ export async function openPlayheadOcr() {
     unsubscribe?.();
     frame = null;
   };
-  const languages = Object.entries(FRAME_TEXT_LANGUAGES).map(([id, name]) =>
-    `<label><input type="checkbox" value="${id}"${lastLanguages.includes(id) ? ' checked' : ''}>${name}</label>`).join('');
+  const languages = selectableLanguages.map(id =>
+    `<label><input type="checkbox" value="${id}"${lastLanguages.includes(id) ? ' checked' : ''}>${FRAME_TEXT_LANGUAGES[id]}</label>`).join('');
   const modal = openModal('辨識播放點文字', `<div class="recognition-review">
     <p id="playheadOcrStatus" role="status">正在擷取播放點畫格…</p>
     <div id="playheadOcrOptions" hidden>

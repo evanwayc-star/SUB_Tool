@@ -109,6 +109,8 @@ Renderer 透過 contextBridge 呼叫 main。`main.js` 組裝視窗與下列模�
 
 **長片續算**。8 分鐘以上的背景 Proxy 以 120 秒為單位保存 H.264，續算時驗來源、配方、分段 SHA-256 與來源呈現時間。合併用第一個實際畫格 PTS 決定每段的間隔，整段來源音訊保持連續。成長串流取消時由已關閉的 writer 取出完整 fMP4 前綴，以下一個視訊 fragment 的時間決定重編起點。重開時先供應已驗前綴的畫面與 MIX，背景接好剩餘畫格及聲道，最後才發布並回收中間檔。[逐格與音訊回歸](../tests/mediaIntakePortableCacheNative.test.js)
 
+母素材若帶相機時碼，預覽 MP4 與分段合併均指定 `-write_tmcd 0`。預覽定位使用視訊 PTS；這可避免 FFmpeg 另建一個涵蓋全片的時碼樣本，在長片寫入 MP4 索引時超出範圍。舊分段仍可核對後沿用，重試前可以保留素材旁的快取。
+
 | 階段 | 持有者、輸入與完成證據 |
 |---|---|
 | 解碼與進度 | main 持有 FFmpeg，以背壓控制送往 worker 的 PCM，worker 負責 NAS 讀寫。來源時鐘對齊後，以 4000 Hz、mono、16-bit 解碼，完整樣本數為 `round(duration * 4000)`。每 40 samples 一對 min/max（100 Hz），MIX 與指定聲道分開保存。完整顯示峰值可從既有 WAV 補建。 |
@@ -239,6 +241,7 @@ Windows x64 需在 `electron/mpv/` 放 `mpv.exe` 與 `d3dcompiler_43.dll`。`mpv
 
 - 每次 launch／loadfile 建立不同來源 session，以 playlist entry、client、路徑與世代配對。duration 通知只觸發重查，舊觀察者或延遲讀數失去資格。time-pos、pause、core-idle、paused-for-cache、seeking 綁當前來源。
 - `mpv:present` 只留最新請求。暫停定位核命令 ACK 後的命中 time-pos。播放／擷取另核相應 restart。逐格用 time-pos setter。restart 無來源／請求 ID，最後用真實像素驗證。起播就緒與緩衝恢復各有證據，單一 ACK 或 URL 不足。
+- 暫停時，`mpv:seek` 可用 `subtitleTarget` 保留專案播放點對應的來源秒數。`mpv:subSet` 將 ASS 與字幕時鐘綁定到目前的來源 session。host 用實際呈現的來源 PTS 校正字幕延遲，恢復播放時解除暫停定位的補償。[字幕邊界範例](FPS_時碼一致性.md#ui-權威與實際呈現)
 - 原生與 renderer 交界只用**影片來源秒數**。例如影片比容器晚 0.5 秒，來源 2.8 秒對應容器 3.3 秒。已歸零的 Proxy 不再加偏移。慢速/VFR 素材用 frameTarget／frameStart／frameDuration 的實際區間。[FPS 契約](FPS_時碼一致性.md) · [換源回歸](../tests/mpvSourceTransition.test.js)
 
 ### 截圖輸出

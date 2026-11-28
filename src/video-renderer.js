@@ -3,8 +3,9 @@ import { State, isSel, setSelection, deselect, IS_DESKTOP, saveConfig, trackVisi
 import { Media } from './media.js';
 
 import { Seq } from './sequence.js';
+import { mpvSubtitleTiming } from './sequence-time.js';
 import { emit, on } from './events.js';
-import { getExactFps, secToEncore } from './time.js';
+import { getExactFps, secToASS, secToEncore } from './time.js';
 import { effStyle, styleToCss, ASS_PLAY_RES, anchorPct, subtitleFontRevision } from './substyle.js';
 import { escapeHTML } from './util.js';
 import { getPlayerAdapter, getNativePreviewRuntime } from './media-player-adapter.js';
@@ -41,10 +42,11 @@ export function refreshMpvSubs(revealAfter=false, live=false){
       // 序列：mpv/libass 以【來源時間】渲染字幕，而 cue 時碼為【時間軸時間】——
       // 依當前 clip 的映射（來源 = 時間軸 - offset + in）整批平移後再餵給 mpv
       const c=Media.seqOn() ? Media.activeClip() : null;
+      const timing=mpvSubtitleTiming(c,getExactFps(State.fps || 25));
       // live 也必須先用時間軸位置篩選，最後才映射成 mpv 的來源時間。
       const cs=Seq.timedRangesForSource(State.cues,c,live
         ? {center:Media.displayTime(),radius:5}
-        : {});
+        : {}).map(timing.range);
       let assStr;
       if(State.presetEdit) {
         const previewText = document.getElementById('tsEditPreviewText')?.value || '田這是一段|範例字幕田\n田 ABC123|321CBA 田';
@@ -66,19 +68,22 @@ export function refreshMpvSubs(revealAfter=false, live=false){
       }
       if(State.safeFrame) {
         const sf = [];
+        const duration = Math.max(State.duration || 0, c?.out || 0);
+        const end = State.presetEdit ? duration : (duration - timing.clock.origin) / timing.clock.speed;
+        const safeEnd = secToASS(Math.max(35999.99, end + 1));
         // 以 1920x1080 畫布為基準產生四邊矩形邊框
         // 100%
-        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFA300&\\3a&H00&\\bord2}m 2 2 l 1918 2 l 1918 1078 l 2 1078`);
+        sf.push(`Dialogue: 0,0:00:00.00,${safeEnd},Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFA300&\\3a&H00&\\bord2}m 2 2 l 1918 2 l 1918 1078 l 2 1078`);
         // 90%
-        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFFFFF&\\3a&H77&\\bord1}m 96 54 l 1824 54 l 1824 1026 l 96 1026`);
+        sf.push(`Dialogue: 0,0:00:00.00,${safeEnd},Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&HFFFFFF&\\3a&H77&\\bord1}m 96 54 l 1824 54 l 1824 1026 l 96 1026`);
         // 80%
-        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&H5ADCF0&\\3a&H55&\\bord2}m 192 108 l 1728 108 l 1728 972 l 192 972`);
+        sf.push(`Dialogue: 0,0:00:00.00,${safeEnd},Default,,0,0,0,,{\\an7\\pos(0,0)\\p1\\1a&HFF&\\3c&H5ADCF0&\\3a&H55&\\bord2}m 192 108 l 1728 108 l 1728 972 l 192 972`);
         // 中心十字線 (垂直、水平)
-        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(960,0)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m -1 0 l 1 0 l 1 1080 l -1 1080`);
-        sf.push(`Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an7\\pos(0,540)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m 0 -1 l 1920 -1 l 1920 1 l 0 1`);
+        sf.push(`Dialogue: 0,0:00:00.00,${safeEnd},Default,,0,0,0,,{\\an7\\pos(960,0)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m -1 0 l 1 0 l 1 1080 l -1 1080`);
+        sf.push(`Dialogue: 0,0:00:00.00,${safeEnd},Default,,0,0,0,,{\\an7\\pos(0,540)\\p1\\1c&HFFFFFF&\\1a&H77&\\bord0}m 0 -1 l 1920 -1 l 1920 1 l 0 1`);
         assStr += '\n' + sf.join('\n') + '\n';
       }
-      const applied=await getPlayerAdapter().subSet(assStr);
+      const applied=await getPlayerAdapter().subSet(assStr,State.presetEdit ? null : timing.clock);
       // 只在拖曳結束時才重新露出 mpv/libass 字幕，避免舊位置與 DOM 預覽重疊。
       if(applied && _mpvSubT===timer && _revealMpvSubsAfterRefresh){
         _revealMpvSubsAfterRefresh=false;
@@ -242,11 +247,11 @@ export function toggleTimecodeWatermark(){
 
 let _lastStageH = 0;
 let _htmlCanvasRectKey = '';
-export function renderVideoSub(fromPlayback=false){
+export function renderVideoSub(fromPlayback=false,t=Media.displayTime()){
   // 編輯／Undo／匯入由直接 render 或 render:videoSub 進來；只有播放 tick 可沿用索引。
   if(fromPlayback!==true) subtitlePreviewIndex.invalidate();
   drawSafeFrame(); // 安全框跟著畫面每幀對齊
-  renderTimecodeWatermark(); // 同步播放器監看時間碼（不參與輸出）
+  renderTimecodeWatermark(t); // 同步播放器監看時間碼（不參與輸出）
   // 【雙引擎渲染架構說明 (v5.2.0)】
   // 1. 單軌影片 (MPV): mpv.exe 是一個 OS 層級實體視窗 (HWND)，會像一塊黑布一樣完全蓋住底下的 Chrome DOM。
   //    因此，單軌時「必須」依賴 MPV 內建的 C++ libass 引擎，直接將字幕畫在影片上。此時 HTML DOM 僅保留透明命中層供拖曳。
@@ -260,7 +265,6 @@ export function renderVideoSub(fromPlayback=false){
     if((!Media.mpvPresenting() || mpvHitLayer || _mpvSubtitleDrag || State.presetEdit) && _videoSub.style.display==='none') _videoSub.style.display='';
   }
   if(!mpvHitLayer) _sendMpvSubtitleGuide(null);
-  const t=Media.displayTime();
   const fps = State.fps || 25;
   let exactFps = getExactFps(fps);
   const currentFrame = Math.round(t * exactFps);

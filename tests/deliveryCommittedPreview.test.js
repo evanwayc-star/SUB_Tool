@@ -120,8 +120,9 @@ it.each(['字幕檔案','影片交付'])('%s 在變速仍等待播放器時，�
       expect(window.subtool.exportVideo).toHaveBeenCalledOnce();
       const job=window.subtool.exportVideo.mock.calls[0][0];
       expect(job.duration).toBe(5);expect(job.clips[0]).toMatchObject({speed:1,in:0,out:3});
-      expect(job.assText).toMatch(/Dialogue:.*0:00:02\.00,0:00:03\.00/);
-      expect(job.assText).not.toMatch(/Dialogue:.*0:00:02\.00,0:00:04\.00/);
+      expect(job.assTiming).toBe('output-fields');
+      expect(job.assText).toMatch(/Dialogue:.*0:00:01\.00,0:00:01\.50/); // 2–3 s at 50 fields/s
+      expect(job.assText).not.toMatch(/Dialogue:.*0:00:01\.00,0:00:02\.00/);
     }
     expect(clip.speed).toBe(.5);expect(State.duration).toBe(6);
     expect(State.cues[0]).toMatchObject({start:2,end:3,_tempEnd:true});

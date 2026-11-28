@@ -34,7 +34,7 @@ import { AudioEngine } from './audio-engine.js';
 import { createNativeAudioMeterClient } from './native-audio-meter.js';
 import { createPreviewSourceSession, isNetworkPreviewPath } from './preview-source-session.js';
 import { projectCanvasSize } from './project-canvas.js';
-import { MediaIntakeJobs } from './media-intake-jobs.js';
+import { intakeCacheLabel, intakeErrorSummary, MediaIntakeJobs } from './media-intake-jobs.js';
 import { MediaAudioRouter, AudioPipeline } from './audio-routing-engine.js';
 import { destroyScrubber } from './audio-engine.js';
 import { State, DESK, snapFps, ensureVideoTrackCount, resetVideoTracks, ensureAudioSourceMap, deselect, saveConfig } from './state.js';
@@ -1883,6 +1883,7 @@ const Media = {
     const current=()=>this._bgVersion===myVer&&sourceCurrent();
     const recovery=this._registerIntakeRecovery(p,()=>this._bgAudioIngest(p,audio,dur,primary,{needsProxy,restorePreview}),sourceCurrent);
     let res;
+    let failureLabel='來源波形準備失敗';
     let stagedElements=[],stagedTracks=[];
     // 需要 Proxy 時同 pass 產 短 GOP 預覽檔：多軌合成時交給 WebCodecs，
     // 持續倒帶時則暫時交給 mpv，避免母素材的長 GOP 造成反向預解碼停頓。
@@ -1891,9 +1892,11 @@ const Media = {
     try{
       const preparation=DESK?.prepareSourceWaveform?await this._prepareWaveformForIngest(primary,p,audio,dur,current,recovery):true;
       if(!preparation||!current()) return;
+      failureLabel=intakeCacheLabel({proxy:needsProxy,audio:audio.length>0})+'未完成';
       res=await MediaIntakeJobs.ingest({path:p,duration:dur,needsProxy,audio,queue:true});
       if(!current()) return; // 使用者已換另一個檔，丟棄結果
       if(res.proxy){
+        failureLabel='Proxy 預覽載入失敗';
         try{
           const u=await DESK.fileURL(res.proxy);
           if(!current()) return;
@@ -1908,6 +1911,7 @@ const Media = {
       }
 
       if(!current()) return;
+      failureLabel='音訊預覽載入失敗';
       const chs=res.channels||[];
       const livePrimary=this._liveClipForSource(primary);
       if(!livePrimary) return;
@@ -1941,6 +1945,7 @@ const Media = {
       if(!current()) return;
       this.pendingChannels=[];
       this.usingWebAudio=true; this.syncMuteState();
+      if(restorePreview&&res.proxy)failureLabel='Proxy 預覽接手失敗';
       const previewRefreshed=restorePreview&&res.proxy
         &&await this._adoptCompletedStreamProxy(primary,this._wcProxyUrl,current);
       if(!current())return;
@@ -1951,18 +1956,21 @@ const Media = {
       // Proxy has no embedded audio. Publish its selectable path only after
       // every original channel is committed; waveform display may finish later.
       if(current())this._publishPreviewAssets(primary,res,current);
+      failureLabel='波形準備失敗';
       if(await this._finishIngestWave(primary,audio,preparation,waveReady,current,recovery)&&current())
         setMediaProcessingStatus(needsProxy?'轉檔 Proxy 與音軌波形已就緒':'音軌波形已就緒','ok');
     }catch(error){
       for(const element of stagedElements) this._disposeMediaElement(element);
       for(const track of stagedTracks){try{track.gain?.disconnect();track.analyser?.disconnect?.();}catch(_){} }
       if(!current()) return;
-      recovery.fail(error);
+      recovery.fail(error,failureLabel);
       console.warn('bg audio ingest:',error);
       this.pendingChannels=[];
       notifyAudioTracks();
-      showToast('音訊預覽載入失敗：'+(error?.message||String(error)));
-      setStatus('影片已載入，但音訊預覽載入失敗','err',false,error?.message||String(error));
+      const message='影片已載入，'+failureLabel;
+      const detail=error?.message||String(error);
+      showToast(intakeErrorSummary(message,detail));
+      setStatus(message,'err',false,detail);
     }
   },
 
@@ -2395,14 +2403,12 @@ const Media = {
      它們背後的 _gap / presentation session / _activeClip 以前是被【模組外直接讀】的底線
      名稱——呼叫端因此得知道 Media 的內部欄位長什麼樣，改名就會靜默壞掉。
 
-     mpvPresenting() 特別值得存在：`mpvMode && !webCodecsTakeover()` 這個組合原本在
-     app.js 與 pointer-interaction.js 手寫了七次，任何一處漏掉 takeover 判斷，
-     WebCodecs 接管期間就會把 guide／命中層送去 mpv——畫面看起來正常，但點不到。 */
+     mpvPresenting() 對應原生畫面是否正在出圖。WebCodecs 接管或影片間隙隱藏原生
+     視窗時，字幕和操作提示都由 renderer 繪製。 */
   activeClip(){ return this._activeClip(); },
   inGap(){ return !!this._gap; },
   sourceLocalTime(srcId, t){ return this._srcLocalT(srcId, t); },
-  /* mpv 正在自己出圖（WebCodecs 尚未接管） */
-  mpvPresenting(){ return !!(this.mpvMode && !this.webCodecsTakeover()); },
+  mpvPresenting(){ return !!(this.mpvMode && !this.inGap() && !this.webCodecsTakeover()); },
   /* WebCodecs 是否已接管畫面（mpv 視窗讓位）。與 _wcComposited 不同：
      這個是「有沒有叫 mpv 讓位」，_wcComposited 是「WC 這一輪有沒有真的畫出東西」。 */
   webCodecsTakeover(){ return !!this._presentationSession?.webCodecsTakeover(); },
@@ -3141,6 +3147,7 @@ const Media = {
     const clip=this._activeClip();
     const bounded=clip?.reverse?Math.min(time,clip.out-0.5/getExactFps(clip.fps||State.fps||30)):time;
     const target=Math.max(0, bounded-this._mpvSeekOffset);
+    if(this.mpvMode && target!==time) return getPlayerAdapter()?.seek(target,{exact:this._mpvExactSeek,subtitleTarget:time});
     return getPlayerAdapter()?.seek(target, this._mpvExactSeek ? { exact:true } : undefined);
   },
   _playerSeekSource(s){
@@ -3569,7 +3576,14 @@ const Media = {
     const preparation=needsEarlyPicture?(await Promise.all([waveform,earlyPicture()]))[0]:waveform===true?true:await waveform;
     if(!preparation||!owns()) return;
     let res; try{ res = await MediaIntakeJobs.ingest({ path: c.path, duration: c.dur, needsProxy: true, audio: info?.audio || [], queue: true }); }
-    catch(e){ if(owns()){recovery.fail(e);setMediaProcessingStatus('影片音訊抽取失敗：' + (e?.message||e), 'err');} return; }
+    catch(error){
+      if(owns()){
+        const label=intakeCacheLabel({proxy:true,audio:!!info?.audio?.length})+'未完成';
+        recovery.fail(error,label);
+        setMediaProcessingStatus(label,'err',false,error?.message||String(error));
+      }
+      return;
+    }
     if(!res || !owns()) return;
     if(res.proxy){
       try{ const u = await DESK.fileURL(res.proxy);

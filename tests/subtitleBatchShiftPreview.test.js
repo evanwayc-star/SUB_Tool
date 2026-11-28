@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { assToSec } from '../src/time.js';
 
 let State, StateModule, History, Subio, Timeline, Subtitles, Renderer, Media, audit;
 let unsubscribe;
@@ -114,9 +115,19 @@ describe('batch subtitle shifts and preview work', () => {
     expect(State.cues.map(cue => [cue.start, cue.end])).toEqual(Array.from({ length: 80 }, (_, index) => [2 * index + 2, 2 * index + 3]));
     expect(History.stack).toHaveLength(2);
     expect(bridge.subSet).toHaveBeenCalledTimes(1);
-    const ass = bridge.subSet.mock.calls[0][0];
-    expect(ass.match(/^Dialogue:/gm)).toHaveLength(80);
-    expect(ass).toContain('0:00:02.00,0:00:03.00');
+    const [ass,,clock] = bridge.subSet.mock.calls[0];
+    const dialogue = ass.split(/\r?\n/).filter(line=>line.startsWith('Dialogue:'));
+    expect(dialogue).toHaveLength(80);
+    for (const [index,line] of dialogue.entries()) {
+      const [,start,end] = line.split(',');
+      const on = clock.origin + assToSec(start)*clock.speed;
+      const off = clock.origin + assToSec(end)*clock.speed;
+      const cue = State.cues[index];
+      expect(on).toBeGreaterThan(cue.start - 1 / State.fps);
+      expect(on).toBeLessThanOrEqual(cue.start);
+      expect(off).toBeGreaterThan(cue.end - 1 / State.fps);
+      expect(off).toBeLessThanOrEqual(cue.end);
+    }
     expect(State.playing).toBe(true);
     for (const command of ['launch', 'pause', 'play', 'seek', 'loadfile']) expect(bridge[command]).not.toHaveBeenCalled();
   });

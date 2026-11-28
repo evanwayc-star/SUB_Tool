@@ -13,7 +13,7 @@ const SCREEN_TEXT_DEFAULTS = Object.freeze({
 // These model IDs are installed with the desktop application. Empty selection
 // enables the broader automatic script detection in the local frame worker.
 const FRAME_TEXT_LANGUAGES = Object.freeze({
-  chi_tra:'繁體中文', chi_sim:'簡體中文', eng:'英文', jpn:'日文', kor:'韓文', tha:'泰文',
+  chi_tra:'繁中', chi_sim:'簡中', eng:'英文', jpn:'日文', kor:'韓文', tha:'泰文',
   fra:'法文', deu:'德文', spa:'西班牙文', rus:'俄文', ara:'阿拉伯文', hin:'印地文', ell:'希臘文', heb:'希伯來文',
 });
 

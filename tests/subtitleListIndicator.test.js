@@ -15,23 +15,24 @@ describe('字幕列表目前播放與選取提示', () => {
     document.body.innerHTML = '<div class="sublist"><div class="sub-row sel active"><span class="idx">1</span></div></div>';
   });
 
-  it('黃色選取條保留 5px 固定槽位，切換時文字不位移', () => {
+  it('黃色選取條加粗至 8px，連同左內距仍只占原有 13px，切換時文字不位移', () => {
     const row = document.querySelector('.sub-row');
     const selected = getComputedStyle(row);
-    expect(selected.borderLeftWidth).toBe('5px');
+    expect(selected.borderLeftWidth).toBe('8px');
     const selectedPadding = selected.paddingLeft;
+    expect(parseFloat(selectedPadding) + parseFloat(selected.borderLeftWidth)).toBe(13);
 
     row.classList.remove('sel');
     const unselected = getComputedStyle(row);
-    expect(unselected.borderLeftWidth).toBe('5px');
+    expect(unselected.borderLeftWidth).toBe('8px');
     expect(unselected.borderLeftColor).toBe('rgba(0, 0, 0, 0)');
     expect(unselected.paddingLeft).toBe(selectedPadding);
   });
 
-  it('藍色目前播放條是 5px，與黃色選取條並排時都清楚可見', () => {
+  it('藍色目前播放條是 8px，與黃色選取條並排時都清楚可見', () => {
     const row = document.querySelector('.sub-row');
     row.classList.add('sel', 'active');
-    expect(getComputedStyle(row).boxShadow).toMatch(/inset\s+5px\s+0\s+0/);
+    expect(getComputedStyle(row).boxShadow).toMatch(/inset\s+8px\s+0\s+0/);
   });
 
   it('黃色選取條不做漸變等待，狀態改變同一幀就顯示', () => {

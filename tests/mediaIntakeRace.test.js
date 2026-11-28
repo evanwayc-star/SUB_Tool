@@ -904,7 +904,7 @@ describe('desktop mother-source intake ownership', () => {
       await Media.loadDesktopMedia('C:/media/audio-error.webm');
       expect(State.clips[0].path).toBe('C:/media/audio-error.webm');
       await vi.waitFor(()=>expect(showToast).toHaveBeenCalledWith(expect.stringContaining('metadata 讀取失敗')));
-      expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗', 'err',false,'metadata 讀取失敗');
+      expect(setStatus).toHaveBeenLastCalledWith('影片已載入，音訊預覽載入失敗', 'err',false,'metadata 讀取失敗');
       expect(showToast.mock.calls.filter(([,kind])=>kind==='error')).toHaveLength(0);
     } finally {
       audio.mockRestore();
@@ -989,6 +989,33 @@ describe('desktop mother-source intake ownership', () => {
     }finally{fetch.mockRestore();decode.mockRestore();}
   });
 
+  it('母素材載入後 Proxy 封裝錯誤留在背景，保留已備妥的波形及母素材聲道',async()=>{
+    const path='C:/media/long-film.mp4',sourceKey='a'.repeat(16);
+    const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:6313,sourceSessionId:'mux-session'})),
+      quit:vi.fn(async()=>{}),onEvent:vi.fn(),setBounds:vi.fn(async()=>{})};
+    window.subtool.mpv=mpv;window.subtool.mediaSourceKey=vi.fn(async()=>sourceKey);resetPlayerAdapter(window.subtool);
+    const ingest=deferred();
+    deskMock.probe.mockResolvedValueOnce({duration:6313,video:{codec:'h264',fps:29.97,width:1920,height:1080},audio:[{channels:2}]});
+    deskMock.ingest.mockReturnValueOnce(ingest.promise);
+    const diagnostic='[LOG_PATH]C:/logs/long-ingest.log[/LOG_PATH]ffmpeg 結束碼 3\nAssertion next_dts failed';
+    try{
+      await Media.loadDesktopMedia(path);
+      await vi.waitFor(()=>expect(deskMock.ingest).toHaveBeenCalledWith(expect.objectContaining({path,needsProxy:true})));
+      const source=State.clips[0];
+      Wave.registerSourceWaveforms(source,{mixPath:'C:/cache/complete-wave.wav'});
+      const routing=structuredClone(State.audioProject.sourceMaps);
+      expect(Media.usingWebAudio).toBe(false);
+      ingest.reject(new Error(diagnostic));
+      await vi.waitFor(()=>expect(setStatus).toHaveBeenLastCalledWith('影片已載入，Proxy 與音軌快取未完成','err',false,diagnostic));
+      expect(showToast).toHaveBeenCalledWith('影片已載入，Proxy 與音軌快取未完成');
+      expect(Media.mpvMode).toBe(true);expect(Media.usingWebAudio).toBe(false);
+      expect(State.clips[0]).toBe(source);expect(State.audioProject.sourceMaps).toEqual(routing);
+      expect(Wave._sourceState(source,false).mix.path).toBe('C:/cache/complete-wave.wav');
+    }finally{
+      Media.reset();delete window.subtool.mediaSourceKey;delete window.subtool.mpv;resetPlayerAdapter(window.subtool);
+    }
+  });
+
   it.each(['URL','metadata','deferred metadata','stale'])('mpv background audio %s rejection is owned and settled',async failure=>{
     const mpv={detect:vi.fn(async()=>({available:true})),launch:vi.fn(async()=>({duration:12,sourceSessionId:'background-session'})),
       present:vi.fn(async time=>({backend:'mpv',presentedSourceTime:time})),
@@ -1023,7 +1050,7 @@ describe('desktop mother-source intake ownership', () => {
         expect(setStatus).toHaveBeenLastCalledWith('new project ready','ok');
         expect(showToast).not.toHaveBeenCalled();
       }else{
-        await vi.waitFor(()=>expect(setStatus).toHaveBeenLastCalledWith('影片已載入，但音訊預覽載入失敗','err',false,
+        await vi.waitFor(()=>expect(setStatus).toHaveBeenLastCalledWith('影片已載入，音訊預覽載入失敗','err',false,
           failure==='URL'?'cache URL unavailable':'metadata unavailable'));
         expect(Media.pendingChannels).toEqual([]);expect(State.clips).toHaveLength(1);
         expect(showToast).toHaveBeenCalledWith(expect.stringContaining(failure==='URL'?'cache URL unavailable':'metadata unavailable'));

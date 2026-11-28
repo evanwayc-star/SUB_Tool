@@ -19,6 +19,30 @@ beforeEach(async()=>{
   cancel=vi.fn(()=>jobs.reset());bindView(cancel);
 });
 
+it('合併 Proxy 失敗時保留原生診斷、正確顯示影音快取階段，並可從右側重試',async()=>{
+  const path='C:/media/長片.mp4';
+  const diagnostic='[LOG_PATH]C:/logs/job-a-ingest.log[/LOG_PATH]ffmpeg 結束碼 3\nAssertion next_dts failed';
+  const ipcError=new Error("Error invoking remote method 'ffmpeg:ingest': "+diagnostic);
+  let reject;
+  window.subtool.ingest.mockImplementationOnce(options=>{
+    requests.push(options);return new Promise((_,fail)=>{reject=fail;});
+  });
+  const retry=vi.fn();const recovery=jobs.registerRecovery({path,owns:()=>true,retry});
+  const work=jobs.ingest({path,duration:6300,needsProxy:true,audio:[{channels:2}]});
+  progress({...requests[0],stage:'transcoding',outputs:{proxy:true,audio:true},done:true,outcome:'failed',errorMsg:diagnostic});
+  reject(ipcError);await expect(work).rejects.toBe(ipcError);
+  recovery.fail(ipcError,'Proxy 與音軌快取未完成');
+  setStatus('影片已載入，Proxy 與音軌快取未完成','err',false,ipcError.message);
+
+  const message=document.getElementById('stIntakeMsg'),button=document.getElementById('stIntakeRetryBtn');
+  expect(message.textContent).toBe('長片.mp4：Proxy 與音軌快取未完成');
+  expect(message.title).toBe(ipcError.message);
+  expect(document.getElementById('stErrorCount').textContent).toBe('1');
+  expect(getComputedStyle(button).display).not.toBe('none');
+  expect(button.textContent).toBe('重試背景處理');
+  button.click();await vi.waitFor(()=>expect(retry).toHaveBeenCalledOnce());
+});
+
 it('來源波形驗證錯誤由波形工作回報一次，不顯示為轉檔失敗',async()=>{
   const path='episode.mp4',reason='連續波形快取的來源、目錄或內容已變更';
   let request,reject;

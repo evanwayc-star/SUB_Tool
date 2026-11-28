@@ -876,7 +876,14 @@ function buildDeliveryArgv(spec = {}, env = {}) {
     //    所以字面上得是 `C\\:/...`。只寫一個反斜線（舊版）→ ffmpeg 把 `:` 當成選項分隔符、
     //    整條 filterchain 解析失敗 → 匯出直接掛掉。此路徑僅在 font/ 存在時才加。
     const fdirArg = fontsDir ? ':fontsdir=' + _drawtextValue(fontsDir) : '';
-    fc.push(`${vc}ass=${_drawtextValue(assFileName)}${fdirArg}[vout]`);
+    const ass = `ass=${_drawtextValue(assFileName)}${fdirArg}`;
+    // A new burn snapshot uses one ASS centisecond per output field. Sample
+    // 1 ms inside the event to avoid libass rounding an exact boundary down.
+    // Restore the real frame clock for timecode, interlacing and encoding.
+    const burn = spec.assTiming === 'output-fields'
+      ? `settb=1/1000,setpts=N*${isInterlaced ? 10 : 20}+1,${ass},settb=1/(${R}),setpts=N`
+      : ass;
+    fc.push(`${vc}${burn}[vout]`);
     vfinal = '[vout]';
   }
   if (W !== frameW || H !== frameH) {

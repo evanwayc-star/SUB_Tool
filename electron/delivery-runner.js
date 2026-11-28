@@ -183,7 +183,7 @@ function createDeliveryRunner(options = {}) {
         format, clips, videoTracks, width, height, fps, duration, videoKbps,
         mp3Kbps: payload.mp3Kbps,
         targetW: payload.targetW, targetH: payload.targetH, canvasW: payload.canvasW, canvasH: payload.canvasH,
-        audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName: assName, outPath,
+        audioPlan: rawAudioPlan, timecodeWatermark: rawTimecodeWatermark, assFileName: assName, assTiming: payload.assTiming, outPath,
         chapters: payload.chapters, chapterFileName,
       }, {
         hwdecArgs: encoder.hwdecArgs,

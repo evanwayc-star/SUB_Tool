@@ -107,6 +107,10 @@ it('組字確認與 Shift+Enter 換行仍由輸入欄處理，單按 Enter 建�
 
 it('同一個凍結畫格可重新框選，複選語言與白字選項傳給對應工作',async()=>{
   await openPlayheadOcr();
+  const choices = el('playheadOcrOptions').querySelectorAll('fieldset input');
+  expect(Array.from(choices, field => [field.value, field.labels[0].textContent])).toEqual([
+    ['chi_tra','繁中'], ['chi_sim','簡中'], ['eng','英文'], ['jpn','日文'], ['kor','韓文'],
+  ]);
   const chosen = el('playheadOcrOptions').querySelectorAll('input[value=chi_tra],input[value=eng]');
   chosen.forEach(input=>input.click());
   el('playheadOcrWhite').click();
@@ -114,7 +118,7 @@ it('同一個凍結畫格可重新框選，複選語言與白字選項傳給對�
   await select(rect);
   expect(encodePlayheadOcrRegion.mock.lastCall).toEqual([expect.anything(),[rect],expect.objectContaining({whiteSubtitles:true})]);
   expect(DESK.recognizeFrameText.mock.lastCall[0].languages).toEqual(['chi_tra','eng']);
-  expect(el('playheadOcrLanguageSummary').textContent).toContain('繁體中文、英文');
+  expect(el('playheadOcrLanguageSummary').textContent).toContain('繁中、英文');
   el('playheadOcrReselect').click();
   expect(el('playheadOcrRegion').hidden).toBe(false);
   expect(encodePlayheadOcrRegion).toHaveBeenCalledTimes(1);

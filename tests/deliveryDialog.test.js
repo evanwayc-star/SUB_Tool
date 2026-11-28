@@ -260,12 +260,13 @@ describe('匯出交付清單', () => {
   it('進行中 I 點的交付 ASS 使用收尾快照且不更動 live 打點', async () => {
     State.tracks=[{name:'字幕',visible:true}];
     State.cues=[{id:'pending',text:'測試',start:1,end:9,track:0,_tempEnd:true}];
-    State.duration=10;State.exportIn=0;State.exportOut=10;
+    State.duration=10;State.exportIn=0;State.exportOut=10;State.fps=25;
     window.subtool.exportVideo.mockResolvedValue('job-A');
     const submit=await prepareRows(['A.mp4']);
     await submit.act();
     const [job]=window.subtool.exportVideo.mock.calls[0];
-    expect(job.assText).toMatch(/Dialogue:.*0:00:01\.00,0:00:03\.00/);
+    expect(job.assTiming).toBe('output-fields');
+    expect(job.assText).toMatch(/Dialogue:.*0:00:00\.50,0:00:01\.50/); // 1–3 s at 50 fields/s
     expect(State.cues[0]).toMatchObject({start:1,end:9,_tempEnd:true});
   });
 

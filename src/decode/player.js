@@ -422,7 +422,7 @@ export const WCPreview = {
     const vs = $('videoSub');
     if(vs){
       vs.style.display='';
-      vs.classList.toggle('mpv-hit-layer', Media.mpvMode&&!v);
+      vs.classList.toggle('mpv-hit-layer', Media.mpvPresenting());
     }
     emit('mpv:sync'); // _syncMpvPanel 讓 mpv 視窗讓位／回歸
   },

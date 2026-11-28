@@ -151,6 +151,8 @@ on('fps:changed', ()=>{
       renderSubList();
       drawTimeline();
     }
+    renderVideoSub();
+    refreshMpvSubs();
   }, 0);
 });
 on('duration:display', renderDurationReadout);
@@ -722,11 +724,11 @@ function rafLoop(renderVideoSubCallback) {
     }
     renderSeekBar($('seekBar'), t);
     if (window._ensurePlayheadVisible) window._ensurePlayheadVisible();
-    updatePlayhead();
-    renderVideoSubCallback(true);
+    updatePlayhead(t);
+    renderVideoSubCallback(true,t);
     if (Wave.live || Wave.liveElementSources.size) { Wave.captureLive(); if ((_rafFrame++ % 6) === 0) emit('media:waveform'); }
     
-    const active=subtitlePreviewIndex.activeAtTime(State.cues,getExactFps(State.fps||25),t+0.001,_rafLastIdx,State.listTrack);
+    const active=subtitlePreviewIndex.activeAtTime(State.cues,getExactFps(State.fps||25),t,_rafLastIdx,State.listTrack);
     const act=active?.cue||null;
     _rafLastIdx=active?.index??-1;
     const activeId=act?.id??null;

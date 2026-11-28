@@ -53,6 +53,9 @@ it('starts once with flagship cloud vision settings at ten samples per second an
   let finish;
   recognizeClipText.mockReturnValue(new Promise(resolve => { finish = resolve; }));
   await openDialog(clip, () => true);
+  expect(Array.from(element('ocrSourceLang').options, option => [option.value, option.label])).toEqual([
+    ['auto', '自動判斷'], ['zh', '中文'], ['en', '英文'], ['ja', '日文'], ['ko', '韓文'],
+  ]);
   expect(element('ocrScope').value).toBe('clip');
   expect(element('ocrScopeRange').textContent).toContain('00:00:10:00');
   expect(element('modalBody').querySelector('strong').textContent).toBe(clip.name);

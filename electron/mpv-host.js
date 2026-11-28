@@ -471,7 +471,20 @@ function createMpvHost(deps) {
     if (MPV_BUFFERING_PROPERTIES.includes(message.name) && typeof message.data !== 'boolean') return;
     const event={...message,sourceSessionId:session.sourceSessionId};
     if(event.name==='time-pos'&&session.awaitingPositioning) event.beforeSourcePositioning=true;
-    if(event.name==='time-pos'&&typeof event.data==='number') event.data=sourceTime(event.data);
+    if(event.name==='time-pos'&&typeof event.data==='number') {
+      event.data=sourceTime(event.data);
+      if (!event.beforeSourcePositioning) {
+        session.subtitlePosition = event.data;
+        if (playerPaused && !pendingPresentation && session.subtitleTarget != null) {
+          // A paused seek can acknowledge its requested position before the
+          // decoder settles on the actual PTS. The committed UI frame stays put.
+          session.subtitleHold = event.data - session.subtitleTarget;
+        }
+        if ((!playerPaused || !pendingPresentation) && session.subtitleClock) {
+          void syncSubtitleDelay(session)?.catch(error => log('[mpv] 字幕時鐘更新失敗：', error.message));
+        }
+      }
+    }
     if(!event.beforeSourcePositioning) observePresentationEvent(event);
     sendEvent(event);
   }
@@ -591,6 +604,24 @@ function createMpvHost(deps) {
     if (!request.commandAcknowledged || request.presentedSourceTime == null) return;
     if (!request.waitForFrame && !request.confirmedAfterAck) return;
     if (!playerPaused && !request.restarted) return;
+    const session = fileLoadSession;
+    if (playerPaused && session && !request.subtitleAligned) {
+      if (request.aligningSubtitles) return;
+      // An indexed frame can cover several paused project positions. Without
+      // that interval the renderer commits the observed PTS on its grid.
+      session.subtitleTarget = request.knownFrame ? request.frameTarget : request.presentedSourceTime;
+      session.subtitleHold = request.presentedSourceTime - session.subtitleTarget;
+      session.subtitlePosition = request.presentedSourceTime;
+      const write = syncSubtitleDelay(session);
+      if (write) {
+        request.aligningSubtitles = true;
+        void write.then(() => {
+          request.subtitleAligned = true;
+          maybeFinishPresentation(request);
+        }).catch(() => settlePresentation(request));
+        return;
+      }
+    }
     settlePresentation(request, {
       backend: 'mpv',
       presentedSourceTime: request.presentedSourceTime,
@@ -1517,16 +1548,65 @@ function createMpvHost(deps) {
     }
   }
 
-  async function setSubtitles(assText, sourceSessionId = fileLoadSession?.sourceSessionId) {
+  function subtitleProperty(session, key, value, initial) {
+    const properties = session.subtitleProperties ??= new Map();
+    const previous = properties.get(key);
+    if (previous?.value === value) return previous.pending;
+    if (!previous && value === initial) return null;
+    const entry = { value, pending: null };
+    properties.set(key, entry);
+    entry.pending = send(['set_property', key, value], true, { requireSuccess: true }).then(() => {
+      entry.pending = null;
+    }).catch(error => {
+      // The write may have reached mpv. Retry this unconfirmed property even
+      // for its default value, without touching a newer in-flight write.
+      if (properties.get(key) === entry) entry.value = null;
+      throw error;
+    });
+    return entry.pending;
+  }
+
+  function syncSubtitleDelay(session) {
+    if (!session) return null;
+    const clock = session.subtitleClock;
+    let delay = playerTime(0);
+    if (clock) {
+      const hold = session.subtitleHold || 0;
+      const sample = (session.subtitlePosition ?? clock.origin) - hold;
+      // mpv stores sub-speed as float32 and sub-delay as double. Correct the
+      // accumulated rate error at the current source PTS for long timelines.
+      const drift = (sample - clock.origin) * (1 - Math.fround(clock.speed) / clock.speed);
+      delay = playerClockTime(clock.origin, sourceClock) + hold + drift;
+    }
+    return subtitleProperty(session, 'sub-delay', Number(delay.toFixed(7)), clock ? null : playerTime(0));
+  }
+
+  function releaseSubtitleHold(session) {
+    if (!session) return;
+    session.subtitleTarget = null;
+    if (!session.subtitleHold) return;
+    session.subtitleHold = 0;
+    void syncSubtitleDelay(session)?.catch(error => log('[mpv] 字幕時鐘更新失敗：', error.message));
+  }
+
+  async function setSubtitles(assText, sourceSessionId = fileLoadSession?.sourceSessionId, clock) {
     const session = fileLoadSession;
     if (!ownsReadySource(session) || sourceSessionId !== session.sourceSessionId) return false;
+    if (clock != null && (!Number.isFinite(clock.origin) || !Number.isFinite(clock.speed)
+      || clock.speed < 0.1 || clock.speed > 10)) return false;
     const request = Symbol();
     session.subtitleRequest = request;
     const current = () => ownsReadySource(session) && session.subtitleRequest === request;
     // ASS 暫存檔直到上一筆 ACK 才能覆寫；等待期間只提交最新一次面板輸入。
     if (subtitleWork) await subtitleWork;
     if (!current()) return false;
-    const work = applySubtitles(assText, current).catch(error => {
+    const work = (async () => {
+      session.subtitleClock = clock;
+      const speed = subtitleProperty(session, 'sub-speed', clock?.speed ?? 1, clock ? null : 1);
+      const delay = syncSubtitleDelay(session);
+      if (speed || delay) await Promise.all([speed, delay]);
+      return current() && applySubtitles(assText, current);
+    })().catch(error => {
       if (current()) log('[mpv] 字幕更新失敗：', error.message);
       return false;
     });
@@ -1571,6 +1651,10 @@ function createMpvHost(deps) {
     if (!current()) return superseded();
     log('[mpv] loadfile:', filePath);
     sourceClock = info?.video || null;
+    // A superseded probe can leave no previous ready session while mpv still
+    // carries that file's speed. Every replacement takes its own baseline.
+    await send(['set_property', 'sub-speed', 1]);
+    if (!current()) return superseded();
     await send(['set_property', 'sub-delay', playerTime(0)]);
     if (!current()) return superseded();
     for(const old of [...sourceObserverSessions]) if(old!==session) releaseSourceObservers(old);
@@ -1633,14 +1717,24 @@ function createMpvHost(deps) {
     loadFile,
     // time-pos 讓最新目標立即取代舊目標，適合一般連續逐格；少數 HEVC MP4 在
     // frame boundary 會把 time-pos 呈現到下一格，改用 mpv 的 absolute+exact command。
-    seek: async (time, { exact = false } = {}) => {
+    seek: async (time, { exact = false, subtitleTarget = time } = {}) => {
       cancelPlaybackReady();
       const session=fileLoadSession;
+      if (playerPaused && session) session.subtitleTarget = subtitleTarget;
+      else releaseSubtitleHold(session);
       const positioningGeneration=session?(session.positioningGeneration=(session.positioningGeneration||0)+1):0;
       const command=exact?['seek',playerTime(time),'absolute+exact']:['set_property','time-pos',playerTime(time)];
       const result=await send(command,true,{requireSuccess:true,onSuccess:()=>{
         if(session===fileLoadSession&&session?.positioningGeneration===positioningGeneration) session.awaitingPositioning=false;
       }});
+      if (playerPaused && session?.subtitleClock && session === fileLoadSession && session.positioningGeneration === positioningGeneration) {
+        const raw = await send(['get_property','time-pos'],true,{requireSuccess:true});
+        if (Number.isFinite(raw) && playerPaused && session === fileLoadSession && session.positioningGeneration === positioningGeneration) {
+          session.subtitlePosition = sourceTime(raw);
+          session.subtitleHold = session.subtitlePosition - subtitleTarget;
+          await syncSubtitleDelay(session);
+        }
+      }
       return result;
     },
     present,
@@ -1665,6 +1759,7 @@ function createMpvHost(deps) {
       // not overwrite a newer pause. Normal play proves command acceptance;
       // external audio followers opt into actual playback-core readiness.
       playerPaused = false;
+      releaseSubtitleHold(session);
       const ready = options?.waitForReady === true ? beginPlaybackReady(session, commandGeneration) : null;
       const accepted = send(['set_property', 'pause', false], true, { requireSuccess: true }).catch(error=>{
         if(commandGeneration===playbackCommandGeneration&&session===fileLoadSession) playerPaused=previousPaused;

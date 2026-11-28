@@ -67,8 +67,8 @@ it.each([['1','2'],['1',2],[1,'2']])('格網上的字幕時間 %j–%j 仍須正
   expect(cue).toMatchObject({start:1,end:2});
 });
 
-it('正常數值格網的准入為 no-op，無時間碼內容不補造或轉換時間',()=>{
-  const cue={id:'numeric',start:1,end:2,text:'原字幕',track:0,timed:true};
+it.each([0, 0.0000002])('數值格網偏移 %s 秒的准入保留原值，無時間碼內容不補造或轉換時間',offset=>{
+  const cue={id:'numeric',start:1+offset,end:2+offset,text:'原字幕',track:0,timed:true};
   const before={...cue};
   expect(Model.snapCueToFrames(cue)).toBe(false);
   expect(cue).toEqual(before);

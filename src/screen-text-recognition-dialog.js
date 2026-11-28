@@ -12,7 +12,7 @@ import {
 } from './screen-text-session.js';
 import { SCREEN_TEXT_MODELS as modelOptions, SCREEN_TEXT_DEFAULT_MODELS as defaultModels,
   SCREEN_TEXT_DEFAULTS } from '../shared/screen-text-options.cjs';
-const languageNames = { auto:'自動判斷', ko:'韓文', ja:'日文', zh:'中文', en:'英文' };
+const languageNames = { auto:'自動判斷', zh:'中文', en:'英文', ja:'日文', ko:'韓文' };
 const customModelOption = '__custom__';
 const defaults = { ...SCREEN_TEXT_DEFAULTS, scope:'clip' };
 

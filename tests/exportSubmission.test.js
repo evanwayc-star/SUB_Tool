@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createDeliveryList } from '../src/delivery-list.js';
 import { createDeliverySubmission, freezeExportSubmission, subtitleCuesForSubmission } from '../src/delivery-submission.js';
 import { runVideoExportCommand, videoExportCapability } from '../src/export-job-engine.js';
+import { SubFormats } from '../src/formats.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,7 +48,17 @@ describe('frozen export submission', () => {
     expect(after.fps).toBe(24);
     expect(after.timelineStartTimecode).toBe('00:00:01:19');
     expect(after.timecodeWatermark).toEqual({ start: '00:00:01:19' });
-    expect(after.assText).toBe(before.assText);
+    for (const [job, rate] of [[before, 30000/1001], [after, 24]]) {
+      expect(job.assTiming).toBe('output-fields');
+      const [cue] = SubFormats.parseASS(job.assText);
+      expect(cue.text).toBe('固定秒數');
+      // Read the private burn clock on every output frame, including both edges.
+      for (let frame=0; frame < Math.ceil(job.duration*rate); frame++) {
+        const clock = (2*frame+0.1)/100;
+        const seconds = submission.timelineStart + frame/rate;
+        expect(clock>=cue.start && clock<cue.end, `${job.fps} fps frame ${frame}`).toBe(seconds>=2 && seconds<3);
+      }
+    }
     expect(after.clips).toEqual(before.clips);
     expect(after.audioPlan).toEqual(before.audioPlan);
     expect(submission.fps).toBe(29.97);

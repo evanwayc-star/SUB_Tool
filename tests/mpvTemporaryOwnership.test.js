@@ -48,10 +48,74 @@ function setup(dir, { autoClose = true, rootAuthority, describeSource, subtitleR
     getMainWindow: () => ({ isDestroyed: () => false, getContentBounds: () => ({ x:0, y:0 }) }),
     supported: () => true, findExecutable: () => 'mpv', ensureTmp: () => {}, tmpDir:dir, describeSource,
     tempFiles:new Set(), tempRootAuthority:rootAuthority, guideHtml:'guide content', now:() => 123, setTimer:() => 0, clearTimer:() => {} });
-  return { host, commands, tracks, children, documents };
+  const position = data => {
+    const observer = commands.findLast(c => c[0] === 'observe_property' && c[2] === 'time-pos');
+    socket.emit('data', Buffer.from(JSON.stringify({event:'property-change', id:observer[1], name:'time-pos', data})+'\n'));
+  };
+  return { host, commands, tracks, children, documents, position };
 }
 
 describe('mpv 暫存檔所有權', () => {
+  it('keeps a paused project frame on its subtitle clock until the matching native ACK', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mpv-sub-clock-'));
+    const pending = [];
+    const {host, commands, position} = setup(dir, {subtitleReply(command, reply) {
+      if (command[0] === 'set_property' && command[1] === 'sub-delay' && command[2] < 0) {
+        pending.push({value:command[2], reply});
+        return true;
+      }
+      return false;
+    }});
+    try {
+      const {sourceSessionId} = await host.launch({src:'movie.mp4'});
+      expect(await host.setSubtitles('preview', sourceSessionId, {speed:1,origin:0})).toBe(true);
+      const present = target => host.present(1, {frameTarget:target,frameStart:1,frameDuration:0.05});
+      const old = present(1.03);
+      await vi.waitFor(() => expect(pending).toHaveLength(1));
+      let sameFinished = false;
+      const same = present(1.03).then(result => { sameFinished = true; return result; });
+      expect(await old).toBeNull();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(sameFinished).toBe(false);
+      expect(pending.map(p => p.value)).toEqual([-0.03]);
+      pending[0].reply(null);
+      expect((await same).presentedSourceTime).toBe(1);
+
+      const first = present(1.02);
+      await vi.waitFor(() => expect(pending).toHaveLength(2));
+      const intervening = present(1.01);
+      await vi.waitFor(() => expect(pending).toHaveLength(3));
+      const latest = present(1.02);
+      await vi.waitFor(() => expect(pending).toHaveLength(4));
+      expect(await first).toBeNull();
+      expect(await intervening).toBeNull();
+      pending[1].reply(null, 'error running command');
+      pending[2].reply(null);
+      pending[3].reply(null);
+      expect((await latest).presentedSourceTime).toBe(1);
+      expect((await present(1.02)).presentedSourceTime).toBe(1);
+      expect(pending).toHaveLength(4);
+      await host.play();
+      const writes = commands.filter(c => c[0] === 'set_property' && ['sub-delay','pause'].includes(c[1]));
+      expect(writes.slice(-2)).toEqual([['set_property','sub-delay',0],['set_property','pause',false]]);
+      await host.pause();
+      // No index: the observed PTS is committed on the project grid even if
+      // an adjacent requested frame is within seek tolerance.
+      expect((await host.present(1.03,{tolerance:0.05})).presentedSourceTime).toBe(1);
+      expect(pending).toHaveLength(4);
+      position(1.04);
+      expect(commands.at(-1)).toEqual(['set_property','sub-delay',0.04]);
+      // A direct pause positions the video with a raw seek. Its settle event
+      // must still use the UI's snapped subtitle target before the decode bias.
+      const raw = host.seek(1.01, {subtitleTarget:1.02});
+      await vi.waitFor(() => expect(pending).toHaveLength(5));
+      pending[4].reply(null);
+      await raw;
+      position(1.033333);
+      expect(commands.at(-1)).toEqual(['set_property','sub-delay',0.013333]);
+    } finally { await host.disposeAndWait(); fs.rmSync(dir,{recursive:true,force:true}); }
+  });
+
   it('同一畫格快速改樣式等待 mpv 讀完 ASS，再將最後一次修改套至專案字幕軌', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mpv-subtitle-edit-'));
     let finishAdd;

@@ -1,7 +1,7 @@
 import { State, newId, setSelection, pruneSelection, ensureTrackCount, cueSuffix, saveConfig } from './state.js';
 import { emit } from './events.js';
 import { Media } from './media.js';
-import { snapTimeToFrame, getExactFps } from './time.js';
+import { snapTimeToFrame, getExactFps, SUBTITLE_FRAME_TOLERANCE_SEC } from './time.js';
 import { History, recordHistory } from './history.js';
 import { showToast, openModal, closeModal, setStatus } from './ui.js';
 import { planCueStyleAssignment } from './subtitle-style-engine.js';
@@ -18,7 +18,8 @@ export function snapCueToFrames(cue, {fps=State.fps,dropFrame=State.dropFrame}={
   const end=subtitleTimeOnFrame(cue.end,start+frame,Infinity,{fps,dropFrame});
   // 舊專案可有已在格網上的數字字串；相減會隱式轉型，不能據此略過數值准入。
   if (typeof cue.start==='number' && typeof cue.end==='number'
-    && Math.abs(start-cue.start)<=1e-6 && Math.abs(end-cue.end)<=1e-6) return false;
+    && Math.abs(start-cue.start)<=SUBTITLE_FRAME_TOLERANCE_SEC
+    && Math.abs(end-cue.end)<=SUBTITLE_FRAME_TOLERANCE_SEC) return false;
   cue.start=start; cue.end=end;
   return true;
 }

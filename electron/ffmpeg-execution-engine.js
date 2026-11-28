@@ -138,6 +138,9 @@ function videoEncoderCandidates(platform = process.platform) {
 
 const { PREVIEW_PROXY_HEIGHT, PREVIEW_PROXY_KBPS, PREVIEW_PROXY_MAX_KBPS } = require('../shared/preview-proxy.cjs');
 const PREVIEW_PROXY_PROFILE = '720p-4000k-fast-v2';
+// A source timecode tag otherwise makes the MP4 muxer create a tmcd sample
+// spanning the entire video. Preview uses video PTS as its clock.
+const PREVIEW_MP4_TIMECODE_ARGS = Object.freeze(['-write_tmcd', '0']);
 function previewVideoEncoderArgs(encoderName) {
   const rate = ['-b:v', `${PREVIEW_PROXY_KBPS}k`, '-maxrate', `${PREVIEW_PROXY_MAX_KBPS}k`, '-bufsize', `${2 * PREVIEW_PROXY_MAX_KBPS}k`];
   switch (encoderName) {
@@ -580,11 +583,8 @@ function buildIngestArgs({
     const gop = encoder === 'h264_nvenc' ? '2' : '1';
     args.push('-g', gop, '-keyint_min', gop, '-bf', '0', '-flags', '+cgop');
 
-    if (isStream) {
-      args.push('-movflags', 'frag_keyframe+empty_moov+default_base_moof', proxyPath);
-    } else {
-      args.push('-movflags', '+faststart', proxyPath);
-    }
+    const movFlags = isStream ? 'frag_keyframe+empty_moov+default_base_moof' : '+faststart';
+    args.push('-movflags', movFlags, ...PREVIEW_MP4_TIMECODE_ARGS, proxyPath);
   }
 
   (channels || []).forEach((c, k) => {
@@ -1042,6 +1042,7 @@ function createFFmpegExecution(options = {}) {
 
 module.exports = {
   PREVIEW_PROXY_PROFILE,
+  PREVIEW_MP4_TIMECODE_ARGS,
   buildIngestArgs,
   bundledNativeRequirements,
   createFFmpegExecution,

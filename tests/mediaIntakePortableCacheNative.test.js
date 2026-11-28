@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { expect, it, vi } from 'vitest';
 import { nativeTestTools } from './fixtures/native-tools.cjs';
@@ -23,6 +24,90 @@ function run(args) {
   expect(result.error || result.status, result.stderr?.toString()).toBe(0);
   return result.stdout;
 }
+
+function streamTags(file) {
+  const result = spawnSync(ffprobe, ['-v', 'error', '-show_entries', 'stream=codec_tag_string', '-of', 'csv=p=0', file],
+    {windowsHide: true, encoding: 'utf8'});
+  expect(result.error || result.status, result.stderr).toBe(0);
+  return result.stdout.trim().split(/\r?\n/);
+}
+
+it.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('40 分鐘 NTSC 長片經正常分段後，全部 PTS、尾端逐格顏色與聲道對齊', async () => {
+  const base = fs.realpathSync(tmpdir()), dir = fs.mkdtempSync(path.join(base, 'subtool-proxy-long-'));
+  const source = path.join(dir, 'feature.mov'), cacheRoot = path.join(dir, 'cache');
+  const probe = createMediaProbe({executable: ffprobe});
+  const execution = createFFmpegExecution({getFFmpegPath: () => ffmpeg, getUserDataDir: () => dir});
+  const partPaths = [];
+  const runtime = createMediaIntakeRuntime({
+    cacheRoot, tempRoot: dir, allowSidecarCache: false,
+    fileAuthority: new FileAuthority({internalDirectories: [cacheRoot]}),
+    ffmpegExecution: {execute(args, options) {
+      // Preview parts and their final MP4 use the project's clock; the camera timecode stays on the mother file.
+      expect(args[args.indexOf('-write_tmcd') + 1]).toBe('0');
+      return execution.execute(args, options);
+    }},
+    describeVideo: async file => (await probe.describe(file)).video,
+    describeProxyPart: file => { partPaths.push(file); return probe.describe(file); },
+  });
+  const frames = 72000, frameSeconds = 1001 / 30000, duration = frames * frameSeconds;
+  const rgb = (file, index) => {
+    // Seek a little before the target PTS so rounding the CLI time to microseconds cannot skip the target.
+    const seek = Math.max(0, (index - 0.1) * frameSeconds).toFixed(6);
+    return [...run(['-ss', seek, '-i', file, '-vf', 'scale=1:1', '-frames:v', '1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'])];
+  };
+  try {
+    run(['-f', 'lavfi', '-i', 'color=red:s=32x24:r=30000/1001:d=2402.4',
+      '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=8000:d=2.4,adelay=2400000',
+      '-vf', "drawbox=c=blue:t=fill:enable='gte(t,2400)',drawbox=c=lime:t=fill:enable='eq(n,71999)'",
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-threads:v', '1', '-bf', '0', '-c:a', 'pcm_s16le',
+      '-timecode', '01:00:00;00', source]);
+    const info = await probe.describe(source);
+    expect(info.duration).toBeCloseTo(duration, 4);
+    expect(info.video.nominalFrameRate).toBe('30000/1001');
+    expect(streamTags(source)).toContain('tmcd');
+    const result = await runtime.ingest({src: source, duration: info.duration, needsProxy: true, audio: info.audio});
+    expect(result.cached).toBe(false);
+    expect(new Set(partPaths).size).toBe(Math.ceil(duration / 120));
+    const video = await probe.describe(result.proxy);
+    expect(streamTags(result.proxy)).toEqual(['avc1']);
+    const packets = spawnSync(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-show_packets',
+      '-show_entries', 'packet=pts', '-of', 'csv=p=0', result.proxy], {windowsHide: true, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
+    expect(packets.error || packets.status, packets.stderr).toBe(0);
+    const pts = packets.stdout.trim().split(/\r?\n/).map(Number);
+    expect(pts).toHaveLength(frames);
+    const [num, den] = video.video.timeBase.split('/').map(Number), tick = num / den;
+    const maxError = pts.reduce((worst, point, index) => Math.max(worst, Math.abs(point * tick - index * frameSeconds)), 0);
+    expect(maxError).toBeLessThanOrEqual(0.000001);
+    for (const [index, color] of [[0,[255,0,0]], [frames-2,[0,0,255]], [frames-1,[0,255,0]]]) {
+      for (const file of [source, result.proxy]) {
+        const pixel = rgb(file, index);
+        expect(pixel).toHaveLength(3);
+        expect(pixel.every((v, i) => Math.abs(v - color[i]) < 8), JSON.stringify({index, pixel})).toBe(true);
+      }
+    }
+    expect(result.channels).toHaveLength(1);
+    for (const file of [source, result.channels[0].file, result.wave]) {
+      for (const [seek, audible] of [[2399.5,false],[2401.5,true]]) {
+        const bytes = run(['-ss', String(seek), '-i', file, '-map', '0:a:0', '-t', '0.125',
+          '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1']);
+        expect(bytes.length).toBe(2000);
+        let real = 0, imaginary = 0, peak = 0;
+        for (let i = 0; i < 1000; i++) {
+          const amplitude = bytes.readInt16LE(2*i) / 32768, phase = 2*Math.PI*880*i / 8000;
+          real += amplitude * Math.cos(phase); imaginary += amplitude * Math.sin(phase);
+          peak = Math.max(peak, Math.abs(amplitude));
+        }
+        if (audible) expect(2*Math.hypot(real,imaginary) / 1000).toBeGreaterThan(0.08);
+        else expect(peak).toBeLessThan(0.001);
+      }
+    }
+  } finally {
+    await runtime.close(); await execution.cancelAllAndWait(); await probe.cancelAllAndWait();
+    const target = fs.realpathSync(dir);
+    if (path.dirname(target) !== base || !path.basename(target).startsWith('subtool-proxy-long-')) throw new Error('暫存目錄已變更');
+    fs.rmSync(target, {recursive:true, force:true});
+  }
+}, 120000);
 
 it.skipIf(!fs.existsSync(ffmpeg)||!fs.existsSync(ffprobe))('重建同大小損毀的 Proxy 後每格像素一致，保留原聲道',async()=>{
   const base=fs.realpathSync(tmpdir()),dir=fs.mkdtempSync(path.join(base,'subtool-proxy-repair-'));
@@ -77,11 +162,27 @@ it.skipIf(!fs.existsSync(ffmpeg)||!fs.existsSync(ffprobe)).each(['pcm_s16le','aa
     const first=create('checkpoint',true,p=>{if(p.label?.includes('3/4')&&p.pct===75)stop=true;});
     await expect(first.ingest(request,{isCancelled:()=>stop})).rejects.toMatchObject({code:'INGEST_SUPERSEDED'});
     await first.close();calls.length=0;
+    if (codec === 'pcm_s16le') {
+      // A previous release can leave a one-second, video + camera-timecode part in this bucket.
+      const cache = path.join(dir, 'checkpoint');
+      const markers = fs.readdirSync(cache, {recursive: true}).filter(file =>
+        file.includes('proxy-part-') && path.basename(file) === 'ready');
+      const marker = markers.map(file => path.join(cache, file)).find(file => JSON.parse(fs.readFileSync(file, 'utf8')).first === 0);
+      expect(marker).toBeTruthy();
+      const part = path.join(path.dirname(marker), 'content.mp4'), legacy = path.join(dir, 'short-timecoded.mp4');
+      run(['-i', part, '-map', '0:v:0', '-c:v', 'copy', '-video_track_timescale', '1000000',
+        '-timecode', '01:00:00:00', legacy]);
+      expect(streamTags(legacy)).toContain('tmcd');
+      const bytes = fs.readFileSync(legacy), receipt = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      fs.writeFileSync(part, bytes);
+      fs.writeFileSync(marker, JSON.stringify({...receipt, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex')}));
+    }
     const messages=[];
     const next=create('checkpoint',true,p=>messages.push(p.label));
     const resumed=await next.ingest(request);
     expect(calls.filter(args=>args.includes('-enc_time_base'))).toHaveLength(1);
     expect(messages).toContain('Proxy 分段 3/4（沿用 3 段）');
+    expect(streamTags(resumed.proxy)).toEqual(['avc1']);
     const times=file=>JSON.parse(spawnSync(ffprobe,['-v','error','-select_streams','v:0','-show_frames',
       '-show_entries','frame=pts_time','-of','json',file],{encoding:'utf8',windowsHide:true}).stdout).frames.map(frame=>Number(frame.pts_time));
     expect(times(resumed.proxy)).toEqual(times(direct.proxy));

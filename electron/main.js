@@ -2270,13 +2270,15 @@ ipcMain.handle('mpv:clearTimecodeWatermark', event => {
   return mpvHost.clearTimecodeWatermark();
 });
 
-ipcMain.handle('mpv:subSet', (event, assText, sourceSessionId) => mpvHost.setSubtitles(assText, sourceSessionId));
+ipcMain.handle('mpv:subSet', (event, assText, sourceSessionId, clock) => mpvHost.setSubtitles(assText, sourceSessionId, clock));
 ipcMain.handle('mpv:subVisible', (event, value) => mpvHost.setSubVisible(value));
 ipcMain.handle('mpv:loadfile', async (event, filePath) => {
   if (!fileAuthority.canRead(filePath)) { console.warn('[sec] mpv loadfile blocked:', filePath); return null; }
   return mpvHost.loadFile(filePath);
 });
-ipcMain.handle('mpv:seek', (event, time, options) => mpvHost.seek(time, { exact: options?.exact === true }));
+ipcMain.handle('mpv:seek', (event, time, options) => mpvHost.seek(time, {
+  exact: options?.exact === true, subtitleTarget: Number.isFinite(options?.subtitleTarget) ? options.subtitleTarget : undefined,
+}));
 ipcMain.handle('mpv:present', (event, time, options) => mpvHost.present(time, {
   exact: options?.exact === true,
   waitForFrame: options?.waitForFrame === true,

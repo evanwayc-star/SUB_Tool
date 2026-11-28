@@ -2414,6 +2414,28 @@ describe('Windows mpv host lifecycle', () => {
     await expect(oldPresentation).resolves.toBeNull();
   });
 
+  it('快速跳過仍在探測的片段，下一個一般速度的素材會從雙倍字幕時鐘還原', async () => {
+    let finishProbe;
+    const { host, sockets } = make({ describeSource: path => path.includes('pending')
+      ? new Promise(resolve => { finishProbe = resolve; }) : Promise.resolve(null) });
+    const source = await host.launch({ src: 'D:/media/fast.mkv' });
+    const ass = '[Script Info]\nTitle: timeline';
+    try {
+      expect(await host.setSubtitles(ass, source.sourceSessionId, { origin: -.08, speed: 2 })).toBe(true);
+      const skipped = host.loadFile('D:/media/pending.mkv');
+      const normal = await host.loadFile('D:/media/normal.mkv');
+      finishProbe(null);
+      expect((await skipped).ok).toBe(false);
+      expect(normal.ok).toBe(true);
+      expect(await host.setSubtitles(ass, normal.sourceSessionId, { origin: -.04, speed: 1 })).toBe(true);
+      const speeds = sockets[0].write.mock.calls.map(([raw]) => JSON.parse(raw).command)
+        .filter(command => command[0] === 'set_property' && command[1] === 'sub-speed')
+        .map(command => command[2]);
+      expect(speeds).toContain(2);
+      expect(speeds.at(-1)).toBe(1);
+    } finally { host.quit(); }
+  });
+
   it('mpv 異常結束時也收掉 pipe 與兩個透明視窗，不能留下空白 native overlay', async () => {
     const { host, children, sockets, events } = make();
 

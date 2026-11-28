@@ -1334,8 +1334,7 @@ function renderCueBlocks(){
 /* 把選取的字幕移到指定軌道（或位移 delta） */
 
 
-function updatePlayhead(){
-  let t = Media.displayTime();
+function updatePlayhead(t=Media.displayTime()){
   const x=timeToX(t);
   $('tlPlayhead').style.left=x+'px';
   if(State.inPoint!=null){ const ip=$('tlInpoint'); ip.style.display='block'; ip.style.left=timeToX(State.inPoint)+'px'; }

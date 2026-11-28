@@ -28,6 +28,27 @@ it('records reported errors while the status is locked and after notifications d
   expect(rows.every(row=>Number.isFinite(Date.parse(row.querySelector('time').dateTime)))).toBe(true);
 });
 
+it('同一執行日誌的進度與 IPC 通知只保留一筆及完整 FFmpeg 診斷，重試或不同工作各自保留',async()=>{
+  const {openModal}=await import('../src/ui.js');
+  const {recordStatusError,openStatusErrorReport}=await import('../src/status-error-report.js');
+  const log=name=>'[LOG_PATH]C:/logs/'+name+'.log[/LOG_PATH]ffmpeg 結束碼 3\nAssertion next_dts failed';
+  const diagnostic=log('ingest-1');
+  recordStatusError('長片.mp4：'+diagnostic);
+  recordStatusError('Proxy 與音軌快取未完成',diagnostic);
+  recordStatusError('長片.mp4：Proxy 與音軌快取未完成',diagnostic);
+  recordStatusError('影片已載入，Proxy 與音軌快取未完成','Error invoking remote method: '+diagnostic);
+  recordStatusError('長片.mp4：'+diagnostic.split('\n')[0]);
+  recordStatusError('另一部影片',log('ingest-2'));
+  recordStatusError('重試仍未完成',log('ingest-3'));
+  openStatusErrorReport(openModal);
+  const rows=[...document.querySelectorAll('#statusErrorList li')];
+  expect(rows.map(row=>row.querySelector('strong').textContent)).toEqual([
+    '重試仍未完成','另一部影片','影片已載入，Proxy 與音軌快取未完成',
+  ]);
+  expect(rows[2].textContent).toContain('長片.mp4：Proxy 與音軌快取未完成');
+  expect(rows[2].textContent.split('Assertion next_dts failed')).toHaveLength(2);
+});
+
 it('retains the latest 100 reports and avoids recording the same background state on every render',async()=>{
   const {setMediaIntakeStatus,openModal}=await import('../src/ui.js');
   const {recordStatusError,openStatusErrorReport}=await import('../src/status-error-report.js');

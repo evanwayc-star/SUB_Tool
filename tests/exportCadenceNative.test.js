@@ -6,14 +6,92 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { buildExportSnapshot } from '../src/delivery-job.js';
+import { createDeliveryList } from '../src/delivery-list.js';
+import { createDeliverySubmission, freezeExportSubmission } from '../src/delivery-submission.js';
 
 const require = createRequire(import.meta.url);
 const { buildDeliveryArgv } = require('../electron/export-plan.js');
 const { createMediaProbe } = require('../electron/media-probe.js');
+const { createDeliveryRunner } = require('../electron/delivery-runner.js');
+const { captureOutputAuthority, captureOutputDirectory, captureDestinationEvidence } = require('../electron/export-lease.js');
 const ffmpeg = process.env.FFMPEG_PATH || path.resolve('electron/ffmpeg/ffmpeg.exe');
 const ffprobe = process.env.FFPROBE_PATH || path.resolve('electron/ffmpeg/ffprobe.exe');
 const rate = 24000 / 1001;
 const width = 64, height = 48, lumaSize = width * height, frameSize = lumaSize * 1.5;
+
+it.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('一格字幕 00:06:35:15 依各交付列的實際畫格和場燒錄，In/Out 不移動起訖', async () => {
+  const base = fs.realpathSync(tmpdir()), dir = fs.mkdtempSync(path.join(base, 'subtool-burn-cue-'));
+  const w = 160, h = 90, mother = path.join(dir, 'black.mp4');
+  const run = args => {
+    const r = spawnSync(ffmpeg, ['-hide_banner','-nostdin','-loglevel','error', ...args], {
+      cwd: dir, windowsHide:true, timeout:30000, maxBuffer:8*1024*1024,
+    });
+    expect(r.error || r.status, r.stderr?.toString()).toBe(0);
+    return r.stdout;
+  };
+  try {
+    run(['-f','lavfi','-i','color=black:s=160x90:r=25:d=1','-an','-c:v','libx264',mother]);
+    let progress;
+    const runner = createDeliveryRunner({
+      queueDir:()=>dir, tempDir:dir, mediaProbe:()=>createMediaProbe({executable:ffprobe}),
+      nativeCapabilities:{assertReady:async()=>{}},
+      queue:{assertJobCapabilities(){},registerActiveJob(){},clearActiveJob(){},reportProgress(_id, update){progress=update;}},
+      encoder:{bitrateArgs:()=>['-c:v','libx264','-preset','ultrafast','-crf','0','-threads','1']},
+      runFfmpeg:async args=>{run(args);return {};},
+    });
+    for (const cropped of [false, true]) {
+      const fps = cropped ? 24 : 29.97, actualFps = cropped ? 24 : 30000/1001;
+      const first = 395*Math.round(fps)+15, timelineStart = cropped ? (first-4)/actualFps : 0;
+      const start = first/actualFps, end = (first+1)/actualFps;
+      // A reopened project can retain numeric edges within one microsecond of its grid.
+      const savedOffset = cropped ? 0 : 0.0000002;
+      const project = freezeExportSubmission({
+        clips:[{id:'black',path:mother,type:'video',in:0,out:.1,offset:0,vtrack:0,natW:w,natH:h}],
+        videoTracks:[{visible:true}], timelineStart, duration:(first+5)/actualFps-timelineStart,
+      }, {fps, canvasW:w, canvasH:h, tracks:[{visible:true}], cues:[
+        {id:'one-frame',start:start+savedOffset,end:end+savedOffset,track:0,text:'MMMM',style:{fontSize:185,posX:50,posY:60}},
+      ]});
+      const list = createDeliveryList({projectTag:'burn',fps,canvasW:w,canvasH:h,
+        defaultAudioLayout:{streams:[{layout:'stereo',busIds:['left','right']}]}});
+      const rows = cropped ? [60,'mod-fhd'] : [29.97,25,50];
+      rows.forEach((row, i) => {
+        if (i) list.add();
+        if (typeof row === 'number') list.setTargetFps(i, row);
+        else list.setFormat(i, row);
+        list.setOutDir(i, dir);
+        list.setName(i, `burn-${fps}-${i}`+(typeof row === 'number' ? '.mp4' : '.ts'));
+      });
+      const jobs = [];
+      const submission = createDeliverySubmission({list,initialProject:project,readProject:()=>project,isCurrent:()=>true,
+        desktop:{listDir:async()=>[],exportVideo:async job=>{jobs.push(job);return 'job-'+jobs.length;}},confirmOverwrite:async()=>true});
+      const receipt = await submission.submit();
+      expect(receipt, receipt.reason || receipt.error?.message).toMatchObject({status:'submitted',accepted:rows.length});
+      for (const job of jobs) {
+        fs.writeFileSync(path.join(dir,'burn.ass'),job.assText);
+        const interlaced = job.format === 'mod-fhd';
+        const authority = captureOutputAuthority(job.outPath,captureOutputDirectory(dir));
+        progress=null;
+        await runner.run({id:'burn',assRef:'burn.ass',payload:{...job,assText:null},outputAuthority:captureDestinationEvidence(authority)});
+        expect(progress,progress?.errorMsg).toMatchObject({done:true});
+        const sampleRate = (job.fps === 29.97 ? 30000/1001 : job.fps) * (interlaced ? 2 : 1);
+        const on = Math.ceil((start-timelineStart)*sampleRate-1e-7), off = Math.ceil((end-timelineStart)*sampleRate-1e-7);
+        const fieldFilter = interlaced ? 'separatefields,' : '';
+        const pixels = run(['-i',job.outPath,'-map','0:v:0','-vf',
+          fieldFilter+`select='between(n,${on-1},${off})',scale=${w}:${h}`,'-fps_mode','passthrough','-pix_fmt','gray','-f','rawvideo','pipe:1']);
+        expect(pixels.length).toBe((off-on+2)*w*h);
+        for (let sample=on-1; sample<=off; sample++) {
+          const offset=(sample-on+1)*w*h;
+          expect(pixels.subarray(offset,offset+w*h).some(value=>value>100),
+            `${fps}→${job.fps} / ${job.format} sample ${sample}`).toBe(sample>=on && sample<off);
+        }
+      }
+    }
+  } finally {
+    const resolved=fs.realpathSync(dir);
+    if (path.dirname(resolved)!==base || !path.basename(resolved).startsWith('subtool-burn-cue-')) throw new Error('暫存目錄已變更');
+    fs.rmSync(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:50});
+  }
+}, 30000);
 
 describe.skipIf(!fs.existsSync(ffmpeg) || !fs.existsSync(ffprobe))('粗時間刻度母素材的逐格交付', () => {
   it('相同原始影格裝入 MOV 或毫秒 MKV 後，同 FPS 交付都沒有新增重複或遺失影格', async () => {

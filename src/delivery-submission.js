@@ -1,7 +1,7 @@
 import { createDeliveryList, projectTagFrom } from './delivery-list.js';
 import { composeDeliveryAudioPlan } from './export-job-engine.js';
 import { renderASS } from './formats.js';
-import { secToEncore } from './time.js';
+import { getExactFps, secToEncore, snapTimeToFrame, SUBTITLE_FRAME_TOLERANCE_SEC } from './time.js';
 import { normalizeDeliveryChapters } from '../shared/delivery-chapters.cjs';
 
 let nextDeliveryRequest = 0;
@@ -40,21 +40,24 @@ export function subtitleCuesForSubmission(submission) {
   const expIn = submission?.timelineStart != null ? submission.timelineStart : 0;
   const duration = Number(submission?.duration);
   const clipDuration = Number.isFinite(duration) && duration >= 0 ? duration : Infinity;
-  const expOut = expIn + clipDuration;
   const tracks = Array.isArray(submission?.tracks) ? submission.tracks : [];
-  return (Array.isArray(submission?.cues) ? submission.cues : [])
-    .filter(cue => {
-      if (!cue || cue.timed === false) return false;
-      const trackIndex = Number.isInteger(cue.track) ? cue.track : 0;
-      if (tracks[trackIndex]?.visible === false) return false;
-      return Number(cue.end) > expIn && Number(cue.start) < expOut;
-    })
-    .map(cue => ({
-      ...cue,
-      start: Math.max(0, Number(cue.start) - expIn),
-      end: Math.min(clipDuration, Number(cue.end) - expIn),
-    }))
-    .filter(cue => Number.isFinite(cue.start) && Number.isFinite(cue.end) && cue.end > cue.start);
+  function projectBoundary(value) {
+    const seconds = Number(value);
+    const snapped = snapTimeToFrame(seconds, submission?.fps);
+    // Project admission accepts numeric values within 1 µs of their frame.
+    // Resolve that tolerance before subtracting the independent delivery In.
+    return Math.abs(seconds - snapped) <= SUBTITLE_FRAME_TOLERANCE_SEC ? snapped : seconds;
+  }
+  const cues = [];
+  for (const cue of Array.isArray(submission?.cues) ? submission.cues : []) {
+    if (!cue || cue.timed === false) continue;
+    const track = Number.isInteger(cue.track) ? cue.track : 0;
+    if (tracks[track]?.visible === false) continue;
+    const start = Math.max(0, projectBoundary(cue.start) - expIn);
+    const end = Math.min(clipDuration, projectBoundary(cue.end) - expIn);
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) cues.push({...cue, start, end});
+  }
+  return cues;
 }
 
 export function burnedSubtitleTrackNames(tracks, cues = null) {
@@ -83,29 +86,41 @@ export function chaptersForSubmission(submission, { chapterNotes = false, format
   return normalizeDeliveryChapters(chapters, duration, format);
 }
 
-function subtitlePayloadForSubmission(submission) {
-  const cues = subtitleCuesForSubmission(submission);
-  if (!cues.length) return { assText: null, cues };
-  const assText = renderASS(cues, {
+function burnSubtitlesForRate(cues, submission, fps) {
+  // Each centisecond in this private libass document represents one output field.
+  // Progressive frames sample even fields. This also supports a queued interlaced
+  // job changing to progressive at the same rate without rebuilding its snapshot.
+  const fieldsPerSecond = 2 * getExactFps(fps);
+  const field = seconds => Math.ceil(seconds * fieldsPerSecond - 1e-6) / 100;
+  const events = cues.map(cue => ({...cue, start: field(cue.start), end: field(cue.end)}))
+    .filter(cue => cue.end > cue.start);
+  if (!events.length) return null;
+  const assText = renderASS(events, {
     fps: submission?.fps, tracks: submission?.tracks,
     dropFrame: submission?.dropFrame, backgroundLayouts: submission?.backgroundLayouts,
   });
-  return { assText: /\nDialogue:/.test(assText) ? assText : null, cues };
+  return /\nDialogue:/.test(assText) ? assText : null;
 }
 
 function buildExportJobs(submission, list) {
   const expIn = submission.timelineStart != null ? submission.timelineStart : 0;
-  const subtitlePayload = subtitlePayloadForSubmission(submission);
-  return list.toJobs({
+  const cues = subtitleCuesForSubmission(submission);
+  const jobs = list.toJobs({
     clips: submission.clips, videoTracks: submission.videoTracks, duration: submission.duration,
-    assText: subtitlePayload.assText,
-    subtitleTracks: burnedSubtitleTrackNames(submission.tracks, subtitlePayload.cues),
+    subtitleTracks: burnedSubtitleTrackNames(submission.tracks, cues),
     timelineStartTimecode: secToEncore(expIn, submission.fps, submission.dropFrame),
     // FPS-SYNC: output FPS changes the TC spelling, never timeline seconds.
     timecodeForFps: fps => secToEncore(expIn, fps, submission.dropFrame),
     composeAudioPlan: composeDeliveryAudioPlan, compiledAudioPlan: submission.audioPlan,
     chaptersForRow: row => chaptersForSubmission(submission, row),
   });
+  const subtitlesByFps = new Map();
+  for (const job of jobs) {
+    if (!subtitlesByFps.has(job.fps)) subtitlesByFps.set(job.fps, burnSubtitlesForRate(cues, submission, job.fps));
+    job.assText = subtitlesByFps.get(job.fps);
+    if (job.assText) job.assTiming = 'output-fields';
+  }
+  return jobs;
 }
 
 export function createDeliverySubmission({

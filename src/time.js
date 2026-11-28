@@ -18,6 +18,9 @@
 import { pad } from './util.js';
 import { exactDeliveryFrameRate } from '../shared/delivery-frame-rate.cjs';
 
+// A stored subtitle edge within one microsecond is on its project frame.
+export const SUBTITLE_FRAME_TOLERANCE_SEC = 1e-6;
+
 /**
  * 將秒數格式化為 UI 播放器毫秒制時鐘字串 (00:00:00.000)。
  * 

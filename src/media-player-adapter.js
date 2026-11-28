@@ -773,10 +773,10 @@ export function createNativePreviewRuntime({
       if (!delivery || delivery.event !== event) return () => false;
       return () => nativeDisconnectDelivery === delivery && nativeSourceRequest === delivery.request && mode === 'mpv';
     },
-    async subSet(assText) {
+    async subSet(assText, clock) {
       if (mode !== 'mpv' || !bridge?.subSet || !nativeSourceSession) return false;
       const sourceSessionId = nativeSourceSession;
-      const applied = await bridge.subSet(assText, sourceSessionId);
+      const applied = await bridge.subSet(assText, sourceSessionId, ...(clock ? [clock] : []));
       return applied === true && runtime.ownsNativeSourceSession(sourceSessionId);
     },
     async subVisible(visible) {

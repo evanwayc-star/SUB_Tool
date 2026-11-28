@@ -6,6 +6,7 @@ const { pipeline } = require('node:stream/promises');
 const { createClipCacheArtifact } = require('./clip-cache-artifact');
 const { digestFile, sameSnapshot } = require('./file-content-evidence');
 const { sourceClockSeek } = require('./media-source-clock');
+const { PREVIEW_MP4_TIMECODE_ARGS } = require('./ffmpeg-execution-engine');
 
 // Each part retains the original presentation timestamps. At assembly the
 // offsets use the first *actual* frame of each part, including gaps in VFR.
@@ -64,7 +65,7 @@ async function encodeCheckpointedProxy({plan, request, video, sourceContent, sec
       const {seek} = sourceClockSeek(Math.max(0,start-1),video);
       await execute([...plan.args.slice(0,input),'-copyts','-ss',seek.toFixed(6),'-noaccurate_seek','-i',request.src,...args,
         '-fps_mode','passthrough','-enc_time_base','1:1000000','-video_track_timescale','1000000',
-        '-movie_timescale','1000000','-avoid_negative_ts','disabled','-f','mp4','fd:'],
+        '-movie_timescale','1000000','-avoid_negative_ts','disabled',...PREVIEW_MP4_TIMECODE_ARGS,'-f','mp4','fd:'],
       {outputDescriptor:artifact.fd,duration:request.duration,onProgress:()=>progress(index,count,resumed)});
       verify(); artifact.verify(); fs.fsyncSync(artifact.fd);
       const info = await describe(artifact.path);
@@ -123,7 +124,7 @@ async function encodeCheckpointedProxy({plan, request, video, sourceContent, sec
       try{
         verify();prefix.verify();
         await execute(['-y','-i',prefix.path,'-map','0:v:0','-c:v','copy','-an',
-          '-movie_timescale','1000000','-video_track_timescale','1000000','-f','mp4','fd:'],
+          '-movie_timescale','1000000','-video_track_timescale','1000000',...PREVIEW_MP4_TIMECODE_ARGS,'-f','mp4','fd:'],
         {outputDescriptor:fd,label:'接回已完成的串流畫格',duration:prefix.end});
         verify();prefix.verify();
       }finally{staged.push({file,entry:fs.fstatSync(fd,{bigint:true})});fs.closeSync(fd);}
@@ -166,7 +167,7 @@ async function encodeCheckpointedProxy({plan, request, video, sourceContent, sec
     };
     verifyStaging();
     await execute([...args,'-c:v','copy',...mappings,'-movie_timescale','1000000','-video_track_timescale','1000000',
-      '-movflags','+faststart',plan.meta.proxy,...extra],{duration:request.duration,label:'合併已驗證的 Proxy 分段及準備聲道'});
+      '-movflags','+faststart',...PREVIEW_MP4_TIMECODE_ARGS,plan.meta.proxy,...extra],{duration:request.duration,label:'合併已驗證的 Proxy 分段及準備聲道'});
     verifyStaging();
   } finally {
     for(const {file,entry} of staged){

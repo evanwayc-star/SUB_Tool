@@ -8,6 +8,22 @@ function cancelled(){
   const error=new Error('媒體處理已取消');error.name='AbortError';return error;
 }
 
+export function intakeCacheLabel({proxy,audio}){
+  if(proxy)return audio?'Proxy 與音軌快取':'Proxy 快取';
+  return audio?'音軌快取':'媒體快取';
+}
+
+export function intakeErrorSummary(label,detail){
+  return !detail||detail===label||/[\r\n]|\[LOG_PATH\]/.test(detail)?label:label+'：'+detail;
+}
+
+function markRecoveryFailed(entry,error,summary){
+  const detail=error?.message||String(error);
+  entry.status='failed';
+  entry.message=summary?intakeErrorSummary(summary,detail):detail;
+  entry.detail=summary?detail:null;
+}
+
 export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.crypto.randomUUID()}){
   let session={id:id(),used:false};
   const pending=new Map();
@@ -25,6 +41,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       progress:job.progress?{...job.progress}:null})),
     recoveries:[...recoveries.values()].filter(entry=>entry.owns()&&entry.status!=='working').map(entry=>({
       id:entry.id,path:entry.path,status:entry.status,message:entry.message,saved:entry.saved||null,
+      ...(entry.detail?{detail:entry.detail}:{}),
     }))});
   const publish=()=>changed(snapshot());
   const finish=job=>{if(pending.get(job.requestId)===job){pending.delete(job.requestId);publish();}};
@@ -105,7 +122,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       recoveries.set(path,entry);
       const current=()=>recoveries.get(path)===entry&&owns();
       return {
-        fail(error){if(current()){entry.status='failed';entry.message=error?.message||String(error);publish();}},
+        fail(error,summary){if(current()){markRecoveryFailed(entry,error,summary);publish();}},
         complete(){if(current()){recoveries.delete(path);publish();}},
       };
     },
@@ -124,7 +141,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
     },
     failRecovery(path,error){
       const entry=recoveries.get(path);
-      if(entry?.owns()){entry.status='failed';entry.message=error?.message||String(error);publish();}
+      if(entry?.owns()){markRecoveryFailed(entry,error);publish();}
     },
     async retry(recoveryId){
       const entry=[...recoveries.values()].find(value=>value.id===recoveryId);
@@ -133,7 +150,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
       const owns=()=>owner===session&&recoveries.get(entry.path)===entry&&entry.owns();
       entry.status='working';entry.retrying=true;publish();
       try{if(!owns())return false;await entry.retry(owns);if(owns()&&entry.status==='working'){recoveries.delete(entry.path);publish();}return entry.status!=='failed';}
-      catch(error){if(owns()){entry.status='failed';entry.message=error?.message||String(error);publish();}return false;}
+      catch(error){if(owns()){markRecoveryFailed(entry,error);publish();}return false;}
     },
     capture(){
       const owner=session;
@@ -173,7 +190,8 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
         // The source-waveform owner reports its own failure after removing any
         // unverified peaks. A later ingest can still finish this source.
         if(payload.outcome==='failed'&&payload.stage!=='source-waveform'&&recovery&&recovery.id===job.recoveryId&&recovery.owns()){
-          recovery.status='failed';recovery.message=payload.errorMsg||`${payload.label||'背景處理'}失敗`;
+          const summary=payload.outputs?intakeCacheLabel(payload.outputs)+'未完成':null;
+          markRecoveryFailed(recovery,payload.errorMsg||`${payload.label||'背景處理'}失敗`,summary);
         }
         job.terminal=true;job.outcome=payload.outcome;finish(job);
       }
@@ -188,7 +206,7 @@ export function createMediaIntakeJobs({bridge,changed=()=>{},id=()=>globalThis.c
         }
       }else proxyStates.clear();
       if(retainRecovery){for(const entry of recoveries.values())if(entry.owns()){
-        entry.status='stopped';entry.message='背景處理已停止；已保存的快取會在繼續時重新驗證。';
+        entry.status='stopped';entry.detail=null;entry.message='背景處理已停止；已保存的快取會在繼續時重新驗證。';
       }}else recoveries.clear();
       for(const job of new Set([...pending.values(),...awaitingReply])) job.abort();
       pending.clear();publish();

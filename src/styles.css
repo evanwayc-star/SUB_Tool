@@ -378,14 +378,14 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);
 .sublist.windowed{overflow-anchor:none}
 .sublist.windowed .sub-row{content-visibility:visible}
 .sub-list-gap{pointer-events:none}
-.sub-row{display:flex;align-items:center;gap:8px;padding:2px 8px;border-bottom:1px solid var(--border);border-left:5px solid transparent;background:var(--bg);cursor:pointer;
+.sub-row{display:flex;align-items:center;gap:8px;padding:2px 8px 2px 5px;border-bottom:1px solid var(--border);border-left:8px solid transparent;background:var(--bg);cursor:pointer;
   font-size:12px;user-select:text;line-height:1.4;transition:background .15s ease;
   content-visibility:auto;contain-intrinsic-size:1px 32px}
 .sub-row:hover{background:var(--panel3)}
 /* 亮底色配合較亮的時間／序號，保留播放藍與選中金的既有語意。 */
-.sub-row.active{--text-dim:#c6ddff;--text-faint:#adcbf6;--red:#fca5a5;box-shadow:inset 5px 0 0 var(--cue);background:#153b76!important}
+.sub-row.active{--text-dim:#c6ddff;--text-faint:#adcbf6;--red:#fca5a5;box-shadow:inset 8px 0 0 var(--cue);background:#153b76!important}
 .sub-row.sel{--text-dim:#f6d9a2;--text-faint:#e6bd7a;--red:#fca5a5;background:#62420d!important;border-left-color:var(--cue-sel)}
-.sub-row.sel.active{box-shadow:inset 5px 0 0 var(--cue)!important}
+.sub-row.sel.active{box-shadow:inset 8px 0 0 var(--cue)!important}
 body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .idx{width:32px;color:var(--text-faint);font-family:"JetBrains Mono","Cascadia Mono",monospace;font-size:13px;font-weight:700;text-align:right;padding-top:2px;flex-shrink:0;font-variant-numeric:tabular-nums}
 .sub-row .body{flex:1;min-width:0}
@@ -849,7 +849,7 @@ body.sub-mode-on .sub-row.active { background: transparent; box-shadow: none; }
 .sub-row .style-disclosure{display:none}
 /* 窄側欄保留句間上下文；完整樣式可以從每句名稱展開。 */
 @container subtitle-panel (max-width:900px){
-  .sub-row{display:grid;align-items:center;grid-template-columns:24px minmax(0,1fr) auto;gap:0 6px;padding:2px 8px;contain-intrinsic-size:1px 48px}
+  .sub-row{display:grid;align-items:center;grid-template-columns:24px minmax(0,1fr) auto;gap:0 6px;contain-intrinsic-size:1px 48px}
   .sub-row .idx{width:auto;grid-column:1;grid-row:1}
   .sub-row .body{grid-column:2;grid-row:1;max-width:none;width:100%}
   .sub-row .times{flex-wrap:wrap;gap:4px 6px;margin-bottom:0;letter-spacing:0;font-variant-numeric:tabular-nums}
@@ -1832,7 +1832,7 @@ select:focus-visible {
 .playhead-ocr-languages summary{min-height:28px;padding:4px 0;color:var(--text);cursor:pointer;overflow-wrap:anywhere}
 .playhead-ocr-languages summary:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .playhead-ocr-language-list{
-  display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,7.5rem),1fr));gap:0 8px;
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,4.25rem),1fr));gap:0 8px;
   max-height:min(10rem,23dvh);min-width:0;margin:2px 0 4px;padding:2px 8px 5px;
   overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border:1px solid var(--border2);border-radius:4px;
 }

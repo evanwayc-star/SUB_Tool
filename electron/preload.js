@@ -230,7 +230,9 @@ contextBridge.exposeInMainWorld('subtool', {
   mpv: {
     detect:    ()      => ipcRenderer.invoke('mpv:detect'),
     launch:    (opts)  => ipcRenderer.invoke('mpv:launch', opts),
-    seek:      (t, options) => ipcRenderer.invoke('mpv:seek', t, options?.exact === true ? { exact: true } : undefined),
+    seek:      (t, options) => ipcRenderer.invoke('mpv:seek', t, {
+      exact: options?.exact === true, subtitleTarget: Number.isFinite(options?.subtitleTarget) ? options.subtitleTarget : undefined,
+    }),
     present:   (t, options) => ipcRenderer.invoke('mpv:present', t, {
       exact: options?.exact === true,
       waitForFrame: options?.waitForFrame === true,
@@ -260,7 +262,7 @@ contextBridge.exposeInMainWorld('subtool', {
     // 由主程序再次白名單驗證，preload 僅作受限 IPC 入口。
     setTimecodeWatermark: (data) => ipcRenderer.invoke('mpv:setTimecodeWatermark', data),
     clearTimecodeWatermark: () => ipcRenderer.invoke('mpv:clearTimecodeWatermark'),
-    subSet:    (ass, sourceSessionId) => ipcRenderer.invoke('mpv:subSet', ass, sourceSessionId),
+    subSet:    (ass, sourceSessionId, clock) => ipcRenderer.invoke('mpv:subSet', ass, sourceSessionId, clock),
     subVisible:(v)     => ipcRenderer.invoke('mpv:subVisible', v),
     quit:      ()      => ipcRenderer.invoke('mpv:quit'),
     onEvent:   (cb)    => { ipcRenderer.removeAllListeners('mpv:event'); ipcRenderer.on('mpv:event', (_, d) => cb(d)); },
